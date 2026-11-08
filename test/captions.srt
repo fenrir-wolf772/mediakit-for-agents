@@ -1,0 +1,11 @@
+1
+00:00:00,000 --> 00:00:02,500
+MediaKit gives agents
+
+2
+00:00:02,500 --> 00:00:05,000
+eyes and ears for video.
+
+3
+00:00:05,000 --> 00:00:08,000
+Trim, crop, caption, done.

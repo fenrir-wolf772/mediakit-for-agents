@@ -1,0 +1,5 @@
+node_modules/
+outputs/
+test/media/
+*.log
+.DS_Store

@@ -1,0 +1,14 @@
+1
+00:00:00,000 --> 00:00:03,000
+Your agent can
+finally see video.
+
+2
+00:00:03,000 --> 00:00:06,500
+Trim it. Crop it.
+Caption it.
+
+3
+00:00:06,500 --> 00:00:10,000
+MediaKit
+for Agents.
