@@ -67,6 +67,8 @@ verified duration/dimensions of what it produced.
 
 ## Demo: 16:9 clip → vertical captioned Short
 
+<p align="center"><img src="demo.gif" alt="MediaKit turning a 16:9 clip into a vertical 1080×1920 Short with burned-in captions" width="270"></p>
+
 ```bash
 # 1. Inspect the source
 mediakit probe input.mp4
