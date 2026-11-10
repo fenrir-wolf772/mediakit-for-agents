@@ -210,3 +210,49 @@ dependency, không cần binary `zip` ngoài). Bundle gồm media +
   package), SKILL.md (mục cropdetect/package + rule 10 + workflow
   9 bước) đã cập nhật.
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+
+## Lượt 4 — 2026-11-10 (mix, 18 tools)
+
+### mix (new tool)
+Voice + music bed với sidechain ducking, theo ý học từ
+user-github-me/soniccraft (ducking params attack/release, level giọng
+trước khi trộn, master R128, đo kết quả thật). Implement bằng ffmpeg,
+không copy code của họ: `sidechaincompress` + `amix` + `loudnorm`.
+
+Fixture mới: `test/mix-voice.mp3` (9s, tone 660Hz theo nhịp
+[0,2),[4,6),[7,9) — giống nhịp silence-source), `test/mix-music.mp3`
+(9s, tone 220Hz liên tục, volume 0.8), `test/mix-music-short.mp3`
+(2s, để test loop).
+
+| Case | Command | Result |
+|---|---|---|
+| audio happy path | `mix test/mix-voice.mp3 --music test/mix-music.mp3 -o outputs/mix-test.mp3 --music-volume 0.5 --duck-db 12` | 9.0s, 70.7 KB; voice −22.1 LUFS → gain **+6.1 dB** (target −16); output LUFS đo thật **−14.1** (target −14); **ducking đo thật 9.9 dB** (target 12 — compressor thật, không phải số đặt vào) |
+| duck sâu hơn | `--duck-db 18` | Đo thật **14.9 dB** (ratio 10) — độ sâu scale đúng theo tham số |
+| không duck | `--duck-db 0` | ratio 1, `ducking_measured_db: null` (không đo khi không duck), LUFS −14.1 |
+| nhạc ngắn hơn giọng | music 2s, voice 9s | Output vẫn **9.0s** — nhạc loop đúng (`-stream_loop -1`) |
+| voice là video | `mix test/source.mp4 --music … -o outputs/mix-video.mp4` | 10.0s, video **1280×720 h264 copy nguyên**, LUFS −14.0; `ducking_measured_db: null` — đúng, vì audio source.mp4 liên tục không có khoảng lặng ≥1.1s để đo |
+| error cases | music = captions.srt (không có audio) | Từ chối đúng: `mix needs an audio stream in the music file` (exit 2) |
+| error cases | thiếu `--music` | `missing required option: --music <file>` (exit 1, theo chuẩn CLI) |
+| error cases | `--duck-db 30` | `duck_db must be <= 24` (exit 2) |
+
+- Bug bắt được khi test: `sidechaincompress` nhận threshold **tuyến
+  tính 0–1**, không phải dB — `threshold=-30` bị ffmpeg từ chối
+  (`out of range [0.000976563 - 1]`). Fix: threshold = 0.0316
+  (= −30 dB tuyến tính), ratio suy từ duckDb theo công thức
+  ratio = 20/(20−duckDb), clamp [1.2, 20]; comment trong code ghi rõ.
+- Đo ducking: tool tự chạy lại graph ducked-bed-only và đo
+  `volumedetect` trong cửa sổ giọng (0.1–0.5s trong đoạn nói) vs cửa
+  sổ lặng (0.6–1.0s trong khoảng lặng, qua release 400ms); nếu không
+  tìm được cặp cửa sổ thì trả null (best-effort, mix vẫn thành công).
+
+### Tests
+
+- `npm run check`: `node --check` sạch trên `src/core.js`,
+  `src/server.js`, `bin/mediakit.js`.
+- `npm test`: **all 18 tools present**; `mix` qua MCP: duration 9,
+  output LUFS −14.1, voice gain 6.1 dB, ducking measured 9.9 dB;
+  `doctor` qua MCP: ok=true, **18/18 tools available**
+  (sidechaincompress/amix/aresample có mặt).
+- README (bảng 18 tools + đoạn mix), SKILL.md (mục mix + rule 11) đã
+  cập nhật. Fixture mix-voice/mix-music đã commit vào test/.
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).

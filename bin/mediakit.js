@@ -174,6 +174,22 @@ const COMMANDS = {
       ["-o, --output", "Output .zip file (required)"],
     ],
   },
+  mix: {
+    usage: "mediakit mix <voice> --music <file> -o <output> [--music-volume 0.3] [--duck-db 12] [--attack-ms 100] [--release-ms 400] [--voice-lufs -16] [--target-lufs -14] [--no-master]",
+    desc: "Mix voice over a music bed with sidechain ducking (bed drops under speech), then master to target LUFS.",
+    args: [{ name: "voice", required: true }],
+    options: [
+      ["--music", "Music bed audio file (required, looped to voice length)"],
+      ["--music-volume", "Bed level when voice is silent, 0-1 (default 0.3)"],
+      ["--duck-db", "How far the bed drops under speech, dB (default 12, 0 = no ducking)"],
+      ["--attack-ms", "Ducking attack in ms (default 100)"],
+      ["--release-ms", "Ducking release in ms (default 400)"],
+      ["--voice-lufs", "Voice level target before mixing (default -16)"],
+      ["--target-lufs", "Master the mix to this LUFS (default -14)"],
+      ["--no-master", "Skip mastering, leave raw mix levels"],
+      ["-o, --output", "Output file (required)"],
+    ],
+  },
   doctor: {
     usage: "mediakit doctor",
     desc: "Read-only preflight: ffmpeg/ffprobe versions, available filters/encoders, and which tools that enables.",
@@ -389,6 +405,20 @@ async function main() {
           platform: opts.platform ?? null,
         });
         break;
+      case "mix": {
+        if (!opts.music) fail("missing required option: --music <file>");
+        result = await core.mix({
+          voice: needInput(), music: opts.music, output: needOutput(opts),
+          musicVolume: numOpt(opts, "music_volume") ?? 0.3,
+          duckDb: numOpt(opts, "duck_db") ?? 12,
+          attackMs: numOpt(opts, "attack_ms") ?? 100,
+          releaseMs: numOpt(opts, "release_ms") ?? 400,
+          voiceLufs: numOpt(opts, "voice_lufs") ?? -16,
+          targetLufs: numOpt(opts, "target_lufs") ?? -14,
+          master: opts.master !== false,
+        });
+        break;
+      }
       case "doctor":
         result = await core.doctor();
         break;

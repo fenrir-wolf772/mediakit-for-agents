@@ -17,9 +17,9 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 17 tools present");
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 18 tools present");
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -100,5 +100,18 @@ const packageRes = await client.callTool({
 });
 const packageJson = JSON.parse(packageRes.content[0].text);
 console.log("package call: files", packageJson.files.join(", "), "| platform_pass", packageJson.platform_pass, "| size", packageJson.size_human);
+
+const mixRes = await client.callTool({
+  name: "mix",
+  arguments: {
+    voice: path.join(root, "test/mix-voice.mp3"),
+    music: path.join(root, "test/mix-music.mp3"),
+    output: path.join(root, "outputs/mcp-mix.mp3"),
+    music_volume: 0.5,
+    duck_db: 12,
+  },
+});
+const mixJson = JSON.parse(mixRes.content[0].text);
+console.log("mix call: duration", mixJson.duration_seconds, "| output LUFS", mixJson.output_lufs, "| voice gain", mixJson.voice_gain_db, "dB | ducking measured", mixJson.ducking_measured_db, "dB");
 await client.close();
 console.log("MCP test done");

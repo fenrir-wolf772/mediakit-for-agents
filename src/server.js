@@ -234,6 +234,35 @@ server.tool(
 );
 
 server.tool(
+  "mix",
+  "Mix voice over a music bed with sidechain ducking: the bed drops by duck_db whenever the voice speaks (attack/release in ms), the voice is levelled to voice_lufs first, the music loops to the voice length, and the mix is mastered to target_lufs. Returns the ducking actually measured (ducking_measured_db, speech vs silence window on the ducked bed). If the voice file is a video, its video stream is copied through.",
+  {
+    voice: pathSchema.describe("Voice/speech file (audio or video with an audio track)"),
+    music: pathSchema.describe("Music bed audio file (looped to the voice length)"),
+    output: pathSchema,
+    music_volume: z.number().min(0).max(1).default(0.3).describe("Bed level when the voice is silent (0-1)"),
+    duck_db: z.number().min(0).max(24).default(12).describe("How far the bed drops under speech, in dB (0 = no ducking)"),
+    attack_ms: z.number().int().min(1).max(1000).default(100).describe("Ducking attack time in ms"),
+    release_ms: z.number().int().min(10).max(5000).default(400).describe("Ducking release time in ms"),
+    voice_lufs: z.number().min(-70).max(0).default(-16).describe("Voice level target before mixing"),
+    target_lufs: z.number().min(-70).max(0).default(-14).describe("Master the mix to this LUFS"),
+    master: z.boolean().default(true).describe("Master the mix (false = leave the raw mix levels)"),
+  },
+  async (a) => safe(() => core.mix({
+    voice: a.voice,
+    music: a.music,
+    output: a.output,
+    musicVolume: a.music_volume,
+    duckDb: a.duck_db,
+    attackMs: a.attack_ms,
+    releaseMs: a.release_ms,
+    voiceLufs: a.voice_lufs,
+    targetLufs: a.target_lufs,
+    master: a.master,
+  })),
+);
+
+server.tool(
   "doctor",
   "Read-only environment preflight: ffmpeg/ffprobe versions, which filters and encoders this build has, and which mediakit tools that enables. Run first on a new machine — a tool that reports available=false will fail at runtime.",
   {},

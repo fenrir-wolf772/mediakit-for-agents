@@ -3,7 +3,8 @@
 Give your coding agent eyes and ears for media. MediaKit is a small MCP
 server + CLI that wraps **ffmpeg** — trim, crop, resize, captions, loudness,
 thumbnails, frame grabs, audio extraction, concat, conversion, silence
-removal, black-bar measurement, delivery packaging, and an environment preflight — so an
+removal, black-bar measurement, delivery packaging, voice/music mixing
+with sidechain ducking, and an environment preflight — so an
 agent can actually *work* with video and audio instead of guessing.
 
 > Coding agents are blind and deaf to media. They can read a 10,000-line
@@ -66,6 +67,7 @@ Then ask your agent things like:
 | `silence` | Remove silent stretches, keeping a margin around speech | `mediakit silence in.mp4 -o tight.mp4` |
 | `cropdetect` | Measure letterbox/pillarbox bars; returns the crop rect + a ready crop command | `mediakit cropdetect in.mp4` |
 | `package` | Bundle a finished file for delivery: media + spec.json receipt + checksums.sha256 (+ captions) | `mediakit package out.mp4 -o delivery.zip --platform tiktok` |
+| `mix` | Mix voice over a music bed with sidechain ducking (bed drops under speech), then master to target LUFS; reports the ducking actually measured | `mediakit mix voice.mp3 --music bed.mp3 -o mixed.mp3` |
 | `doctor` | Read-only preflight: ffmpeg version, filters/encoders, tool availability | `mediakit doctor` |
 | `convert` | Change container/codec (omit a codec to stream-copy) | `mediakit convert in.mov -o out.mp4 --video-codec libx264` |
 
@@ -111,7 +113,15 @@ crop rectangle plus a ready-to-run `crop` command. `package` is the last
 step: a ZIP with the finished media, a `spec.json` receipt (measured probe
 + loudness + the platform check result), `checksums.sha256`, and the
 captions sidecar when given — the bundle proves what was delivered, and
-`sha256sum -c` verifies it on any machine. `doctor` is a read-only preflight — run it first
+`sha256sum -c` verifies it on any machine. `mix` lays a voice track over a
+music bed: the voice is levelled to `--voice-lufs` (−16) first, the bed is
+ducked under the voice with `sidechaincompress` (`--duck-db` 12,
+`--attack-ms` 100, `--release-ms` 400), the music loops to the voice
+length, and the mix is mastered to `--target-lufs` (−14) — if the voice
+file is a video its video stream is copied through. It reports the
+ducking it actually achieved (`ducking_measured_db`, measured on the
+ducked bed alone in a speech window vs a silence window), so tune
+`--duck-db` from a measured number, not a guess. `doctor` is a read-only preflight — run it first
 on a new machine to confirm ffmpeg/ffprobe and every filter/encoder the
 tools need are actually present.
 

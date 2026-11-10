@@ -29,6 +29,11 @@ video or audio file, and instead of writing one-off ffmpeg shell commands.
 - **Delivering a finished file**: `package` — a ZIP with the media,
   a `spec.json` receipt (measured probe + loudness + platform check),
   `checksums.sha256`, and the captions sidecar when given.
+- **Voice over music**: `mix` — levels the voice to `voice_lufs`
+  (−16), ducks the music bed under the voice (`duck_db` 12, attack
+  100 ms, release 400 ms), loops the bed to the voice length, masters
+  to `target_lufs` (−14). Read `ducking_measured_db` in the result —
+  the ducking actually measured — before claiming the bed sits right.
 - **First run on a new machine, or a tool fails oddly**: `doctor` —
   read-only preflight; a tool listed `available: false` will fail at
   runtime because its ffmpeg filter/encoder is missing.
@@ -136,6 +141,17 @@ the aspect changes mid-clip — crop per segment instead of once.
 records the measured probe, loudness, and platform check, so the bundle
 itself proves what was delivered. Verify with `sha256sum -c` after
 unzipping; never re-zip by hand (the checksums would no longer match).
+
+### 11. Mix voice over music: duck, don't just turn the bed down
+A flat `music_volume` buries the voice or leaves the bed inaudible in
+gaps. `mix` ducks instead: the bed sits at `music_volume` in gaps and
+drops by `duck_db` under speech. Trust `ducking_measured_db`, not the
+parameter — the compressor's real reduction depends on the voice level,
+so if the measured depth is far from `duck_db`, raise/lower `duck_db`
+and re-run. If the voice is much quieter than the bed, level it first
+(`loudness` on the voice alone, or `mix`'s own `voice_lufs` levelling).
+If the voice file is a video, its video stream is copied through, so
+`mix` can be the last audio step before `check`/`package`.
 
 ## Workflow: vertical captioned clip from a landscape source
 

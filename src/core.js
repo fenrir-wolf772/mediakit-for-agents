@@ -680,7 +680,7 @@ export async function silence({ input, output = null, thresholdDb = -40, minDura
 const DOCTOR_FILTERS = [
   "silencedetect", "loudnorm", "subtitles", "ass", "scale", "crop",
   "cropdetect", "gblur", "trim", "atrim", "concat", "select", "tile", "pad", "overlay",
-  "drawtext", "volume",
+  "drawtext", "volume", "sidechaincompress", "amix", "aresample",
 ];
 const DOCTOR_ENCODERS = [
   "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4",
@@ -706,6 +706,7 @@ const TOOL_REQUIREMENTS = {
   silence: { filters: ["silencedetect", "trim", "atrim", "concat"], encoders: ["libx264", "aac"] },
   cropdetect: { filters: ["cropdetect"] },
   package: {},
+  mix: { filters: ["sidechaincompress", "amix", "aresample", "volume", "loudnorm"], encoders: ["aac", "libmp3lame"] },
   doctor: {},
 };
 
@@ -969,5 +970,148 @@ export async function packageDelivery({ input, output, captions = null, platform
     loudness_lufs: lufs,
     ...(checkResult ? { platform: checkResult.platform, platform_pass: checkResult.pass } : {}),
     verify_hint: `unzip -l ${path.basename(outPath)} && sha256sum -c <(unzip -p ${path.basename(outPath)} checksums.sha256)`,
+  };
+}
+
+// ---------------------------------------------------------------- mix
+// Voice + music bed with sidechain ducking (soniccraft's ducking idea,
+// rebuilt on ffmpeg): level the voice to a target LUFS first, duck the
+// bed under the voice with sidechaincompress (attack/release in ms),
+// mix, then master the result to a target LUFS. The music input is
+// looped to the voice length. The tool also MEASURES the ducking it
+// actually achieved: it re-runs the ducked bed alone and compares its
+// mean volume in a speech window vs a silence window, so the returned
+// ducking_measured_db is observed, not assumed.
+
+/** Mean volume (dB) of the ducked music bed alone in [start, end). */
+async function duckedBedVolume(voicePath, musicPath, voiceGainDb, musicVolume, duck, start, end) {
+  const graph = [
+    `[0:a]aresample=48000,volume=${voiceGainDb}dB[voice]`,
+    `[1:a]aresample=48000,volume=${musicVolume}[bed]`,
+    `[bed][voice]sidechaincompress=threshold=0.0316:ratio=${duck.ratio}:attack=${duck.attack}:release=${duck.release}[ducked]`,
+    `[ducked]atrim=start=${start}:end=${end},volumedetect`,
+  ].join(";");
+  const { stderr } = await run(FFMPEG, [
+    "-y", "-i", voicePath, "-stream_loop", "-1", "-i", musicPath,
+    "-vn", "-filter_complex", graph, "-f", "null", "-",
+  ]);
+  const m = stderr.match(/mean_volume:\s*(-?[\d.]+)\s*dB/);
+  return m ? parseFloat(m[1]) : null;
+}
+
+export async function mix({
+  voice, music, output,
+  musicVolume = 0.3, duckDb = 12, attackMs = 100, releaseMs = 400,
+  voiceLufs = -16, targetLufs = -14, master = true,
+}) {
+  const voicePath = await requireInput(voice, "voice file");
+  const musicPath = await requireInput(music, "music file");
+  const outPath = await prepareOutput(output, [voicePath, musicPath]);
+  const bedVol = num(musicVolume, "music_volume", { min: 0, max: 1 });
+  const duck = num(duckDb, "duck_db", { min: 0, max: 24 });
+  const attack = num(attackMs, "attack_ms", { min: 1, max: 1000, integer: true });
+  const release = num(releaseMs, "release_ms", { min: 10, max: 5000, integer: true });
+  const vTarget = num(voiceLufs, "voice_lufs", { min: -70, max: 0 });
+  const mTarget = master ? num(targetLufs, "target_lufs", { min: -70, max: 0 }) : null;
+
+  const voiceMeta = await probe(voicePath);
+  if (!voiceMeta.audio) throw new MediaKitError("mix needs an audio stream in the voice file", "INVALID_ARG");
+  const musicMeta = await probe(musicPath);
+  if (!musicMeta.audio) throw new MediaKitError("mix needs an audio stream in the music file", "INVALID_ARG");
+  const voiceDuration = voiceMeta.duration_seconds;
+  if (voiceDuration === null) throw new MediaKitError("could not read voice duration", "PROBE_FAILED");
+
+  // Level the voice first (soniccraft levels each cue before mixing):
+  // a plain gain, clamped so a very quiet/loud voice cannot explode.
+  const voiceLufsBefore = await measureLoudness(voicePath);
+  const voiceGainDb = voiceLufsBefore === null
+    ? 0
+    : Math.max(-12, Math.min(12, +(vTarget - voiceLufsBefore).toFixed(1)));
+
+  // sidechaincompress takes a LINEAR threshold (0-1), so -30 dB =
+  // 0.0316. Reduction for a voice ~20 dB over that threshold is
+  // (1 - 1/ratio) * 20 dB, so ratio follows from duckDb.
+  const ratio = duck === 0 ? 1 : Math.max(1.2, Math.min(20, +(20 / (20 - duck)).toFixed(2)));
+  const duckParams = { ratio, attack, release };
+
+  const ext = path.extname(outPath).slice(1).toLowerCase();
+  const audioCodec = voiceMeta.video
+    ? (VIDEO_CONTAINER_AUDIO[ext] ?? "aac")
+    : (AUDIO_FORMATS[ext] ?? VIDEO_CONTAINER_AUDIO[ext]);
+  if (!audioCodec) throw new MediaKitError(`unsupported mix output format: .${ext || "(none)"}`, "INVALID_ARG");
+
+  const graph = [
+    `[0:a]aresample=48000,volume=${voiceGainDb}dB[voice]`,
+    `[1:a]aresample=48000,volume=${bedVol}[bed]`,
+    `[bed][voice]sidechaincompress=threshold=0.0316:ratio=${ratio}:attack=${attack}:release=${release}[ducked]`,
+    `[ducked][voice]amix=inputs=2:duration=first:normalize=0[mix]`,
+    ...(mTarget !== null ? [`[mix]loudnorm=I=${mTarget}:TP=-1.5:LRA=11[out]`] : []),
+  ].join(";");
+  const mixLabel = mTarget !== null ? "[out]" : "[mix]";
+  const args = ["-y", "-i", voicePath, "-stream_loop", "-1", "-i", musicPath,
+    "-filter_complex", graph];
+  if (voiceMeta.video) {
+    args.push("-map", "0:v", "-map", mixLabel, "-c:v", "copy", "-c:a", audioCodec, "-shortest");
+    if (["mp4", "mov", "m4v"].includes(ext)) args.push("-movflags", "+faststart");
+  } else {
+    args.push("-map", mixLabel, "-c:a", audioCodec);
+  }
+  args.push(outPath);
+  await run(FFMPEG, args);
+
+  const info = await fileInfo(outPath);
+  const outMeta = await probe(outPath);
+  const outputLufs = outMeta.audio ? await measureLoudness(outPath) : null;
+
+  // Measure the ducking actually achieved: a speech window vs a silence
+  // window on the ducked bed alone. Speech windows sit 0.1s into a
+  // speech stretch; silence windows 0.6s into a silence (past release),
+  // so attack/release tails do not pollute the numbers.
+  let duckingMeasuredDb = null;
+  if (duck > 0) {
+    try {
+      const det = await detectSilence(voicePath, { thresholdDb: -40, minDuration: 0.5 });
+      const silences = det.silences;
+      const speechSegs = [];
+      let cursor = 0;
+      for (const s of silences) {
+        if (s.start > cursor) speechSegs.push([cursor, s.start]);
+        cursor = Math.max(cursor, s.end);
+      }
+      if (cursor < voiceDuration) speechSegs.push([cursor, voiceDuration]);
+      const speech = speechSegs.find(([a, b]) => b - a >= 0.6);
+      const gap = silences.find((s) => s.duration >= 1.1);
+      if (speech && gap) {
+        const speechVol = await duckedBedVolume(voicePath, musicPath, voiceGainDb, bedVol, duckParams, +(speech[0] + 0.1).toFixed(3), +(speech[0] + 0.5).toFixed(3));
+        const gapVol = await duckedBedVolume(voicePath, musicPath, voiceGainDb, bedVol, duckParams, +(gap.start + 0.6).toFixed(3), +(gap.start + 1.0).toFixed(3));
+        if (speechVol !== null && gapVol !== null) {
+          duckingMeasuredDb = +(gapVol - speechVol).toFixed(1);
+        }
+      }
+    } catch {
+      // Measurement is best-effort: the mix itself already succeeded.
+      duckingMeasuredDb = null;
+    }
+  }
+
+  return {
+    operation: "mix",
+    voice: voicePath,
+    music: musicPath,
+    output: outPath,
+    music_volume: bedVol,
+    duck_db: duck,
+    attack_ms: attack,
+    release_ms: release,
+    sidechain_ratio: ratio,
+    voice_lufs_before: voiceLufsBefore,
+    voice_lufs_target: vTarget,
+    voice_gain_db: voiceGainDb,
+    mastered_to_lufs: mTarget,
+    output_lufs: outputLufs,
+    ducking_measured_db: duckingMeasuredDb,
+    duration_seconds: outMeta.duration_seconds,
+    has_video: Boolean(voiceMeta.video),
+    ...info,
   };
 }
