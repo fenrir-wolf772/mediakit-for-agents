@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - run: npm ci
+      - name: Syntax check
+        run: npm run check
+      - name: CLI smoke test
+        run: |
+          node bin/mediakit.js probe test/source.mp4
+          node bin/mediakit.js reframe test/source.mp4 --mode crop -o outputs/ci-reframe.mp4
+          node bin/mediakit.js loudness outputs/ci-reframe.mp4 -o outputs/ci-reframe-loud.mp4 --target-lufs -14
+          node bin/mediakit.js check outputs/ci-reframe-loud.mp4 --platform tiktok | grep '"pass": true'
+      - name: MCP test
+        run: npm test
