@@ -7,6 +7,22 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+// Independent loudness measurement: run ffmpeg's loudnorm analysis
+// directly on the file (not through the tool under test) and read
+// the integrated loudness it reports.
+async function measureLufs(file) {
+  try {
+    const { stderr } = await execFileAsync("ffmpeg", ["-i", file, "-af", "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-"]);
+    const m = stderr.match(/"input_i"\s*:\s*"(-?[\d.]+)"/);
+    return m ? parseFloat(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
 
 const failures = [];
 function checkOk(cond, label, detail = "") {
@@ -27,10 +43,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 24 tools present");
-checkOk(missing.length === 0, "tools/list has all 24 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 25 tools present");
+checkOk(missing.length === 0, "tools/list has all 25 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -69,6 +85,31 @@ console.log("reframe call:", reframeRes.content[0].text.replace(/\n/g, " "));
 const reframeJson = JSON.parse(reframeRes.content[0].text);
 checkOk(reframeJson.dimensions === "1080x1920", "reframe output is 1080x1920", `got ${reframeJson.dimensions}`);
 checkOk(near(reframeJson.duration_seconds, 10, 0.05), "reframe keeps 10s duration", `got ${reframeJson.duration_seconds}`);
+checkOk(reframeJson.crop.x === 438, "reframe default centers the crop (x=438)", `got x=${reframeJson.crop?.x}`);
+
+// reframe anchor: named anchors pin the crop window to a side.
+// 1280x720 -> 1080x1920 crop window is 404x720; "left" => x=0,
+// "right" => x=876; keeps 31.6% of the frame (warns: below 40%).
+const reframeLeftRes = await client.callTool({
+  name: "reframe",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-reframe-left.mp4"), width: 1080, height: 1920, mode: "crop", anchor: "left" },
+});
+const reframeLeftJson = JSON.parse(reframeLeftRes.content[0].text);
+console.log("reframe left:", JSON.stringify(reframeLeftJson.crop), "| kept", reframeLeftJson.crop_kept_percent + "%", "| upscale", reframeLeftJson.upscale + "x");
+checkOk(reframeLeftJson.crop.x === 0 && reframeLeftJson.crop.width === 404, "reframe anchor left pins crop to x=0, width 404", `got ${JSON.stringify(reframeLeftJson.crop)}`);
+checkOk(near(reframeLeftJson.crop_kept_percent, 31.6, 0.2), "reframe reports 31.6% kept", `got ${reframeLeftJson.crop_kept_percent}`);
+checkOk(near(reframeLeftJson.upscale, 2.67, 0.01), "reframe reports 2.67x upscale", `got ${reframeLeftJson.upscale}`);
+checkOk(typeof reframeLeftJson.warning === "string", "reframe warns when the crop keeps under 40%", `got warning=${JSON.stringify(reframeLeftJson.warning)}`);
+const reframeRightRes = await client.callTool({
+  name: "reframe",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-reframe-right.mp4"), width: 1080, height: 1920, mode: "crop", anchor: "right" },
+});
+const reframeRightJson = JSON.parse(reframeRightRes.content[0].text);
+checkOk(reframeRightJson.crop.x === 876, "reframe anchor right pins crop to x=876", `got x=${reframeRightJson.crop.x}`);
+// Pixel-verify the anchor actually moves the picture: left-crop and
+// right-crop frames of the same testsrc must differ a lot.
+const anchorPsnr = await bandPsnr(path.join(root, "outputs/mcp-reframe-left.mp4"), path.join(root, "outputs/mcp-reframe-right.mp4"), 5, 0, 1920);
+checkOk(anchorPsnr !== null && anchorPsnr < 30, "reframe left vs right frames differ (anchor moves the crop)", `got PSNR ${anchorPsnr}`);
 
 const checkRes = await client.callTool({
   name: "check",
@@ -85,6 +126,24 @@ checkOk(Array.isArray(checkJson.warnings) && checkJson.warnings.some((w) => w.st
 checkOk(!checkJson.issues?.some((i) => i.startsWith("video_bitrate")), "bitrate warning does not appear in issues", JSON.stringify(checkJson.issues));
 checkOk(checkJson.safe_zone?.x0 === 64 && checkJson.safe_zone?.y1 === 1400, "check reports the TikTok safe zone", JSON.stringify(checkJson.safe_zone));
 checkOk(checkJson.checks.find((c) => c.name === "dimensions")?.pass === true, "check dimensions pass on the reframed file");
+// D positive case: bitrate is the ONLY problem -> overall pass must
+// still be true (a warning, not a gate). Fix the reframe file's
+// loudness first (-21.8 LUFS fails), then check it: 0.3 Mbps video
+// bitrate warns, everything else passes.
+const loudReframeRes = await client.callTool({
+  name: "loudness",
+  arguments: { input: path.join(root, "outputs/mcp-reframe.mp4"), output: path.join(root, "outputs/mcp-reframe-loud.mp4") },
+});
+const loudReframeJson = JSON.parse(loudReframeRes.content[0].text);
+checkOk(near(loudReframeJson.output_lufs, -14, 0.5), "loudness fixes the reframed file to -14 LUFS", `got ${loudReframeJson.output_lufs}`);
+const checkGoodRes = await client.callTool({
+  name: "check",
+  arguments: { input: path.join(root, "outputs/mcp-reframe-loud.mp4"), platform: "tiktok" },
+});
+const checkGoodJson = JSON.parse(checkGoodRes.content[0].text);
+console.log("check good file:", "pass", checkGoodJson.pass, "| warnings", JSON.stringify(checkGoodJson.warnings));
+checkOk(checkGoodJson.pass === true, "check passes overall when bitrate is the only issue", `got pass=${checkGoodJson.pass} issues=${JSON.stringify(checkGoodJson.issues)}`);
+checkOk(Array.isArray(checkGoodJson.warnings) && checkGoodJson.warnings.some((w) => w.startsWith("video_bitrate")), "check still warns about the low bitrate", JSON.stringify(checkGoodJson.warnings));
 
 const doctorRes = await client.callTool({
   name: "doctor",
@@ -298,6 +357,118 @@ const pipJson = JSON.parse(pipRes.content[0].text);
 console.log("pip call:", pipJson.position, pipJson.x + "," + pipJson.y, "|", pipJson.pip_size, "|", pipJson.dimensions, "|", pipJson.duration_seconds + "s");
 checkOk(pipJson.x === 936 && pipJson.y === 516 && pipJson.pip_size === "320x180", "pip default lands at 936,516 as 320x180", `got ${pipJson.x},${pipJson.y} ${pipJson.pip_size}`);
 checkOk(pipJson.dimensions === "1280x720" && near(pipJson.duration_seconds, 10, 0.05), "pip keeps 1280x720 / 10s", `got ${pipJson.dimensions} ${pipJson.duration_seconds}s`);
+
+// Pixel-verify a horizontal band of two frames: extract the frame at
+// time t from each file, crop the band, and return the PSNR between
+// them (Infinity when identical). Low PSNR = the band differs a lot.
+async function bandPsnr(fileA, fileB, t, y, h) {
+  const aPng = path.join(root, "outputs/mcp-band-a.png");
+  const bPng = path.join(root, "outputs/mcp-band-b.png");
+  await execFileAsync("ffmpeg", ["-v", "error", "-y", "-ss", String(t), "-i", fileA, "-frames:v", "1", aPng]);
+  await execFileAsync("ffmpeg", ["-v", "error", "-y", "-ss", String(t), "-i", fileB, "-frames:v", "1", bPng]);
+  const { stderr } = await execFileAsync("ffmpeg", ["-i", aPng, "-i", bPng, "-filter_complex", `[0:v]crop=iw:${h}:0:${y}[a];[1:v]crop=iw:${h}:0:${y}[b];[a][b]psnr`, "-f", "null", "-"]);
+  const m = stderr.match(/average:\s*(inf|[0-9.]+)/);
+  if (!m) return null;
+  return m[1] === "inf" ? Infinity : parseFloat(m[1]);
+}
+
+// Pixel-verify a titlecard PNG: count yellow text pixels, orange box
+// pixels, and transparent pixels in the middle band; corners must be
+// transparent. Returns { width, height, yellow, orange, transparent, corners }.
+async function titlecardPixels(file) {
+  const script = `
+from PIL import Image
+import sys
+im = Image.open(sys.argv[1]).convert('RGBA')
+w, h = im.size
+px = im.load()
+yellow = orange = transparent = 0
+for y in range(h//2 - 300, h//2 + 300):
+    for x in range(0, w, 2):
+        r, g, b, a = px[x, y]
+        if a == 0: transparent += 1
+        elif r > 200 and g > 170 and b < 120: yellow += 1
+        elif r > 200 and 80 < g < 180 and b < 90: orange += 1
+corners = [px[5,5][3], px[w-5,5][3], px[5,h-5][3], px[w-5,h-5][3]]
+print(f"{w}x{h} yellow={yellow} orange={orange} transparent={transparent} corners={','.join(map(str, corners))}")
+`;
+  const { stdout } = await execFileAsync("python3", ["-c", script, file]);
+  const m = stdout.match(/(\d+)x(\d+) yellow=(\d+) orange=(\d+) transparent=(\d+) corners=([\d,]+)/);
+  if (!m) return null;
+  return { width: +m[1], height: +m[2], yellow: +m[3], orange: +m[4], transparent: +m[5], corners: m[6].split(",").map(Number) };
+}
+
+// titlecard: big bold hook on an orange box, transparent canvas.
+// "THE MOON IS LEAVING US" wraps to 2 lines at ~119px on 1080 wide.
+const titleRes = await client.callTool({
+  name: "titlecard",
+  arguments: { text: "The Moon Is Leaving Us", output: path.join(root, "outputs/mcp-titlecard.png") },
+});
+const titleJson = JSON.parse(titleRes.content[0].text);
+console.log("titlecard call:", titleJson.dimensions, "| lines", JSON.stringify(titleJson.lines), "| font", titleJson.font_size);
+checkOk(titleJson.dimensions === "1080x1920", "titlecard output is 1080x1920", `got ${titleJson.dimensions}`);
+checkOk(JSON.stringify(titleJson.lines) === JSON.stringify(["THE MOON IS", "LEAVING US"]), "titlecard wraps to 2 lines", `got ${JSON.stringify(titleJson.lines)}`);
+checkOk(titleJson.font_size === 119, "titlecard default font is 119px at 1080 wide", `got ${titleJson.font_size}`);
+const titlePx = await titlecardPixels(path.join(root, "outputs/mcp-titlecard.png"));
+console.log("titlecard pixels:", JSON.stringify(titlePx));
+checkOk(titlePx !== null && titlePx.yellow > 5000, "titlecard has yellow text pixels", JSON.stringify(titlePx));
+checkOk(titlePx !== null && titlePx.orange > 5000, "titlecard has an orange box", JSON.stringify(titlePx));
+checkOk(titlePx !== null && titlePx.transparent > 50000, "titlecard canvas is transparent outside the box", JSON.stringify(titlePx));
+checkOk(titlePx !== null && titlePx.corners.every((a) => a === 0), "titlecard corners are fully transparent", JSON.stringify(titlePx));
+
+// burn_captions: defaults scale with frame height and sit above the
+// platform UI. On 1280x720: font 22px, margin 187px from the bottom.
+// Pixel-verify at t=3.5s (cue 2): the caption band differs a lot
+// (PSNR ~19), the bottom strip is nearly identical (PSNR ~64).
+const capsRes = await client.callTool({
+  name: "burn_captions",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    captions: path.join(root, "test/captions.srt"),
+    output: path.join(root, "outputs/mcp-captions.mp4"),
+  },
+});
+const capsJson = JSON.parse(capsRes.content[0].text);
+console.log("burn_captions call:", "font_size", capsJson.font_size, "| margin_v", capsJson.margin_v);
+checkOk(capsJson.font_size === 22, "burn_captions default font is 22px at 720p", `got ${capsJson.font_size}`);
+checkOk(capsJson.margin_v === 187, "burn_captions default margin is 187px at 720p", `got ${capsJson.margin_v}`);
+const capsBand = await bandPsnr(path.join(root, "test/source.mp4"), path.join(root, "outputs/mcp-captions.mp4"), 3.5, 480, 60);
+checkOk(capsBand !== null && capsBand < 30, "burn_captions text lands in the safe band (low PSNR there)", `got PSNR ${capsBand}`);
+const capsStrip = await bandPsnr(path.join(root, "test/source.mp4"), path.join(root, "outputs/mcp-captions.mp4"), 3.5, 680, 40);
+checkOk(capsStrip !== null && capsStrip > 40, "burn_captions text stays out of the bottom strip (high PSNR there)", `got PSNR ${capsStrip}`);
+
+// loudness: two-pass must hit -14 LUFS on representative content.
+// Voice (test/mix-voice.mp3, -22.1 LUFS in) reaches -14 ±0.5.
+// The quiet music bed (test/quiet-source.mp3, -26.1 LUFS in) is
+// peak-limited: sub-bass dominates the true peak (crest ~21 dB), so
+// no linear gain can reach -14 without clipping — the tool must get
+// as close as the peak ceiling allows AND say so (warning), never
+// pretend the target was hit. Single-pass only reached -21.6 here.
+const loudVoiceRes = await client.callTool({
+  name: "loudness",
+  arguments: {
+    input: path.join(root, "test/mix-voice.mp3"),
+    output: path.join(root, "outputs/mcp-loudness-voice.mp3"),
+  },
+});
+const loudVoiceJson = JSON.parse(loudVoiceRes.content[0].text);
+console.log("loudness voice:", "target", loudVoiceJson.target_lufs, "| input", loudVoiceJson.input_lufs, "| output", loudVoiceJson.output_lufs, "| two_pass", loudVoiceJson.two_pass);
+checkOk(loudVoiceJson.two_pass === true, "loudness uses two-pass", `got two_pass=${loudVoiceJson.two_pass}`);
+checkOk(near(loudVoiceJson.output_lufs, -14, 0.5), "loudness voice reports output at -14 LUFS (±0.5)", `got ${loudVoiceJson.output_lufs}`);
+const loudVoiceMeasured = await measureLufs(path.join(root, "outputs/mcp-loudness-voice.mp3"));
+checkOk(near(loudVoiceMeasured, -14, 0.5), "loudness voice output independently measures -14 LUFS (±0.5)", `got ${loudVoiceMeasured}`);
+
+const loudRes = await client.callTool({
+  name: "loudness",
+  arguments: {
+    input: path.join(root, "test/quiet-source.mp3"),
+    output: path.join(root, "outputs/mcp-loudness.mp3"),
+  },
+});
+const loudJson = JSON.parse(loudRes.content[0].text);
+console.log("loudness quiet bed:", "target", loudJson.target_lufs, "| input", loudJson.input_lufs, "| output", loudJson.output_lufs, "| warning", loudJson.warning ?? "(none)");
+checkOk(typeof loudJson.output_lufs === "number" && loudJson.output_lufs > loudJson.input_lufs, "loudness quiet bed improves on input LUFS", `input ${loudJson.input_lufs} -> output ${loudJson.output_lufs}`);
+checkOk(typeof loudJson.warning === "string" && loudJson.warning.length > 0, "loudness quiet bed warns it cannot reach target", `got warning=${JSON.stringify(loudJson.warning)}`);
 
 await client.close();
 if (failures.length) {

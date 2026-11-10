@@ -74,9 +74,12 @@ past the end of the file fails too. The probe result is the ground truth.
 ### 3. Reframe in one step — don't crop then resize by hand
 To turn 16:9 into 9:16: `reframe --mode crop` (default 1080×1920).
 `--mode blur` fills the sides with a blurred copy of the frame (the
-Shorts look); `--mode pad` uses black bars. Use `--x`/`--y` to anchor
-the crop window when the subject isn't centered. `crop` + `resize`
-remain for exact pixel rectangles only.
+Shorts look); `--mode pad` uses black bars. Use `--anchor left|right|
+top|bottom|...` (or `--x`/`--y`) to pin the crop window when the
+subject isn't centered — a subject at the frame edge gets cut by a
+centre crop. Crop mode reports `crop_kept_percent` and warns below
+40% kept (the result is upscaled and may look soft); prefer `pad` or
+`blur` then. `crop` + `resize` remain for exact pixel rectangles only.
 
 ### 4. Check before you publish
 After the last edit, run `check --platform tiktok` (or `reels`,
@@ -102,8 +105,14 @@ re-cut blind.
 YouTube, Spotify, and TikTok all normalize to around −14 LUFS. Normalizing
 to −14 means your audio sounds the same loudness as everything else on the
 platform. Use −16 LUFS for podcasts, −23 LUFS only for broadcast (EBU R128).
-Single-pass loudnorm (what this tool does) is fast and good for speech and
-creator audio; it is not sample-exact broadcast mastering.
+Two-pass loudnorm (what this tool does): pass 1 measures the input,
+pass 2 applies the exact linear gain, then the tool re-measures the
+output and reports the real `output_lufs`. It hits the target on
+voice and normal mixed audio. On peak-limited input (sub-bass-heavy
+music, crest ~20 dB) the true-peak ceiling caps the gain — the tool
+gets as close as it can and warns instead of pretending it hit −14;
+high-pass the sub-bass or compress first, then normalize again. It is
+not sample-exact broadcast mastering.
 
 ### 7. Captions must exist before you burn them
 `burn_captions` needs a real `.srt`, `.ass`, or `.vtt` file. If the user
@@ -122,8 +131,10 @@ Second line of caption
 ```
 
 Keep lines short (≤ 42 chars), max 2 lines per cue, and never let a cue
-span a sentence break awkwardly. For vertical video use `--font-size 48`
-or larger — 24px is for 720p landscape.
+span a sentence break awkwardly. Font size and position default to the
+safe zone and scale with frame height (~60px type on 1080x1920, sitting
+~500px above the bottom edge so TikTok/Shorts UI never covers the
+text) — pass `--font-size` / `--margin-v` only to override.
 
 ### 8. Concat re-encodes — that's a feature
 `concat` re-encodes all parts to one codec, so clips with different
@@ -236,6 +247,15 @@ clip loops inside its window, so a 6s facecam covers a 10s main clip.
 Verify a pip with `extract_frame` inside the PiP rect — the pixels
 there must match the PiP source at the same timestamp, not the main
 clip.
+
+### 18. Open with a title card, not a bare first frame
+`titlecard "THE MOON IS LEAVING US"` renders a PNG: big bold hook
+(3-6 words, wrapped to short lines) in yellow on an orange box, on a
+transparent canvas, sitting in the safe zone. Overlay it onto the first
+2.5s with `overlay --image title.png --position center --start 0
+--end 2.5`, or use it as the opening card. Default type is ~120px at
+1080 wide; pass `--font-size` / `--text-color` / `--box-color` to
+match the channel brand.
 
 ## Workflow: vertical captioned clip from a landscape source
 

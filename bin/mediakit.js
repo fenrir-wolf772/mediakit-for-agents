@@ -126,17 +126,18 @@ const COMMANDS = {
     ],
   },
   "burn-captions": {
-    usage: "mediakit burn-captions <input> --captions <file.srt|ass|vtt> -o <output> [--font-size <n>]",
+    usage: "mediakit burn-captions <input> --captions <file.srt|ass|vtt> -o <output> [--font-size <n>] [--margin-v <n>]",
     desc: "Burn subtitles into the video (hardcoded, always visible).",
     args: [{ name: "input", required: true }],
     options: [
       ["--captions", "Subtitle file .srt/.ass/.vtt (required)"],
-      ["--font-size", "Font size in px (default 24)"],
+      ["--font-size", "Font size in px (default: scales with frame height, ~60px at 1920 high)"],
+      ["--margin-v", "Distance from bottom edge in px (default: 26% of frame height, above platform UI)"],
       ["-o, --output", "Output file (required)"],
     ],
   },
   reframe: {
-    usage: "mediakit reframe <input> -o <output> [--width 1080] [--height 1920] [--mode crop|pad|blur] [--x <px>] [--y <px>] [--blur <n>]",
+    usage: "mediakit reframe <input> -o <output> [--width 1080] [--height 1920] [--mode crop|pad|blur] [--x <px>] [--y <px>] [--anchor <name>] [--blur <n>]",
     desc: "Reframe to a target aspect/size in one step (e.g. 16:9 -> 9:16 vertical).",
     args: [{ name: "input", required: true }],
     options: [
@@ -145,8 +146,22 @@ const COMMANDS = {
       ["--mode", "crop (default) | pad (black bars) | blur (blurred fill)"],
       ["--x", "Crop anchor: left offset (crop mode only)"],
       ["--y", "Crop anchor: top offset (crop mode only)"],
+      ["--anchor", "Named crop anchor: center | left | right | top | bottom | top-left | top-right | bottom-left | bottom-right (crop mode only; explicit --x/--y win)"],
       ["--blur", "Blur strength for blur mode (default 20)"],
       ["-o, --output", "Output file (required)"],
+    ],
+  },
+  titlecard: {
+    usage: "mediakit titlecard \"<hook text>\" -o <output.png> [--width 1080] [--height 1920] [--font-size <n>] [--text-color <hex>] [--box-color <hex>]",
+    desc: "Render a title card PNG: big bold hook on a coloured box, transparent background (overlay it with the overlay tool).",
+    args: [{ name: "text", required: true }],
+    options: [
+      ["--width", "Canvas width in pixels (default 1080, must be even)"],
+      ["--height", "Canvas height in pixels (default 1920, must be even)"],
+      ["--font-size", "Font size in px (default: ~120px at 1080 wide)"],
+      ["--text-color", "Text color name or hex (default FFD60A yellow)"],
+      ["--box-color", "Box color name or hex (default F97316 orange)"],
+      ["-o, --output", "Output PNG file (required)"],
     ],
   },
   check: {
@@ -443,7 +458,8 @@ async function main() {
         if (!opts.captions) fail("missing required option: --captions <file.srt|ass|vtt>");
         result = await core.burnCaptions({
           input: needInput(), output: needOutput(opts),
-          captions: opts.captions, fontSize: numOpt(opts, "font_size") ?? 24,
+          captions: opts.captions, fontSize: numOpt(opts, "font_size") ?? null,
+          marginV: numOpt(opts, "margin_v") ?? null,
         });
         break;
       }
@@ -455,6 +471,7 @@ async function main() {
           mode: opts.mode ?? "crop",
           x: numOpt(opts, "x") ?? null,
           y: numOpt(opts, "y") ?? null,
+          anchor: opts.anchor ?? null,
           blur: numOpt(opts, "blur") ?? 20,
         });
         break;
@@ -540,6 +557,16 @@ async function main() {
         });
         break;
       }
+      case "titlecard":
+        result = await core.titlecard({
+          text: needInput("text"), output: needOutput(opts),
+          width: numOpt(opts, "width") ?? 1080,
+          height: numOpt(opts, "height") ?? 1920,
+          fontSize: numOpt(opts, "font_size") ?? null,
+          textColor: opts.text_color ?? "FFD60A",
+          boxColor: opts.box_color ?? "F97316",
+        });
+        break;
       case "scenes":
         result = await core.detectScenes({
           input: needInput(),

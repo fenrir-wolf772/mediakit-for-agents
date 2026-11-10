@@ -476,16 +476,41 @@ export async function loudness({ input, output, targetLufs = -14, format = null 
   const ext = (format || path.extname(outPath).slice(1) || "mp3").toLowerCase();
   const codec = AUDIO_FORMATS[ext] ?? VIDEO_CONTAINER_AUDIO[ext];
   if (!codec) throw new MediaKitError(`unsupported audio format: ${ext}`, "INVALID_ARG");
-  // Single-pass loudnorm: fast, good enough for speech/creator audio.
-  // Two-pass is more precise; see SKILL.md if you need broadcast exactness.
-  await run(FFMPEG, [
-    "-y", "-i", inPath,
-    "-af", `loudnorm=I=${target}:TP=-1.5:LRA=11`,
-    "-ar", "48000", "-c:v", "copy", "-c:a", codec, outPath,
-  ]);
+  const meta = await probe(inPath);
+  if (!meta.audio) throw new MediaKitError("loudness needs an audio stream in the input", "INVALID_ARG");
+  // Two-pass loudnorm: pass 1 measures the input (integrated loudness,
+  // true peak, LRA, threshold, target offset); pass 2 applies the exact
+  // linear gain. Single-pass cannot hit the target when the input is far
+  // from it — a -26 LUFS music bed only reached -21.6 in one pass.
+  const measured = await measureLoudnessFull(inPath);
+  let twoPass = false;
+  if (measured) {
+    await run(FFMPEG, [
+      "-y", "-i", inPath,
+      "-af", `loudnorm=I=${target}:TP=-1.5:LRA=11:measured_I=${measured.i}:measured_TP=${measured.tp}:measured_LRA=${measured.lra}:measured_thresh=${measured.thresh}:offset=${measured.offset}:linear=true`,
+      "-ar", "48000", "-c:v", "copy", "-c:a", codec, outPath,
+    ]);
+    twoPass = true;
+  } else {
+    // Measurement failed (unusual input): fall back to single-pass.
+    await run(FFMPEG, [
+      "-y", "-i", inPath,
+      "-af", `loudnorm=I=${target}:TP=-1.5:LRA=11`,
+      "-ar", "48000", "-c:v", "copy", "-c:a", codec, outPath,
+    ]);
+  }
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
-  return { operation: "loudness", input: inPath, output: outPath, target_lufs: target, format: ext, ...info, duration_seconds: out.duration_seconds };
+  const outputLufs = out.audio ? await measureLoudness(outPath) : null;
+  // Honest reporting: when the input is peak-limited (true peak caps the
+  // gain — e.g. sub-bass-heavy music with a 20+ dB crest), even two-pass
+  // cannot reach the target without clipping. Say so instead of
+  // pretending the target was hit.
+  const offTarget = outputLufs === null ? null : +(outputLufs - target).toFixed(1);
+  const warning = offTarget !== null && Math.abs(offTarget) > 0.5
+    ? `reached ${outputLufs} LUFS, ${Math.abs(offTarget)} LUFS ${offTarget < 0 ? "below" : "above"} target — input is peak-limited (true peak caps the gain); high-pass sub-bass or compress first, then normalize again`
+    : null;
+  return { operation: "loudness", input: inPath, output: outPath, target_lufs: target, input_lufs: measured?.i ?? null, output_lufs: outputLufs, two_pass: twoPass, ...(warning ? { warning } : {}), format: ext, ...info, duration_seconds: out.duration_seconds };
 }
 
 // ---------------------------------------------------------------- concat
@@ -683,7 +708,7 @@ async function concatTransition({ inPaths, outPath, videoCodec, audioCodec, tran
 
 // ---------------------------------------------------------------- burn_captions
 
-export async function burnCaptions({ input, output, captions, fontSize = 24, fontColor = "white", box = true }) {
+export async function burnCaptions({ input, output, captions, fontSize = null, fontColor = "white", box = true, marginV = null }) {
   const inPath = await requireInput(input);
   const capPath = await requireInput(captions, "captions file");
   const outPath = await prepareOutput(output, [inPath]);
@@ -691,14 +716,20 @@ export async function burnCaptions({ input, output, captions, fontSize = 24, fon
   if (![".srt", ".ass", ".vtt"].includes(ext)) {
     throw new MediaKitError(`captions must be .srt/.ass/.vtt, got ${ext}`, "INVALID_ARG");
   }
-  const size = num(fontSize, "font_size", { min: 8, max: 200, integer: true });
+  const meta = await probe(inPath);
+  const vw = meta.video?.width ?? 1280;
+  const vh = meta.video?.height ?? 720;
+  // Defaults scale with frame height so captions stay readable and clear
+  // of platform overlays at any size: ~60px type on 1080x1920, sitting
+  // ~500px above the bottom edge (TikTok/Shorts cover the bottom ~480px
+  // with their own UI). Explicit values always win. Applies to .srt/.vtt;
+  // .ass files carry their own styles.
+  const size = fontSize === null ? Math.round(vh * 0.031) : num(fontSize, "font_size", { min: 8, max: 200, integer: true });
+  const margin = marginV === null ? Math.round(vh * 0.26) : num(marginV, "margin_v", { min: 0, max: vh, integer: true });
   // libass scales FontSize against the ASS PlayRes (default 384x288) when
   // converting SRT -> ASS, so a "48px" font would render ~6x too big on
   // a 1080x1920 frame. Pin PlayRes to the real video size so FontSize
   // means actual pixels.
-  const meta = await probe(inPath);
-  const vw = meta.video?.width ?? 1280;
-  const vh = meta.video?.height ?? 720;
   // libass handles .ass natively; for .srt/.vtt use subtitles filter.
   // Escape : and ' inside the filter argument the ffmpeg way.
   const esc = capPath.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
@@ -706,14 +737,77 @@ export async function burnCaptions({ input, output, captions, fontSize = 24, fon
   if (ext === ".ass") {
     vf = `ass='${esc}'`;
   } else {
-    const forceStyle = `PlayResX=${vw},PlayResY=${vh},FontSize=${size},PrimaryColour=&HFFFFFF&,OutlineColour=&H80000000&,BorderStyle=${box ? 3 : 1},BackColour=&H80000000&,Outline=2,Shadow=0,MarginV=40`;
+    const forceStyle = `PlayResX=${vw},PlayResY=${vh},FontSize=${size},PrimaryColour=&HFFFFFF&,OutlineColour=&H80000000&,BorderStyle=${box ? 3 : 1},BackColour=&H80000000&,Outline=2,Shadow=0,MarginV=${margin}`;
     const color = fontColor.toLowerCase() === "white" ? "" : `,PrimaryColour=&H${fontColor}&`;
     vf = `subtitles='${esc}':force_style='${forceStyle}${color}'`;
   }
   await run(FFMPEG, ["-y", "-i", inPath, "-vf", vf, "-c:a", "copy", outPath]);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
-  return { operation: "burn_captions", input: inPath, output: outPath, captions: capPath, font_size: size, ...info, duration_seconds: out.duration_seconds };
+  return { operation: "burn_captions", input: inPath, output: outPath, captions: capPath, font_size: size, margin_v: margin, ...info, duration_seconds: out.duration_seconds };
+}
+
+// ---------------------------------------------------------------- titlecard
+// Title card image: a big bold hook (3-6 words) on a coloured box, on a
+// transparent canvas so it overlays cleanly onto any frame (see overlay).
+// Text wraps to ~14 chars per line; the block sits in the safe zone
+// (centred horizontally, ~55% down the frame). One drawtext call with
+// a textfile: newlines handled natively, one box around the whole block.
+
+const TITLECARD_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+
+function wrapTitleLines(text, maxChars = 14) {
+  const words = text.split(/\s+/).filter(Boolean);
+  const lines = [];
+  let cur = "";
+  for (const w of words) {
+    const next = cur ? `${cur} ${w}` : w;
+    if (next.length <= maxChars || !cur) cur = next;
+    else { lines.push(cur); cur = w; }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+function normalizeColor(c, name) {
+  const v = String(c).trim().replace(/^#/, "");
+  if (!/^(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{8}|[a-zA-Z]+)$/.test(v)) {
+    throw new MediaKitError(`titlecard ${name} must be a color name or hex like FFD60A, got: ${c}`, "INVALID_ARG");
+  }
+  return v;
+}
+
+export async function titlecard({ text, output, width = 1080, height = 1920, fontSize = null, textColor = "FFD60A", boxColor = "F97316" }) {
+  if (!text || !String(text).trim()) throw new MediaKitError("titlecard needs text", "INVALID_ARG");
+  const outPath = await prepareOutput(output, []);
+  const w = num(width, "width", { min: 2, integer: true });
+  const h = num(height, "height", { min: 2, integer: true });
+  if (w % 2 !== 0 || h % 2 !== 0) throw new MediaKitError("titlecard width/height must be even", "INVALID_ARG");
+  const size = fontSize === null ? Math.round(w * 0.11) : num(fontSize, "font_size", { min: 16, max: 400, integer: true });
+  const fg = normalizeColor(textColor, "text_color");
+  const bg = normalizeColor(boxColor, "box_color");
+  const lines = wrapTitleLines(String(text).trim().toUpperCase());
+  // Textfile (not inline text): drawtext reads newlines natively and
+  // draws one box around the whole block.
+  const tmpFile = path.join(path.dirname(outPath), `.titlecard-${process.pid}.txt`);
+  await writeFile(tmpFile, lines.join("\n"), "utf8");
+  const esc = tmpFile.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
+  try {
+    // nullsrc + geq clears the alpha channel first: lavfi color sources
+    // ignore alpha (always opaque), so the canvas must be made
+    // transparent explicitly before drawtext paints the opaque box+text.
+    await run(FFMPEG, [
+      "-y", "-f", "lavfi", "-i", `nullsrc=s=${w}x${h}:r=30:d=0.1`,
+      "-vf", `format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='0',drawtext=fontfile=${TITLECARD_FONT}:textfile=${esc}:fontsize=${size}:fontcolor=0x${fg}:borderw=6:bordercolor=black:box=1:boxcolor=0x${bg}:boxborderw=${Math.round(size * 0.25)}:x=(w-text_w)/2:y=(h-text_h)*0.55`,
+      "-frames:v", "1", outPath,
+    ]);
+  } finally {
+    const { unlink } = await import("node:fs/promises");
+    await unlink(tmpFile).catch(() => {});
+  }
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  return { operation: "titlecard", output: outPath, text: String(text).trim(), lines, font_size: size, text_color: fg, box_color: bg, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null };
 }
 
 // ---------------------------------------------------------------- reframe
@@ -724,7 +818,7 @@ export async function burnCaptions({ input, output, captions, fontSize = 24, fon
 // black bars. mode "blur": same fit, but the empty area is filled with
 // a blurred, darkened copy of the frame (the Shorts/Reels look).
 
-export async function reframe({ input, output, width = 1080, height = 1920, mode = "crop", x = null, y = null, blur = 20 }) {
+export async function reframe({ input, output, width = 1080, height = 1920, mode = "crop", x = null, y = null, blur = 20, anchor = null }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const tw = num(width, "width", { min: 2, integer: true });
@@ -739,6 +833,7 @@ export async function reframe({ input, output, width = 1080, height = 1920, mode
   const srcAspect = sw / sh;
   let vf;
   let cropRect = null;
+  let cropStats = null;
   if (mode === "crop") {
     // Crop window with the target aspect, as large as fits in the source.
     let cw, ch;
@@ -746,10 +841,32 @@ export async function reframe({ input, output, width = 1080, height = 1920, mode
     else { cw = sw; ch = Math.floor((sw / targetAspect) / 2) * 2; }
     const maxX = sw - cw;
     const maxY = sh - ch;
-    const ox = x === null || x === undefined ? Math.floor(maxX / 2) : num(x, "x", { min: 0, max: maxX, integer: true });
-    const oy = y === null || y === undefined ? Math.floor(maxY / 2) : num(y, "y", { min: 0, max: maxY, integer: true });
+    // Named anchor ("left", "right", "top-left", ...) pins the crop
+    // window to the subject's side so a subject at the frame edge is
+    // not cut away; explicit x/y always win over it.
+    let ax = null, ay = null;
+    if (anchor !== null && anchor !== undefined) {
+      const parts = String(anchor).toLowerCase().split("-");
+      const allowed = ["center", "left", "right", "top", "bottom"];
+      if (!parts.every((p) => allowed.includes(p)) || parts.length > 2) {
+        throw new MediaKitError(`reframe anchor must be one of center, left, right, top, bottom, top-left, top-right, bottom-left, bottom-right, got: ${anchor}`, "INVALID_ARG");
+      }
+      if (parts.includes("left")) ax = 0;
+      else if (parts.includes("right")) ax = maxX;
+      if (parts.includes("top")) ay = 0;
+      else if (parts.includes("bottom")) ay = maxY;
+    }
+    const ox = x === null || x === undefined ? (ax ?? Math.floor(maxX / 2)) : num(x, "x", { min: 0, max: maxX, integer: true });
+    const oy = y === null || y === undefined ? (ay ?? Math.floor(maxY / 2)) : num(y, "y", { min: 0, max: maxY, integer: true });
     cropRect = { width: cw, height: ch, x: ox, y: oy };
     vf = `crop=${cw}:${ch}:${ox}:${oy},scale=${tw}:${th}`;
+    // Report how much of the frame the crop keeps: a 16:9 -> 9:16 crop
+    // keeps ~32% of the pixels and upscales ~2.7x, which is where the
+    // softness comes from. Below 40% kept, say so.
+    const kept = +(((cw * ch) / (sw * sh)) * 100).toFixed(1);
+    const upscale = +(tw / cw).toFixed(2);
+    cropStats = { kept_percent: kept, upscale };
+    if (kept < 40) cropStats.warning = `crop keeps only ${kept}% of the frame (upscaled ${upscale}x) — the result may look soft; use pad or blur mode to keep the whole frame`;
   } else if (mode === "pad") {
     vf = `scale=${tw}:${th}:force_original_aspect_ratio=decrease,pad=${tw}:${th}:(ow-iw)/2:(oh-ih)/2:black`;
   } else {
@@ -767,6 +884,7 @@ export async function reframe({ input, output, width = 1080, height = 1920, mode
     operation: "reframe", input: inPath, output: outPath, mode,
     target: `${tw}x${th}`, source: `${sw}x${sh}`,
     ...(cropRect ? { crop: cropRect } : {}),
+    ...(cropStats ? { crop_kept_percent: cropStats.kept_percent, upscale: cropStats.upscale, ...(cropStats.warning ? { warning: cropStats.warning } : {}) } : {}),
     ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
     duration_seconds: out.duration_seconds,
   };
@@ -842,8 +960,10 @@ export function recommendedVideoBitrateMbps(width, height, fps) {
   return null;
 }
 
-/** Measure integrated loudness with a loudnorm analysis pass (no output file). */
-export async function measureLoudness(input) {
+/** Measure loudness with a loudnorm analysis pass (no output file).
+ * Returns the full measured set needed for a precise two-pass
+ * normalization, or null when the input cannot be measured. */
+export async function measureLoudnessFull(input) {
   const { stderr } = await run(FFMPEG, [
     "-i", input, "-vn",
     "-af", "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json",
@@ -853,11 +973,23 @@ export async function measureLoudness(input) {
   if (!m) return null;
   try {
     const j = JSON.parse(m[0]);
-    const v = parseFloat(j.input_i);
-    return Number.isFinite(v) ? +v.toFixed(1) : null;
+    const num = (k) => { const v = parseFloat(j[k]); return Number.isFinite(v) ? v : null; };
+    const i = num("input_i");
+    const tp = num("input_tp");
+    const lra = num("input_lra");
+    const thresh = num("input_thresh");
+    const offset = num("target_offset");
+    if (i === null || tp === null || lra === null || thresh === null || offset === null) return null;
+    return { i: +i.toFixed(2), tp: +tp.toFixed(2), lra: +lra.toFixed(2), thresh: +thresh.toFixed(2), offset: +offset.toFixed(2) };
   } catch {
     return null;
   }
+}
+
+/** Measure integrated loudness (LUFS) with a loudnorm analysis pass. */
+export async function measureLoudness(input) {
+  const full = await measureLoudnessFull(input);
+  return full === null ? null : +full.i.toFixed(1);
 }
 
 export async function check({ input, platform = "tiktok" }) {
@@ -1124,7 +1256,7 @@ const DOCTOR_FILTERS = [
   "cropdetect", "gblur", "trim", "atrim", "concat", "select", "tile", "pad", "overlay",
   "drawtext", "volume", "sidechaincompress", "amix", "aresample",
   "xfade", "acrossfade", "fps", "anullsrc", "setpts", "asetpts",
-  "format", "colorchannelmixer", "atempo", "aloop",
+  "format", "colorchannelmixer", "atempo", "aloop", "geq",
 ];
 const DOCTOR_ENCODERS = [
   "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4",
@@ -1157,6 +1289,7 @@ const TOOL_REQUIREMENTS = {
   keyframes: {},
   fit: { filters: ["setpts", "atempo"], encoders: ["libx264", "aac"] },
   pip: { filters: ["overlay", "format", "scale", "colorchannelmixer", "amix"], encoders: ["libx264"] },
+  titlecard: { filters: ["drawtext", "geq"] },
   doctor: {},
 };
 

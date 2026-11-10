@@ -62,17 +62,18 @@ Then ask your agent things like:
 | `extract_frame` | Grab one frame at a timestamp | `mediakit extract-frame in.mp4 --timestamp 3.5 -o frame.png` |
 | `thumbnail` | Contact sheet of N evenly spaced frames | `mediakit thumbnail in.mp4 --frames 6 -o sheet.jpg` |
 | `frames` | Extract N evenly spaced frames as separate images, each with its timestamp — so an agent can look at a video before cutting it | `mediakit frames in.mp4 -o frames/ --count 6` |
-| `loudness` | Normalize to a loudness target (default −14 LUFS) | `mediakit loudness in.mp3 -o out.mp3` |
+| `loudness` | Normalize to a loudness target (default −14 LUFS) — two-pass: measures first, applies the exact gain, re-measures the output and reports the real `output_lufs`; warns when the input is peak-limited and the target cannot be reached | `mediakit loudness in.mp3 -o out.mp3` |
 | `concat` | Join 2+ files into one; auto-detects identical clips and stream-copies them (fast, lossless), otherwise re-encodes; `--transition fade` crossfades between clips with xfade + acrossfade | `mediakit concat a.mp4 b.mp4 -o joined.mp4` |
-| `burn_captions` | Burn .srt/.ass/.vtt subtitles into the video | `mediakit burn-captions in.mp4 --captions subs.srt -o out.mp4` |
-| `reframe` | Reframe to a target aspect/size in one step (crop, pad, or blurred fill) | `mediakit reframe in.mp4 --mode crop -o vertical.mp4` |
-| `check` | Verify a file against a platform spec (tiktok/reels/shorts/youtube) | `mediakit check out.mp4 --platform tiktok` |
+| `burn_captions` | Burn .srt/.ass/.vtt subtitles into the video — font size and position default to the safe zone and scale with frame height (~60px type on 1080x1920, ~500px above the bottom edge so platform UI never covers the text) | `mediakit burn-captions in.mp4 --captions subs.srt -o out.mp4` |
+| `reframe` | Reframe to a target aspect/size in one step (crop, pad, or blurred fill) — crop mode takes a named `--anchor` (left/right/top/bottom/...) to keep an edge subject in frame, and reports `crop_kept_percent` + a warning below 40% kept | `mediakit reframe in.mp4 --mode crop -o vertical.mp4` |
+| `check` | Verify a file against a platform spec (tiktok/reels/shorts/youtube) — video bitrate is a warning, not a gate; overall pass ignores warnings | `mediakit check out.mp4 --platform tiktok` |
 | `silence` | Remove silent stretches, keeping a margin around speech | `mediakit silence in.mp4 -o tight.mp4` |
 | `cropdetect` | Measure letterbox/pillarbox bars; returns the crop rect + a ready crop command | `mediakit cropdetect in.mp4` |
 | `package` | Bundle a finished file for delivery: media + spec.json receipt + checksums.sha256 (+ captions) | `mediakit package out.mp4 -o delivery.zip --platform tiktok` |
 | `mix` | Mix voice over a music bed with sidechain ducking (bed drops under speech), then master to target LUFS; reports the ducking actually measured | `mediakit mix voice.mp3 --music bed.mp3 -o mixed.mp3` |
 | `overlay` | Overlay a logo/watermark image (named position, margin, scale, opacity, optional timing) | `mediakit overlay in.mp4 --image logo.png -o out.mp4 --position top-right` |
 | `pip` | Picture-in-picture: a second video over the main one (9 positions, size by width or scale, opacity, optional timing, audio main/pip/mix) | `mediakit pip main.mp4 --pip facecam.mp4 -o out.mp4 --position bottom-right` |
+| `titlecard` | Render a title card PNG: big bold hook (3-6 words) on a coloured box, transparent canvas — overlay it onto frame 1 or use it as the opening card | `mediakit titlecard "The Moon Is Leaving Us" -o title.png` |
 | `scenes` | Detect scene changes / hard cuts; returns cut timestamps + segments (probe-only) | `mediakit scenes in.mp4` |
 | `keyframes` | List keyframe (I-frame) timestamps + GOP min/max/avg interval (probe-only) — check before a stream-copy trim | `mediakit keyframes in.mp4` |
 | `doctor` | Read-only preflight: ffmpeg version, filters/encoders, tool availability | `mediakit doctor` |

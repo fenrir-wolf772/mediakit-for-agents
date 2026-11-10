@@ -189,24 +189,26 @@ server.tool(
 
 server.tool(
   "burn_captions",
-  "Burn subtitles into the video (hardcoded, always visible). Accepts .srt, .ass or .vtt. Style: white bold text on a semi-transparent black box at the bottom.",
+  "Burn subtitles into the video (hardcoded, always visible). Accepts .srt, .ass or .vtt. Style: white bold text on a semi-transparent black box. Defaults scale with frame height: ~60px type on 1080x1920, sitting ~500px above the bottom edge so platform UI (bottom ~480px) never covers the text. Explicit font_size / margin_v override.",
   {
     input: pathSchema,
     output: pathSchema,
     captions: pathSchema.describe("Path to the .srt/.ass/.vtt file"),
-    font_size: z.number().int().min(8).max(200).default(24),
+    font_size: z.number().int().min(8).max(200).optional().describe("Font size in px; default scales with frame height (~60px at 1920 high)"),
+    margin_v: z.number().int().min(0).optional().describe("Distance from bottom edge in px; default is 26% of frame height (above platform UI)"),
   },
   async (a) => safe(() => core.burnCaptions({
     input: a.input,
     output: a.output,
     captions: a.captions,
-    fontSize: a.font_size,
+    fontSize: a.font_size ?? null,
+    marginV: a.margin_v ?? null,
   })),
 );
 
 server.tool(
   "reframe",
-  "Reframe a video to a target aspect/size in one step (e.g. 16:9 to 9:16 vertical 1080x1920). mode crop cuts the target aspect out (centre, or x/y anchor); pad letterboxes with black bars; blur fills the empty area with a blurred copy of the frame.",
+  "Reframe a video to a target aspect/size in one step (e.g. 16:9 to 9:16 vertical 1080x1920). mode crop cuts the target aspect out (centre, or x/y anchor, or a named anchor: left/right/top/bottom/top-left/... to keep an edge subject in frame); pad letterboxes with black bars; blur fills the empty area with a blurred copy of the frame. Crop mode reports crop_kept_percent and warns below 40% kept (upscaled, may look soft).",
   {
     input: pathSchema,
     output: pathSchema,
@@ -215,6 +217,7 @@ server.tool(
     mode: z.enum(["crop", "pad", "blur"]).default("crop"),
     x: z.number().int().min(0).optional().describe("Crop anchor: left offset of the crop window (crop mode only)"),
     y: z.number().int().min(0).optional().describe("Crop anchor: top offset of the crop window (crop mode only)"),
+    anchor: z.enum(["center", "left", "right", "top", "bottom", "top-left", "top-right", "bottom-left", "bottom-right"]).optional().describe("Named crop anchor (crop mode only); explicit x/y win over it"),
     blur: z.number().min(0).max(100).default(20).describe("Blur strength for the background fill (blur mode only)"),
   },
   async (a) => safe(() => core.reframe(a)),
@@ -421,6 +424,29 @@ server.tool(
   "Read-only environment preflight: ffmpeg/ffprobe versions, which filters and encoders this build has, and which mediakit tools that enables. Run first on a new machine — a tool that reports available=false will fail at runtime.",
   {},
   async () => safe(() => core.doctor()),
+);
+
+server.tool(
+  "titlecard",
+  "Render a title card PNG: a big bold hook (3-6 words) on a coloured box, on a transparent canvas so it overlays onto any frame. Text wraps to short lines; the block sits centred in the safe zone (~55% down the frame). Default: yellow text on an orange box, ~120px type at 1080 wide.",
+  {
+    text: z.string().min(1).describe("The hook text, 3-6 words (e.g. 'The Moon Is Leaving Us')"),
+    output: pathSchema,
+    width: z.number().int().min(2).default(1080).describe("Canvas width in pixels (must be even)"),
+    height: z.number().int().min(2).default(1920).describe("Canvas height in pixels (must be even)"),
+    font_size: z.number().int().min(16).max(400).optional().describe("Font size in px; default scales with canvas width (~120px at 1080 wide)"),
+    text_color: z.string().optional().describe("Text color: name or hex, default FFD60A (yellow)"),
+    box_color: z.string().optional().describe("Box color: name or hex, default F97316 (orange)"),
+  },
+  async (a) => safe(() => core.titlecard({
+    text: a.text,
+    output: a.output,
+    width: a.width,
+    height: a.height,
+    fontSize: a.font_size ?? null,
+    textColor: a.text_color ?? "FFD60A",
+    boxColor: a.box_color ?? "F97316",
+  })),
 );
 
 const transport = new StdioServerTransport();

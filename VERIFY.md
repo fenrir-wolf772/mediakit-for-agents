@@ -633,3 +633,15 @@ KHÔNG copy code của họ — chỉ học ý tưởng, tự implement bằng N
   (rule 17 "join identical clips with a copy, facecam with pip")
   đã cập nhật.
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+
+## Plan A→E (TikTok quality) — 2026-11-11 01:00 (+07), Tony lệnh "tự plan đừng hỏi"
+Tony xem 5 video TikTok trending rồi lệnh làm cho ra chất lượng như thế. Định nghĩa "đạt" = từng mục đo thật + assert + CI xanh. Làm hết A→E theo thứ tự.
+
+- **A. Two-pass loudness** (`loudness`): pass 1 đo `measureLoudnessFull` (input_i/tp/lra/thresh/offset), pass 2 áp gain tuyến tính chính xác + `linear=true`, đo lại output và báo `output_lufs` thật. Voice fixture (−22.14 LUFS) → **−14.44 LUFS (đo độc lập −14.44, TP −9.50)**. Nhạc nền TVC −26.08 LUFS, crest ~21 dB (sub-bass <100Hz chiếm 23 dB năng lượng — phổ + highpass 100Hz đã kiểm chứng): true-peak chặn gain, mọi cách (linear/dynamic/compand/limiter) đều dừng ở ~−22.1 — tool lấy gần nhất có thể và **cảnh báo** thay vì giả vờ đạt. Test: voice assert −14 ±0.5 (báo cáo + đo độc lập), quiet bed assert cải thiện + có warning.
+- **B. burn_captions mặc định vùng an toàn**: font-size mặc định scale theo chiều cao (`vh*0.031` → 60px ở 1920, 22px ở 720), MarginV mặc định `vh*0.26` → 500px ở 1920 (trên vùng 480px TikTok che), `--font-size`/`--margin-v` ghi đè. Pixel-verify trên source.mp4 @t=3.5s: band phụ đề **PSNR 19.5** (chữ rõ), strip dưới đáy **PSNR 64.5** (sạch, không chữ). Test assert cả 2 PSNR + font/margin báo cáo.
+- **C. reframe anchor**: `--anchor left|right|top|bottom|top-left|...` (x/y tường minh thắng anchor); báo `crop_kept_percent` + `upscale` + warning khi giữ <40%. 1280×720→1080×1920: crop 404×720, left x=0 / center x=438 / right x=876, giữ **31.6%**, upscale **2.67x** + warning. Pixel-verify: frame left vs right **PSNR thấp** (crop thực sự dịch chuyển).
+- **D. check bitrate warn**: ĐÃ CÓ từ lượt 8 (severity "warn", overall pass bỏ qua warn) — lần này verify bằng test dương: file reframed + loudness fix → **pass=true** trong khi warnings vẫn liệt kê video_bitrate 0.3 Mbps.
+- **E. titlecard (tool thứ 25)**: drawtext + textfile (wrap ≤14 ký tự/dòng), chữ vàng FFD60A trên hộp cam F97316, canvas trong suốt (nullsrc + `geq` clear alpha — lavfi `color` bỏ qua alpha nên phải clear tay; đã kiểm chứng), block ở ~55% chiều cao trong safe zone. "THE MOON IS LEAVING US" → 2 dòng, font 119px, 1080×1920. Pixel-verify (PIL): yellow 33.545 px, orange 79.438 px, transparent 185.380 px, 4 góc alpha 0. Doctor thêm filter `geq`.
+- `npm test`: **65/65 PASS, exit 0** (25 tools, doctor 25/25 available). Test mới dùng helper `measureLufs` (ffmpeg độc lập) và `bandPsnr` (PSNR theo band) — assert số đo thật, không chỉ "gọi không crash".
+- README (bảng 25 tools), SKILL.md (rule 3 anchor, rule 6 two-pass, rule 7 caption safe zone, rule 18 titlecard) đã cập nhật.
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
