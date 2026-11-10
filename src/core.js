@@ -793,12 +793,13 @@ export async function titlecard({ text, output, width = 1080, height = 1920, fon
   await writeFile(tmpFile, lines.join("\n"), "utf8");
   const esc = tmpFile.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
   try {
-    // nullsrc + geq clears the alpha channel first: lavfi color sources
-    // ignore alpha (always opaque), so the canvas must be made
-    // transparent explicitly before drawtext paints the opaque box+text.
+    // nullsrc + geq clears the whole canvas first (all channels to 0,
+    // including alpha): lavfi color sources ignore alpha (always
+    // opaque), so the canvas must be made transparent explicitly
+    // before drawtext paints the opaque box+text.
     await run(FFMPEG, [
       "-y", "-f", "lavfi", "-i", `nullsrc=s=${w}x${h}:r=30:d=0.1`,
-      "-vf", `format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='0',drawtext=fontfile=${TITLECARD_FONT}:textfile=${esc}:fontsize=${size}:fontcolor=0x${fg}:borderw=6:bordercolor=black:box=1:boxcolor=0x${bg}:boxborderw=${Math.round(size * 0.25)}:x=(w-text_w)/2:y=(h-text_h)*0.55`,
+      "-vf", `format=rgba,geq=r='0':g='0':b='0':a='0',drawtext=fontfile=${TITLECARD_FONT}:textfile=${esc}:fontsize=${size}:fontcolor=0x${fg}:borderw=6:bordercolor=black:box=1:boxcolor=0x${bg}:boxborderw=${Math.round(size * 0.25)}:x=(w-text_w)/2:y=(h-text_h)*0.55`,
       "-frames:v", "1", outPath,
     ]);
   } finally {

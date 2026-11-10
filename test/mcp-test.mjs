@@ -372,34 +372,29 @@ async function bandPsnr(fileA, fileB, t, y, h) {
   return m[1] === "inf" ? Infinity : parseFloat(m[1]);
 }
 
-// Pixel-verify a titlecard PNG: count yellow text pixels, orange box
-// pixels, and transparent pixels in the middle band; corners must be
-// transparent. Returns { width, height, yellow, orange, transparent, corners }.
-async function titlecardPixels(file) {
-  const script = `
-from PIL import Image
-import sys
-im = Image.open(sys.argv[1]).convert('RGBA')
-w, h = im.size
-px = im.load()
-yellow = orange = transparent = 0
-for y in range(h//2 - 300, h//2 + 300):
-    for x in range(0, w, 2):
-        r, g, b, a = px[x, y]
-        if a == 0: transparent += 1
-        elif r > 200 and g > 170 and b < 120: yellow += 1
-        elif r > 200 and 80 < g < 180 and b < 90: orange += 1
-corners = [px[5,5][3], px[w-5,5][3], px[5,h-5][3], px[w-5,h-5][3]]
-print(f"{w}x{h} yellow={yellow} orange={orange} transparent={transparent} corners={','.join(map(str, corners))}")
-`;
-  const { stdout } = await execFileAsync("python3", ["-c", script, file]);
-  const m = stdout.match(/(\d+)x(\d+) yellow=(\d+) orange=(\d+) transparent=(\d+) corners=([\d,]+)/);
-  if (!m) return null;
-  return { width: +m[1], height: +m[2], yellow: +m[3], orange: +m[4], transparent: +m[5], corners: m[6].split(",").map(Number) };
+// Pixel-verify a titlecard PNG with ffmpeg only (no Python/PIL — the
+// CI runner has neither): mean value of one channel in a crop.
+// plane "r"/"g"/"b" via extractplanes, "a" via alphaextract.
+// Returns null on any failure so a broken measurement FAILs the
+// assertion instead of crashing the whole run.
+async function planeMean(file, crop, plane) {
+  try {
+    const vf = plane === "a"
+      ? `format=rgba,crop=${crop},alphaextract,signalstats,metadata=print:key=lavfi.signalstats.YAVG`
+      : `format=rgba,crop=${crop},extractplanes=${plane},signalstats,metadata=print:key=lavfi.signalstats.YAVG`;
+    const { stderr } = await execFileAsync("ffmpeg", ["-i", file, "-vf", vf, "-f", "null", "-"]);
+    const m = stderr.match(/lavfi\.signalstats\.YAVG=([0-9.]+)/);
+    return m ? parseFloat(m[1]) : null;
+  } catch {
+    return null;
+  }
 }
 
 // titlecard: big bold hook on an orange box, transparent canvas.
 // "THE MOON IS LEAVING US" wraps to 2 lines at ~119px on 1080 wide.
+// Pixel-verify on the middle band (y 800-1300, where the block sits):
+// warm bright content (R high, B low) that is opaque (alpha high);
+// the top-left corner must be fully transparent (alpha ~0) and dark.
 const titleRes = await client.callTool({
   name: "titlecard",
   arguments: { text: "The Moon Is Leaving Us", output: path.join(root, "outputs/mcp-titlecard.png") },
@@ -409,12 +404,19 @@ console.log("titlecard call:", titleJson.dimensions, "| lines", JSON.stringify(t
 checkOk(titleJson.dimensions === "1080x1920", "titlecard output is 1080x1920", `got ${titleJson.dimensions}`);
 checkOk(JSON.stringify(titleJson.lines) === JSON.stringify(["THE MOON IS", "LEAVING US"]), "titlecard wraps to 2 lines", `got ${JSON.stringify(titleJson.lines)}`);
 checkOk(titleJson.font_size === 119, "titlecard default font is 119px at 1080 wide", `got ${titleJson.font_size}`);
-const titlePx = await titlecardPixels(path.join(root, "outputs/mcp-titlecard.png"));
-console.log("titlecard pixels:", JSON.stringify(titlePx));
-checkOk(titlePx !== null && titlePx.yellow > 5000, "titlecard has yellow text pixels", JSON.stringify(titlePx));
-checkOk(titlePx !== null && titlePx.orange > 5000, "titlecard has an orange box", JSON.stringify(titlePx));
-checkOk(titlePx !== null && titlePx.transparent > 50000, "titlecard canvas is transparent outside the box", JSON.stringify(titlePx));
-checkOk(titlePx !== null && titlePx.corners.every((a) => a === 0), "titlecard corners are fully transparent", JSON.stringify(titlePx));
+const titleBandR = await planeMean(path.join(root, "outputs/mcp-titlecard.png"), "1080:500:0:800", "r");
+const titleBandG = await planeMean(path.join(root, "outputs/mcp-titlecard.png"), "1080:500:0:800", "g");
+const titleBandB = await planeMean(path.join(root, "outputs/mcp-titlecard.png"), "1080:500:0:800", "b");
+const titleBandA = await planeMean(path.join(root, "outputs/mcp-titlecard.png"), "1080:500:0:800", "a");
+const titleCornerA = await planeMean(path.join(root, "outputs/mcp-titlecard.png"), "200:200:0:0", "a");
+const titleCornerR = await planeMean(path.join(root, "outputs/mcp-titlecard.png"), "200:200:0:0", "r");
+console.log("titlecard pixels: band R/G/B/A =", titleBandR, titleBandG, titleBandB, titleBandA, "| corner A/R =", titleCornerA, titleCornerR);
+checkOk(titleBandR !== null && titleBandR > 50, "titlecard band has bright warm content (R high)", `got R=${titleBandR}`);
+checkOk(titleBandG !== null && titleBandG > 20, "titlecard band has green channel content (yellow/orange, not red-only)", `got G=${titleBandG}`);
+checkOk(titleBandB !== null && titleBandB < 20, "titlecard band is warm, not blue/white (B low)", `got B=${titleBandB}`);
+checkOk(titleBandA !== null && titleBandA > 50, "titlecard band is opaque (the box is there)", `got A=${titleBandA}`);
+checkOk(titleCornerA !== null && titleCornerA < 5, "titlecard corner is fully transparent", `got A=${titleCornerA}`);
+checkOk(titleCornerR !== null && titleCornerR < 5, "titlecard corner is dark (nothing drawn there)", `got R=${titleCornerR}`);
 
 // burn_captions: defaults scale with frame height and sit above the
 // platform UI. On 1280x720: font 22px, margin 187px from the bottom.
