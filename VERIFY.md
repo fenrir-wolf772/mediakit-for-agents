@@ -391,3 +391,61 @@ trả cut timestamps + segments. Fixture `test/scenes-source.mp4`
   (rule 13 "logos go on with overlay" + rule 14 "cut on scene
   boundaries" + workflow bước 9) đã cập nhật.
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+
+## Lượt 7 — 2026-11-10 (keyframes + trim --snap + sửa bug MCP mapping, 22 tools)
+
+### Bug bắt được trước khi làm tính năng mới
+Audit mapping snake_case (MCP) → camelCase (core): 5 tool trong
+`src/server.js` truyền thẳng object `a` vào core trong khi core chờ tên
+camelCase — tham số bị lặng lẽ bỏ qua, dùng default. Bằng chứng trước
+khi sửa (gọi qua MCP stdio thật):
+- `trim stream_copy=true` → kết quả `"stream_copy": false` (re-encode
+  thay vì copy lossless).
+- `loudness target_lufs=-20` → kết quả `"target_lufs": -14` (default).
+Ba tool còn lại cùng lỗi: `resize keep_aspect`, `convert
+video_codec/audio_codec`, `burn_captions font_size`. CLI không dính
+(vì `bin/mediakit.js` map tường minh). Fix: map tường minh trong
+server.js cho cả 5 tool (theo pattern sẵn có của concat/mix/silence).
+Bài học: **mọi tool MCP truyền thẳng `a` vào core đều phải audit tên
+tham số — default lặng lẽ che bug; test MCP phải assert giá trị tham
+số tới được core, không chỉ "gọi thành công".** Đã thêm case regression
+vào `test/mcp-test.mjs` (trim stream_copy + snap).
+
+### Tính năng mới
+- `keyframes` (core+CLI+MCP): ffprobe `-skip_frame nokey` nên chỉ
+  decode keyframe — trả timestamps + count + GOP min/max/avg + flag
+  starts_with_keyframe. Probe-only, không ghi file.
+- `trim --snap` / `snap_to_keyframe` (chỉ với stream-copy): start dời
+  xuống keyframe gần nhất ≤ start, end dời lên keyframe gần nhất ≥ end
+  (kẹp theo duration); trả `requested_start/requested_end` +
+  `keyframe_start/keyframe_end` + `snapped`. `--snap` không kèm
+  stream-copy bị từ chối (re-encode đã frame-accurate).
+
+| Case | Command | Result |
+|---|---|---|
+| keyframes | `keyframes test/source.mp4` | **count 2, [0, 8.333], GOP 8.333s** (đúng GOP 250 frame @30fps đã đo bằng ffprobe tay trước đó) |
+| trim snap CLI | `trim … --start 1 --duration 2 --stream-copy --snap` | requested **1–3** → snapped **0–8.333**, duration_actual **8.4s** (ffprobe), 203.4 KB |
+| snap không stream-copy | `trim … --snap` (không --stream-copy) | Từ chối đúng exit 2, INVALID_ARG |
+| keyframes audio-only | `keyframes test/mix-voice.mp3` | Từ chối đúng exit 2 |
+| MCP trim stream_copy | `trim` stream_copy=true | `"stream_copy": true`, output **2.1s, codec h264** (copy, không re-encode) |
+| MCP loudness -20 | `loudness` target_lufs=-20 | `"target_lufs": -20`; đo lại file bằng loudnorm: **input_i −20.11 LUFS** |
+| MCP resize | `resize` 640×480 keep_aspect=false | output **640×480** đúng (phân biệt với keep_aspect=true) |
+| MCP convert | `convert` video_codec=libx265 | kết quả libx265; ffprobe codec trên đĩa **hevc** |
+| MCP burn_captions | `burn_captions` font_size=48 | kết quả `font_size: 48` |
+| qua MCP | `keyframes` + `trim` snap | keyframes count 2, [0, 8.333], GOP 8.333; trim snap: requested 1–3 → actual **0–8.333**, duration_actual 8.4s |
+
+- Bẫy đo lường: lần đo loudness đầu tiên pipe `2>&1 | tail` ra rỗng
+  (loudnorm in JSON qua stderr nhưng ffmpeg thoát trước khi flush vào
+  pipe) — tưởng file lỗi; đo lại bằng `2> file` rồi grep mới đúng
+  −20.11 LUFS. Bài học: **đo loudness thì redirect stderr ra file,
+  không pipe trực tiếp.**
+
+### Tests
+
+- `npm run check`: `node --check` sạch trên `src/core.js`,
+  `src/server.js`, `bin/mediakit.js`.
+- `npm test`: **all 22 tools present**; `keyframes` + `trim --snap` qua
+  MCP như bảng trên; `doctor` qua MCP: ok=true, **22/22 tools available**.
+- README (bảng 22 tools + đoạn keyframes/snap), SKILL.md
+  (rule 15 "stream-copy cuts must land on keyframes") đã cập nhật.
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).

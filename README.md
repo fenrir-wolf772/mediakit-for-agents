@@ -72,6 +72,7 @@ Then ask your agent things like:
 | `mix` | Mix voice over a music bed with sidechain ducking (bed drops under speech), then master to target LUFS; reports the ducking actually measured | `mediakit mix voice.mp3 --music bed.mp3 -o mixed.mp3` |
 | `overlay` | Overlay a logo/watermark image (named position, margin, scale, opacity, optional timing) | `mediakit overlay in.mp4 --image logo.png -o out.mp4 --position top-right` |
 | `scenes` | Detect scene changes / hard cuts; returns cut timestamps + segments (probe-only) | `mediakit scenes in.mp4` |
+| `keyframes` | List keyframe (I-frame) timestamps + GOP min/max/avg interval (probe-only) — check before a stream-copy trim | `mediakit keyframes in.mp4` |
 | `doctor` | Read-only preflight: ffmpeg version, filters/encoders, tool availability | `mediakit doctor` |
 | `convert` | Change container/codec (omit a codec to stream-copy) | `mediakit convert in.mov -o out.mp4 --video-codec libx264` |
 
@@ -142,7 +143,11 @@ window — x/y are computed from the probed frame size, never typed as
 filter expressions. `scenes` is probe-only: it lists hard cuts and the
 segments between them so you trim on real boundaries; the default
 threshold 0.3 catches real cuts, and a hard cut between flat colours
-scores ~0.4, so keep the threshold at or below 0.4. `doctor` is a read-only preflight — run it first
+scores ~0.4, so keep the threshold at or below 0.4. `keyframes` is
+probe-only: it lists every I-frame timestamp plus the GOP interval, so
+you know where a lossless cut can land — `trim --stream-copy --snap`
+snaps the requested start down and end up to the nearest keyframes and
+reports both the requested and the actual range. `doctor` is a read-only preflight — run it first
 on a new machine to confirm ffmpeg/ffprobe and every filter/encoder the
 tools need are actually present.
 

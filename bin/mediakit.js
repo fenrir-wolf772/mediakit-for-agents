@@ -16,14 +16,15 @@ const COMMANDS = {
     options: [],
   },
   trim: {
-    usage: "mediakit trim <input> --start <s> (--duration <s> | --end <s>) -o <output> [--stream-copy]",
-    desc: "Cut a clip. Re-encodes by default (frame-accurate); --stream-copy is fast but keyframe-only.",
+    usage: "mediakit trim <input> --start <s> (--duration <s> | --end <s>) -o <output> [--stream-copy] [--snap]",
+    desc: "Cut a clip. Re-encodes by default (frame-accurate); --stream-copy is fast but keyframe-only. --snap (with --stream-copy) moves start/end onto the nearest keyframes.",
     args: [{ name: "input", required: true }],
     options: [
       ["--start", "Start time in seconds (default 0)"],
       ["--duration", "Clip length in seconds"],
       ["--end", "End time in seconds (alternative to --duration)"],
       ["--stream-copy", "Copy streams without re-encoding"],
+      ["--snap", "Snap start/end to the nearest keyframes (needs --stream-copy)"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -226,6 +227,12 @@ const COMMANDS = {
       ["--threshold", "Scene sensitivity 0-1, lower = more sensitive (default 0.3)"],
     ],
   },
+  keyframes: {
+    usage: "mediakit keyframes <input>",
+    desc: "List keyframe (I-frame) timestamps + GOP intervals. Probe-only, writes no file. Check before a stream-copy trim.",
+    args: [{ name: "input", required: true }],
+    options: [],
+  },
   doctor: {
     usage: "mediakit doctor",
     desc: "Read-only preflight: ffmpeg/ffprobe versions, available filters/encoders, and which tools that enables.",
@@ -331,6 +338,7 @@ async function main() {
           duration: numOpt(opts, "duration") ?? null,
           end: numOpt(opts, "end") ?? null,
           streamCopy: opts.stream_copy === true,
+          snapToKeyframe: opts.snap === true,
         });
         break;
       }
@@ -483,6 +491,9 @@ async function main() {
           input: needInput(),
           threshold: numOpt(opts, "threshold") ?? 0.3,
         });
+        break;
+      case "keyframes":
+        result = await core.listKeyframes({ input: needInput() });
         break;
       case "doctor":
         result = await core.doctor();

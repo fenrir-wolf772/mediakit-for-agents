@@ -39,7 +39,7 @@ server.tool(
 
 server.tool(
   "trim",
-  "Cut a clip out of a media file. Give start (seconds) plus duration OR end. Re-encodes by default for frame-accurate cuts; set stream_copy=true for fast lossless cuts (keyframe boundaries only).",
+  "Cut a clip out of a media file. Give start (seconds) plus duration OR end. Re-encodes by default for frame-accurate cuts; set stream_copy=true for fast lossless cuts (keyframe boundaries only). With stream_copy, set snap_to_keyframe=true to move start down / end up to the nearest keyframes so the cut lands exactly (see the keyframes tool first).",
   {
     input: pathSchema,
     output: pathSchema.describe("Output file path"),
@@ -47,8 +47,17 @@ server.tool(
     duration: z.number().positive().optional().describe("Clip length in seconds"),
     end: z.number().positive().optional().describe("End time in seconds (alternative to duration)"),
     stream_copy: z.boolean().default(false).describe("Copy streams without re-encoding (fast, keyframe-accurate only)"),
+    snap_to_keyframe: z.boolean().default(false).describe("With stream_copy only: snap start/end to the nearest keyframes (start down, end up)"),
   },
-  async (a) => safe(() => core.trim(a)),
+  async (a) => safe(() => core.trim({
+    input: a.input,
+    output: a.output,
+    start: a.start,
+    duration: a.duration ?? null,
+    end: a.end ?? null,
+    streamCopy: a.stream_copy,
+    snapToKeyframe: a.snap_to_keyframe,
+  })),
 );
 
 server.tool(
@@ -75,7 +84,13 @@ server.tool(
     height: z.number().int().min(2).optional(),
     keep_aspect: z.boolean().default(true),
   },
-  async (a) => safe(() => core.resize(a)),
+  async (a) => safe(() => core.resize({
+    input: a.input,
+    output: a.output,
+    width: a.width ?? null,
+    height: a.height ?? null,
+    keepAspect: a.keep_aspect,
+  })),
 );
 
 server.tool(
@@ -122,7 +137,12 @@ server.tool(
     target_lufs: z.number().min(-70).max(0).default(-14),
     format: z.enum(["mp3", "aac", "wav", "ogg", "opus", "flac"]).optional(),
   },
-  async (a) => safe(() => core.loudness(a)),
+  async (a) => safe(() => core.loudness({
+    input: a.input,
+    output: a.output,
+    targetLufs: a.target_lufs,
+    format: a.format ?? null,
+  })),
 );
 
 server.tool(
@@ -174,7 +194,12 @@ server.tool(
     captions: pathSchema.describe("Path to the .srt/.ass/.vtt file"),
     font_size: z.number().int().min(8).max(200).default(24),
   },
-  async (a) => safe(() => core.burnCaptions(a)),
+  async (a) => safe(() => core.burnCaptions({
+    input: a.input,
+    output: a.output,
+    captions: a.captions,
+    fontSize: a.font_size,
+  })),
 );
 
 server.tool(
@@ -214,7 +239,14 @@ server.tool(
     crf: z.number().int().min(0).max(51).default(23),
     preset: z.string().default("medium"),
   },
-  async (a) => safe(() => core.convert(a)),
+  async (a) => safe(() => core.convert({
+    input: a.input,
+    output: a.output,
+    videoCodec: a.video_codec ?? null,
+    audioCodec: a.audio_codec ?? null,
+    crf: a.crf,
+    preset: a.preset,
+  })),
 );
 
 server.tool(
@@ -325,6 +357,13 @@ server.tool(
     threshold: z.number().min(0).max(1).default(0.3).describe("Scene sensitivity (0-1, lower = more sensitive)"),
   },
   async (a) => safe(() => core.detectScenes(a)),
+);
+
+server.tool(
+  "keyframes",
+  "List the keyframe (I-frame) timestamps of a video (probe-only, writes no file), plus GOP min/max/avg interval. Check this before a stream-copy trim — cutting between keyframes silently shifts the cut. Pair with trim snap_to_keyframe=true to snap the cut onto keyframes.",
+  { input: pathSchema },
+  async (a) => safe(() => core.listKeyframes(a)),
 );
 
 server.tool(

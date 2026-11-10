@@ -140,7 +140,7 @@ function evalFps(rate) {
 
 // ---------------------------------------------------------------- trim
 
-export async function trim({ input, output, start = 0, duration = null, end = null, streamCopy = false }) {
+export async function trim({ input, output, start = 0, duration = null, end = null, streamCopy = false, snapToKeyframe = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const s = num(start, "start", { min: 0 });
@@ -154,15 +154,44 @@ export async function trim({ input, output, start = 0, duration = null, end = nu
   }
   if (dur === null) throw new MediaKitError("trim needs duration or end", "INVALID_ARG");
 
+  // snapToKeyframe only makes sense for stream copy: re-encode cuts are
+  // already frame-accurate, and snapping them would only widen the clip.
+  // Snapping moves start DOWN to the nearest keyframe at/before it and
+  // end UP to the nearest keyframe at/after it, so the stream-copy cut
+  // lands exactly on keyframes instead of ffmpeg's silent rounding.
+  let sActual = s, durActual = dur, snapped = false, kfStart = null, kfEnd = null;
+  if (snapToKeyframe) {
+    if (!streamCopy) throw new MediaKitError("snap_to_keyframe needs stream_copy (re-encode cuts are already frame-accurate)", "INVALID_ARG");
+    const kf = await listKeyframes({ input: inPath });
+    const kfs = kf.keyframe_timestamps;
+    if (!kfs.length) throw new MediaKitError("snap_to_keyframe found no keyframes in the input", "PROBE_FAILED");
+    const reqEnd = s + dur;
+    kfStart = [...kfs].reverse().find((t) => t <= s + 1e-6) ?? 0;
+    kfEnd = kfs.find((t) => t >= reqEnd - 1e-6) ?? kf.duration_seconds ?? reqEnd;
+    if (kfEnd > (kf.duration_seconds ?? kfEnd)) kfEnd = kf.duration_seconds;
+    if (kfEnd <= kfStart) throw new MediaKitError(`snap_to_keyframe cannot fit a clip between keyframes ${kfStart} and ${kfEnd}`, "INVALID_ARG");
+    sActual = kfStart;
+    durActual = +(kfEnd - kfStart).toFixed(3);
+    snapped = sActual !== s || +(sActual + durActual).toFixed(3) !== +reqEnd.toFixed(3);
+  }
+
   // -ss after -i = accurate seek (re-encode path); with stream copy we
   // put -ss before -i for fast keyframe seek.
   const args = streamCopy
-    ? ["-y", "-ss", String(s), "-i", inPath, "-t", String(dur), "-c", "copy", outPath]
-    : ["-y", "-i", inPath, "-ss", String(s), "-t", String(dur), outPath];
+    ? ["-y", "-ss", String(sActual), "-i", inPath, "-t", String(durActual), "-c", "copy", outPath]
+    : ["-y", "-i", inPath, "-ss", String(sActual), "-t", String(durActual), outPath];
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const meta = await probe(outPath);
-  return { operation: "trim", input: inPath, output: outPath, start: s, duration_seconds: dur, stream_copy: streamCopy, ...info, duration_actual: meta.duration_seconds };
+  return {
+    operation: "trim", input: inPath, output: outPath,
+    start: sActual, duration_seconds: durActual, stream_copy: streamCopy,
+    ...(snapToKeyframe ? {
+      requested_start: s, requested_end: +(s + dur).toFixed(3),
+      snapped, keyframe_start: kfStart, keyframe_end: kfEnd,
+    } : {}),
+    ...info, duration_actual: meta.duration_seconds,
+  };
 }
 
 // ---------------------------------------------------------------- crop
@@ -859,6 +888,7 @@ const TOOL_REQUIREMENTS = {
   mix: { filters: ["sidechaincompress", "amix", "aresample", "volume", "loudnorm"], encoders: ["aac", "libmp3lame"] },
   overlay: { filters: ["overlay", "format", "scale", "colorchannelmixer"], encoders: ["libx264"] },
   scenes: { filters: ["select"] },
+  keyframes: {},
   doctor: {},
 };
 
@@ -1402,5 +1432,51 @@ export async function detectScenes({ input, threshold = 0.3 }) {
     scene_changes: changes,
     count: changes.length,
     segments,
+  };
+}
+
+// ---------------------------------------------------------------- keyframes
+// List keyframe (I-frame) timestamps (dubnium0/ffmpeg-mcp's get_keyframes
+// idea): ffprobe with -skip_frame nokey so only keyframes are decoded.
+// Probe-only: no file is written. Needed before any lossless
+// stream-copy trim — cutting between keyframes silently shifts the cut.
+
+export async function listKeyframes({ input }) {
+  const inPath = await requireInput(input);
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("keyframes needs a video input", "INVALID_ARG");
+  const { stdout } = await run(FFPROBE, [
+    "-v", "quiet", "-print_format", "json",
+    "-skip_frame", "nokey", "-select_streams", "v:0",
+    "-show_frames", "-show_entries", "frame=pts_time,key_frame", inPath,
+  ]);
+  let data;
+  try {
+    data = JSON.parse(stdout);
+  } catch {
+    throw new MediaKitError("ffprobe returned unparseable output", "PROBE_FAILED");
+  }
+  const ts = [...new Set(
+    (data.frames ?? [])
+      .filter((f) => f.key_frame === 1)
+      .map((f) => parseFloat(f.pts_time ?? NaN))
+      .filter((v) => Number.isFinite(v)),
+  )].sort((a, b) => a - b).map((v) => +v.toFixed(3));
+  const gaps = [];
+  for (let i = 1; i < ts.length; i++) gaps.push(+(ts[i] - ts[i - 1]).toFixed(3));
+  const gop = gaps.length ? {
+    min_seconds: Math.min(...gaps),
+    max_seconds: Math.max(...gaps),
+    avg_seconds: +(gaps.reduce((a, b) => a + b, 0) / gaps.length).toFixed(3),
+  } : null;
+  return {
+    operation: "keyframes",
+    input: inPath,
+    duration_seconds: meta.duration_seconds,
+    keyframe_timestamps: ts,
+    count: ts.length,
+    first_keyframe_seconds: ts.length ? ts[0] : null,
+    starts_with_keyframe: ts.length ? ts[0] === 0 : false,
+    gop_seconds: gop,
   };
 }

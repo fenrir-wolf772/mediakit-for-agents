@@ -17,9 +17,9 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 21 tools present");
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 22 tools present");
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -162,5 +162,26 @@ const scenesRes = await client.callTool({
 });
 const scenesJson = JSON.parse(scenesRes.content[0].text);
 console.log("scenes call: count", scenesJson.count, "| changes", scenesJson.scene_changes.join(","), "| segments", scenesJson.segments.map((s) => `${s.start}-${s.end}`).join(" "));
+
+const keyframesRes = await client.callTool({
+  name: "keyframes",
+  arguments: { input: path.join(root, "test/source.mp4") },
+});
+const keyframesJson = JSON.parse(keyframesRes.content[0].text);
+console.log("keyframes call: count", keyframesJson.count, "| timestamps", keyframesJson.keyframe_timestamps.join(","), "| gop", JSON.stringify(keyframesJson.gop_seconds));
+
+// Regression: MCP snake_case params must reach core (round 7 bug fix).
+// stream_copy=true must actually stream-copy, and snap_to_keyframe must
+// move 1s..3s onto keyframes 0..8.333 (source GOP is 250 frames).
+const trimSnapRes = await client.callTool({
+  name: "trim",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    output: path.join(root, "outputs/mcp-trim-snap.mp4"),
+    start: 1, duration: 2, stream_copy: true, snap_to_keyframe: true,
+  },
+});
+const trimSnapJson = JSON.parse(trimSnapRes.content[0].text);
+console.log("trim snap call: stream_copy", trimSnapJson.stream_copy, "| requested", trimSnapJson.requested_start + "-" + trimSnapJson.requested_end, "| snapped", trimSnapJson.snapped, "| actual", trimSnapJson.start + "-" + (trimSnapJson.start + trimSnapJson.duration_seconds), "| duration_actual", trimSnapJson.duration_actual + "s");
 await client.close();
 console.log("MCP test done");

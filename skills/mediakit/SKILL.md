@@ -193,6 +193,17 @@ threshold to 0.2 before concluding there are none. A continuous shot
 (testsrc, a static camera) correctly returns zero cuts; zero is a
 real answer, not a failure.
 
+### 15. Stream-copy cuts must land on keyframes
+A lossless `--stream-copy` trim can only start/end on keyframes — ask
+for 1s–3s on a clip whose keyframes are at 0s and 8.33s and ffmpeg
+silently widens the cut. Run `keyframes` first (probe-only: timestamps
++ GOP interval), then `trim --stream-copy --snap` to move the start
+down and the end up to the nearest keyframes; the result reports the
+requested range and the actual range — read both, don't assume. If the
+snapped range is wider than you can accept, re-encode instead
+(`trim` without `--stream-copy` is frame-accurate). `--snap` without
+`--stream-copy` is refused: there is nothing to snap.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.
