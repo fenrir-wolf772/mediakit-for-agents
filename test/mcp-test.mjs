@@ -17,9 +17,9 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 19 tools present");
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 21 tools present");
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -138,5 +138,29 @@ const framesRes = await client.callTool({
 });
 const framesJson = JSON.parse(framesRes.content[0].text);
 console.log("frames call: extracted", framesJson.extracted, "| timestamps", framesJson.frames.map((f) => f.timestamp_seconds).join(","));
+
+const overlayRes = await client.callTool({
+  name: "overlay",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    overlay: path.join(root, "test/logo.png"),
+    output: path.join(root, "outputs/mcp-overlay.mp4"),
+    position: "top-right",
+    width: 120,
+    opacity: 1,
+  },
+});
+const overlayJson = JSON.parse(overlayRes.content[0].text);
+console.log("overlay call:", overlayJson.position, overlayJson.x + "," + overlayJson.y, "|", overlayJson.overlay_size, "|", overlayJson.dimensions, "|", overlayJson.duration_seconds + "s");
+
+const scenesRes = await client.callTool({
+  name: "scenes",
+  arguments: {
+    input: path.join(root, "test/scenes-source.mp4"),
+    threshold: 0.3,
+  },
+});
+const scenesJson = JSON.parse(scenesRes.content[0].text);
+console.log("scenes call: count", scenesJson.count, "| changes", scenesJson.scene_changes.join(","), "| segments", scenesJson.segments.map((s) => `${s.start}-${s.end}`).join(" "));
 await client.close();
 console.log("MCP test done");

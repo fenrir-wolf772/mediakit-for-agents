@@ -323,3 +323,71 @@ timestamp `i×D/N` mỗi file.
 - README (bảng 19 tools + đoạn concat-transition/frames), SKILL.md
   (mục concat-transition + rule 12 "look before you cut") đã cập nhật.
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+
+## Lượt 6 — 2026-11-10 (overlay + scenes, 21 tools)
+
+### Học: dubnium0/ffmpeg-mcp (22★, 40+ tools, Python/FastMCP)
+1. `add_image_overlay` — logo/watermark: position bằng expression
+   (`W-w-10`, `(W-w)/2`), opacity qua `colorchannelmixer=aa=`,
+   timing qua `enable=between(t,start,end)` → đã làm `overlay`
+   (nhưng dùng named position + tính x/y bằng JS thay vì expression
+   tự do — expression là injection surface trong filter graph).
+2. `detect_scene_changes` — `select=gt(scene,threshold)` qua lavfi
+   `movie=` + `ffprobe -show_frames` → đã làm `scenes` (trả thêm
+   segments giữa các cut để trim đúng biên).
+3. `get_keyframes` — liệt kê keyframe timestamps (cần cho trim
+   stream-copy an toàn) → backlog mới.
+4. `run_command` trả structured result kèm command string →
+   củng cố backlog "error kèm retry command".
+5. `validate_output_path` tự tạo parent dir → MediaKit đã có
+   (`prepareOutput`), không cần thêm.
+KHÔNG copy code của họ — chỉ học ý tưởng, tự implement bằng Node/ffmpeg.
+
+### overlay (tool mới)
+PNG logo lên video: named position + margin, scale theo `--width`
+(giữ aspect), opacity qua `colorchannelmixer`, timing qua
+`enable=between(t,…)` / `gte` / `lte`. Vị trí tính bằng JS từ frame
+đã probe; từ chối khi overlay + margin không vừa khung, opacity 0,
+`end <= start`, `start` quá cuối video. Audio stream-copy
+(`-map 0:a?` nên input không audio vẫn chạy).
+
+| Case | Command | Result |
+|---|---|---|
+| top-right, width 120 | `overlay test/source.mp4 --image test/logo.png -o outputs/overlay-test.mp4 --position top-right --margin 24 --width 120` | **x=1136, y=24** (1280−120−24 ✓), 120×120, 1280×720, 10s, 243.9 KB; **pixel thật**: vùng logo RGB **252,0,0** (đỏ thuần) vs cùng điểm trên source **255,255,255** (testsrc trắng) |
+| bottom-left, opacity 0.5, start 2 end 4 | `overlay … --position bottom-left --width 100 --opacity 0.5 --start 2 --end 4` | x=24, y=596; **pixel thật**: t=1 → **0,0,1** (logo ẩn), t=3 → **127,0,0** (đúng blend 50% đỏ trên nền đen), t=5 → **0,0,0** (ẩn lại) |
+| input không audio | `overlay /tmp/noaudio.mp4 … --position center --width 80` | 640×360, 3s — `-map 0:a?` chạy đúng |
+| error cases | `--position nowhere` / `--width 1300` / `--opacity 0` / ảnh không tồn tại | Từ chối đúng, exit 2, message rõ (vị trí hợp lệ / không vừa khung / opacity 0 / file không tồn tại) |
+| qua MCP | `overlay` top-right width 120 | top-right 1136,24, 120×120, 1280×720, 10s |
+
+### scenes (tool mới)
+`ffprobe -f lavfi movie=…,select=gt(scene,threshold) -show_frames`,
+trả cut timestamps + segments. Fixture `test/scenes-source.mp4`
+(đỏ 5s + xanh 5s, concat hard cut).
+
+| Case | Command | Result |
+|---|---|---|
+| cut đỏ→xanh, threshold 0.3 | `scenes test/scenes-source.mp4` | **count 1, cut 5.033s** (kỳ vọng 5.0; concat cộng ~33ms), segments **0–5.033 / 5.033–10.039** |
+| threshold 0.9 | `scenes … --threshold 0.9` | count 0 — **đúng**: đo `lavfi.scene_score` tại cut = **0.4** (trần của metric với màu phẳng), nên threshold >0.4 bỏ lỡ cut thật. Ghi chú vào README/SKILL: giữ threshold ≤0.4 cho hard cut |
+| không có cut | `scenes test/source.mp4` (testsrc liên tục) | count 0 — không false positive |
+| error cases | `scenes test/mix-voice.mp3` (audio-only) | Từ chối đúng exit 2 |
+| qua MCP | `scenes` threshold 0.3 | count 1, changes 5.033, segments 0–5.033 5.033–10.039 |
+
+- Bẫy đo lường bắt được khi verify: script verify pixel đầu tiên
+  quên `encoding: "buffer"` cho `execFile` nên stdout về dạng string,
+  cộng dồn ra NaN — tưởng overlay hỏng. Fix: đọc rawvideo dạng
+  Buffer rồi mới tính mean RGB. Bài học: **verify số phải kiểm tra
+  kiểu dữ liệu đầu vào của phép đo trước khi tin kết quả.**
+- Fixture mới: `test/logo.png` (200×200 đỏ, 608 B),
+  `test/scenes-source.mp4` (640×360, 10.039s, cut tại 5.033s).
+
+### Tests
+
+- `npm run check`: `node --check` sạch trên `src/core.js`,
+  `src/server.js`, `bin/mediakit.js`.
+- `npm test`: **all 21 tools present**; `overlay` + `scenes` qua MCP
+  như bảng trên; `doctor` qua MCP: ok=true, **21/21 tools available**
+  (overlay/format/scale/colorchannelmixer/select có mặt).
+- README (bảng 21 tools + đoạn overlay/scenes), SKILL.md
+  (rule 13 "logos go on with overlay" + rule 14 "cut on scene
+  boundaries" + workflow bước 9) đã cập nhật.
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).

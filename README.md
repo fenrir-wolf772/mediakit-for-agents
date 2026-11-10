@@ -4,7 +4,8 @@ Give your coding agent eyes and ears for media. MediaKit is a small MCP
 server + CLI that wraps **ffmpeg** — trim, crop, resize, captions, loudness,
 thumbnails, frame grabs, audio extraction, concat with transitions,
 conversion, silence removal, black-bar measurement, delivery packaging,
-voice/music mixing with sidechain ducking, and an environment preflight — so an
+voice/music mixing with sidechain ducking, logo overlays, scene-cut
+detection, and an environment preflight — so an
 agent can actually *work* with video and audio instead of guessing.
 
 > Coding agents are blind and deaf to media. They can read a 10,000-line
@@ -69,6 +70,8 @@ Then ask your agent things like:
 | `cropdetect` | Measure letterbox/pillarbox bars; returns the crop rect + a ready crop command | `mediakit cropdetect in.mp4` |
 | `package` | Bundle a finished file for delivery: media + spec.json receipt + checksums.sha256 (+ captions) | `mediakit package out.mp4 -o delivery.zip --platform tiktok` |
 | `mix` | Mix voice over a music bed with sidechain ducking (bed drops under speech), then master to target LUFS; reports the ducking actually measured | `mediakit mix voice.mp3 --music bed.mp3 -o mixed.mp3` |
+| `overlay` | Overlay a logo/watermark image (named position, margin, scale, opacity, optional timing) | `mediakit overlay in.mp4 --image logo.png -o out.mp4 --position top-right` |
+| `scenes` | Detect scene changes / hard cuts; returns cut timestamps + segments (probe-only) | `mediakit scenes in.mp4` |
 | `doctor` | Read-only preflight: ffmpeg version, filters/encoders, tool availability | `mediakit doctor` |
 | `convert` | Change container/codec (omit a codec to stream-copy) | `mediakit convert in.mov -o out.mp4 --video-codec libx264` |
 
@@ -131,7 +134,15 @@ transition length, and a clip without audio gets a silent bed so the
 audio crossfade still works. `frames` pulls N evenly spaced frames out
 as separate `frame-001.png` files with timestamps, so an agent can look
 at what's actually in a clip before deciding where to cut — use it
-instead of guessing from `probe` alone. `doctor` is a read-only preflight — run it first
+instead of guessing from `probe` alone. `overlay` puts a logo or
+watermark on a video: named position (`top-right` default, `top-left`,
+`bottom-left`, `bottom-right`, `center`), `--margin`, `--width` (keeps
+aspect), `--opacity`, and `--start`/`--end` to show it only in a time
+window — x/y are computed from the probed frame size, never typed as
+filter expressions. `scenes` is probe-only: it lists hard cuts and the
+segments between them so you trim on real boundaries; the default
+threshold 0.3 catches real cuts, and a hard cut between flat colours
+scores ~0.4, so keep the threshold at or below 0.4. `doctor` is a read-only preflight — run it first
 on a new machine to confirm ffmpeg/ffprobe and every filter/encoder the
 tools need are actually present.
 

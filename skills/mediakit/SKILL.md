@@ -171,6 +171,28 @@ see what's actually in the clip (scene changes, framing, captions
 rendering) before choosing trim points or a reframe anchor. `thumbnail`
 is the cheaper one-image overview when you only need the gist.
 
+### 13. Logos go on with `overlay`, not by hand-built filter graphs
+`overlay` takes a PNG (transparency recommended), a named position
+(`top-right` default, `top-left`, `bottom-left`, `bottom-right`,
+`center`), a margin, a width, and an opacity — the x/y are computed
+from the probed frame size, so you never spell `W-w-10` and never risk
+a filter-expression injection. Use `--start`/`--end` to show the logo
+only in a window (e.g. an end-card bug), and `--opacity 0.5`–`0.8` for
+a watermark that doesn't fight the picture. The overlay must fit inside
+the frame with its margin — if it doesn't, shrink `--width`, don't
+force it. Always `extract_frame` afterwards and look at the logo
+corner: a logo placed but never seen is the most common silent failure.
+
+### 14. Cut on scene boundaries, not round numbers
+`scenes` (probe-only, writes nothing) lists the hard cuts and the
+segments between them — trim on those timestamps. The default
+threshold 0.3 catches real cuts; a hard cut between flat colours
+scores ~0.4, so a threshold above ~0.4 will miss genuine cuts — if
+`scenes` returns nothing on a clip you know has cuts, lower the
+threshold to 0.2 before concluding there are none. A continuous shot
+(testsrc, a static camera) correctly returns zero cuts; zero is a
+real answer, not a failure.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.
@@ -181,6 +203,7 @@ is the cheaper one-image overview when you only need the gist.
 6. `loudness` to −14 LUFS.
 7. `check --platform tiktok` — all rules must pass.
 8. `extract_frame` at a mid timestamp to verify the captions actually render.
-9. `package` the finished file with `--platform tiktok` and the captions — the delivery ZIP.
+9. `overlay` the channel logo (`--position top-right --opacity 0.8`) when the clip is branded — verify with another `extract_frame` at the logo corner.
+10. `package` the finished file with `--platform tiktok` and the captions — the delivery ZIP.
 
 See `skills/shorts-video/SKILL.md` for the full scripted workflow.

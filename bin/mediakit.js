@@ -203,6 +203,29 @@ const COMMANDS = {
       ["-o, --output", "Output file (required)"],
     ],
   },
+  overlay: {
+    usage: "mediakit overlay <input> --image <logo.png> -o <output> [--position top-right|top-left|bottom-left|bottom-right|center] [--margin 24] [--width <px>] [--opacity 0.8] [--start <s>] [--end <s>]",
+    desc: "Overlay a logo/watermark image on a video, with position, scale, opacity and optional timing.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--image", "Overlay image file (PNG with transparency recommended, required)"],
+      ["--position", "top-right (default) | top-left | bottom-left | bottom-right | center"],
+      ["--margin", "Margin from the edge in pixels (default 24)"],
+      ["--width", "Overlay width in pixels (keeps aspect; default = native size)"],
+      ["--opacity", "Overlay opacity 0-1 (default 1)"],
+      ["--start", "Show the overlay from this time in seconds"],
+      ["--end", "Hide the overlay after this time in seconds"],
+      ["-o, --output", "Output file (required)"],
+    ],
+  },
+  scenes: {
+    usage: "mediakit scenes <input> [--threshold 0.3]",
+    desc: "Detect scene changes / hard cuts; returns cut timestamps + the segments between them. Probe-only, writes no file.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--threshold", "Scene sensitivity 0-1, lower = more sensitive (default 0.3)"],
+    ],
+  },
   doctor: {
     usage: "mediakit doctor",
     desc: "Read-only preflight: ffmpeg/ffprobe versions, available filters/encoders, and which tools that enables.",
@@ -442,6 +465,25 @@ async function main() {
         });
         break;
       }
+      case "overlay": {
+        if (!opts.image) fail("missing required option: --image <logo.png>");
+        result = await core.overlayImage({
+          input: needInput(), overlay: opts.image, output: needOutput(opts),
+          position: opts.position ?? "top-right",
+          margin: numOpt(opts, "margin") ?? 24,
+          width: numOpt(opts, "width") ?? null,
+          opacity: numOpt(opts, "opacity") ?? 1,
+          start: numOpt(opts, "start") ?? null,
+          end: numOpt(opts, "end") ?? null,
+        });
+        break;
+      }
+      case "scenes":
+        result = await core.detectScenes({
+          input: needInput(),
+          threshold: numOpt(opts, "threshold") ?? 0.3,
+        });
+        break;
       case "doctor":
         result = await core.doctor();
         break;

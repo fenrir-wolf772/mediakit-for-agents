@@ -291,6 +291,43 @@ server.tool(
 );
 
 server.tool(
+  "overlay",
+  "Overlay a logo/watermark image on a video. Named position (top-right, top-left, bottom-left, bottom-right, center) plus a margin from the edge; the overlay is scaled to width keeping its aspect ratio, opacity 0-1, and start/end (seconds) show it only during that window. Audio is copied through.",
+  {
+    input: pathSchema,
+    overlay: pathSchema.describe("Overlay image file (PNG with transparency recommended)"),
+    output: pathSchema,
+    position: z.enum(["top-left", "top-right", "bottom-left", "bottom-right", "center"]).default("top-right").describe("Corner/center placement"),
+    margin: z.number().int().min(0).default(24).describe("Margin from the edge in pixels"),
+    width: z.number().int().min(2).optional().describe("Overlay width in pixels (keeps aspect; default = native size)"),
+    opacity: z.number().min(0).max(1).default(1).describe("Overlay opacity (0-1)"),
+    start: z.number().min(0).optional().describe("Show the overlay from this time in seconds"),
+    end: z.number().min(0).optional().describe("Hide the overlay after this time in seconds"),
+  },
+  async (a) => safe(() => core.overlayImage({
+    input: a.input,
+    overlay: a.overlay,
+    output: a.output,
+    position: a.position,
+    margin: a.margin,
+    width: a.width ?? null,
+    opacity: a.opacity,
+    start: a.start ?? null,
+    end: a.end ?? null,
+  })),
+);
+
+server.tool(
+  "scenes",
+  "Detect scene changes / hard cuts in a video (probe-only, writes no file). Returns the cut timestamps plus the segments between them — trim on these boundaries instead of guessing. Lower threshold = more sensitive.",
+  {
+    input: pathSchema,
+    threshold: z.number().min(0).max(1).default(0.3).describe("Scene sensitivity (0-1, lower = more sensitive)"),
+  },
+  async (a) => safe(() => core.detectScenes(a)),
+);
+
+server.tool(
   "doctor",
   "Read-only environment preflight: ffmpeg/ffprobe versions, which filters and encoders this build has, and which mediakit tools that enables. Run first on a new machine — a tool that reports available=false will fail at runtime.",
   {},

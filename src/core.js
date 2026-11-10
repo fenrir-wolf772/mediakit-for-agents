@@ -829,6 +829,7 @@ const DOCTOR_FILTERS = [
   "cropdetect", "gblur", "trim", "atrim", "concat", "select", "tile", "pad", "overlay",
   "drawtext", "volume", "sidechaincompress", "amix", "aresample",
   "xfade", "acrossfade", "fps", "anullsrc", "setpts", "asetpts",
+  "format", "colorchannelmixer",
 ];
 const DOCTOR_ENCODERS = [
   "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4",
@@ -856,6 +857,8 @@ const TOOL_REQUIREMENTS = {
   cropdetect: { filters: ["cropdetect"] },
   package: {},
   mix: { filters: ["sidechaincompress", "amix", "aresample", "volume", "loudnorm"], encoders: ["aac", "libmp3lame"] },
+  overlay: { filters: ["overlay", "format", "scale", "colorchannelmixer"], encoders: ["libx264"] },
+  scenes: { filters: ["select"] },
   doctor: {},
 };
 
@@ -1262,5 +1265,142 @@ export async function mix({
     duration_seconds: outMeta.duration_seconds,
     has_video: Boolean(voiceMeta.video),
     ...info,
+  };
+}
+
+// ---------------------------------------------------------------- overlay
+// Logo/watermark image over a video (ffmpeg-mcp's add_image_overlay
+// idea, but with named positions instead of free-form expressions:
+// free-form x/y strings are an injection surface in a filter graph,
+// and an agent should not have to spell "W-w-10" to put a logo in a
+// corner). Position is computed in JS from the probed frame size, the
+// overlay is scaled to --width keeping aspect, opacity goes through
+// colorchannelmixer, and start/end gate it with enable=between().
+// The overlay frame is held for the whole video (a still image input
+// repeats its last frame), audio is stream-copied.
+
+const OVERLAY_POSITIONS = ["top-left", "top-right", "bottom-left", "bottom-right", "center"];
+
+export async function overlayImage({
+  input, overlay, output,
+  position = "top-right", margin = 24, width = null, opacity = 1,
+  start = null, end = null,
+}) {
+  const inPath = await requireInput(input);
+  const ovPath = await requireInput(overlay, "overlay image");
+  const outPath = await prepareOutput(output, [inPath, ovPath]);
+  if (!OVERLAY_POSITIONS.includes(position)) {
+    throw new MediaKitError(`overlay position must be one of ${OVERLAY_POSITIONS.join(", ")}, got: ${position}`, "INVALID_ARG");
+  }
+  const m = num(margin, "margin", { min: 0, integer: true });
+  const op = num(opacity, "opacity", { min: 0, max: 1 });
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("overlay needs a video input", "INVALID_ARG");
+  const ovMeta = await probe(ovPath);
+  if (!ovMeta.video) throw new MediaKitError("overlay file must be an image or video", "INVALID_ARG");
+  const sw = meta.video.width;
+  const sh = meta.video.height;
+  const owNative = ovMeta.video.width;
+  const ohNative = ovMeta.video.height;
+  const ow = width === null || width === undefined ? owNative : num(width, "width", { min: 2, integer: true });
+  const oh = Math.max(2, Math.round((ohNative * ow) / owNative));
+  if (ow + 2 * m > sw || oh + 2 * m > sh) {
+    throw new MediaKitError(`overlay ${ow}x${oh} with margin ${m}px does not fit source ${sw}x${sh} — use a smaller --width or --margin`, "INVALID_ARG");
+  }
+  let s = null;
+  let e = null;
+  if (start !== null && start !== undefined) s = num(start, "start", { min: 0 });
+  if (end !== null && end !== undefined) e = num(end, "end", { min: 0 });
+  if (s !== null && e !== null && e <= s) throw new MediaKitError(`end (${e}) must be greater than start (${s})`, "INVALID_ARG");
+  const duration = meta.duration_seconds;
+  if (s !== null && duration !== null && s >= duration) {
+    throw new MediaKitError(`start (${s}) is past the end of the video (${duration}s)`, "INVALID_ARG");
+  }
+  if (e !== null && duration !== null && e > duration) e = duration;
+  const x = position === "top-left" || position === "bottom-left" ? m
+    : position === "top-right" || position === "bottom-right" ? sw - ow - m
+    : Math.floor((sw - ow) / 2);
+  const y = position.startsWith("top") ? m
+    : position.startsWith("bottom") ? sh - oh - m
+    : Math.floor((sh - oh) / 2);
+  let enable = "";
+  if (s !== null && e !== null) enable = `:enable=between(t\\,${s}\\,${e})`;
+  else if (s !== null) enable = `:enable=gte(t\\,${s})`;
+  else if (e !== null) enable = `:enable=lte(t\\,${e})`;
+  // Opacity 0 means "invisible overlay": still a valid no-op render,
+  // but refuse it — it is almost certainly a mistake.
+  if (op === 0) throw new MediaKitError("opacity 0 would render nothing — use at least 0.05", "INVALID_ARG");
+  const graph = `[1:v]scale=${ow}:-2,format=rgba${op < 1 ? `,colorchannelmixer=aa=${op}` : ""}[ovr];[0:v][ovr]overlay=${x}:${y}${enable}[out]`;
+  await run(FFMPEG, [
+    "-y", "-i", inPath, "-i", ovPath,
+    "-filter_complex", graph, "-map", "[out]", "-map", "0:a?",
+    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "medium",
+    "-c:a", "copy", "-movflags", "+faststart", outPath,
+  ]);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  return {
+    operation: "overlay",
+    input: inPath, overlay: ovPath, output: outPath,
+    position, x, y, margin: m,
+    overlay_size: `${ow}x${oh}`,
+    opacity: op,
+    ...(s !== null ? { visible_from_seconds: s } : {}),
+    ...(e !== null ? { visible_until_seconds: e } : {}),
+    ...info,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+    duration_seconds: out.duration_seconds,
+  };
+}
+
+// ---------------------------------------------------------------- scenes
+// Detect scene changes / hard cuts (ffmpeg-mcp's detect_scene_changes
+// idea): ffprobe over a lavfi movie source with select=gt(scene,threshold).
+// Returns the cut timestamps plus the segments between them, so a caller
+// can trim on real boundaries instead of guessing. Probe-only: no file
+// is written. The lavfi path is escaped for the filter parser
+// (backslash -> /, : -> \:, ' -> \'); the command itself still goes
+// through execFile with no shell.
+
+export async function detectScenes({ input, threshold = 0.3 }) {
+  const inPath = await requireInput(input);
+  const t = num(threshold, "threshold", { min: 0, max: 1 });
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("scenes needs a video input", "INVALID_ARG");
+  const duration = meta.duration_seconds;
+  const escaped = inPath.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
+  const { stdout } = await run(FFPROBE, [
+    "-v", "quiet", "-print_format", "json", "-show_frames",
+    "-f", "lavfi", `movie=${escaped},select=gt(scene\\,${t})`,
+  ]);
+  let data;
+  try {
+    data = JSON.parse(stdout);
+  } catch {
+    throw new MediaKitError("ffprobe returned unparseable output", "PROBE_FAILED");
+  }
+  const raw = (data.frames ?? [])
+    .map((f) => parseFloat(f.best_effort_timestamp_time ?? NaN))
+    .filter((v) => Number.isFinite(v))
+    .map((v) => +v.toFixed(3));
+  // The first frame has no predecessor, so a hit at ~0 is not a cut.
+  const changes = [...new Set(raw)].filter((v) => v > 0.05).sort((a, b) => a - b);
+  const bounds = [0, ...changes, ...(duration !== null ? [duration] : [])];
+  const segments = [];
+  for (let i = 0; i < bounds.length - 1; i++) {
+    segments.push({
+      start: +bounds[i].toFixed(3),
+      end: +bounds[i + 1].toFixed(3),
+      duration_seconds: +(bounds[i + 1] - bounds[i]).toFixed(3),
+    });
+  }
+  return {
+    operation: "scenes",
+    input: inPath,
+    threshold: t,
+    duration_seconds: duration,
+    scene_changes: changes,
+    count: changes.length,
+    segments,
   };
 }
