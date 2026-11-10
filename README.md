@@ -2,7 +2,8 @@
 
 Give your coding agent eyes and ears for media. MediaKit is a small MCP
 server + CLI that wraps **ffmpeg** — trim, crop, resize, captions, loudness,
-thumbnails, frame grabs, audio extraction, concat, and conversion — so an
+thumbnails, frame grabs, audio extraction, concat, conversion, silence
+removal, and an environment preflight — so an
 agent can actually *work* with video and audio instead of guessing.
 
 > Coding agents are blind and deaf to media. They can read a 10,000-line
@@ -62,6 +63,8 @@ Then ask your agent things like:
 | `burn_captions` | Burn .srt/.ass/.vtt subtitles into the video | `mediakit burn-captions in.mp4 --captions subs.srt -o out.mp4` |
 | `reframe` | Reframe to a target aspect/size in one step (crop, pad, or blurred fill) | `mediakit reframe in.mp4 --mode crop -o vertical.mp4` |
 | `check` | Verify a file against a platform spec (tiktok/reels/shorts/youtube) | `mediakit check out.mp4 --platform tiktok` |
+| `silence` | Remove silent stretches, keeping a margin around speech | `mediakit silence in.mp4 -o tight.mp4` |
+| `doctor` | Read-only preflight: ffmpeg version, filters/encoders, tool availability | `mediakit doctor` |
 | `convert` | Change container/codec (omit a codec to stream-copy) | `mediakit convert in.mov -o out.mp4 --video-codec libx264` |
 
 Every tool returns a concise JSON result: output path, size, and the
@@ -92,6 +95,12 @@ frame (the classic Shorts look); `--mode pad` uses black bars instead.
 `check` measures the real file — dimensions, codecs, fps, duration limit,
 audio channels and integrated LUFS — and reports pass/fail per rule with
 a fix hint. Platforms: `tiktok`, `reels`, `shorts`, `youtube`.
+`silence` cuts dead air out of speech/video (detects with `silencedetect`,
+keeps a 0.2s margin around speech so words are never clipped);
+`--detect-only` reports the silence/kept segments without writing a file,
+so probe before you cut. `doctor` is a read-only preflight — run it first
+on a new machine to confirm ffmpeg/ffprobe and every filter/encoder the
+tools need are actually present.
 
 See [`skills/shorts-video/SKILL.md`](skills/shorts-video/SKILL.md) for the
 full script → captioned vertical-video workflow.

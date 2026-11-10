@@ -189,5 +189,33 @@ server.tool(
   async (a) => safe(() => core.convert(a)),
 );
 
+server.tool(
+  "silence",
+  "Remove silent stretches from speech/video. Detects silence with silencedetect, keeps the speech plus a margin of silence on each side (so words are never clipped), then cuts and re-joins. Set detect_only=true to just report the silence/kept segments without writing a file. Returns removed_seconds and the kept segment list — verify those before trusting the cut.",
+  {
+    input: pathSchema,
+    output: pathSchema.optional().describe("Output file path (not needed with detect_only=true)"),
+    threshold_db: z.number().min(-90).max(0).default(-40).describe("Silence threshold in dB (more negative = stricter)"),
+    min_duration: z.number().min(0.05).max(60).default(0.5).describe("Minimum silence length in seconds to cut"),
+    margin: z.number().min(0).max(5).default(0.2).describe("Seconds of silence kept around each speech segment"),
+    detect_only: z.boolean().default(false).describe("Report silence/kept segments without writing output"),
+  },
+  async (a) => safe(() => core.silence({
+    input: a.input,
+    output: a.output ?? null,
+    thresholdDb: a.threshold_db,
+    minDuration: a.min_duration,
+    margin: a.margin,
+    detectOnly: a.detect_only,
+  })),
+);
+
+server.tool(
+  "doctor",
+  "Read-only environment preflight: ffmpeg/ffprobe versions, which filters and encoders this build has, and which mediakit tools that enables. Run first on a new machine — a tool that reports available=false will fail at runtime.",
+  {},
+  async () => safe(() => core.doctor()),
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);

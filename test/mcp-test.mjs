@@ -17,9 +17,9 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 13 tools present");
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 15 tools present");
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -58,5 +58,25 @@ const checkRes = await client.callTool({
   },
 });
 console.log("check call:", checkRes.content[0].text.replace(/\n/g, " "));
+
+const doctorRes = await client.callTool({
+  name: "doctor",
+  arguments: {},
+});
+const doctorJson = JSON.parse(doctorRes.content[0].text);
+console.log("doctor call: ok =", doctorJson.ok, "| ffmpeg", doctorJson.ffmpeg_version, "| tools available:", Object.values(doctorJson.tools).filter((t) => t.available).length + "/" + Object.keys(doctorJson.tools).length);
+
+const silenceRes = await client.callTool({
+  name: "silence",
+  arguments: {
+    input: path.join(root, "test/silence-source.mp4"),
+    output: path.join(root, "outputs/mcp-silence.mp4"),
+    threshold_db: -40,
+    min_duration: 0.5,
+    margin: 0.2,
+  },
+});
+const silenceJson = JSON.parse(silenceRes.content[0].text);
+console.log("silence call: duration", silenceJson.duration_before, "->", silenceJson.duration_after, "| removed", silenceJson.removed_seconds, "s in", silenceJson.removed_count, "gaps");
 await client.close();
 console.log("MCP test done");

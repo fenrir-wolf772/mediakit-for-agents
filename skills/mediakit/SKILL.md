@@ -17,9 +17,15 @@ video or audio file, and instead of writing one-off ffmpeg shell commands.
 - **User asks to join clips**: `concat`.
 - **User asks for captions/subtitles on the video**: `burn_captions`.
 - **User asks for a different format**: `convert`.
+- **Speech has dead air / long pauses**: `silence` — first run it with
+  `detect_only: true` and read the silence/kept segments; only then cut.
+  The 0.2s margin keeps words from being clipped.
 - **Before publishing to TikTok / Reels / Shorts / YouTube**: `check`
   — verifies dimensions, codecs, duration limit and measured loudness
   against the platform spec, with a fix hint per failed rule.
+- **First run on a new machine, or a tool fails oddly**: `doctor` —
+  read-only preflight; a tool listed `available: false` will fail at
+  runtime because its ffmpeg filter/encoder is missing.
 
 ## How to call the tools
 
@@ -67,6 +73,15 @@ failing check.
 ### 5. Even dimensions
 H.264 (yuv420p) needs even width/height. `resize` with `keep_aspect`
 rounds to even automatically. If you `crop` by hand, use even numbers.
+
+### 6. Detect silence before you cut it
+`silence` with `detect_only: true` costs one fast analysis pass and
+returns the exact silence intervals plus the kept segments and
+`removed_seconds`. Read those numbers first: if `removed_seconds` is
+near zero, nothing was worth cutting (the tool then just stream-copies).
+If the threshold is wrong (music counted as silence, or room tone kept),
+adjust `threshold_db` (−50 is stricter, −30 looser) and re-detect — never
+re-cut blind.
 
 ### 6. Loudness: −14 LUFS is the default for a reason
 YouTube, Spotify, and TikTok all normalize to around −14 LUFS. Normalizing

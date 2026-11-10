@@ -530,3 +530,216 @@ export async function convert({ input, output, videoCodec = null, audioCodec = n
     dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
   };
 }
+
+// ---------------------------------------------------------------- silence
+// Remove silent stretches from speech/video. Detection runs the
+// silencedetect filter; speech is kept with a margin of silence on
+// each side (so words are never clipped), then the kept segments are
+// cut and re-joined in one filter graph.
+
+export async function detectSilence(input, { thresholdDb = -40, minDuration = 0.5 } = {}) {
+  const inPath = await requireInput(input);
+  const threshold = num(thresholdDb, "threshold_db", { min: -90, max: 0 });
+  const minDur = num(minDuration, "min_duration", { min: 0.05, max: 60 });
+  const meta = await probe(inPath);
+  if (!meta.audio) throw new MediaKitError("silence needs an audio stream", "INVALID_ARG");
+  const duration = meta.duration_seconds;
+  const { stderr } = await run(FFMPEG, [
+    "-i", inPath, "-vn",
+    "-af", `silencedetect=noise=${threshold}dB:d=${minDur}`,
+    "-f", "null", "-",
+  ]);
+  const silences = [];
+  let open = null;
+  for (const line of stderr.split("\n")) {
+    const start = line.match(/silence_start:\s*([\d.]+)/);
+    if (start) { open = parseFloat(start[1]); continue; }
+    const end = line.match(/silence_end:\s*([\d.]+)\s*\|\s*silence_duration:\s*([\d.]+)/);
+    if (end && open !== null) {
+      silences.push({
+        start: +open.toFixed(3),
+        end: +parseFloat(end[1]).toFixed(3),
+        duration: +parseFloat(end[2]).toFixed(3),
+      });
+      open = null;
+    }
+  }
+  // A trailing silence runs to the end of the file with no silence_end line.
+  if (open !== null && duration !== null) {
+    silences.push({
+      start: +open.toFixed(3),
+      end: +duration.toFixed(3),
+      duration: +(duration - open).toFixed(3),
+    });
+  }
+  return { input: inPath, threshold_db: threshold, min_duration: minDur, duration_seconds: duration, silences };
+}
+
+/** Complement of the silence intervals, expanded by margin, merged. */
+function keptSegments(duration, silences, margin) {
+  const kept = [];
+  let cursor = 0;
+  for (const s of silences) {
+    if (s.start > cursor) kept.push([cursor, s.start]);
+    cursor = Math.max(cursor, s.end);
+  }
+  if (cursor < duration) kept.push([cursor, duration]);
+  const expanded = kept
+    .map(([a, b]) => [Math.max(0, a - margin), Math.min(duration, b + margin)])
+    .filter(([a, b]) => b - a >= 0.05);
+  const merged = [];
+  for (const seg of expanded) {
+    const last = merged[merged.length - 1];
+    if (last && seg[0] <= last[1]) last[1] = Math.max(last[1], seg[1]);
+    else merged.push([...seg]);
+  }
+  return merged.map(([a, b]) => ({
+    start: +a.toFixed(3), end: +b.toFixed(3), duration: +(b - a).toFixed(3),
+  }));
+}
+
+export async function silence({ input, output = null, thresholdDb = -40, minDuration = 0.5, margin = 0.2, detectOnly = false }) {
+  const inPath = await requireInput(input);
+  const m = num(margin, "margin", { min: 0, max: 5 });
+  const det = await detectSilence(inPath, { thresholdDb, minDuration });
+  const duration = det.duration_seconds;
+  if (duration === null) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
+  const kept = keptSegments(duration, det.silences, m);
+  if (kept.length === 0) {
+    throw new MediaKitError("input is entirely silent — nothing to keep", "INVALID_ARG");
+  }
+  const keptTotal = kept.reduce((s, k) => s + k.duration, 0);
+  const removed = +(duration - keptTotal).toFixed(3);
+  const base = {
+    operation: "silence", input: inPath,
+    threshold_db: det.threshold_db, min_duration: det.min_duration, margin: m,
+    duration_before: duration,
+    silences: det.silences,
+    kept_segments: kept,
+    removed_seconds: removed,
+    removed_count: det.silences.length,
+  };
+  if (detectOnly) return { ...base, detect_only: true };
+
+  const outPath = await prepareOutput(output, [inPath]);
+  const meta = await probe(inPath);
+  if (removed < 0.05) {
+    // Nothing worth cutting: copy the streams as-is.
+    await run(FFMPEG, ["-y", "-i", inPath, "-c", "copy", outPath]);
+    const info = await fileInfo(outPath);
+    return { ...base, output: outPath, duration_after: duration, stream_copy: true, ...info };
+  }
+
+  // One filter graph: trim each kept segment (video + audio), then concat.
+  const vParts = [];
+  const aParts = [];
+  const vLabels = [];
+  const aLabels = [];
+  kept.forEach((seg, i) => {
+    if (meta.video) {
+      vParts.push(`[0:v]trim=start=${seg.start}:end=${seg.end},setpts=PTS-STARTPTS[v${i}]`);
+      vLabels.push(`[v${i}]`);
+    }
+    aParts.push(`[0:a]atrim=start=${seg.start}:end=${seg.end},asetpts=PTS-STARTPTS[a${i}]`);
+    aLabels.push(`[a${i}]`);
+  });
+  const graph = [...vParts, ...aParts];
+  if (meta.video) graph.push(`${vLabels.join("")}concat=n=${kept.length}:v=1:a=0[vout]`);
+  graph.push(`${aLabels.join("")}concat=n=${kept.length}:v=0:a=1[aout]`);
+  const args = ["-y", "-i", inPath, "-filter_complex", graph.join(";")];
+  if (meta.video) {
+    args.push("-map", "[vout]", "-map", "[aout]",
+      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "medium",
+      "-c:a", "aac", "-movflags", "+faststart");
+  } else {
+    const ext = path.extname(outPath).slice(1).toLowerCase();
+    const codec = AUDIO_FORMATS[ext];
+    if (!codec) throw new MediaKitError(`audio-only input needs an audio output format (.mp3/.aac/.wav/.ogg/.opus/.flac), got .${ext || "(none)"}`, "INVALID_ARG");
+    args.push("-map", "[aout]", "-c:a", codec);
+  }
+  args.push(outPath);
+  await run(FFMPEG, args);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  return {
+    ...base, output: outPath,
+    duration_after: out.duration_seconds,
+    ...info,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+  };
+}
+
+// ---------------------------------------------------------------- doctor
+// Read-only environment preflight (kinocut's video_doctor idea): what
+// ffmpeg/ffprobe can actually do on this machine, and which mediakit
+// tools that enables. Never writes anything.
+
+const DOCTOR_FILTERS = [
+  "silencedetect", "loudnorm", "subtitles", "ass", "scale", "crop",
+  "gblur", "trim", "atrim", "concat", "select", "tile", "pad", "overlay",
+  "drawtext", "volume",
+];
+const DOCTOR_ENCODERS = [
+  "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4",
+  "aac", "libopus", "libmp3lame", "libvorbis", "flac", "pcm_s16le",
+];
+// Tool -> capabilities it needs. A tool is available when all listed
+// filters exist and at least one listed encoder exists (empty list =
+// no requirement).
+const TOOL_REQUIREMENTS = {
+  probe: {},
+  trim: { encoders: ["libx264"] },
+  crop: { filters: ["crop"] },
+  resize: { filters: ["scale"] },
+  extract_audio: { encoders: ["libmp3lame", "aac", "pcm_s16le", "libvorbis", "libopus", "flac"] },
+  extract_frame: {},
+  thumbnail: { filters: ["select", "scale", "tile"] },
+  loudness: { filters: ["loudnorm"] },
+  concat: { filters: ["concat"] },
+  burn_captions: { filters: ["subtitles", "ass"] },
+  reframe: { filters: ["crop", "scale", "pad", "gblur", "overlay"], encoders: ["libx264"] },
+  check: { filters: ["loudnorm"] },
+  convert: { encoders: ["libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4"] },
+  silence: { filters: ["silencedetect", "trim", "atrim", "concat"], encoders: ["libx264", "aac"] },
+  doctor: {},
+};
+
+async function listCapabilities(kind) {
+  // `ffmpeg -filters` / `-encoders` print a table; match whole words so
+  // "crop" does not match "cropdetect".
+  const { stdout } = await run(FFMPEG, ["-hide_banner", `-${kind}`]);
+  return stdout;
+}
+
+export async function doctor() {
+  const { stdout: ffmpegVer } = await run(FFMPEG, ["-version"]);
+  const { stdout: ffprobeVer } = await run(FFPROBE, ["-version"]);
+  const ffmpegVersion = (ffmpegVer.match(/ffmpeg version (\S+)/) || [])[1] ?? null;
+  const ffprobeVersion = (ffprobeVer.match(/ffprobe version (\S+)/) || [])[1] ?? null;
+  const filtersOut = await listCapabilities("filters");
+  const encodersOut = await listCapabilities("encoders");
+  const has = (text, name) => new RegExp(`\\b${name}\\b`).test(text);
+  const filters = Object.fromEntries(DOCTOR_FILTERS.map((f) => [f, has(filtersOut, f)]));
+  const encoders = Object.fromEntries(DOCTOR_ENCODERS.map((e) => [e, has(encodersOut, e)]));
+  const tools = {};
+  let allOk = Boolean(ffmpegVersion && ffprobeVersion);
+  for (const [name, req] of Object.entries(TOOL_REQUIREMENTS)) {
+    const missing = [];
+    for (const f of req.filters ?? []) if (!filters[f]) missing.push(`filter:${f}`);
+    const enc = req.encoders ?? [];
+    if (enc.length && !enc.some((e) => encoders[e])) missing.push(`encoder:${enc.join("|")}`);
+    tools[name] = { available: missing.length === 0, ...(missing.length ? { missing } : {}) };
+    if (missing.length) allOk = false;
+  }
+  return {
+    operation: "doctor",
+    ffmpeg_version: ffmpegVersion,
+    ffprobe_version: ffprobeVersion,
+    node_version: process.version,
+    platform: `${process.platform}-${process.arch}`,
+    filters,
+    encoders,
+    tools,
+    ok: allOk,
+  };
+}

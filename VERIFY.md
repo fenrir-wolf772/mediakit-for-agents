@@ -116,4 +116,44 @@ Environment: ffmpeg 8.1.2. Source: `test/source.mp4` — 1280×720, h264,
   `tools/list`; probe, trim, reframe, check calls succeed over MCP.
 - CI: `.github/workflows/ci.yml` (Node 20, ffmpeg from apt, `npm ci`,
   syntax check, CLI smoke incl. `check … | grep '"pass": true'`,
-  MCP test). Not yet observed green on GitHub — first push will show it.
+  MCP test). **Update 2026-11-10 07:56**: `gh auth refresh -s workflow`
+  xong (device flow), commit 1c5e874 đã push; GitHub Actions run
+  #42732152380 **success, 48s** — CI xanh lần đầu trên GitHub.
+
+---
+
+## Lượt 2 — 2026-11-10 (silence + doctor, 15 tools)
+
+Environment: ffmpeg/ffprobe 8.1.2, Node v24.22.1. Test fixture mới:
+`test/silence-source.mp4` — 640×360, 30 fps, h264 + aac mono, 9.0 s,
+tone 440 Hz chỉ ở [0,2), [4,6), [7,9); lặng ở [2,4), [6,7)
+(tạo bằng `aevalsrc` + `testsrc`, không download).
+
+### silence (new tool)
+
+| Case | Command | Result |
+|---|---|---|
+| detect-only | `silence test/silence-source.mp4 --detect-only` | Tìm đúng 2 khoảng lặng đã cắm: [2.002, 4.000] (1.998 s) và [6.003, 7.000] (0.997 s); kept segments [0, 2.202], [3.8, 6.203], [6.8, 9.0] (margin 0.2 s hai đầu); `removed_seconds: 2.195` |
+| video cut | `silence … -o outputs/silence-cut.mp4` | 9.0 s → **6.867 s** (ffprobe 6.866667), 640×360, 108.0 KB; detect lại trên file đã cắt: **0 khoảng lặng ≥ 0.5 s** |
+| audio-only | `silence test/silence-audio.mp3 -o outputs/silence-audio.mp3` | 9.009 s → **6.814 s**, 53.8 KB, mp3 |
+| no silence | `silence test/source.mp4 -o outputs/silence-nosilence.mp4` | `removed_seconds: 0`, stream-copy nguyên file (243,932 bytes, 10.0 s) |
+
+### doctor (new tool)
+
+- `mediakit doctor`: `ok: true`, ffmpeg 8.1.2 / ffprobe 8.1.2,
+  Node v24.22.1, linux-x64; 16/16 filters và 11/11 encoders có mặt;
+  **15/15 tools available**.
+- Lỗi parse fixture lúc đầu: dấu phẩy trong `lt(t,2)` của `aevalsrc`
+  bị hiểu là tách filter — fix bằng cách bọc expression trong single
+  quotes. Không phải bug của tool.
+
+### Tests
+
+- `npm run check`: `node --check` sạch trên `src/core.js`,
+  `src/server.js`, `bin/mediakit.js`, `test/mcp-test.mjs`.
+- `npm test`: **all 15 tools present**; probe/trim/reframe/check như
+  trước; `doctor` qua MCP: ok=true, 15/15; `silence` qua MCP:
+  9 → 6.867 s, removed 2.195 s trong 2 gaps.
+- README (bảng 15 tools + đoạn silence/doctor), SKILL.md (rule 6
+  "detect silence before you cut it" + mục doctor) đã cập nhật.
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).

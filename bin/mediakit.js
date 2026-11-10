@@ -143,6 +143,24 @@ const COMMANDS = {
       ["-o, --output", "Output file (required)"],
     ],
   },
+  silence: {
+    usage: "mediakit silence <input> -o <output> [--threshold-db <n>] [--min-duration <s>] [--margin <s>] [--detect-only]",
+    desc: "Remove silent stretches, keeping a margin of silence around speech. --detect-only reports segments without writing.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--threshold-db", "Silence threshold in dB (default -40, more negative = stricter)"],
+      ["--min-duration", "Minimum silence length to cut, seconds (default 0.5)"],
+      ["--margin", "Silence kept around each speech segment, seconds (default 0.2)"],
+      ["--detect-only", "Report silence/kept segments, write no file"],
+      ["-o, --output", "Output file (required unless --detect-only)"],
+    ],
+  },
+  doctor: {
+    usage: "mediakit doctor",
+    desc: "Read-only preflight: ffmpeg/ffprobe versions, available filters/encoders, and which tools that enables.",
+    args: [],
+    options: [],
+  },
   mcp: {
     usage: "mediakit mcp",
     desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex).",
@@ -325,6 +343,21 @@ async function main() {
           crf: numOpt(opts, "crf") ?? 23,
           preset: opts.preset ?? "medium",
         });
+        break;
+      case "silence": {
+        const detectOnly = opts.detect_only === true;
+        result = await core.silence({
+          input: needInput(),
+          output: detectOnly ? null : needOutput(opts),
+          thresholdDb: numOpt(opts, "threshold_db") ?? -40,
+          minDuration: numOpt(opts, "min_duration") ?? 0.5,
+          margin: numOpt(opts, "margin") ?? 0.2,
+          detectOnly,
+        });
+        break;
+      }
+      case "doctor":
+        result = await core.doctor();
         break;
       case "mcp": {
         // Hand off to the MCP server process (same stdio).
