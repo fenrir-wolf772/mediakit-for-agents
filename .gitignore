@@ -3,3 +3,4 @@ outputs/
 test/media/
 *.log
 .DS_Store
+*.tgz
