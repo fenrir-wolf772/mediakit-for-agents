@@ -164,8 +164,36 @@ const COMMANDS = {
       ["-o, --output", "Output PNG file (required)"],
     ],
   },
+  intro: {
+    usage: "mediakit intro \"<title>\" -o <output.mp4> [--width 1280] [--height 720] [--duration 3] [--bg-color 0F172A] [--text-color FFFFFF] [--font-size <n>] [--fade-in 0.5] [--fade-out 0.5]",
+    desc: "Render a short intro clip: a title on a solid-colour background, fading in and out (silent video).",
+    args: [{ name: "text", required: true }],
+    options: [
+      ["--width", "Canvas width in pixels (default 1280, must be even)"],
+      ["--height", "Canvas height in pixels (default 720, must be even)"],
+      ["--duration", "Clip length in seconds (default 3)"],
+      ["--bg-color", "Background color name or hex (default 0F172A dark navy)"],
+      ["--text-color", "Text color name or hex (default FFFFFF white)"],
+      ["--font-size", "Font size in px (default: ~100px at 1280 wide)"],
+      ["--fade-in", "Text fade-in in seconds (default 0.5, 0 = none)"],
+      ["--fade-out", "Text fade-out in seconds (default 0.5, 0 = none)"],
+      ["-o, --output", "Output MP4 file (required)"],
+    ],
+  },
+  social: {
+    usage: "mediakit social <input> -o <output-dir> [--platforms tiktok,reels,shorts] [--strategy blur] [--target-lufs -14] [--no-trim-to-max]",
+    desc: "Export one video to several platform specs in one call (reframe + trim to max duration + loudness + check each), writing <base>-<platform>.mp4 + manifest.json.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--platforms", "Comma-separated platforms (default tiktok,reels,shorts): tiktok | reels | shorts | instagram-feed | instagram-story | linkedin | youtube"],
+      ["--strategy", "blur (default) | crop | pad — how to fit the frame into each platform size"],
+      ["--target-lufs", "Normalize audio to this LUFS (default -14)"],
+      ["--no-trim-to-max", "Keep full length even past the platform max duration (check will then fail duration)"],
+      ["-o, --output", "Output directory (required, created if needed)"],
+    ],
+  },
   check: {
-    usage: "mediakit check <input> [--platform tiktok|reels|shorts|youtube]",
+    usage: "mediakit check <input> [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin]",
     desc: "Verify a file against a platform delivery spec (dimensions, codecs, duration, loudness).",
     args: [{ name: "input", required: true }],
     options: [
@@ -206,7 +234,7 @@ const COMMANDS = {
     ],
   },
   package: {
-    usage: "mediakit package <input> -o <output.zip> [--captions <file.srt|ass|vtt>] [--platform tiktok|reels|shorts|youtube]",
+    usage: "mediakit package <input> -o <output.zip> [--captions <file.srt|ass|vtt>] [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin]",
     desc: "Bundle a finished file for delivery: media + spec.json receipt + checksums.sha256 (+ captions).",
     args: [{ name: "input", required: true }],
     options: [
@@ -567,6 +595,32 @@ async function main() {
           boxColor: opts.box_color ?? "F97316",
         });
         break;
+      case "intro":
+        result = await core.intro({
+          text: needInput("text"), output: needOutput(opts),
+          width: numOpt(opts, "width") ?? 1280,
+          height: numOpt(opts, "height") ?? 720,
+          duration: numOpt(opts, "duration") ?? 3,
+          bgColor: opts.bg_color ?? "0F172A",
+          textColor: opts.text_color ?? "FFFFFF",
+          fontSize: numOpt(opts, "font_size") ?? null,
+          fadeIn: numOpt(opts, "fade_in") ?? 0.5,
+          fadeOut: numOpt(opts, "fade_out") ?? 0.5,
+        });
+        break;
+      case "social": {
+        const platforms = opts.platforms
+          ? String(opts.platforms).split(",").map((s) => s.trim()).filter(Boolean)
+          : ["tiktok", "reels", "shorts"];
+        result = await core.social({
+          input: needInput(), outputDir: needOutput(opts),
+          platforms,
+          strategy: opts.strategy ?? "blur",
+          targetLufs: numOpt(opts, "target_lufs") ?? -14,
+          trimToMax: opts.trim_to_max !== false,
+        });
+        break;
+      }
       case "scenes":
         result = await core.detectScenes({
           input: needInput(),

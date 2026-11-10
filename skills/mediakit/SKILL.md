@@ -257,6 +257,23 @@ transparent canvas, sitting in the safe zone. Overlay it onto the first
 1080 wide; pass `--font-size` / `--text-color` / `--box-color` to
 match the channel brand.
 
+### 19. One source, every platform: `social`; open with `intro`
+`social in.mp4 -o out/` exports the clip to several platform specs in
+one call — tiktok, reels, shorts by default (add `instagram-feed`,
+`instagram-story`, `linkedin`, `youtube` with `--platforms`): each
+output is reframed to that platform's size (`--strategy blur` keeps
+the whole frame, default), trimmed to the platform's max duration
+(Shorts 180s, Story 60s — `--no-trim-to-max` keeps the full length and
+the check then fails duration honestly), normalized to −14 LUFS, and
+checked against that platform's spec. Files are named
+`<base>-<platform>.mp4` and `manifest.json` records dimensions,
+duration, LUFS and check results per platform — read it instead of
+re-probing every file. A platform whose check fails still writes its
+file; `all_pass` is false and `issues` says why. `intro "Welcome
+Back"` renders a 3s opening clip — title on a solid background, fading
+in and out (`--duration`, `--bg-color`, `--fade-in`/`--fade-out`);
+concat it in front of the main clip. Silent video, no audio track.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

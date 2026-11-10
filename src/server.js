@@ -228,7 +228,7 @@ server.tool(
   "Verify a finished file against a platform delivery spec (tiktok, reels, shorts, youtube): dimensions, codecs, fps, duration limit, audio channels and measured loudness, plus a file-size limit where the platform has one. Video bitrate is checked as a warning only (platforms publish recommendations, not gates) and the result also reports the platform's text-safe zone. Returns pass/fail per rule with fix hints. Run this before publishing.",
   {
     input: pathSchema,
-    platform: z.enum(["tiktok", "reels", "shorts", "youtube"]).default("tiktok"),
+    platform: z.enum(["tiktok", "reels", "shorts", "youtube", "instagram-feed", "instagram-story", "linkedin"]).default("tiktok"),
   },
   async (a) => safe(() => core.check(a)),
 );
@@ -293,7 +293,7 @@ server.tool(
     input: pathSchema,
     output: pathSchema.describe("Output .zip path"),
     captions: pathSchema.optional().describe("Optional .srt/.ass/.vtt file to include in the bundle"),
-    platform: z.enum(["tiktok", "reels", "shorts", "youtube"]).optional().describe("If given, run check for this platform and record the result in spec.json"),
+    platform: z.enum(["tiktok", "reels", "shorts", "youtube", "instagram-feed", "instagram-story", "linkedin"]).optional().describe("If given, run check for this platform and record the result in spec.json"),
   },
   async (a) => safe(() => core.packageDelivery(a)),
 );
@@ -446,6 +446,56 @@ server.tool(
     fontSize: a.font_size ?? null,
     textColor: a.text_color ?? "FFD60A",
     boxColor: a.box_color ?? "F97316",
+  })),
+);
+
+server.tool(
+  "intro",
+  "Render a short intro clip: a title on a solid-colour background that fades in and out. Silent video (no audio); use it as the opening card, then concat it in front of the main clip. Text wraps to short lines, centred on the frame.",
+  {
+    text: z.string().min(1).describe("The intro title, e.g. 'Welcome Back'"),
+    output: pathSchema,
+    width: z.number().int().min(2).default(1280).describe("Canvas width in pixels (must be even)"),
+    height: z.number().int().min(2).default(720).describe("Canvas height in pixels (must be even)"),
+    duration: z.number().min(0.5).max(30).default(3).describe("Clip length in seconds"),
+    bg_color: z.string().default("0F172A").describe("Background color: name or hex, default 0F172A (dark navy)"),
+    text_color: z.string().default("FFFFFF").describe("Text color: name or hex, default FFFFFF (white)"),
+    font_size: z.number().int().min(16).max(400).optional().describe("Font size in px; default scales with canvas width (~100px at 1280 wide)"),
+    fade_in: z.number().min(0).max(30).default(0.5).describe("Text fade-in length in seconds (0 = no fade-in)"),
+    fade_out: z.number().min(0).max(30).default(0.5).describe("Text fade-out length in seconds (0 = no fade-out)"),
+  },
+  async (a) => safe(() => core.intro({
+    text: a.text,
+    output: a.output,
+    width: a.width,
+    height: a.height,
+    duration: a.duration,
+    bgColor: a.bg_color,
+    textColor: a.text_color,
+    fontSize: a.font_size ?? null,
+    fadeIn: a.fade_in,
+    fadeOut: a.fade_out,
+  })),
+);
+
+server.tool(
+  "social",
+  "Export one video to several platform specs in a single call: reframes each platform's size (blur keeps the whole frame by default), trims clips longer than the platform's max duration (Shorts 180s, Story 60s), normalizes loudness to target_lufs, then checks each output against that platform's spec. Writes <base>-<platform>.mp4 per platform plus manifest.json (receipt with dimensions, duration, LUFS and check results) into the output directory. A platform whose check fails still writes its file — the result says so instead of hiding it.",
+  {
+    input: pathSchema,
+    output_dir: pathSchema.describe("Directory to write the platform files + manifest.json into (created if needed)"),
+    platforms: z.array(z.enum(["tiktok", "reels", "shorts", "instagram-feed", "instagram-story", "linkedin", "youtube"])).min(1).default(["tiktok", "reels", "shorts"]).describe("Platforms to export (default: tiktok, reels, shorts)"),
+    strategy: z.enum(["crop", "pad", "blur"]).default("blur").describe("How to fit the source frame into each platform size: crop cuts the aspect out, pad letterboxes, blur fills with a blurred copy (default)"),
+    target_lufs: z.number().min(-70).max(0).default(-14).describe("Normalize audio to this LUFS"),
+    trim_to_max: z.boolean().default(true).describe("Trim clips longer than the platform's max duration (false keeps the full length; check will then fail the duration rule)"),
+  },
+  async (a) => safe(() => core.social({
+    input: a.input,
+    outputDir: a.output_dir,
+    platforms: a.platforms,
+    strategy: a.strategy,
+    targetLufs: a.target_lufs,
+    trimToMax: a.trim_to_max,
   })),
 );
 

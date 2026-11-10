@@ -43,10 +43,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 25 tools present");
-checkOk(missing.length === 0, "tools/list has all 25 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 27 tools present");
+checkOk(missing.length === 0, "tools/list has all 27 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -471,6 +471,83 @@ const loudJson = JSON.parse(loudRes.content[0].text);
 console.log("loudness quiet bed:", "target", loudJson.target_lufs, "| input", loudJson.input_lufs, "| output", loudJson.output_lufs, "| warning", loudJson.warning ?? "(none)");
 checkOk(typeof loudJson.output_lufs === "number" && loudJson.output_lufs > loudJson.input_lufs, "loudness quiet bed improves on input LUFS", `input ${loudJson.input_lufs} -> output ${loudJson.output_lufs}`);
 checkOk(typeof loudJson.warning === "string" && loudJson.warning.length > 0, "loudness quiet bed warns it cannot reach target", `got warning=${JSON.stringify(loudJson.warning)}`);
+
+// intro: title on a dark background, fading in and out. Pixel-verify
+// the fade on the centre band (text sits there): dim at t=0.05 and
+// t=2.95, bright at t=1.5. Thresholds from direct measurement on the
+// same fixture (R 21.8 -> 68.4 -> 18.4).
+const introRes = await client.callTool({
+  name: "intro",
+  arguments: { text: "Welcome Back", output: path.join(root, "outputs/mcp-intro.mp4") },
+});
+const introJson = JSON.parse(introRes.content[0].text);
+console.log("intro call:", introJson.dimensions, "| duration", introJson.duration_seconds, "| lines", JSON.stringify(introJson.lines), "| font", introJson.font_size);
+checkOk(introJson.dimensions === "1280x720", "intro output is 1280x720", `got ${introJson.dimensions}`);
+checkOk(near(introJson.duration_seconds, 3, 0.1), "intro duration is 3s", `got ${introJson.duration_seconds}`);
+checkOk(JSON.stringify(introJson.lines) === JSON.stringify(["WELCOME BACK"]), "intro wraps to 1 line", `got ${JSON.stringify(introJson.lines)}`);
+checkOk(introJson.font_size === 102, "intro default font is 102px at 1280 wide", `got ${introJson.font_size}`);
+async function introBandR(t) {
+  const png = path.join(root, `outputs/mcp-intro-${t}.png`);
+  await execFileAsync("ffmpeg", ["-v", "error", "-y", "-ss", String(t), "-i", path.join(root, "outputs/mcp-intro.mp4"), "-frames:v", "1", png]);
+  return planeMean(png, "800:160:240:280", "r");
+}
+const introEarly = await introBandR(0.05);
+const introMid = await introBandR(1.5);
+const introLate = await introBandR(2.95);
+console.log("intro pixels: centre-band R early/mid/late =", introEarly, introMid, introLate);
+checkOk(introEarly !== null && introEarly < 30, "intro text is dim at fade-in (t=0.05)", `got R=${introEarly}`);
+checkOk(introMid !== null && introMid > 50, "intro text is bright at full fade (t=1.5)", `got R=${introMid}`);
+checkOk(introLate !== null && introLate < 30, "intro text is dim at fade-out (t=2.95)", `got R=${introLate}`);
+checkOk(introMid !== null && introEarly !== null && introMid > introEarly + 20, "intro fades in (mid much brighter than early)", `early ${introEarly} -> mid ${introMid}`);
+// intro rejects fade_in + fade_out >= duration.
+const introBadRes = await client.callTool({
+  name: "intro",
+  arguments: { text: "Hi", output: path.join(root, "outputs/mcp-intro-bad.mp4"), duration: 1, fade_in: 0.6, fade_out: 0.6 },
+});
+const introBadJson = JSON.parse(introBadRes.content[0].text);
+checkOk(introBadRes.isError === true && /fade_in \+ fade_out/.test(introBadJson.error ?? ""), "intro rejects fades longer than duration", JSON.stringify(introBadJson));
+
+// social: one call exports tiktok + shorts + instagram-feed from the
+// 1280x720 10s source. Each output must be the platform size, ~10s,
+// -14 LUFS measured, and check_pass true; manifest.json must list
+// all three. Unknown platform must error, not silently skip.
+const socialRes = await client.callTool({
+  name: "social",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    output_dir: path.join(root, "outputs/mcp-social"),
+    platforms: ["tiktok", "shorts", "instagram-feed"],
+    strategy: "blur",
+  },
+});
+const socialJson = JSON.parse(socialRes.content[0].text);
+console.log("social call:", "all_pass", socialJson.all_pass, "|", socialJson.outputs.map((o) => `${o.platform} ${o.dimensions} ${o.duration_seconds}s LUFS ${o.lufs} pass=${o.check_pass}`).join(" | "));
+checkOk(socialJson.all_pass === true, "social all platforms pass their check", JSON.stringify(socialJson.outputs.map((o) => ({ p: o.platform, pass: o.check_pass, issues: o.issues }))));
+checkOk(socialJson.outputs.length === 3, "social returns 3 platform outputs", `got ${socialJson.outputs.length}`);
+const socialByPlatform = Object.fromEntries(socialJson.outputs.map((o) => [o.platform, o]));
+checkOk(socialByPlatform.tiktok?.dimensions === "1080x1920", "social tiktok is 1080x1920", `got ${socialByPlatform.tiktok?.dimensions}`);
+checkOk(socialByPlatform.shorts?.dimensions === "1080x1920", "social shorts is 1080x1920", `got ${socialByPlatform.shorts?.dimensions}`);
+checkOk(socialByPlatform["instagram-feed"]?.dimensions === "1080x1080", "social instagram-feed is 1080x1080", `got ${socialByPlatform["instagram-feed"]?.dimensions}`);
+for (const o of socialJson.outputs) {
+  checkOk(near(o.duration_seconds, 10, 0.2), `social ${o.platform} keeps ~10s duration`, `got ${o.duration_seconds}`);
+  checkOk(typeof o.lufs === "number" && o.lufs >= -16 && o.lufs <= -12, `social ${o.platform} LUFS in platform window`, `got ${o.lufs}`);
+  checkOk(o.trimmed === false, `social ${o.platform} did not trim a 10s source`, `got trimmed=${o.trimmed}`);
+}
+const { readFile } = await import("node:fs/promises");
+const manifestJson = JSON.parse(await readFile(path.join(root, "outputs/mcp-social/manifest.json"), "utf8"));
+checkOk(manifestJson.outputs.length === 3 && manifestJson.strategy === "blur", "social manifest.json lists all 3 outputs + strategy", `got ${manifestJson.outputs?.length} outputs`);
+// An unknown platform is rejected by the MCP schema itself (enum
+// validation) before the tool runs — the client returns the -32602
+// error as result text instead of a tool result.
+let socialBadText = "";
+try {
+  const socialBadRes = await client.callTool({
+    name: "social",
+    arguments: { input: path.join(root, "test/source.mp4"), output_dir: path.join(root, "outputs/mcp-social-bad"), platforms: ["nosuch"] },
+  });
+  socialBadText = socialBadRes.content?.[0]?.text ?? "";
+} catch (e) { socialBadText = e.message; }
+checkOk(/Invalid enum value/.test(socialBadText) && /nosuch/.test(socialBadText), "social rejects an unknown platform (MCP enum validation)", socialBadText.slice(0, 120));
 
 await client.close();
 if (failures.length) {

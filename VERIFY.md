@@ -645,3 +645,61 @@ Tony xem 5 video TikTok trending rồi lệnh làm cho ra chất lượng như t
 - `npm test`: **65/65 PASS, exit 0** (25 tools, doctor 25/25 available). Test mới dùng helper `measureLufs` (ffmpeg độc lập) và `bandPsnr` (PSNR theo band) — assert số đo thật, không chỉ "gọi không crash".
 - README (bảng 25 tools), SKILL.md (rule 3 anchor, rule 6 two-pass, rule 7 caption safe zone, rule 18 titlecard) đã cập nhật.
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+
+## Lượt 10 — 2026-11-11 (social + intro, 27 tools)
+- Học: priyanshum143/MCP-FFMPEG (Python, job queue + parallel workers).
+  Ý áp dụng được:
+  1. Per-job output folder với `job_details.json` (đường dẫn, tham số,
+     log ffmpeg) → `social` viết `manifest.json` receipt trong thư mục
+     output (input, strategy, target_lufs, từng platform: dimensions,
+     duration, LUFS, check_pass).
+  2. Subtitle format conversion (srt→vtt) → backlog mới (nhỏ, chưa làm).
+  3. Transcript extraction (Whisper) → đã có trong backlog `transcribe`.
+  4. Job queue + cache theo job ID (same inputs → reuse) → KHÔNG áp
+     dụng: MediaKit là CLI/MCP single-shot, không có worker nền; cache
+     theo input sẽ giấu việc input đã đổi.
+  KHÔNG copy code của họ — chỉ học ý tưởng, tự implement bằng Node/ffmpeg.
+- Làm:
+  - `social` (core+CLI+MCP, tool thứ 26): 1 call export ra nhiều
+    platform — reframe theo size từng platform (strategy crop/pad/blur,
+    mặc định blur giữ nguyên khung), trim về maxDuration của platform
+    (Shorts 180s, Story 60s — `--no-trim-to-max` giữ nguyên và check
+    sẽ fail duration một cách trung thực), loudness 2-pass về −14 LUFS
+    (chỉ khi có audio; nguồn câm thì copy file), rồi `check` từng
+    platform. File `<base>-<platform>.mp4` + `manifest.json`; platform
+    nào check fail vẫn ghi file, `all_pass=false` + `issues` nêu rõ.
+  - `intro` (core+CLI+MCP, tool thứ 27): clip mở đầu — title trên nền
+    màu đặc, fade in/out bằng `drawtext alpha` expression (text qua
+    textfile như titlecard). Mặc định 1280×720, 3s, nền 0F172A, chữ
+    trắng, font ~100px, fade 0.5s mỗi đầu. `fade_in + fade_out >=
+    duration` bị từ chối; fade = 0 không chia cho 0 (branch chỉ build
+    khi fade > 0).
+  - Platform mới trong `PLATFORMS` (cũng mở rộng `check`):
+    `instagram-feed` 1080×1080 max 3600s, `instagram-story` 1080×1920
+    max 60s, `linkedin` 1920×1080 max 600s — mỗi cái có safe zone riêng.
+  - `doctor`: thêm filter `color`, tool `intro`/`social` (27/27).
+  - README (bảng 27 tools + check liệt kê platform mới), SKILL.md
+    (rule 19 "one source, every platform: social; open with intro").
+- Test (ffmpeg 8.1.2):
+  - `intro` CLI "Welcome Back" → **1280×720, 3s, font 102px, 16.8 KB**.
+    Pixel-verify fade trên band giữa (R): t=0.05 **21.8** → t=0.25
+    **43.2** → t=1.5 **68.4** → t=2.75 **40.0** → t=2.95 **18.4** —
+    fade in/out thật, không phải fade giả.
+  - `social` CLI source 10s → tiktok + instagram-feed: **1080×1920 /
+    1080×1080, 10.1s, LUFS −14, check pass, trimmed false**;
+    `manifest.json` ghi đủ 2 outputs + strategy; không còn file tmp
+    `.social-*` sót lại.
+  - Trim-to-max trên file testsrc 70s (tự sinh, không phải fixture):
+    instagram-story → **60s, trimmed=true, LUFS −14.1, check pass**;
+    shorts → 70.1s, trimmed=false, LUFS −13.9, check pass.
+    Platform lạ → **exit 2, INVALID_ARG, nêu đúng danh sách platform**.
+  - `npm run check` sạch; `npm test`: **92/92 PASS, exit 0** (27 tools,
+    doctor 27/27 available). Assert mới: intro (dims/duration/font +
+    4 điểm fade R + từ chối fade quá dài), social (3 platform: dims,
+    duration ~10s, LUFS trong [−16,−12], trimmed=false, manifest.json
+    đủ 3 outputs + strategy, platform lạ bị MCP enum validation chặn).
+    Bẫy bắt được: client MCP validate enum *trước khi* gọi tool nên lỗi
+    platform lạ trả về dạng result text `-32602`, không throw — test
+    đầu viết theo kiểu try/catch đã FAIL 1 assertion, sửa thành đọc
+    `content[0].text` mới đúng.
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).

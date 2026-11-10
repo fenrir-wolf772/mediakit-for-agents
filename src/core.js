@@ -6,7 +6,7 @@
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 
@@ -811,6 +811,131 @@ export async function titlecard({ text, output, width = 1080, height = 1920, fon
   return { operation: "titlecard", output: outPath, text: String(text).trim(), lines, font_size: size, text_color: fg, box_color: bg, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null };
 }
 
+// ---------------------------------------------------------------- intro
+// A short intro clip: a title on a solid-colour background, fading in
+// and out (the generateIntro idea from studiomeyer-io/mcp-video,
+// rebuilt on ffmpeg directly). Text goes through a textfile like
+// titlecard, so quoting can never break the filter. Silent video.
+
+export async function intro({ text, output, width = 1280, height = 720, duration = 3, bgColor = "0F172A", textColor = "FFFFFF", fontSize = null, fadeIn = 0.5, fadeOut = 0.5 }) {
+  if (!text || !String(text).trim()) throw new MediaKitError("intro needs text", "INVALID_ARG");
+  const outPath = await prepareOutput(output, []);
+  const w = num(width, "width", { min: 2, integer: true });
+  const h = num(height, "height", { min: 2, integer: true });
+  if (w % 2 !== 0 || h % 2 !== 0) throw new MediaKitError("intro width/height must be even", "INVALID_ARG");
+  const d = num(duration, "duration", { min: 0.5, max: 30 });
+  const fi = num(fadeIn, "fade_in", { min: 0, max: 30 });
+  const fo = num(fadeOut, "fade_out", { min: 0, max: 30 });
+  if (fi + fo >= d) throw new MediaKitError(`intro fade_in + fade_out (${fi + fo}s) must be shorter than duration (${d}s)`, "INVALID_ARG");
+  const size = fontSize === null ? Math.round(w * 0.08) : num(fontSize, "font_size", { min: 16, max: 400, integer: true });
+  const bg = normalizeColor(bgColor, "bg_color");
+  const fg = normalizeColor(textColor, "text_color");
+  const lines = wrapTitleLines(String(text).trim().toUpperCase());
+  const tmpFile = path.join(path.dirname(outPath), `.intro-${process.pid}.txt`);
+  await writeFile(tmpFile, lines.join("\n"), "utf8");
+  const esc = tmpFile.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
+  // Fade the text alpha in/out; each branch is only built when its
+  // fade is > 0, so a zero fade never divides by zero in the filter.
+  let alpha = "1";
+  if (fi > 0 && fo > 0) alpha = `if(lt(t,${fi}),t/${fi},if(gt(t,${d - fo}),(${d}-t)/${fo},1))`;
+  else if (fi > 0) alpha = `if(lt(t,${fi}),t/${fi},1)`;
+  else if (fo > 0) alpha = `if(gt(t,${d - fo}),(${d}-t)/${fo},1)`;
+  try {
+    await run(FFMPEG, [
+      "-y", "-f", "lavfi", "-i", `color=c=0x${bg}:s=${w}x${h}:r=30:d=${d}`,
+      "-vf", `drawtext=fontfile=${TITLECARD_FONT}:textfile=${esc}:fontsize=${size}:fontcolor=0x${fg}:alpha='${alpha}':x=(w-text_w)/2:y=(h-text_h)/2`,
+      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-preset", "veryfast",
+      "-movflags", "+faststart", outPath,
+    ]);
+  } finally {
+    await unlink(tmpFile).catch(() => {});
+  }
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  return { operation: "intro", output: outPath, text: String(text).trim(), lines, font_size: size, bg_color: bg, text_color: fg, fade_in: fi, fade_out: fo, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null, duration_seconds: out.duration_seconds };
+}
+
+// ---------------------------------------------------------------- social
+// One call, every platform: reframe each platform's size (blur keeps
+// the whole frame by default), trim to the platform's max duration,
+// normalize loudness, then check against that platform's spec. Writes
+// <base>-<platform>.mp4 per platform plus a manifest.json receipt in
+// the output directory (the per-job details file idea from
+// priyanshum143/MCP-FFMPEG, which stores job_details.json next to its
+// outputs). A platform whose check fails still writes its file — the
+// result says so instead of hiding it.
+
+const SOCIAL_PLATFORMS = ["tiktok", "reels", "shorts", "instagram-feed", "instagram-story", "linkedin", "youtube"];
+
+export async function social({ input, outputDir, platforms = ["tiktok", "reels", "shorts"], strategy = "blur", targetLufs = -14, trimToMax = true }) {
+  const inPath = await requireInput(input);
+  if (!outputDir || !String(outputDir).trim()) throw new MediaKitError("social needs an output directory", "INVALID_OUTPUT");
+  const outDir = path.resolve(outputDir);
+  await mkdir(outDir, { recursive: true });
+  if (!["crop", "pad", "blur"].includes(strategy)) throw new MediaKitError(`social strategy must be crop, pad or blur, got: ${strategy}`, "INVALID_ARG");
+  const target = num(targetLufs, "target_lufs", { min: -70, max: 0 });
+  const list = Array.isArray(platforms) ? platforms : String(platforms).split(",").map((s) => s.trim()).filter(Boolean);
+  if (list.length === 0) throw new MediaKitError("social needs at least one platform", "INVALID_ARG");
+  for (const p of list) {
+    if (!PLATFORMS[p]) throw new MediaKitError(`unknown platform: ${p} (supported: ${Object.keys(PLATFORMS).join(", ")})`, "INVALID_ARG");
+  }
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("social needs a video input", "INVALID_ARG");
+  const base = path.basename(inPath, path.extname(inPath)).replace(/[^\w.-]+/g, "_") || "video";
+  const results = [];
+  for (const p of list) {
+    const spec = PLATFORMS[p];
+    const finalPath = path.join(outDir, `${base}-${p}.mp4`);
+    const tmpReframe = path.join(outDir, `.social-${p}-${process.pid}-reframe.mp4`);
+    const tmpTrim = path.join(outDir, `.social-${p}-${process.pid}-trim.mp4`);
+    try {
+      await reframe({ input: inPath, output: tmpReframe, width: spec.width, height: spec.height, mode: strategy });
+      let stagePath = tmpReframe;
+      let trimmed = false;
+      const reframedMeta = await probe(tmpReframe);
+      if (trimToMax && spec.maxDuration !== null && reframedMeta.duration_seconds !== null && reframedMeta.duration_seconds > spec.maxDuration) {
+        await fitDuration({ input: tmpReframe, output: tmpTrim, duration: spec.maxDuration, method: "trim" });
+        stagePath = tmpTrim;
+        trimmed = true;
+      }
+      let lufs = null;
+      let loudnessWarning = null;
+      const stageMeta = await probe(stagePath);
+      if (stageMeta.audio) {
+        const loud = await loudness({ input: stagePath, output: finalPath, targetLufs: target });
+        lufs = loud.output_lufs;
+        loudnessWarning = loud.warning ?? null;
+      } else {
+        // Silent source: no loudness step, just place the file.
+        await copyFile(stagePath, finalPath);
+      }
+      const chk = await check({ input: finalPath, platform: p });
+      const outMeta = await probe(finalPath);
+      const info = await fileInfo(finalPath);
+      results.push({
+        platform: p, platform_label: spec.label, output: finalPath,
+        dimensions: outMeta.video ? `${outMeta.video.width}x${outMeta.video.height}` : null,
+        duration_seconds: outMeta.duration_seconds, lufs, trimmed,
+        check_pass: chk.pass,
+        ...(chk.issues ? { issues: chk.issues } : {}),
+        ...(chk.warnings ? { warnings: chk.warnings } : {}),
+        ...(loudnessWarning ? { loudness_warning: loudnessWarning } : {}),
+        ...info,
+      });
+    } finally {
+      await unlink(tmpReframe).catch(() => {});
+      await unlink(tmpTrim).catch(() => {});
+    }
+  }
+  const manifestPath = path.join(outDir, "manifest.json");
+  const manifest = {
+    operation: "social", input: inPath, strategy, target_lufs: target,
+    trim_to_max: trimToMax, generated_at: new Date().toISOString(), outputs: results,
+  };
+  await writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+  return { operation: "social", input: inPath, output_dir: outDir, manifest: manifestPath, outputs: results, all_pass: results.every((r) => r.check_pass) };
+}
+
 // ---------------------------------------------------------------- reframe
 // One-step aspect reframe: 16:9 -> 9:16 (or any target aspect/size).
 // mode "crop": cut the target aspect out of the source (centre, or the
@@ -935,6 +1060,33 @@ export const PLATFORMS = {
     safeZone: {
       x0: 96, y0: 64, x1: 1824, y1: 980,
       note: "Keep titles/text clear of the bottom player bar and the bottom-right end-screen area. Creator guidance, not a platform-published spec.",
+    },
+  },
+  "instagram-feed": {
+    label: "Instagram Feed", width: 1080, height: 1080, maxDuration: 3600,
+    videoCodecs: ["h264"], audioCodecs: ["aac"], maxChannels: 2,
+    lufs: [-16, -12], fps: [23, 61],
+    safeZone: {
+      x0: 64, y0: 120, x1: 1016, y1: 960,
+      note: "Keep text inside this square: the top bar and the bottom caption/like row cover the rest. Creator guidance, not a platform-published spec.",
+    },
+  },
+  "instagram-story": {
+    label: "Instagram Story", width: 1080, height: 1920, maxDuration: 60,
+    videoCodecs: ["h264"], audioCodecs: ["aac"], maxChannels: 2,
+    lufs: [-16, -12], fps: [23, 61],
+    safeZone: {
+      x0: 64, y0: 200, x1: 1016, y1: 1400,
+      note: "Keep text/subtitles inside this rect: the top bar, reply box and bottom UI cover the rest. Creator guidance, not a platform-published spec.",
+    },
+  },
+  linkedin: {
+    label: "LinkedIn", width: 1920, height: 1080, maxDuration: 600,
+    videoCodecs: ["h264"], audioCodecs: ["aac"], maxChannels: 2,
+    lufs: [-16, -12], fps: [23, 61],
+    safeZone: {
+      x0: 96, y0: 64, x1: 1824, y1: 980,
+      note: "Keep titles/text clear of the bottom player bar. Creator guidance, not a platform-published spec.",
     },
   },
 };
@@ -1257,7 +1409,7 @@ const DOCTOR_FILTERS = [
   "cropdetect", "gblur", "trim", "atrim", "concat", "select", "tile", "pad", "overlay",
   "drawtext", "volume", "sidechaincompress", "amix", "aresample",
   "xfade", "acrossfade", "fps", "anullsrc", "setpts", "asetpts",
-  "format", "colorchannelmixer", "atempo", "aloop", "geq",
+  "format", "colorchannelmixer", "atempo", "aloop", "geq", "color",
 ];
 const DOCTOR_ENCODERS = [
   "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4",
@@ -1291,6 +1443,8 @@ const TOOL_REQUIREMENTS = {
   fit: { filters: ["setpts", "atempo"], encoders: ["libx264", "aac"] },
   pip: { filters: ["overlay", "format", "scale", "colorchannelmixer", "amix"], encoders: ["libx264"] },
   titlecard: { filters: ["drawtext", "geq"] },
+  intro: { filters: ["color", "drawtext"], encoders: ["libx264"] },
+  social: { filters: ["crop", "scale", "pad", "gblur", "overlay", "loudnorm"], encoders: ["libx264"] },
   doctor: {},
 };
 
