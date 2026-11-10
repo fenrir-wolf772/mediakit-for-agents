@@ -274,6 +274,17 @@ Back"` renders a 3s opening clip — title on a solid background, fading
 in and out (`--duration`, `--bg-color`, `--fade-in`/`--fade-out`);
 concat it in front of the main clip. Silent video, no audio track.
 
+### 20. Convert captions, don't retype them; dry-run a mix before you render it
+`convert_captions subs.srt -o subs.vtt` (or the reverse) converts
+between SRT and VTT — cue text is carried verbatim, never rewritten;
+VTT cue settings (`line:`/`position:`/`align:`) are dropped on the way
+to SRT and counted in `settings_dropped`. Converting a file to its own
+format is refused. `mix ... --dry-run` prints the exact ffmpeg command
+that would run (with the real voice gain measured from the files) and
+writes no file — read the command before a long render, then run the
+same call without `--dry-run`. The probe and loudnorm measurement still
+run in dry-run mode, but they are read-only.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

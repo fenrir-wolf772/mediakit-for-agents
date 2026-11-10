@@ -6,6 +6,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -43,10 +44,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 27 tools present");
-checkOk(missing.length === 0, "tools/list has all 27 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 28 tools present");
+checkOk(missing.length === 0, "tools/list has all 28 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -548,6 +549,63 @@ try {
   socialBadText = socialBadRes.content?.[0]?.text ?? "";
 } catch (e) { socialBadText = e.message; }
 checkOk(/Invalid enum value/.test(socialBadText) && /nosuch/.test(socialBadText), "social rejects an unknown platform (MCP enum validation)", socialBadText.slice(0, 120));
+
+// convert_captions: SRT -> VTT (fixture has 3 cues, 0-8s), then back
+// VTT -> SRT — the round trip must keep every cue and timestamp.
+// A VTT with cue settings must report settings_dropped=1, and
+// converting a file to its own format must be refused.
+const capsConvRes = await client.callTool({
+  name: "convert_captions",
+  arguments: { input: path.join(root, "test/captions.srt"), output: path.join(root, "outputs/mcp-captions.vtt") },
+});
+const capsConvJson = JSON.parse(capsConvRes.content[0].text);
+console.log("convert_captions srt->vtt:", capsConvJson.cue_count, "cues |", capsConvJson.first_start_seconds + "s ->", capsConvJson.last_end_seconds + "s |", capsConvJson.size_human);
+checkOk(capsConvJson.cue_count === 3 && capsConvJson.from_format === "srt" && capsConvJson.to_format === "vtt", "convert_captions srt->vtt reports 3 cues", JSON.stringify(capsConvJson));
+checkOk(capsConvJson.first_start_seconds === 0 && capsConvJson.last_end_seconds === 8, "convert_captions keeps 0s..8s span", `got ${capsConvJson.first_start_seconds}..${capsConvJson.last_end_seconds}`);
+const vttText = await readFile(path.join(root, "outputs/mcp-captions.vtt"), "utf8");
+checkOk(vttText.startsWith("WEBVTT") && vttText.includes("00:00:02.500 --> 00:00:05.000"), "convert_captions VTT has WEBVTT header + dot timestamps", vttText.slice(0, 80).replace(/\n/g, " "));
+const capsBackRes = await client.callTool({
+  name: "convert_captions",
+  arguments: { input: path.join(root, "outputs/mcp-captions.vtt"), output: path.join(root, "outputs/mcp-captions-roundtrip.srt") },
+});
+const capsBackJson = JSON.parse(capsBackRes.content[0].text);
+checkOk(capsBackJson.cue_count === 3 && capsBackJson.from_format === "vtt" && capsBackJson.to_format === "srt", "convert_captions round-trips VTT->SRT with 3 cues", JSON.stringify(capsBackJson));
+const srtText = await readFile(path.join(root, "outputs/mcp-captions-roundtrip.srt"), "utf8");
+checkOk(srtText.includes("00:00:00,000 --> 00:00:02,500") && srtText.includes("MediaKit gives agents"), "round-tripped SRT has comma timestamps + original text", srtText.slice(0, 80).replace(/\n/g, " "));
+const capsSetRes = await client.callTool({
+  name: "convert_captions",
+  arguments: { input: path.join(root, "test/captions-settings.vtt"), output: path.join(root, "outputs/mcp-captions-settings.srt") },
+});
+const capsSetJson = JSON.parse(capsSetRes.content[0].text);
+checkOk(capsSetJson.cue_count === 2 && capsSetJson.settings_dropped === 1, "convert_captions drops 1 VTT cue setting and counts it", JSON.stringify(capsSetJson));
+const capsSameRes = await client.callTool({
+  name: "convert_captions",
+  arguments: { input: path.join(root, "test/captions.srt"), output: path.join(root, "outputs/mcp-captions-same.srt") },
+});
+const capsSameJson = JSON.parse(capsSameRes.content[0].text);
+checkOk(capsSameRes.isError === true && /already srt/.test(capsSameJson.error ?? ""), "convert_captions refuses same-format conversion", JSON.stringify(capsSameJson));
+
+// mix --dry-run: plan mode must print the exact ffmpeg command
+// (sidechaincompress + loudnorm, real measured voice gain) and write
+// no file.
+const mixDryPath = path.join(root, "outputs/mcp-mix-dry.mp3");
+const mixDryRes = await client.callTool({
+  name: "mix",
+  arguments: {
+    voice: path.join(root, "test/mix-voice.mp3"),
+    music: path.join(root, "test/mix-music.mp3"),
+    output: mixDryPath,
+    music_volume: 0.5,
+    duck_db: 12,
+    dry_run: true,
+  },
+});
+const mixDryJson = JSON.parse(mixDryRes.content[0].text);
+console.log("mix dry-run:", "gain", mixDryJson.voice_gain_db, "dB | ratio", mixDryJson.sidechain_ratio, "|", mixDryJson.commands?.[0]?.slice(0, 120), "...");
+checkOk(mixDryJson.dry_run === true, "mix dry_run=true reports dry_run", JSON.stringify(mixDryJson).slice(0, 120));
+checkOk(Array.isArray(mixDryJson.commands) && mixDryJson.commands.length === 1 && mixDryJson.commands[0].includes("sidechaincompress") && mixDryJson.commands[0].includes("loudnorm"), "mix dry-run prints the exact ffmpeg command (sidechain + loudnorm)", JSON.stringify(mixDryJson.commands));
+checkOk(typeof mixDryJson.voice_gain_db === "number" && mixDryJson.voice_gain_db !== 0, "mix dry-run computes a real voice gain from measurement", `got ${mixDryJson.voice_gain_db}`);
+checkOk(existsSync(mixDryPath) === false, "mix dry-run writes no file", mixDryPath);
 
 await client.close();
 if (failures.length) {

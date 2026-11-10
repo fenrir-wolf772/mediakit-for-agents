@@ -299,8 +299,18 @@ server.tool(
 );
 
 server.tool(
+  "convert_captions",
+  "Convert a subtitle file between SRT and VTT (pure text, no ffmpeg). Cue text is carried verbatim; VTT cue settings (line:/position:/align:) are dropped on the way to SRT and counted in settings_dropped. The output format comes from the output extension; converting a file to its own format is refused.",
+  {
+    input: pathSchema.describe("Input subtitle file (.srt or .vtt)"),
+    output: pathSchema.describe("Output subtitle file (.vtt or .srt — must differ from the input format)"),
+  },
+  async (a) => safe(() => core.convertCaptions(a)),
+);
+
+server.tool(
   "mix",
-  "Mix voice over a music bed with sidechain ducking: the bed drops by duck_db whenever the voice speaks (attack/release in ms), the voice is levelled to voice_lufs first, the music loops to the voice length, and the mix is mastered to target_lufs. Returns the ducking actually measured (ducking_measured_db, speech vs silence window on the ducked bed). If the voice file is a video, its video stream is copied through.",
+  "Mix voice over a music bed with sidechain ducking: the bed drops by duck_db whenever the voice speaks (attack/release in ms), the voice is levelled to voice_lufs first, the music loops to the voice length, and the mix is mastered to target_lufs. Returns the ducking actually measured (ducking_measured_db, speech vs silence window on the ducked bed). If the voice file is a video, its video stream is copied through. Set dry_run=true to print the exact ffmpeg command that would run and write no file (probes and the loudnorm measurement still run, read-only, to compute the voice gain).",
   {
     voice: pathSchema.describe("Voice/speech file (audio or video with an audio track)"),
     music: pathSchema.describe("Music bed audio file (looped to the voice length)"),
@@ -312,6 +322,7 @@ server.tool(
     voice_lufs: z.number().min(-70).max(0).default(-16).describe("Voice level target before mixing"),
     target_lufs: z.number().min(-70).max(0).default(-14).describe("Master the mix to this LUFS"),
     master: z.boolean().default(true).describe("Master the mix (false = leave the raw mix levels)"),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command that would run, write no file"),
   },
   async (a) => safe(() => core.mix({
     voice: a.voice,
@@ -324,6 +335,7 @@ server.tool(
     voiceLufs: a.voice_lufs,
     targetLufs: a.target_lufs,
     master: a.master,
+    dryRun: a.dry_run,
   })),
 );
 

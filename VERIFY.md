@@ -703,3 +703,58 @@ Tony xem 5 video TikTok trending rồi lệnh làm cho ra chất lượng như t
     đầu viết theo kiểu try/catch đã FAIL 1 assertion, sửa thành đọc
     `content[0].text` mới đúng.
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+
+## Lượt 11 — 2026-11-11 (convert_captions + mix --dry-run, 28 tools)
+- Học: kajisho5/ffmpeg-skill (5.011★, 42 tools, Python, đối thủ mạnh nhất
+  cùng ngách). Ý áp dụng được:
+  1. `--dry-run` trên mọi tool (plan before render: in lệnh ffmpeg, ghi
+     không gì) → đã làm `mix --dry-run` (backlog item); mở rộng sang các
+     tool khác là backlog mới (mỗi tool một plan, tốn công).
+  2. Machine-readable contract: `input_schema` suy ra từ parser thật lúc
+     chạy, CI fail khi drift (SPEC) → đã có trong backlog ("contract
+     machine-readable + CI fail khi drift"); chưa làm lượt này (lớn — cần
+     refactor server.js dùng chung một bảng tool).
+  3. `check --content` (black frame, frozen frame, silence, flash) →
+     backlog mới.
+  4. `caption --fit-size` (co chữ tới khi vừa max-lines) → đã làm ở
+     plan B (burn_captions mặc định 60px/500px vùng an toàn).
+  5. MCP chỉ advertise 12 tool core mặc định, đủ 42 khi
+     `FFMPEG_SKILL_MCP_FULL=1` (tiết kiệm context client) → backlog mới
+     (cân nhắc; MediaKit hiện list đủ 28).
+  6. `look.py` contact sheet để agent tự nhìn output → MediaKit đã có
+     `thumbnail`/`frames`, không thêm tool mới.
+  KHÔNG copy code của họ — chỉ học ý tưởng, tự implement bằng Node/ffmpeg.
+- Làm:
+  - `convert_captions` (core+CLI+MCP, tool thứ 28): chuyển .srt↔.vtt,
+    thuần Node, không ffmpeg. Format suy từ đuôi output; chuyển về cùng
+    format bị từ chối. Text cue giữ nguyên verbatim; VTT cue settings
+    (`line:`/`position:`/`align:`) bị bỏ khi về SRT và đếm trong
+    `settings_dropped`; header WEBVTT + block NOTE/STYLE/REGION được bỏ
+    qua khi đọc VTT; timestamp sai, cue không text, end<=start bị từ
+    chối kèm dòng lỗi. Trả `cue_count`, `first_start_seconds`,
+    `last_end_seconds`, `settings_dropped`.
+  - `mix --dry-run` (core+CLI+MCP): plan mode — probe + đo loudnorm vẫn
+    chạy (chỉ đọc) để tính `voice_gain_db` thật, rồi trả `commands` (lệnh
+    ffmpeg đầy đủ, shell-quoted) và ghi KHÔNG file nào. `output_lufs` /
+    `ducking_measured_db` = null kèm `note` giải thích.
+  - `doctor`: thêm tool `convert_captions` (không cần ffmpeg → luôn
+    available). README (bảng 28 tools + dòng mix --dry-run), SKILL.md
+    (rule 20), VERIFY.md (lượt 11).
+- Test (ffmpeg 8.1.2):
+  - `convert_captions` CLI captions.srt → .vtt: **3 cues, 0–8s, 174 B**;
+    file VTT có header WEBVTT + timestamp dấu chấm; round-trip về .srt
+    giữ đủ 3 cue + text gốc + timestamp dấu phẩy; fixture
+    captions-settings.vtt → .srt: **2 cues, settings_dropped 1**; cùng
+    format → **exit 2, INVALID_ARG, "already srt"**.
+  - `mix --dry-run` CLI: gain thật **+6.1 dB** (voice −22.1 LUFS → target
+    −16), ratio 2.5, lệnh in ra chứa `sidechaincompress` + `loudnorm`;
+    file output **không tồn tại** sau dry-run.
+  - `npm run check` sạch; `npm test`: **103/103 PASS, exit 0** (28 tools,
+    doctor 28/28 available). Assert mới (11): convert_captions (srt→vtt
+    3 cues + span 0–8s, header/timestamp VTT, round-trip SRT, settings
+    dropped 1, từ chối cùng format), mix dry-run (dry_run flag, lệnh chứa
+    sidechain+loudnorm, gain thật ≠ 0, không ghi file).
+  - Bẫy bắt được: chạy `npm test` 2 lần trong cùng một lệnh để đếm PASS
+    rồi kiểm tra FAIL làm tốn gấp đôi thời gian (~4 phút) — lần sau chỉ
+    chạy 1 lần rồi grep cả hai.
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).

@@ -747,6 +747,117 @@ export async function burnCaptions({ input, output, captions, fontSize = null, f
   return { operation: "burn_captions", input: inPath, output: outPath, captions: capPath, font_size: size, margin_v: margin, ...info, duration_seconds: out.duration_seconds };
 }
 
+// ---------------------------------------------------------------- convert_captions
+// Convert a subtitle file between SRT and VTT (pure Node, no ffmpeg).
+// SRT: numbered cues, "HH:MM:SS,mmm --> HH:MM:SS,mmm". VTT: "WEBVTT"
+// header, "HH:MM:SS.mmm --> HH:MM:SS.mmm" plus optional cue settings
+// (line:/position:/align: — dropped on the way to SRT, counted in
+// settings_dropped). Cue text is carried verbatim, never rewritten.
+// Format is inferred from the output extension; converting a file to
+// its own format is refused (nothing to do).
+
+function parseCaptionTimestamp(ts, label) {
+  const m = /^(\d+):(\d{2}):(\d{2})[,.](\d{3})$/.exec(ts.trim());
+  if (!m) throw new MediaKitError(`${label} has a bad timestamp: ${ts}`, "INVALID_ARG");
+  const [, h, mi, s, ms] = m.map(Number);
+  if (mi > 59 || s > 59) throw new MediaKitError(`${label} has a bad timestamp: ${ts}`, "INVALID_ARG");
+  return ((h * 60 + mi) * 60 + s) * 1000 + ms;
+}
+
+function formatCaptionTimestamp(ms, sep) {
+  const total = Math.round(ms);
+  const h = Math.floor(total / 3_600_000);
+  const mi = Math.floor((total % 3_600_000) / 60_000);
+  const s = Math.floor((total % 60_000) / 1000);
+  const m = total % 1000;
+  const p = (n, w) => String(n).padStart(w, "0");
+  return `${p(h, 2)}:${p(mi, 2)}:${p(s, 2)}${sep}${p(m, 3)}`;
+}
+
+function parseCaptions(text, format) {
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  const cues = [];
+  let i = 0;
+  let settingsDropped = 0;
+  let inHeader = format === "vtt";
+  while (i < lines.length) {
+    const line = lines[i].trim();
+    i++;
+    if (!line) continue;
+    if (inHeader) {
+      // WEBVTT header + NOTE/STYLE/REGION blocks: skip until the first
+      // timing line. A NOTE block runs to the next blank line.
+      if (/^WEBVTT/.test(line) || /^NOTE(\s|$)/.test(line)) continue;
+      if (/^(STYLE|REGION)(\s|$)/.test(line)) {
+        while (i < lines.length && lines[i].trim()) i++;
+        continue;
+      }
+      inHeader = false;
+    }
+    // Optional cue id (SRT number, or a VTT id line): any line that is
+    // not a timing line, followed by a timing line.
+    let timing = line;
+    if (!timing.includes("-->")) {
+      if (i >= lines.length) throw new MediaKitError(`captions: cue "${line}" has no timing line`, "INVALID_ARG");
+      timing = lines[i].trim();
+      i++;
+    }
+    const tm = /^(\S+)\s+-->\s+(\S+)(?:\s+(.*))?$/.exec(timing);
+    if (!tm) throw new MediaKitError(`captions: bad timing line: ${timing}`, "INVALID_ARG");
+    const startMs = parseCaptionTimestamp(tm[1], "cue");
+    const endMs = parseCaptionTimestamp(tm[2], "cue");
+    if (endMs <= startMs) throw new MediaKitError(`captions: cue ends before it starts: ${timing}`, "INVALID_ARG");
+    if (tm[3]) settingsDropped++;
+    const textLines = [];
+    while (i < lines.length && lines[i].trim()) { textLines.push(lines[i]); i++; }
+    if (!textLines.length) throw new MediaKitError(`captions: cue at ${timing} has no text`, "INVALID_ARG");
+    cues.push({ startMs, endMs, text: textLines.join("\n") });
+  }
+  if (!cues.length) throw new MediaKitError("captions: no cues found in the file", "INVALID_ARG");
+  return { cues, settingsDropped };
+}
+
+export async function convertCaptions({ input, output }) {
+  const inPath = await requireInput(input, "captions file");
+  const inExt = path.extname(inPath).toLowerCase();
+  if (![".srt", ".vtt"].includes(inExt)) {
+    throw new MediaKitError(`convert_captions input must be .srt or .vtt, got ${inExt}`, "INVALID_ARG");
+  }
+  const outPath = await prepareOutput(output, [inPath]);
+  const outExt = path.extname(outPath).toLowerCase();
+  if (![".srt", ".vtt"].includes(outExt)) {
+    throw new MediaKitError(`convert_captions output must be .srt or .vtt, got ${outExt}`, "INVALID_ARG");
+  }
+  if (inExt === outExt) {
+    throw new MediaKitError(`convert_captions: input is already ${inExt.slice(1)} — nothing to convert`, "INVALID_ARG");
+  }
+  const from = inExt.slice(1);
+  const to = outExt.slice(1);
+  const raw = await readFile(inPath, "utf8");
+  const { cues, settingsDropped } = parseCaptions(raw, from);
+  const sep = to === "srt" ? "," : ".";
+  let out;
+  if (to === "vtt") {
+    out = `WEBVTT\n\n${cues.map((c) => `${formatCaptionTimestamp(c.startMs, sep)} --> ${formatCaptionTimestamp(c.endMs, sep)}\n${c.text}`).join("\n\n")}\n`;
+  } else {
+    out = cues.map((c, n) => `${n + 1}\n${formatCaptionTimestamp(c.startMs, sep)} --> ${formatCaptionTimestamp(c.endMs, sep)}\n${c.text}`).join("\n\n") + "\n";
+  }
+  await writeFile(outPath, out, "utf8");
+  const info = await fileInfo(outPath);
+  return {
+    operation: "convert_captions",
+    input: inPath,
+    output: outPath,
+    from_format: from,
+    to_format: to,
+    cue_count: cues.length,
+    first_start_seconds: +(cues[0].startMs / 1000).toFixed(3),
+    last_end_seconds: +(cues[cues.length - 1].endMs / 1000).toFixed(3),
+    settings_dropped: settingsDropped,
+    ...info,
+  };
+}
+
 // ---------------------------------------------------------------- titlecard
 // Title card image: a big bold hook (3-6 words) on a coloured box, on a
 // transparent canvas so it overlays cleanly onto any frame (see overlay).
@@ -1445,6 +1556,7 @@ const TOOL_REQUIREMENTS = {
   titlecard: { filters: ["drawtext", "geq"] },
   intro: { filters: ["color", "drawtext"], encoders: ["libx264"] },
   social: { filters: ["crop", "scale", "pad", "gblur", "overlay", "loudnorm"], encoders: ["libx264"] },
+  convert_captions: {},
   doctor: {},
 };
 
@@ -1740,7 +1852,7 @@ async function duckedBedVolume(voicePath, musicPath, voiceGainDb, musicVolume, d
 export async function mix({
   voice, music, output,
   musicVolume = 0.3, duckDb = 12, attackMs = 100, releaseMs = 400,
-  voiceLufs = -16, targetLufs = -14, master = true,
+  voiceLufs = -16, targetLufs = -14, master = true, dryRun = false,
 }) {
   const voicePath = await requireInput(voice, "voice file");
   const musicPath = await requireInput(music, "music file");
@@ -1795,6 +1907,34 @@ export async function mix({
     args.push("-map", mixLabel, "-c:a", audioCodec);
   }
   args.push(outPath);
+  if (dryRun) {
+    // Plan before render (ffmpeg-skill's --dry-run idea): the probe and
+    // the loudnorm measurement above are read-only — they ran so the
+    // gain in the plan is the real one — but no file is written.
+    const quote = (s) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
+    return {
+      operation: "mix",
+      dry_run: true,
+      voice: voicePath,
+      music: musicPath,
+      output: outPath,
+      music_volume: bedVol,
+      duck_db: duck,
+      attack_ms: attack,
+      release_ms: release,
+      sidechain_ratio: ratio,
+      voice_lufs_before: voiceLufsBefore,
+      voice_lufs_target: vTarget,
+      voice_gain_db: voiceGainDb,
+      mastered_to_lufs: mTarget,
+      output_lufs: null,
+      ducking_measured_db: null,
+      duration_seconds: voiceDuration,
+      has_video: Boolean(voiceMeta.video),
+      commands: [`${FFMPEG} ${args.map(quote).join(" ")}`],
+      note: "Dry run: no file written. Probes and the loudnorm measurement are read-only; they ran to compute voice_gain_db.",
+    };
+  }
   await run(FFMPEG, args);
 
   const info = await fileInfo(outPath);

@@ -243,9 +243,17 @@ const COMMANDS = {
       ["-o, --output", "Output .zip file (required)"],
     ],
   },
+  "convert-captions": {
+    usage: "mediakit convert-captions <input.srt|vtt> -o <output.vtt|srt>",
+    desc: "Convert a subtitle file between SRT and VTT (cue text carried verbatim; VTT cue settings are dropped and counted). Format is inferred from the output extension.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["-o, --output", "Output file .srt or .vtt (required, must differ from the input format)"],
+    ],
+  },
   mix: {
-    usage: "mediakit mix <voice> --music <file> -o <output> [--music-volume 0.3] [--duck-db 12] [--attack-ms 100] [--release-ms 400] [--voice-lufs -16] [--target-lufs -14] [--no-master]",
-    desc: "Mix voice over a music bed with sidechain ducking (bed drops under speech), then master to target LUFS.",
+    usage: "mediakit mix <voice> --music <file> -o <output> [--music-volume 0.3] [--duck-db 12] [--attack-ms 100] [--release-ms 400] [--voice-lufs -16] [--target-lufs -14] [--no-master] [--dry-run]",
+    desc: "Mix voice over a music bed with sidechain ducking (bed drops under speech), then master to target LUFS. --dry-run prints the exact ffmpeg command and writes nothing.",
     args: [{ name: "voice", required: true }],
     options: [
       ["--music", "Music bed audio file (required, looped to voice length)"],
@@ -256,6 +264,7 @@ const COMMANDS = {
       ["--voice-lufs", "Voice level target before mixing (default -16)"],
       ["--target-lufs", "Master the mix to this LUFS (default -14)"],
       ["--no-master", "Skip mastering, leave raw mix levels"],
+      ["--dry-run", "Print the exact ffmpeg command that would run, write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -543,6 +552,11 @@ async function main() {
           platform: opts.platform ?? null,
         });
         break;
+      case "convert-captions":
+        result = await core.convertCaptions({
+          input: needInput(), output: needOutput(opts),
+        });
+        break;
       case "mix": {
         if (!opts.music) fail("missing required option: --music <file>");
         result = await core.mix({
@@ -554,6 +568,7 @@ async function main() {
           voiceLufs: numOpt(opts, "voice_lufs") ?? -16,
           targetLufs: numOpt(opts, "target_lufs") ?? -14,
           master: opts.master !== false,
+          dryRun: opts.dry_run === true,
         });
         break;
       }
