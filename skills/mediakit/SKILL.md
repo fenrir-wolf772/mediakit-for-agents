@@ -8,7 +8,8 @@ video or audio file, and instead of writing one-off ffmpeg shell commands.
 - **Before describing or editing media**: `probe` first. Never guess a
   duration, resolution, or codec from a filename.
 - **User asks for a cut, a clip, a shorter version**: `trim`.
-- **User asks for vertical / square / a different size**: `crop` + `resize`.
+- **User asks for vertical / square / a different size**: `reframe`
+  (one step; `crop` + `resize` only when you need an exact pixel rectangle).
 - **User asks for the audio, a voiceover, or a soundtrack**: `extract_audio`.
 - **User asks "what does it look like at 0:12?"**: `extract_frame`, then
   read the image. For an overview of the whole clip: `thumbnail`.
@@ -16,6 +17,9 @@ video or audio file, and instead of writing one-off ffmpeg shell commands.
 - **User asks to join clips**: `concat`.
 - **User asks for captions/subtitles on the video**: `burn_captions`.
 - **User asks for a different format**: `convert`.
+- **Before publishing to TikTok / Reels / Shorts / YouTube**: `check`
+  — verifies dimensions, codecs, duration limit and measured loudness
+  against the platform spec, with a fix hint per failed rule.
 
 ## How to call the tools
 
@@ -46,24 +50,32 @@ past the end of the file fails too. The probe result is the ground truth.
   Use it for rough cuts, previews, or splitting long files; use the
   default for publish-ready clips.
 
-### 3. Crop then resize — in that order
-To turn 16:9 into 9:16: first `crop` the center 720×1280 region, then
-`resize` to 1080×1920. Resizing first and cropping after wastes pixels;
-cropping to the exact final size in one step is fine too if the source is
-sharp enough.
+### 3. Reframe in one step — don't crop then resize by hand
+To turn 16:9 into 9:16: `reframe --mode crop` (default 1080×1920).
+`--mode blur` fills the sides with a blurred copy of the frame (the
+Shorts look); `--mode pad` uses black bars. Use `--x`/`--y` to anchor
+the crop window when the subject isn't centered. `crop` + `resize`
+remain for exact pixel rectangles only.
 
-### 4. Even dimensions
+### 4. Check before you publish
+After the last edit, run `check --platform tiktok` (or `reels`,
+`shorts`, `youtube`). It measures the real file — never trust the
+tool that produced it. `pass: false` means fix the listed issues
+(each carries a hint) and check again; never report "ready" with a
+failing check.
+
+### 5. Even dimensions
 H.264 (yuv420p) needs even width/height. `resize` with `keep_aspect`
 rounds to even automatically. If you `crop` by hand, use even numbers.
 
-### 5. Loudness: −14 LUFS is the default for a reason
+### 6. Loudness: −14 LUFS is the default for a reason
 YouTube, Spotify, and TikTok all normalize to around −14 LUFS. Normalizing
 to −14 means your audio sounds the same loudness as everything else on the
 platform. Use −16 LUFS for podcasts, −23 LUFS only for broadcast (EBU R128).
 Single-pass loudnorm (what this tool does) is fast and good for speech and
 creator audio; it is not sample-exact broadcast mastering.
 
-### 6. Captions must exist before you burn them
+### 7. Captions must exist before you burn them
 `burn_captions` needs a real `.srt`, `.ass`, or `.vtt` file. If the user
 only has raw text, write the SRT yourself first (format below), then burn.
 Hardcoded captions cannot be turned off later — keep an uncaptioned master.
@@ -83,12 +95,12 @@ Keep lines short (≤ 42 chars), max 2 lines per cue, and never let a cue
 span a sentence break awkwardly. For vertical video use `--font-size 48`
 or larger — 24px is for 720p landscape.
 
-### 7. Concat re-encodes — that's a feature
+### 8. Concat re-encodes — that's a feature
 `concat` re-encodes all parts to one codec, so clips with different
 resolutions, codecs, or frame rates join cleanly. It is slower than a
 stream-copy concat, but it doesn't fail on mismatched inputs.
 
-### 8. Convert: copy what you don't need to change
+### 9. Convert: copy what you don't need to change
 `convert` with no codec arguments stream-copies both streams (a fast
 re-mux). Pass `--video-codec libx264` only when you actually need to change
 the codec. CRF 23 is a good default for H.264; 18–20 for near-lossless,
@@ -97,11 +109,11 @@ the codec. CRF 23 is a good default for H.264; 18–20 for near-lossless,
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.
-2. `crop` the center 9:16 region (width = height × 9/16, x centered).
-3. `resize` to 1080×1920.
-4. Write an SRT from the script/voiceover.
-5. `burn_captions` with a large font size.
-6. `probe` the result and `extract_frame` at a mid timestamp to verify
-   the captions actually render.
+2. `reframe --mode crop` to 1080×1920 (or `--mode blur` for the blurred-fill look).
+3. Write an SRT from the script/voiceover.
+4. `burn_captions` with a large font size.
+5. `loudness` to −14 LUFS.
+6. `check --platform tiktok` — all rules must pass.
+7. `extract_frame` at a mid timestamp to verify the captions actually render.
 
 See `skills/shorts-video/SKILL.md` for the full scripted workflow.

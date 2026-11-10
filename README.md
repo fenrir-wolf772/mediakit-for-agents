@@ -60,6 +60,8 @@ Then ask your agent things like:
 | `loudness` | Normalize to a loudness target (default −14 LUFS) | `mediakit loudness in.mp3 -o out.mp3` |
 | `concat` | Join 2+ files into one (re-encodes, mixed codecs OK) | `mediakit concat a.mp4 b.mp4 -o joined.mp4` |
 | `burn_captions` | Burn .srt/.ass/.vtt subtitles into the video | `mediakit burn-captions in.mp4 --captions subs.srt -o out.mp4` |
+| `reframe` | Reframe to a target aspect/size in one step (crop, pad, or blurred fill) | `mediakit reframe in.mp4 --mode crop -o vertical.mp4` |
+| `check` | Verify a file against a platform spec (tiktok/reels/shorts/youtube) | `mediakit check out.mp4 --platform tiktok` |
 | `convert` | Change container/codec (omit a codec to stream-copy) | `mediakit convert in.mov -o out.mp4 --video-codec libx264` |
 
 Every tool returns a concise JSON result: output path, size, and the
@@ -73,16 +75,23 @@ verified duration/dimensions of what it produced.
 # 1. Inspect the source
 mediakit probe input.mp4
 
-# 2. Center-crop to 9:16, then resize to 1080×1920
-mediakit crop input.mp4 --width 720 --height 1280 --x 280 --y 0 -o cropped.mp4
-mediakit resize cropped.mp4 --width 1080 -o vertical.mp4
+# 2. Reframe 16:9 -> 9:16 vertical in one step (crop | pad | blur)
+mediakit reframe input.mp4 --mode crop -o vertical.mp4
 
 # 3. Burn captions on
 mediakit burn-captions vertical.mp4 --captions captions.srt -o short.mp4
 
-# 4. Check the result
-mediakit probe short.mp4   # 1080x1920, same duration, captions visible
+# 4. Normalize loudness, then verify against the TikTok delivery spec
+mediakit loudness short.mp4 -o short-loud.mp4 --target-lufs -14
+mediakit check short-loud.mp4 --platform tiktok   # pass: true when ready
 ```
+
+`reframe --mode blur` fills the empty area with a blurred copy of the
+frame (the classic Shorts look); `--mode pad` uses black bars instead.
+`--x`/`--y` anchor the crop window when the subject isn't centered.
+`check` measures the real file — dimensions, codecs, fps, duration limit,
+audio channels and integrated LUFS — and reports pass/fail per rule with
+a fix hint. Platforms: `tiktok`, `reels`, `shorts`, `youtube`.
 
 See [`skills/shorts-video/SKILL.md`](skills/shorts-video/SKILL.md) for the
 full script → captioned vertical-video workflow.

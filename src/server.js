@@ -150,6 +150,32 @@ server.tool(
 );
 
 server.tool(
+  "reframe",
+  "Reframe a video to a target aspect/size in one step (e.g. 16:9 to 9:16 vertical 1080x1920). mode crop cuts the target aspect out (centre, or x/y anchor); pad letterboxes with black bars; blur fills the empty area with a blurred copy of the frame.",
+  {
+    input: pathSchema,
+    output: pathSchema,
+    width: z.number().int().min(2).default(1080).describe("Target width in pixels (must be even)"),
+    height: z.number().int().min(2).default(1920).describe("Target height in pixels (must be even)"),
+    mode: z.enum(["crop", "pad", "blur"]).default("crop"),
+    x: z.number().int().min(0).optional().describe("Crop anchor: left offset of the crop window (crop mode only)"),
+    y: z.number().int().min(0).optional().describe("Crop anchor: top offset of the crop window (crop mode only)"),
+    blur: z.number().min(0).max(100).default(20).describe("Blur strength for the background fill (blur mode only)"),
+  },
+  async (a) => safe(() => core.reframe(a)),
+);
+
+server.tool(
+  "check",
+  "Verify a finished file against a platform delivery spec (tiktok, reels, shorts, youtube): dimensions, codecs, fps, duration limit, audio channels and measured loudness. Returns pass/fail per rule with fix hints. Run this before publishing.",
+  {
+    input: pathSchema,
+    platform: z.enum(["tiktok", "reels", "shorts", "youtube"]).default("tiktok"),
+  },
+  async (a) => safe(() => core.check(a)),
+);
+
+server.tool(
   "convert",
   "Change container or codec. Omit video_codec/audio_codec to stream-copy that stream. crf 23 is a good default for H.264.",
   {

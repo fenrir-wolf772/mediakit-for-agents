@@ -67,3 +67,53 @@ was re-run after the fix.
 - Loudness uses single-pass loudnorm; measured −14.43 LUFS vs −14 target. Good for speech/creator audio, not sample-exact broadcast mastering — documented.
 - `concat` re-encodes (slower but safe across mixed codecs) — documented.
 - Nothing was pushed to GitHub or published to npm. No accounts created.
+
+---
+
+## Unreleased (main, after 0.1.0) — verified 2026-11-10
+
+Environment: ffmpeg 8.1.2. Source: `test/source.mp4` — 1280×720, h264,
+30 fps, aac mono, 10.0 s, 243,932 bytes.
+
+### reframe (new tool)
+
+| Mode | Output | Dimensions | Duration | Size |
+|---|---|---|---|---|
+| crop | `outputs/reframe-crop.mp4` | 1080×1920 | 10.0 s | 409.0 KB |
+| pad | `outputs/reframe-pad.mp4` | 1080×1920 | 10.0 s | 227.6 KB |
+| blur | `outputs/reframe-blur.mp4` | 1080×1920 | 10.0 s | 554.6 KB |
+
+- Crop window computed from aspect: 404×720 at x=438 (centre) — even
+  dimensions, no overflow. `--x 0` anchors left (crop 404×720+0+0).
+- `--x 9999` correctly rejected: `x must be <= 876` (exit 2).
+
+### check (new tool)
+
+- `check reframe-crop.mp4 --platform tiktok`: 6/7 rules pass;
+  loudness fails honestly at **−21.8 LUFS** (quiet test tone).
+- `check source.mp4 --platform tiktok`: dimensions fail (1280×720 vs
+  1080×1920) + loudness fail — as expected.
+- Full loop `reframe crop → loudness -14 → check tiktok`: **pass: true**,
+  all 7 rules OK, measured **−14 LUFS**, 1080×1920, 30 fps, 10.1 s.
+- `check --platform shorts` / `youtube` also verified (fail correctly
+  on the un-normalized source).
+
+### Fixes found by testing this run
+
+- CLI parser rejected negative option values (`--target-lufs -14` was
+  read as a flag, `target_lufs must be <= 0, got: 1`). Fixed: a token
+  matching `-\d` after a `--flag` is now taken as its value.
+- `loudness` rejected video outputs (`.mp4` not in the audio format
+  list). Fixed: `.mp4/.mov/.m4v/.mkv` write AAC audio + copy video,
+  `.webm` writes Opus + copy video. Audio-only outputs unchanged
+  (verified `loudness … -o loud.mp3` still works).
+
+### Tests
+
+- `npm run check`: `node --check` clean on `src/core.js`,
+  `src/server.js`, `bin/mediakit.js`, `test/mcp-test.mjs`.
+- `npm test` (`test/mcp-test.mjs`): **all 13 tools present** in
+  `tools/list`; probe, trim, reframe, check calls succeed over MCP.
+- CI: `.github/workflows/ci.yml` (Node 20, ffmpeg from apt, `npm ci`,
+  syntax check, CLI smoke incl. `check … | grep '"pass": true'`,
+  MCP test). Not yet observed green on GitHub — first push will show it.

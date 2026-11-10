@@ -259,12 +259,16 @@ export async function thumbnail({ input, output, frames = 6, columns = 3, width 
 
 // ---------------------------------------------------------------- loudness
 
+// Video containers loudness can write: audio is re-encoded, video is
+// stream-copied (see loudness()).
+const VIDEO_CONTAINER_AUDIO = { mp4: "aac", mov: "aac", m4v: "aac", mkv: "aac", webm: "libopus" };
+
 export async function loudness({ input, output, targetLufs = -14, format = null }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const target = num(targetLufs, "target_lufs", { min: -70, max: 0 });
   const ext = (format || path.extname(outPath).slice(1) || "mp3").toLowerCase();
-  const codec = AUDIO_FORMATS[ext];
+  const codec = AUDIO_FORMATS[ext] ?? VIDEO_CONTAINER_AUDIO[ext];
   if (!codec) throw new MediaKitError(`unsupported audio format: ${ext}`, "INVALID_ARG");
   // Single-pass loudnorm: fast, good enough for speech/creator audio.
   // Two-pass is more precise; see SKILL.md if you need broadcast exactness.
@@ -339,6 +343,162 @@ export async function burnCaptions({ input, output, captions, fontSize = 24, fon
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
   return { operation: "burn_captions", input: inPath, output: outPath, captions: capPath, font_size: size, ...info, duration_seconds: out.duration_seconds };
+}
+
+// ---------------------------------------------------------------- reframe
+// One-step aspect reframe: 16:9 -> 9:16 (or any target aspect/size).
+// mode "crop": cut the target aspect out of the source (centre, or the
+// anchor x/y = top-left of the crop window), then scale to target size.
+// mode "pad": scale the whole frame to fit inside the target and add
+// black bars. mode "blur": same fit, but the empty area is filled with
+// a blurred, darkened copy of the frame (the Shorts/Reels look).
+
+export async function reframe({ input, output, width = 1080, height = 1920, mode = "crop", x = null, y = null, blur = 20 }) {
+  const inPath = await requireInput(input);
+  const outPath = await prepareOutput(output, [inPath]);
+  const tw = num(width, "width", { min: 2, integer: true });
+  const th = num(height, "height", { min: 2, integer: true });
+  if (tw % 2 !== 0 || th % 2 !== 0) throw new MediaKitError("reframe target width/height must be even (H.264 yuv420p)", "INVALID_ARG");
+  if (!["crop", "pad", "blur"].includes(mode)) throw new MediaKitError(`reframe mode must be crop, pad or blur, got: ${mode}`, "INVALID_ARG");
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("reframe needs a video input", "INVALID_ARG");
+  const sw = meta.video.width;
+  const sh = meta.video.height;
+  const targetAspect = tw / th;
+  const srcAspect = sw / sh;
+  let vf;
+  let cropRect = null;
+  if (mode === "crop") {
+    // Crop window with the target aspect, as large as fits in the source.
+    let cw, ch;
+    if (srcAspect > targetAspect) { ch = sh; cw = Math.floor((sh * targetAspect) / 2) * 2; }
+    else { cw = sw; ch = Math.floor((sw / targetAspect) / 2) * 2; }
+    const maxX = sw - cw;
+    const maxY = sh - ch;
+    const ox = x === null || x === undefined ? Math.floor(maxX / 2) : num(x, "x", { min: 0, max: maxX, integer: true });
+    const oy = y === null || y === undefined ? Math.floor(maxY / 2) : num(y, "y", { min: 0, max: maxY, integer: true });
+    cropRect = { width: cw, height: ch, x: ox, y: oy };
+    vf = `crop=${cw}:${ch}:${ox}:${oy},scale=${tw}:${th}`;
+  } else if (mode === "pad") {
+    vf = `scale=${tw}:${th}:force_original_aspect_ratio=decrease,pad=${tw}:${th}:(ow-iw)/2:(oh-ih)/2:black`;
+  } else {
+    const b = num(blur, "blur", { min: 0, max: 100 });
+    vf = `split[a][b];[a]scale=${tw}:${th}:force_original_aspect_ratio=increase,crop=${tw}:${th},gblur=sigma=${b},eq=brightness=-0.25[bg];[b]scale=${tw}:${th}:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2`;
+  }
+  await run(FFMPEG, [
+    "-y", "-i", inPath, "-vf", vf,
+    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "medium",
+    "-c:a", "copy", "-movflags", "+faststart", outPath,
+  ]);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  return {
+    operation: "reframe", input: inPath, output: outPath, mode,
+    target: `${tw}x${th}`, source: `${sw}x${sh}`,
+    ...(cropRect ? { crop: cropRect } : {}),
+    ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+    duration_seconds: out.duration_seconds,
+  };
+}
+
+// ---------------------------------------------------------------- check
+// Verify a finished file against a platform delivery spec. Measures the
+// real file (probe + loudnorm stats) and reports pass/fail per rule —
+// never trusts the filename or the tool that produced it.
+
+export const PLATFORMS = {
+  tiktok: {
+    label: "TikTok", width: 1080, height: 1920, maxDuration: 600,
+    videoCodecs: ["h264"], audioCodecs: ["aac"], maxChannels: 2,
+    lufs: [-16, -12], fps: [23, 61],
+  },
+  reels: {
+    label: "Instagram Reels", width: 1080, height: 1920, maxDuration: 900,
+    videoCodecs: ["h264"], audioCodecs: ["aac"], maxChannels: 2,
+    lufs: [-16, -12], fps: [23, 61],
+  },
+  shorts: {
+    label: "YouTube Shorts", width: 1080, height: 1920, maxDuration: 180,
+    videoCodecs: ["h264", "vp9", "av1"], audioCodecs: ["aac", "opus"], maxChannels: 2,
+    lufs: [-16, -12], fps: [23, 61],
+  },
+  youtube: {
+    label: "YouTube (long-form)", width: 1920, height: 1080, maxDuration: null,
+    videoCodecs: ["h264", "vp9", "av1"], audioCodecs: ["aac", "opus"], maxChannels: 2,
+    lufs: [-16, -12], fps: [23, 61],
+  },
+};
+
+/** Measure integrated loudness with a loudnorm analysis pass (no output file). */
+export async function measureLoudness(input) {
+  const { stderr } = await run(FFMPEG, [
+    "-i", input, "-vn",
+    "-af", "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json",
+    "-f", "null", "-",
+  ]);
+  const m = stderr.match(/\{[\s\S]*?"input_i"[\s\S]*?\}/);
+  if (!m) return null;
+  try {
+    const j = JSON.parse(m[0]);
+    const v = parseFloat(j.input_i);
+    return Number.isFinite(v) ? +v.toFixed(1) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function check({ input, platform = "tiktok" }) {
+  const inPath = await requireInput(input);
+  const spec = PLATFORMS[platform];
+  if (!spec) throw new MediaKitError(`unknown platform: ${platform} (supported: ${Object.keys(PLATFORMS).join(", ")})`, "INVALID_ARG");
+  const meta = await probe(inPath);
+  const checks = [];
+  const add = (name, expected, actual, pass, hint = null) =>
+    checks.push({ name, expected, actual, pass, ...(hint ? { hint } : {}) });
+
+  if (meta.video) {
+    add("dimensions", `${spec.width}x${spec.height}`,
+      `${meta.video.width}x${meta.video.height}`,
+      meta.video.width === spec.width && meta.video.height === spec.height,
+      `reframe to ${spec.width}x${spec.height} first`);
+    add("video_codec", spec.videoCodecs.join(" or "), meta.video.codec,
+      spec.videoCodecs.includes(meta.video.codec),
+      `convert with --video-codec ${spec.videoCodecs[0]}`);
+    if (meta.video.fps !== null) {
+      add("fps", `${spec.fps[0]}–${spec.fps[1] - 1} fps`, `${meta.video.fps} fps`,
+        meta.video.fps >= spec.fps[0] && meta.video.fps < spec.fps[1]);
+    }
+  } else {
+    add("dimensions", `${spec.width}x${spec.height}`, "no video stream", false);
+  }
+  if (meta.duration_seconds !== null && spec.maxDuration !== null) {
+    add("duration", `<= ${spec.maxDuration}s`, `${meta.duration_seconds}s`,
+      meta.duration_seconds <= spec.maxDuration,
+      "trim to fit the platform limit");
+  }
+  if (meta.audio) {
+    add("audio_codec", spec.audioCodecs.join(" or "), meta.audio.codec,
+      spec.audioCodecs.includes(meta.audio.codec));
+    add("audio_channels", `<= ${spec.maxChannels}`, String(meta.audio.channels ?? "?"),
+      (meta.audio.channels ?? 99) <= spec.maxChannels);
+    const lufs = await measureLoudness(inPath);
+    if (lufs !== null) {
+      add("loudness", `${spec.lufs[0]} to ${spec.lufs[1]} LUFS`, `${lufs} LUFS`,
+        lufs >= spec.lufs[0] && lufs <= spec.lufs[1],
+        "loudness to -14 LUFS first");
+    } else {
+      checks.push({ name: "loudness", expected: `${spec.lufs[0]} to ${spec.lufs[1]} LUFS`, actual: "could not measure", pass: false, hint: "check the audio stream" });
+    }
+  } else {
+    checks.push({ name: "audio", expected: "audio stream present", actual: "no audio stream", pass: false });
+  }
+  const failed = checks.filter((c) => !c.pass);
+  return {
+    operation: "check", input: inPath, platform, platform_label: spec.label,
+    pass: failed.length === 0,
+    checks,
+    ...(failed.length ? { issues: failed.map((c) => `${c.name}: ${c.actual} (want ${c.expected})${c.hint ? ` — ${c.hint}` : ""}`) } : {}),
+  };
 }
 
 // ---------------------------------------------------------------- convert

@@ -109,6 +109,28 @@ const COMMANDS = {
       ["-o, --output", "Output file (required)"],
     ],
   },
+  reframe: {
+    usage: "mediakit reframe <input> -o <output> [--width 1080] [--height 1920] [--mode crop|pad|blur] [--x <px>] [--y <px>] [--blur <n>]",
+    desc: "Reframe to a target aspect/size in one step (e.g. 16:9 -> 9:16 vertical).",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--width", "Target width in pixels (default 1080, must be even)"],
+      ["--height", "Target height in pixels (default 1920, must be even)"],
+      ["--mode", "crop (default) | pad (black bars) | blur (blurred fill)"],
+      ["--x", "Crop anchor: left offset (crop mode only)"],
+      ["--y", "Crop anchor: top offset (crop mode only)"],
+      ["--blur", "Blur strength for blur mode (default 20)"],
+      ["-o, --output", "Output file (required)"],
+    ],
+  },
+  check: {
+    usage: "mediakit check <input> [--platform tiktok|reels|shorts|youtube]",
+    desc: "Verify a file against a platform delivery spec (dimensions, codecs, duration, loudness).",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--platform", "Delivery platform (default tiktok)"],
+    ],
+  },
   convert: {
     usage: "mediakit convert <input> -o <output> [--video-codec <c>] [--audio-codec <c>] [--crf <n>] [--preset <p>]",
     desc: "Change container or codec. Omit a codec to stream-copy that stream.",
@@ -168,7 +190,10 @@ function parseArgs(argv) {
       if (eq !== -1) { opts[a.slice(2, eq).replace(/-/g, "_")] = a.slice(eq + 1); continue; }
       const key = a.slice(2).replace(/-/g, "_");
       const next = argv[i + 1];
-      if (next === undefined || next.startsWith("-")) { opts[key] = true; }
+      // A value may be a negative number (e.g. --target-lufs -14):
+      // it starts with "-" but is not a flag.
+      const nextIsNegativeNumber = next !== undefined && /^-\d/.test(next);
+      if (next === undefined || (next.startsWith("-") && !nextIsNegativeNumber)) { opts[key] = true; }
       else { opts[key] = next; i++; }
       continue;
     }
@@ -276,6 +301,22 @@ async function main() {
         });
         break;
       }
+      case "reframe":
+        result = await core.reframe({
+          input: needInput(), output: needOutput(opts),
+          width: numOpt(opts, "width") ?? 1080,
+          height: numOpt(opts, "height") ?? 1920,
+          mode: opts.mode ?? "crop",
+          x: numOpt(opts, "x") ?? null,
+          y: numOpt(opts, "y") ?? null,
+          blur: numOpt(opts, "blur") ?? 20,
+        });
+        break;
+      case "check":
+        result = await core.check({
+          input: needInput(), platform: opts.platform ?? "tiktok",
+        });
+        break;
       case "convert":
         result = await core.convert({
           input: needInput(), output: needOutput(opts),

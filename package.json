@@ -1,1 +1,46 @@
-{"author":"Fenrir","bin":{"mediakit":"./bin/mediakit.js"},"dependencies":{"@modelcontextprotocol/sdk":"^1.32.2","zod":"^3.25.0"},"description":"Professional media tools for coding agents: an MCP server + CLI wrapping ffmpeg — trim, crop, resize, captions, loudness, thumbnails, and more.","devDependencies":{},"engines":{"node":">=18"},"files":["bin","src","skills","README.md","LICENSE"],"homepage":"https://github.com/fenrir-wolf772/mediakit-for-agents#readme","keywords":["mcp","ffmpeg","media","video","audio","coding-agent","claude-code","cli"],"license":"MIT","name":"mediakit-for-agents","repository":{"type":"git","url":"https://github.com/fenrir-wolf772/mediakit-for-agents.git"},"scripts":{"check":"node --check src/core.js && node --check src/server.js && node --check bin/mediakit.js","start":"node bin/mediakit.js mcp"},"type":"module","version":"0.1.0"}
+{
+  "author": "Fenrir",
+  "bin": {
+    "mediakit": "./bin/mediakit.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^3.25.0"
+  },
+  "description": "Professional media tools for coding agents: an MCP server + CLI wrapping ffmpeg — trim, crop, resize, captions, loudness, thumbnails, and more.",
+  "devDependencies": {},
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin",
+    "src",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ],
+  "homepage": "https://github.com/fenrir-wolf772/mediakit-for-agents#readme",
+  "keywords": [
+    "mcp",
+    "ffmpeg",
+    "media",
+    "video",
+    "audio",
+    "coding-agent",
+    "claude-code",
+    "cli"
+  ],
+  "license": "MIT",
+  "name": "mediakit-for-agents",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fenrir-wolf772/mediakit-for-agents.git"
+  },
+  "scripts": {
+    "check": "node --check src/core.js && node --check src/server.js && node --check bin/mediakit.js",
+    "start": "node bin/mediakit.js mcp",
+    "test": "node test/mcp-test.mjs"
+  },
+  "type": "module",
+  "version": "0.1.0"
+}

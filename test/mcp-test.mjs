@@ -17,9 +17,9 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 11 tools present");
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 13 tools present");
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -37,5 +37,26 @@ const trimRes = await client.callTool({
   },
 });
 console.log("trim call:", trimRes.content[0].text.replace(/\n/g, " "));
+
+const reframeRes = await client.callTool({
+  name: "reframe",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    output: path.join(root, "outputs/mcp-reframe.mp4"),
+    width: 1080,
+    height: 1920,
+    mode: "crop",
+  },
+});
+console.log("reframe call:", reframeRes.content[0].text.replace(/\n/g, " "));
+
+const checkRes = await client.callTool({
+  name: "check",
+  arguments: {
+    input: path.join(root, "outputs/mcp-reframe.mp4"),
+    platform: "tiktok",
+  },
+});
+console.log("check call:", checkRes.content[0].text.replace(/\n/g, " "));
 await client.close();
 console.log("MCP test done");
