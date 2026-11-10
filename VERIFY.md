@@ -551,3 +551,85 @@ KHÔNG copy code của họ — chỉ học ý tưởng, tự implement bằng N
 - README (bảng 23 tools + đoạn fit/check), SKILL.md
   (rule 16 "fit the duration before you publish") đã cập nhật.
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+
+## Lượt 9 — 2026-11-10 (concat --fast auto-detect + tool pip, 24 tools)
+
+### Học: studiomeyer-io/mcp-video (5★, 8 tools gom nhóm, Node/TS)
+- `video_edit` gom nhiều op vào 1 tool (speed/crop/reverse/keyframe/
+  pip) → MediaKit giữ 1 tool/1 việc (đã có 24 tool riêng); không gom.
+- `video_compose social` — export 1 lần ra nhiều format đặt tên sẵn
+  (instagram-reel/feed/story, youtube-short, tiktok, linkedin) với
+  `maxDuration` cắt ngắn + strategy mặc định blur-background → ý
+  mới, backlog: tool `social` 1 lần ra đúng spec từng nền tảng
+  (reframe + loudness + check đã có sẵn, chỉ thiếu lớp gom).
+- `concat` normalize về size/fps đích + pad đen, kèm trim từng clip
+  (trimStart/trimEnd) → đã có normalize trong `concat --transition`;
+  per-clip trim là backlog nhỏ.
+- `generateIntro` — clip intro từ màu nền + drawtext fade in/out →
+  backlog nhỏ (hữu ích cho title card TikTok).
+- `FFMPEG_PATH`/`FFPROBE_PATH` honoured ở mọi chỗ spawn → MediaKit
+  đã có tương đương (`MEDIAKIT_FFMPEG`/`MEDIAKIT_FFPROBE`), không
+  cần thêm.
+- SSRF guard cho URL (`MCP_VIDEO_ALLOW_INTERNAL`) → MediaKit không
+  nhận URL, chỉ file local — không áp dụng.
+- Ý áp dụng lượt này: **PiP video-đè-video** (video_edit pip +
+  video-creator overlay_video) → đã làm tool `pip` mới; **concat
+  fast/slow auto-detect** (ý từ video-creator, củng cố bởi cách
+  mcp-video normalize trước khi nối) → đã làm `concat --fast`.
+  KHÔNG copy code của họ — chỉ học ý tưởng, tự implement bằng
+  Node/ffmpeg.
+
+### Làm
+- `concat --fast` (core+CLI+MCP): probe tất cả clip trước khi nối;
+  giống hệt nhau (codec, size, fps, pixel format, audio codec/rate/
+  channels, cùng họ container) thì demuxer stream-copy — nhanh,
+  không mất chất lượng; khác thì fallback re-encode demuxer (hành vi
+  cũ) và liệt kê mọi mismatch trong `fast_skipped`. `fast=true`
+  bắt buộc copy (lỗi kèm mismatch thay vì fallback lặng lẽ);
+  `fast=false` luôn re-encode; `--transition` không kết hợp được
+  với `--fast` (bị từ chối exit 2). Trả thêm `mode: fast|reencode`.
+- `pip` (core+CLI+MCP, tool thứ 24): video đè video — 9 vị trí đặt
+  tên, size theo `--width` hoặc `--scale` (mặc định 0.25 chiều rộng
+  chính), opacity, `--start`/`--end` (clip PiP loop bằng
+  `-stream_loop -1` nên không bao giờ hết trong cửa sổ), audio
+  `main|pip|mix` (amix, giữ nguyên mức). Kích thước ép chẵn
+  (yuv420p + overlay kỵ lẻ) và scale về đúng `pw x ph` đã tính để
+  `pip_size` báo cáo khớp pixel thật.
+- `doctor`: thêm tool `pip` (filters overlay/format/scale/
+  colorchannelmixer/amix, encoder libx264).
+
+### Bug bắt được khi verify
+- **PiP encode chạy vô hạn**: `-stream_loop -1` làm input PiP vô
+  hạn; filter overlay cứ kéo frame từ input đó dù main đã hết →
+  ffmpeg encode mãi không dừng (file phình 2.6 MB sau ~2 phút, CPU
+  142%). Fix: capping output bằng `-t <độ dài main>` (đo bằng probe)
+  — `-shortest` không đủ vì khi main không có audio thì chỉ còn
+  video vô hạn. Sau fix: pip 10s encode trong **4.5s**.
+  Bài học: input loop vô hạn + filter graph = phải có `-t` chặn
+  cứng, không dựa vào EOF của input chính.
+
+### Tests
+- `npm run check`: `node --check` sạch trên `src/core.js`,
+  `src/server.js`, `bin/mediakit.js`.
+- CLI: concat [source, source] `--fast` → **mode fast, 20.023s,
+  475.2 KB**; concat [source, source2] (auto) → **mode reencode,
+  16.037s, fast_skipped ["clip 2: size 640x360 != 1280x720"]**;
+  `--fast` trên cặp lệch → **exit 2**, lỗi nêu đúng mismatch.
+  Pip mặc định → **936,516, 320x180, 1280×720, 10s, 251.6 KB**,
+  encode 4.5s; pip mix top-left scale 0.5 opacity 0.8 window 2–8s →
+  **24,24, 640x360, 285.2 KB, 10s**; position lạ → exit 2.
+- Pixel-check thật (testsrc là pattern động nên phải so cùng điểm
+  đã map + cùng timestamp): tâm PiP @t=1 **[121,124,133]** khớp
+  tâm source2 **[127,127,127]**; ngoài PiP khớp main **[67,34,34]**;
+  cửa sổ mix: t=1 ẩn → main, t=5 hiện → blend 0.8 chính xác
+  **[55,170,203]** vs kỳ vọng [55,170,202]. Probe file mix: 1 video
+  h264 + 1 audio aac, 10s (amix đã gộp đúng).
+- `npm test`: **all 24 tools present**; assertions mới cho concat
+  fast (mode + 20s), concat auto (reencode + 16s + lý do size),
+  concat fast-fail (isError + lỗi nêu size), pip (936,516 /
+  320x180 / 1280×720 / 10s); `doctor` qua MCP: ok=true, **24/24
+  tools available** (pip available). Tổng **39/39 PASS, exit 0**.
+- README (bảng 24 tools + đoạn concat/pip), SKILL.md
+  (rule 17 "join identical clips with a copy, facecam with pip")
+  đã cập nhật.
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).

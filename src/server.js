@@ -147,7 +147,7 @@ server.tool(
 
 server.tool(
   "concat",
-  "Join 2+ media files into one. Re-encodes, so inputs may differ in codec or size. Set transition (e.g. fade, wipeleft, dissolve, circlecrop) to crossfade between clips instead of a hard cut — clips are normalized to the first clip's size/fps first, and the output is sum(durations) minus (n-1) x transition_duration.",
+  "Join 2+ media files into one. By default it probes the clips first: identical clips (codec, size, fps, audio) are stream-copied with no re-encoding (fast, lossless); differing clips are re-encoded so the join still works. Set fast=true to require the stream-copy path (errors with the exact mismatch if clips differ), or fast=false to always re-encode. Set transition (e.g. fade, wipeleft, dissolve, circlecrop) to crossfade between clips instead of a hard cut — clips are normalized to the first clip's size/fps first, and the output is sum(durations) minus (n-1) x transition_duration.",
   {
     inputs: z.array(z.string().min(1)).min(2).describe("Files in order"),
     output: pathSchema,
@@ -155,6 +155,7 @@ server.tool(
     audio_codec: z.string().default("aac"),
     transition: z.string().optional().describe("xfade transition between clips: fade, fadeblack, wipeleft, wiperight, slideleft, dissolve, pixelize, circlecrop, ... (omit for a hard cut)"),
     transition_duration: z.number().min(0.1).max(10).default(1).describe("Transition length in seconds (must be shorter than the shortest clip)"),
+    fast: z.boolean().optional().describe("true = require stream-copy (error if clips differ), false = always re-encode, omit = auto-detect (copy when identical, re-encode otherwise)"),
   },
   async (a) => safe(() => core.concat({
     inputs: a.inputs,
@@ -163,6 +164,7 @@ server.tool(
     audioCodec: a.audio_codec,
     transition: a.transition ?? null,
     transitionDuration: a.transition_duration,
+    fast: a.fast ?? null,
   })),
 );
 
@@ -346,6 +348,37 @@ server.tool(
     opacity: a.opacity,
     start: a.start ?? null,
     end: a.end ?? null,
+  })),
+);
+
+server.tool(
+  "pip",
+  "Picture-in-picture: place a second video over the main one. 9 named positions (corners, edges, center), size by width in pixels or by scale fraction of the main width (default 0.25), opacity 0-1, and start/end (seconds) show it only during that window — the PiP clip loops so it never runs out. Audio: main (default, PiP audio dropped), pip (PiP audio only), or mix (both mixed, levels kept).",
+  {
+    input: pathSchema,
+    pip: pathSchema.describe("Video to place on top"),
+    output: pathSchema,
+    position: z.enum(["top-left", "top-center", "top-right", "center-left", "center", "center-right", "bottom-left", "bottom-center", "bottom-right"]).default("bottom-right").describe("Placement (9 positions)"),
+    margin: z.number().int().min(0).default(24).describe("Margin from the edge in pixels"),
+    width: z.number().int().min(2).optional().describe("PiP width in pixels (keeps aspect; overrides scale)"),
+    scale: z.number().min(0.05).max(0.9).default(0.25).describe("PiP width as a fraction of the main video width (used when width is omitted)"),
+    opacity: z.number().min(0).max(1).default(1).describe("PiP opacity (0-1)"),
+    start: z.number().min(0).optional().describe("Show the PiP from this time in seconds"),
+    end: z.number().min(0).optional().describe("Hide the PiP after this time in seconds"),
+    audio: z.enum(["main", "pip", "mix"]).default("main").describe("Which audio to keep: main, pip, or mix (both)"),
+  },
+  async (a) => safe(() => core.pictureInPicture({
+    input: a.input,
+    pip: a.pip,
+    output: a.output,
+    position: a.position,
+    margin: a.margin,
+    width: a.width ?? null,
+    scale: a.scale,
+    opacity: a.opacity,
+    start: a.start ?? null,
+    end: a.end ?? null,
+    audio: a.audio,
   })),
 );
 

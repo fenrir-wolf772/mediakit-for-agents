@@ -27,10 +27,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 23 tools present");
-checkOk(missing.length === 0, "tools/list has all 23 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 24 tools present");
+checkOk(missing.length === 0, "tools/list has all 24 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -242,6 +242,63 @@ const fitJson = JSON.parse(fitRes.content[0].text);
 console.log("fit call: method", fitJson.method, "| factor", fitJson.speed_factor, "| target", fitJson.target_duration_seconds + "s", "| duration_actual", fitJson.duration_actual + "s", "| error", fitJson.duration_error_seconds + "s");
 checkOk(fitJson.method === "speed" && fitJson.speed_factor === 2, "fit speed factor is 2x", `got ${fitJson.speed_factor}`);
 checkOk(near(fitJson.duration_actual, 5, 0.05) && near(fitJson.duration_error_seconds, 0, 0.05), "fit lands on 5s (error ~0)", `got actual ${fitJson.duration_actual}s, error ${fitJson.duration_error_seconds}s`);
+
+// concat --fast: identical clips stream-copy (20s, no re-encode);
+// differing clips fall back to re-encode with the reason named;
+// fast=true on differing clips is an error, not a silent fallback.
+const concatFastRes = await client.callTool({
+  name: "concat",
+  arguments: {
+    inputs: [path.join(root, "test/source.mp4"), path.join(root, "test/source.mp4")],
+    output: path.join(root, "outputs/mcp-concat-fast.mp4"),
+    fast: true,
+  },
+});
+const concatFastJson = JSON.parse(concatFastRes.content[0].text);
+console.log("concat fast call: mode", concatFastJson.mode, "| duration", concatFastJson.duration_seconds, "|", concatFastJson.fast_reason);
+checkOk(concatFastJson.mode === "fast", "concat fast=true stream-copies identical clips", `got mode=${concatFastJson.mode}`);
+checkOk(near(concatFastJson.duration_seconds, 20, 0.1), "concat fast duration is 20s (10+10)", `got ${concatFastJson.duration_seconds}`);
+
+const concatAutoRes = await client.callTool({
+  name: "concat",
+  arguments: {
+    inputs: [path.join(root, "test/source.mp4"), path.join(root, "test/source2.mp4")],
+    output: path.join(root, "outputs/mcp-concat-auto.mp4"),
+  },
+});
+const concatAutoJson = JSON.parse(concatAutoRes.content[0].text);
+console.log("concat auto call: mode", concatAutoJson.mode, "| duration", concatAutoJson.duration_seconds, "| skipped:", JSON.stringify(concatAutoJson.fast_skipped));
+checkOk(concatAutoJson.mode === "reencode", "concat auto falls back to re-encode on differing clips", `got mode=${concatAutoJson.mode}`);
+checkOk(near(concatAutoJson.duration_seconds, 16, 0.1), "concat auto duration is 16s (10+6)", `got ${concatAutoJson.duration_seconds}`);
+checkOk(Array.isArray(concatAutoJson.fast_skipped) && concatAutoJson.fast_skipped.some((r) => r.includes("640x360")), "concat auto names the size mismatch", JSON.stringify(concatAutoJson.fast_skipped));
+
+const concatFastFailRes = await client.callTool({
+  name: "concat",
+  arguments: {
+    inputs: [path.join(root, "test/source.mp4"), path.join(root, "test/source2.mp4")],
+    output: path.join(root, "outputs/mcp-concat-fast-fail.mp4"),
+    fast: true,
+  },
+});
+const concatFastFailJson = JSON.parse(concatFastFailRes.content[0].text);
+console.log("concat fast-fail call: isError", concatFastFailRes.isError, "|", concatFastFailJson.error);
+checkOk(concatFastFailRes.isError === true && /size 640x360/.test(concatFastFailJson.error ?? ""), "concat fast=true errors on differing clips with the mismatch", JSON.stringify(concatFastFailJson));
+
+// pip: source2 (640x360) over source (1280x720) at default scale 0.25
+// -> 320x180 at bottom-right (936,516); output keeps 1280x720 / 10s.
+const pipRes = await client.callTool({
+  name: "pip",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    pip: path.join(root, "test/source2.mp4"),
+    output: path.join(root, "outputs/mcp-pip.mp4"),
+  },
+});
+const pipJson = JSON.parse(pipRes.content[0].text);
+console.log("pip call:", pipJson.position, pipJson.x + "," + pipJson.y, "|", pipJson.pip_size, "|", pipJson.dimensions, "|", pipJson.duration_seconds + "s");
+checkOk(pipJson.x === 936 && pipJson.y === 516 && pipJson.pip_size === "320x180", "pip default lands at 936,516 as 320x180", `got ${pipJson.x},${pipJson.y} ${pipJson.pip_size}`);
+checkOk(pipJson.dimensions === "1280x720" && near(pipJson.duration_seconds, 10, 0.05), "pip keeps 1280x720 / 10s", `got ${pipJson.dimensions} ${pipJson.duration_seconds}s`);
+
 await client.close();
 if (failures.length) {
   console.error(`\nMCP test FAILED: ${failures.length} assertion(s): ${failures.join("; ")}`);

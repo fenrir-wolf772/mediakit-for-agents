@@ -63,7 +63,7 @@ Then ask your agent things like:
 | `thumbnail` | Contact sheet of N evenly spaced frames | `mediakit thumbnail in.mp4 --frames 6 -o sheet.jpg` |
 | `frames` | Extract N evenly spaced frames as separate images, each with its timestamp — so an agent can look at a video before cutting it | `mediakit frames in.mp4 -o frames/ --count 6` |
 | `loudness` | Normalize to a loudness target (default −14 LUFS) | `mediakit loudness in.mp3 -o out.mp3` |
-| `concat` | Join 2+ files into one (re-encodes, mixed codecs OK); `--transition fade` crossfades between clips with xfade + acrossfade | `mediakit concat a.mp4 b.mp4 -o joined.mp4` |
+| `concat` | Join 2+ files into one; auto-detects identical clips and stream-copies them (fast, lossless), otherwise re-encodes; `--transition fade` crossfades between clips with xfade + acrossfade | `mediakit concat a.mp4 b.mp4 -o joined.mp4` |
 | `burn_captions` | Burn .srt/.ass/.vtt subtitles into the video | `mediakit burn-captions in.mp4 --captions subs.srt -o out.mp4` |
 | `reframe` | Reframe to a target aspect/size in one step (crop, pad, or blurred fill) | `mediakit reframe in.mp4 --mode crop -o vertical.mp4` |
 | `check` | Verify a file against a platform spec (tiktok/reels/shorts/youtube) | `mediakit check out.mp4 --platform tiktok` |
@@ -72,6 +72,7 @@ Then ask your agent things like:
 | `package` | Bundle a finished file for delivery: media + spec.json receipt + checksums.sha256 (+ captions) | `mediakit package out.mp4 -o delivery.zip --platform tiktok` |
 | `mix` | Mix voice over a music bed with sidechain ducking (bed drops under speech), then master to target LUFS; reports the ducking actually measured | `mediakit mix voice.mp3 --music bed.mp3 -o mixed.mp3` |
 | `overlay` | Overlay a logo/watermark image (named position, margin, scale, opacity, optional timing) | `mediakit overlay in.mp4 --image logo.png -o out.mp4 --position top-right` |
+| `pip` | Picture-in-picture: a second video over the main one (9 positions, size by width or scale, opacity, optional timing, audio main/pip/mix) | `mediakit pip main.mp4 --pip facecam.mp4 -o out.mp4 --position bottom-right` |
 | `scenes` | Detect scene changes / hard cuts; returns cut timestamps + segments (probe-only) | `mediakit scenes in.mp4` |
 | `keyframes` | List keyframe (I-frame) timestamps + GOP min/max/avg interval (probe-only) — check before a stream-copy trim | `mediakit keyframes in.mp4` |
 | `doctor` | Read-only preflight: ffmpeg version, filters/encoders, tool availability | `mediakit doctor` |
@@ -154,7 +155,16 @@ watermark on a video: named position (`top-right` default, `top-left`,
 `bottom-left`, `bottom-right`, `center`), `--margin`, `--width` (keeps
 aspect), `--opacity`, and `--start`/`--end` to show it only in a time
 window — x/y are computed from the probed frame size, never typed as
-filter expressions. `scenes` is probe-only: it lists hard cuts and the
+filter expressions. `pip` is the same idea for video-on-video
+(facecam/reaction): 9 positions, size by `--width` or `--scale`
+(fraction of the main width, default 0.25), `--opacity`, `--start`/`--end`,
+and `--audio main|pip|mix` — the PiP clip loops so it never runs out
+inside its window, and the output is capped at the main video's length.
+`concat` probes the clips first: when they are identical (codec, size,
+fps, pixel format, audio) it stream-copies them — fast and lossless —
+and otherwise re-encodes, naming every mismatch in `fast_skipped`;
+`--fast` requires the copy path (errors with the mismatch instead of
+falling back) and `--no-fast` always re-encodes. `scenes` is probe-only: it lists hard cuts and the
 segments between them so you trim on real boundaries; the default
 threshold 0.3 catches real cuts, and a hard cut between flat colours
 scores ~0.4, so keep the threshold at or below 0.4. `keyframes` is

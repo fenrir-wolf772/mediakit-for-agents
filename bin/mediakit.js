@@ -101,14 +101,16 @@ const COMMANDS = {
     ],
   },
   concat: {
-    usage: "mediakit concat <input1> <input2> [input3...] -o <output> [--video-codec <c>] [--audio-codec <c>] [--transition fade|wipeleft|dissolve|...] [--transition-duration <s>]",
-    desc: "Join 2+ media files into one (re-encodes, so mixed codecs are fine). --transition crossfades between clips instead of a hard cut.",
+    usage: "mediakit concat <input1> <input2> [input3...] -o <output> [--video-codec <c>] [--audio-codec <c>] [--transition fade|wipeleft|dissolve|...] [--transition-duration <s>] [--fast] [--no-fast]",
+    desc: "Join 2+ media files into one. Auto-detects: identical clips are stream-copied (fast, lossless), differing clips are re-encoded. --fast requires identical clips (errors otherwise), --no-fast always re-encodes. --transition crossfades between clips instead of a hard cut.",
     args: [{ name: "inputs", required: true, variadic: true }],
     options: [
       ["--video-codec", "Video codec (default libx264)"],
       ["--audio-codec", "Audio codec (default aac)"],
       ["--transition", "xfade transition between clips: fade, wipeleft, dissolve, circlecrop, ..."],
       ["--transition-duration", "Transition length in seconds (default 1, must be shorter than the shortest clip)"],
+      ["--fast", "Require stream-copy: error if the clips differ (default is auto-detect)"],
+      ["--no-fast", "Always re-encode, never stream-copy"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -226,6 +228,23 @@ const COMMANDS = {
       ["--opacity", "Overlay opacity 0-1 (default 1)"],
       ["--start", "Show the overlay from this time in seconds"],
       ["--end", "Hide the overlay after this time in seconds"],
+      ["-o, --output", "Output file (required)"],
+    ],
+  },
+  pip: {
+    usage: "mediakit pip <input> --pip <video> -o <output> [--position bottom-right|top-left|top-center|top-right|center-left|center|center-right|bottom-left|bottom-center] [--margin 24] [--width <px>] [--scale 0.25] [--opacity 1] [--start <s>] [--end <s>] [--audio main|pip|mix]",
+    desc: "Picture-in-picture: place a second video over the main one, with position, size, opacity, timing and audio choice.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--pip", "Video to place on top (required)"],
+      ["--position", "bottom-right (default) | 8 other corners/edges/center"],
+      ["--margin", "Margin from the edge in pixels (default 24)"],
+      ["--width", "PiP width in pixels (keeps aspect; overrides --scale)"],
+      ["--scale", "PiP width as a fraction of the main width (default 0.25)"],
+      ["--opacity", "PiP opacity 0-1 (default 1)"],
+      ["--start", "Show the PiP from this time in seconds"],
+      ["--end", "Hide the PiP after this time in seconds"],
+      ["--audio", "main (default) | pip | mix (both)"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -409,6 +428,7 @@ async function main() {
           audioCodec: opts.audio_codec ?? "aac",
           transition: opts.transition ?? null,
           transitionDuration: numOpt(opts, "transition_duration") ?? 1,
+          fast: opts.fast === true ? true : opts.fast === false ? false : null,
         });
         break;
       case "frames":
@@ -502,6 +522,21 @@ async function main() {
           opacity: numOpt(opts, "opacity") ?? 1,
           start: numOpt(opts, "start") ?? null,
           end: numOpt(opts, "end") ?? null,
+        });
+        break;
+      }
+      case "pip": {
+        if (!opts.pip) fail("missing required option: --pip <video>");
+        result = await core.pictureInPicture({
+          input: needInput(), pip: opts.pip, output: needOutput(opts),
+          position: opts.position ?? "bottom-right",
+          margin: numOpt(opts, "margin") ?? 24,
+          width: numOpt(opts, "width") ?? null,
+          scale: numOpt(opts, "scale") ?? 0.25,
+          opacity: numOpt(opts, "opacity") ?? 1,
+          start: opts.start ?? null,
+          end: opts.end ?? null,
+          audio: opts.audio ?? "main",
         });
         break;
       }

@@ -220,6 +220,23 @@ re-encode everything, so bitrate is a quality hint, not an upload
 requirement. The check result also reports the platform's text-safe
 zone: keep captions inside that rect, clear of the UI chrome.
 
+### 17. Join identical clips with a copy, facecam with pip
+`concat` probes the clips first and stream-copies when they match
+(codec, size, fps, pixel format, audio) — fast and lossless; when they
+differ it re-encodes and tells you why in `fast_skipped`. Read `mode`
+in the result: `fast` means no generation lost, `reencode` means the
+clips differed. Use `--fast` when the copy is required (it errors with
+the exact mismatch instead of silently re-encoding) and `--no-fast`
+when you want a fresh encode regardless. `--transition` always
+re-encodes and cannot combine with `--fast`. `pip` puts a second video
+over the main one (facecam, reaction, before/after): 9 positions,
+`--scale` (default 0.25 of the main width) or `--width`, `--opacity`,
+`--start`/`--end` for the window, and `--audio main|pip|mix`. The PiP
+clip loops inside its window, so a 6s facecam covers a 10s main clip.
+Verify a pip with `extract_frame` inside the PiP rect — the pixels
+there must match the PiP source at the same timestamp, not the main
+clip.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

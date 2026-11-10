@@ -494,6 +494,13 @@ export async function loudness({ input, output, targetLufs = -14, format = null 
 // rebuilt on ffmpeg directly): normalize every clip to the first
 // clip's size/fps in one filter graph, then chain xfade + acrossfade
 // pairwise. Output duration = sum(durations) - (n-1) * transition.
+// Fast mode (video-creator/ffmpeg-mcp's fast/slow concat idea, and
+// mcp-video's normalize-then-join): probe every clip first — when all
+// clips are identical (codec, size, fps, pixel format, audio) the
+// demuxer can stream-copy, which is ~10x faster and lossless. When
+// they differ, fall back to the re-encode demuxer. fast=null means
+// auto-detect, fast=true forces copy (errors with the mismatch
+// reasons), fast=false always re-encodes.
 
 const XFADE_TRANSITIONS = [
   "fade", "fadeblack", "fadewhite", "distance",
@@ -511,7 +518,7 @@ const XFADE_TRANSITIONS = [
   "coverleft", "coverright", "coverup", "coverdown",
 ];
 
-export async function concat({ inputs, output, videoCodec = "libx264", audioCodec = "aac", transition = null, transitionDuration = 1 }) {
+export async function concat({ inputs, output, videoCodec = "libx264", audioCodec = "aac", transition = null, transitionDuration = 1, fast = null }) {
   if (!Array.isArray(inputs) || inputs.length < 2) {
     throw new MediaKitError("concat needs at least 2 input files", "INVALID_ARG");
   }
@@ -519,25 +526,89 @@ export async function concat({ inputs, output, videoCodec = "libx264", audioCode
   for (const p of inputs) inPaths.push(await requireInput(p, "concat input"));
   const outPath = await prepareOutput(output, inPaths);
   if (transition !== null && transition !== undefined) {
+    if (fast === true) {
+      throw new MediaKitError("concat --fast (stream copy) cannot be combined with --transition — transitions need re-encoding", "INVALID_ARG");
+    }
     return concatTransition({ inPaths, outPath, videoCodec, audioCodec, transition, transitionDuration });
   }
-  // Concat demuxer with re-encode: safe across differing codecs/sizes.
+  // Probe once for the fast-path decision (also reused for the result).
+  const metas = [];
+  for (const p of inPaths) metas.push(await probe(p));
+  const compat = checkConcatCompat(metas);
+  const useFast = fast === true ? true : fast === false ? false : compat.ok;
+  if (fast === true && !compat.ok) {
+    throw new MediaKitError(`concat --fast needs identical clips, but: ${compat.reasons.join("; ")}`, "INVALID_ARG");
+  }
+  // Concat demuxer: stream-copy when clips match, re-encode otherwise.
   // The list file is written to a temp file in the output directory.
   const listPath = path.join(path.dirname(outPath), `.mediakit-concat-${Date.now()}.txt`);
   const { writeFile, unlink } = await import("node:fs/promises");
   const listContent = inPaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join("\n") + "\n";
   await writeFile(listPath, listContent, "utf8");
   try {
-    await run(FFMPEG, [
-      "-y", "-f", "concat", "-safe", "0", "-i", listPath,
-      "-c:v", videoCodec, "-c:a", audioCodec, "-movflags", "+faststart", outPath,
-    ]);
+    if (useFast) {
+      await run(FFMPEG, [
+        "-y", "-f", "concat", "-safe", "0", "-i", listPath,
+        "-c", "copy", "-movflags", "+faststart", outPath,
+      ]);
+    } else {
+      await run(FFMPEG, [
+        "-y", "-f", "concat", "-safe", "0", "-i", listPath,
+        "-c:v", videoCodec, "-c:a", audioCodec, "-movflags", "+faststart", outPath,
+      ]);
+    }
   } finally {
     await unlink(listPath).catch(() => {});
   }
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
-  return { operation: "concat", inputs: inPaths, output: outPath, parts: inPaths.length, ...info, duration_seconds: out.duration_seconds };
+  return {
+    operation: "concat", inputs: inPaths, output: outPath, parts: inPaths.length,
+    mode: useFast ? "fast" : "reencode",
+    ...(useFast
+      ? { fast_reason: "all clips identical (codec, size, fps, pixel format, audio) — stream-copied without re-encoding" }
+      : { fast_skipped: compat.reasons.length ? compat.reasons : ["fast mode disabled"] }),
+    ...info, duration_seconds: out.duration_seconds,
+  };
+}
+
+/**
+ * Stream-copy concat only works when every clip matches: same video
+ * codec/size/fps/pixel format and same audio presence/codec/rate/
+ * channels, in the same container family. Compare each clip against
+ * the first and collect every mismatch (not just the first) so the
+ * caller can see what to normalize.
+ */
+function checkConcatCompat(metas) {
+  const reasons = [];
+  const base = metas[0];
+  const fmt = (m) => (m.format ?? "").split(",")[0];
+  const vid = (m) => m.video;
+  const aud = (m) => m.audio;
+  const sameFps = (a, b) => a === b || (a !== null && b !== null && Math.abs(a - b) <= 0.01);
+  for (let i = 1; i < metas.length; i++) {
+    const m = metas[i];
+    const label = `clip ${i + 1}`;
+    if (fmt(m) !== fmt(base)) reasons.push(`${label}: container ${fmt(m)} != ${fmt(base)}`);
+    if (!vid(base) || !vid(m)) {
+      if (!!vid(base) !== !!vid(m)) reasons.push(`${label}: video presence differs`);
+    } else {
+      if (vid(m).codec !== vid(base).codec) reasons.push(`${label}: video codec ${vid(m).codec} != ${vid(base).codec}`);
+      if (vid(m).width !== vid(base).width || vid(m).height !== vid(base).height) {
+        reasons.push(`${label}: size ${vid(m).width}x${vid(m).height} != ${vid(base).width}x${vid(base).height}`);
+      }
+      if (!sameFps(vid(m).fps, vid(base).fps)) reasons.push(`${label}: fps ${vid(m).fps} != ${vid(base).fps}`);
+      if (vid(m).pixel_format !== vid(base).pixel_format) reasons.push(`${label}: pixel format ${vid(m).pixel_format} != ${vid(base).pixel_format}`);
+    }
+    if (!!aud(base) !== !!aud(m)) {
+      reasons.push(`${label}: audio presence differs`);
+    } else if (aud(base) && aud(m)) {
+      if (aud(m).codec !== aud(base).codec) reasons.push(`${label}: audio codec ${aud(m).codec} != ${aud(base).codec}`);
+      if (aud(m).sample_rate !== aud(base).sample_rate) reasons.push(`${label}: audio sample rate ${aud(m).sample_rate} != ${aud(base).sample_rate}`);
+      if (aud(m).channels !== aud(base).channels) reasons.push(`${label}: audio channels ${aud(m).channels} != ${aud(base).channels}`);
+    }
+  }
+  return { ok: reasons.length === 0, reasons };
 }
 
 /** concat with an xfade transition between every pair of clips. */
@@ -1085,6 +1156,7 @@ const TOOL_REQUIREMENTS = {
   scenes: { filters: ["select"] },
   keyframes: {},
   fit: { filters: ["setpts", "atempo"], encoders: ["libx264", "aac"] },
+  pip: { filters: ["overlay", "format", "scale", "colorchannelmixer", "amix"], encoders: ["libx264"] },
   doctor: {},
 };
 
@@ -1571,6 +1643,128 @@ export async function overlayImage({
     position, x, y, margin: m,
     overlay_size: `${ow}x${oh}`,
     opacity: op,
+    ...(s !== null ? { visible_from_seconds: s } : {}),
+    ...(e !== null ? { visible_until_seconds: e } : {}),
+    ...info,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+    duration_seconds: out.duration_seconds,
+  };
+}
+
+// ---------------------------------------------------------------- pip
+// Picture-in-picture: a second video over the main one (mcp-video's
+// video_edit pip + video-creator/ffmpeg-mcp's overlay_video idea,
+// rebuilt on ffmpeg directly). 9 named positions, size by width or by
+// fraction of the main width (default 1/4), opacity, optional time
+// window (the PiP clip loops with -stream_loop so it never runs out
+// inside the window), and audio: main (default, PiP audio dropped),
+// pip (PiP audio only), or mix (amix both, levels kept).
+
+const PIP_POSITIONS = [
+  "top-left", "top-center", "top-right",
+  "center-left", "center", "center-right",
+  "bottom-left", "bottom-center", "bottom-right",
+];
+
+export async function pictureInPicture({
+  input, pip, output,
+  position = "bottom-right", margin = 24, width = null, scale = 0.25,
+  opacity = 1, start = null, end = null, audio = "main",
+}) {
+  const inPath = await requireInput(input);
+  const pipPath = await requireInput(pip, "pip video");
+  const outPath = await prepareOutput(output, [inPath, pipPath]);
+  if (!PIP_POSITIONS.includes(position)) {
+    throw new MediaKitError(`pip position must be one of ${PIP_POSITIONS.join(", ")}, got: ${position}`, "INVALID_ARG");
+  }
+  const m = num(margin, "margin", { min: 0, integer: true });
+  const op = num(opacity, "opacity", { min: 0, max: 1 });
+  if (op === 0) throw new MediaKitError("opacity 0 would render nothing — use at least 0.05", "INVALID_ARG");
+  if (!["main", "pip", "mix"].includes(audio)) {
+    throw new MediaKitError(`pip audio must be main|pip|mix, got: ${audio}`, "INVALID_ARG");
+  }
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("pip needs a video input", "INVALID_ARG");
+  const pipMeta = await probe(pipPath);
+  if (!pipMeta.video) throw new MediaKitError("pip file must be a video", "INVALID_ARG");
+  const sw = meta.video.width;
+  const sh = meta.video.height;
+  const pwRaw = width === null || width === undefined
+    ? Math.round(sw * num(scale, "scale", { min: 0.05, max: 0.9 }))
+    : num(width, "width", { min: 2, integer: true });
+  // Keep even dimensions: yuv420p + overlay chroma subsampling
+  // misbehave on odd widths/heights. Scale to explicit pw x ph so the
+  // reported size is exactly what ffmpeg renders.
+  const pw = Math.max(2, pwRaw - (pwRaw % 2));
+  const phRaw = (pipMeta.video.height * pw) / pipMeta.video.width;
+  const ph = Math.max(2, 2 * Math.round(phRaw / 2));
+  if (pw + 2 * m > sw || ph + 2 * m > sh) {
+    throw new MediaKitError(`pip ${pw}x${ph} with margin ${m}px does not fit source ${sw}x${sh} — use a smaller --width/--scale or --margin`, "INVALID_ARG");
+  }
+  let s = null;
+  let e = null;
+  if (start !== null && start !== undefined) s = parseTime(start, "start");
+  if (end !== null && end !== undefined) e = parseTime(end, "end");
+  if (s !== null && e !== null && e <= s) throw new MediaKitError(`end (${e}) must be greater than start (${s})`, "INVALID_ARG");
+  const duration = meta.duration_seconds;
+  if (s !== null && duration !== null && s >= duration) {
+    throw new MediaKitError(`start (${s}) is past the end of the video (${duration}s)`, "INVALID_ARG");
+  }
+  if (e !== null && duration !== null && e > duration) e = duration;
+  const x = position.endsWith("left") ? m
+    : position.endsWith("right") ? sw - pw - m
+    : Math.floor((sw - pw) / 2);
+  const y = position.startsWith("top") ? m
+    : position.startsWith("bottom") ? sh - ph - m
+    : Math.floor((sh - ph) / 2);
+  let enable = "";
+  if (s !== null && e !== null) enable = `:enable=between(t\\,${s}\\,${e})`;
+  else if (s !== null) enable = `:enable=gte(t\\,${s})`;
+  else if (e !== null) enable = `:enable=lte(t\\,${e})`;
+  const graph = `[1:v]scale=${pw}:${ph},format=rgba${op < 1 ? `,colorchannelmixer=aa=${op}` : ""}[pipv];[0:v][pipv]overlay=${x}:${y}${enable}[out]`;
+  // Audio: main = copy main audio (PiP audio dropped); pip = PiP audio
+  // only; mix = amix both, falling back to whichever stream exists.
+  // The PiP input loops forever (-stream_loop -1), so the output MUST
+  // be capped with -t (main duration): without it the overlay filter
+  // keeps pulling frames from the infinite loop and ffmpeg never ends.
+  const mainAudio = Boolean(meta.audio);
+  const pipAudio = Boolean(pipMeta.audio);
+  let audioArgs = [];
+  let audioFilter = null;
+  if (audio === "main") {
+    audioArgs = ["-map", "0:a?", "-c:a", "copy"];
+  } else if (audio === "pip") {
+    if (!pipAudio) throw new MediaKitError("pip audio=pip needs audio in the pip video", "INVALID_ARG");
+    audioArgs = ["-map", "1:a", "-c:a", "aac"];
+  } else {
+    if (mainAudio && pipAudio) {
+      audioFilter = "[0:a][1:a]amix=inputs=2:normalize=0[aout]";
+      audioArgs = ["-map", "[aout]", "-c:a", "aac"];
+    } else if (mainAudio) {
+      audioArgs = ["-map", "0:a", "-c:a", "copy"];
+    } else if (pipAudio) {
+      audioArgs = ["-map", "1:a", "-c:a", "aac"];
+    } else {
+      audioArgs = [];
+    }
+  }
+  const filterComplex = audioFilter ? `${graph};${audioFilter}` : graph;
+  const durationArgs = duration !== null ? ["-t", String(duration)] : [];
+  await run(FFMPEG, [
+    "-y", "-i", inPath, "-stream_loop", "-1", "-i", pipPath,
+    "-filter_complex", filterComplex, "-map", "[out]", ...audioArgs,
+    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "medium",
+    "-movflags", "+faststart", ...durationArgs, outPath,
+  ]);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  return {
+    operation: "pip",
+    input: inPath, pip: pipPath, output: outPath,
+    position, x, y, margin: m,
+    pip_size: `${pw}x${ph}`,
+    opacity: op,
+    audio,
     ...(s !== null ? { visible_from_seconds: s } : {}),
     ...(e !== null ? { visible_until_seconds: e } : {}),
     ...info,
