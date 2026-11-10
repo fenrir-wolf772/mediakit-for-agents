@@ -23,6 +23,12 @@ video or audio file, and instead of writing one-off ffmpeg shell commands.
 - **Before publishing to TikTok / Reels / Shorts / YouTube**: `check`
   — verifies dimensions, codecs, duration limit and measured loudness
   against the platform spec, with a fix hint per failed rule.
+- **Source may have black bars**: `cropdetect` — measures the
+  letterbox/pillarbox and returns the exact crop rectangle plus a
+  ready-to-run `crop` command. Run it before `crop`/`reframe`.
+- **Delivering a finished file**: `package` — a ZIP with the media,
+  a `spec.json` receipt (measured probe + loudness + platform check),
+  `checksums.sha256`, and the captions sidecar when given.
 - **First run on a new machine, or a tool fails oddly**: `doctor` —
   read-only preflight; a tool listed `available: false` will fail at
   runtime because its ffmpeg filter/encoder is missing.
@@ -121,14 +127,26 @@ re-mux). Pass `--video-codec libx264` only when you actually need to change
 the codec. CRF 23 is a good default for H.264; 18–20 for near-lossless,
 28+ for small files.
 
+### 10. Measure bars before you crop; package last
+`cropdetect` samples frames across the whole file (not just the start,
+where a fade-in would bias the crop too tight) and reports the most
+common rectangle. If `distinct_values` shows several different rects,
+the aspect changes mid-clip — crop per segment instead of once.
+`package` is the final step after `check` passes: the ZIP's `spec.json`
+records the measured probe, loudness, and platform check, so the bundle
+itself proves what was delivered. Verify with `sha256sum -c` after
+unzipping; never re-zip by hand (the checksums would no longer match).
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.
-2. `reframe --mode crop` to 1080×1920 (or `--mode blur` for the blurred-fill look).
-3. Write an SRT from the script/voiceover.
-4. `burn_captions` with a large font size.
-5. `loudness` to −14 LUFS.
-6. `check --platform tiktok` — all rules must pass.
-7. `extract_frame` at a mid timestamp to verify the captions actually render.
+2. `cropdetect` — if it reports black bars, `crop` to the suggested rectangle first.
+3. `reframe --mode crop` to 1080×1920 (or `--mode blur` for the blurred-fill look).
+4. Write an SRT from the script/voiceover.
+5. `burn_captions` with a large font size.
+6. `loudness` to −14 LUFS.
+7. `check --platform tiktok` — all rules must pass.
+8. `extract_frame` at a mid timestamp to verify the captions actually render.
+9. `package` the finished file with `--platform tiktok` and the captions — the delivery ZIP.
 
 See `skills/shorts-video/SKILL.md` for the full scripted workflow.

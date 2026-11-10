@@ -17,9 +17,9 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 15 tools present");
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 17 tools present");
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -78,5 +78,27 @@ const silenceRes = await client.callTool({
 });
 const silenceJson = JSON.parse(silenceRes.content[0].text);
 console.log("silence call: duration", silenceJson.duration_before, "->", silenceJson.duration_after, "| removed", silenceJson.removed_seconds, "s in", silenceJson.removed_count, "gaps");
+
+const cropdetectRes = await client.callTool({
+  name: "cropdetect",
+  arguments: {
+    input: path.join(root, "test/letterbox.mp4"),
+    frames: 10,
+  },
+});
+const cropdetectJson = JSON.parse(cropdetectRes.content[0].text);
+console.log("cropdetect call: source", cropdetectJson.source, "| crop", JSON.stringify(cropdetectJson.crop), "| bars", JSON.stringify(cropdetectJson.black_bars));
+
+const packageRes = await client.callTool({
+  name: "package",
+  arguments: {
+    input: path.join(root, "outputs/mcp-reframe.mp4"),
+    output: path.join(root, "outputs/mcp-package.zip"),
+    captions: path.join(root, "test/captions.srt"),
+    platform: "tiktok",
+  },
+});
+const packageJson = JSON.parse(packageRes.content[0].text);
+console.log("package call: files", packageJson.files.join(", "), "| platform_pass", packageJson.platform_pass, "| size", packageJson.size_human);
 await client.close();
 console.log("MCP test done");

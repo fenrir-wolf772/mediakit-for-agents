@@ -155,6 +155,25 @@ const COMMANDS = {
       ["-o, --output", "Output file (required unless --detect-only)"],
     ],
   },
+  cropdetect: {
+    usage: "mediakit cropdetect <input> [--frames <n>] [--limit <n>]",
+    desc: "Measure letterbox/pillarbox black bars; returns the crop rectangle + a ready crop command.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--frames", "Frames to sample (default 30)"],
+      ["--limit", "Black threshold 0-255 (default 24)"],
+    ],
+  },
+  package: {
+    usage: "mediakit package <input> -o <output.zip> [--captions <file.srt|ass|vtt>] [--platform tiktok|reels|shorts|youtube]",
+    desc: "Bundle a finished file for delivery: media + spec.json receipt + checksums.sha256 (+ captions).",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--captions", "Subtitle file .srt/.ass/.vtt to include"],
+      ["--platform", "Run check for this platform and record it in spec.json"],
+      ["-o, --output", "Output .zip file (required)"],
+    ],
+  },
   doctor: {
     usage: "mediakit doctor",
     desc: "Read-only preflight: ffmpeg/ffprobe versions, available filters/encoders, and which tools that enables.",
@@ -356,6 +375,20 @@ async function main() {
         });
         break;
       }
+      case "cropdetect":
+        result = await core.cropdetect({
+          input: needInput(),
+          frames: numOpt(opts, "frames") ?? 30,
+          limit: numOpt(opts, "limit") ?? 24,
+        });
+        break;
+      case "package":
+        result = await core.packageDelivery({
+          input: needInput(), output: needOutput(opts),
+          captions: opts.captions ?? null,
+          platform: opts.platform ?? null,
+        });
+        break;
       case "doctor":
         result = await core.doctor();
         break;

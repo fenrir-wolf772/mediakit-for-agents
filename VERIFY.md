@@ -157,3 +157,56 @@ tone 440 Hz chỉ ở [0,2), [4,6), [7,9); lặng ở [2,4), [6,7)
 - README (bảng 15 tools + đoạn silence/doctor), SKILL.md (rule 6
   "detect silence before you cut it" + mục doctor) đã cập nhật.
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+
+---
+
+## Lượt 3 — 2026-11-10 (cropdetect + package, 17 tools)
+
+Environment: ffmpeg/ffprobe 8.1.2, Node v24.22.1. Fixture mới:
+`test/letterbox.mp4` — 1920×1080, 30 fps, h264 + aac, 10.0 s:
+`test/source.mp4` (1280×720) pad đen thành 1920×1080, nội dung thật
+ở 1280×720+320+180.
+
+### cropdetect (new tool)
+
+| Case | Command | Result |
+|---|---|---|
+| letterbox | `cropdetect test/letterbox.mp4 --frames 10` | **Chính xác tuyệt đối: crop 1280:720:320:180**, bars top/bottom 180, left/right 320; 8/10 frames đồng thuận; suggested command `mediakit crop letterbox.mp4 --width 1280 --height 720 --x 320 --y 180 -o cropped.mp4` |
+| full-frame | `cropdetect test/source.mp4 --frames 10` | crop 1280:720:0:0, `has_black_bars: false` |
+| audio-only | `cropdetect test/silence-audio.mp3` | Từ chối đúng: `cropdetect needs a video input` (exit 2) |
+
+- Suggested crop command đã chạy thử: `crop … -o outputs/cropped.mp4`
+  → probe xác nhận **1280×720, 10.0 s**.
+- Bug bắt được khi test: lần đầu tool chỉ sample N frame đầu file —
+  source có fade-in tối nên mode ra 1224:720:376:180 (sai, không ổn
+  định: 9 giá trị khác nhau trên 10 frame). Fix: sample đều khắp file
+  bằng `select='not(mod(n\,step))'` trước `cropdetect`; sau fix mode
+  1280:720:320:180 trên 51/60 frame khi sample 60.
+
+### package (new tool)
+
+ZIP writer thuần Node (stored entries, CRC32 tự viết — không thêm
+dependency, không cần binary `zip` ngoài). Bundle gồm media +
+`spec.json` (probe đo thật + LUFS + kết quả check platform) +
+`checksums.sha256` + captions khi có.
+
+| Case | Command | Result |
+|---|---|---|
+| audio + captions + platform | `package outputs/source-loud.mp3 -o outputs/delivery.zip --captions test/captions.srt --platform tiktok` | ZIP 81.0 KB, 4 files; LUFS đo thật **−14.4**; `platform_pass: false` — đúng, vì mp3 không có video stream (spec.json ghi rõ từng rule fail) |
+| video happy path | `reframe crop → loudness -14 → package outputs/vert-loud.mp4 -o outputs/vert-delivery.zip --captions … --platform tiktok` | ZIP **412.2 KB**, 4 files; LUFS **−14.0**; **`platform_pass: true`** |
+| verify độc lập | `unzip` + `sha256sum -c checksums.sha256` trong /tmp | **3/3 OK** (media, captions.srt, spec.json); hash media trong ZIP khớp file gốc `4c33f4ff…` |
+| error cases | `package … -o bad.txt` | Từ chối đúng: `package output must end in .zip` (exit 2) |
+
+### Tests
+
+- `npm run check`: `node --check` sạch trên `src/core.js`,
+  `src/server.js`, `bin/mediakit.js`, `test/mcp-test.mjs`.
+- `npm test`: **all 17 tools present**; `cropdetect` qua MCP trả đúng
+  1280:720:320:180; `package` qua MCP: 4 files, platform_pass false
+  (đúng — file mcp-reframe chưa normalize loudness, −21.8 LUFS);
+  `doctor` qua MCP: ok=true, **17/17 tools available** (cropdetect
+  filter có mặt).
+- README (bảng 17 tools + demo bước 5 package + đoạn cropdetect/
+  package), SKILL.md (mục cropdetect/package + rule 10 + workflow
+  9 bước) đã cập nhật.
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).

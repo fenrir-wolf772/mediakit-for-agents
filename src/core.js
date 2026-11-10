@@ -5,9 +5,12 @@
  * interpreted as a shell command.
  */
 import { execFile } from "node:child_process";
-import { access, mkdir, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
+
+export const MEDIAKIT_VERSION = "0.1.0";
 
 export const FFMPEG = process.env.MEDIAKIT_FFMPEG || "ffmpeg";
 export const FFPROBE = process.env.MEDIAKIT_FFPROBE || "ffprobe";
@@ -676,7 +679,7 @@ export async function silence({ input, output = null, thresholdDb = -40, minDura
 
 const DOCTOR_FILTERS = [
   "silencedetect", "loudnorm", "subtitles", "ass", "scale", "crop",
-  "gblur", "trim", "atrim", "concat", "select", "tile", "pad", "overlay",
+  "cropdetect", "gblur", "trim", "atrim", "concat", "select", "tile", "pad", "overlay",
   "drawtext", "volume",
 ];
 const DOCTOR_ENCODERS = [
@@ -701,6 +704,8 @@ const TOOL_REQUIREMENTS = {
   check: { filters: ["loudnorm"] },
   convert: { encoders: ["libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4"] },
   silence: { filters: ["silencedetect", "trim", "atrim", "concat"], encoders: ["libx264", "aac"] },
+  cropdetect: { filters: ["cropdetect"] },
+  package: {},
   doctor: {},
 };
 
@@ -741,5 +746,228 @@ export async function doctor() {
     encoders,
     tools,
     ok: allOk,
+  };
+}
+
+// ---------------------------------------------------------------- cropdetect
+// Measure letterbox/pillarbox bars with the cropdetect filter, so a
+// crop/reframe starts from a measured rectangle instead of a guess.
+// Samples frames across the file and reports the most common crop
+// rectangle (mode) plus the distinct values seen, so a caller can tell
+// a constant letterbox apart from a scene that changes aspect.
+
+export async function cropdetect({ input, frames = 30, limit = 24 }) {
+  const inPath = await requireInput(input);
+  const n = num(frames, "frames", { min: 1, max: 300, integer: true });
+  const lim = num(limit, "limit", { min: 0, max: 255, integer: true });
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("cropdetect needs a video input", "INVALID_ARG");
+  // Sample evenly across the whole file: the first frames of a clip are
+  // often a fade-in / dark intro, so sampling only the start biases the
+  // result toward a too-tight crop.
+  const fps = meta.video.fps || 30;
+  const totalFrames = Math.max(1, Math.floor((meta.duration_seconds ?? 0) * fps));
+  const step = Math.max(1, Math.floor(totalFrames / n));
+  const { stderr } = await run(FFMPEG, [
+    "-i", inPath,
+    "-vf", `select='not(mod(n\\,${step}))',cropdetect=limit=${lim}:round=2:reset=0`,
+    "-frames:v", String(n), "-f", "null", "-",
+  ]);
+  const counts = new Map();
+  for (const line of stderr.split("\n")) {
+    const m = line.match(/crop=(\d+):(\d+):(\d+):(\d+)/);
+    if (!m) continue;
+    const key = m.slice(1).join(":");
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  if (counts.size === 0) {
+    throw new MediaKitError("cropdetect found no crop values (is the video black?)", "PROBE_FAILED");
+  }
+  const ranked = [...counts.entries()]
+    .map(([key, count]) => {
+      const [width, height, x, y] = key.split(":").map(Number);
+      return { width, height, x, y, frames: count };
+    })
+    .sort((a, b) => b.frames - a.frames);
+  const best = ranked[0];
+  const sw = meta.video.width;
+  const sh = meta.video.height;
+  const hasBars = best.width !== sw || best.height !== sh;
+  return {
+    operation: "cropdetect",
+    input: inPath,
+    source: `${sw}x${sh}`,
+    frames_sampled: n,
+    crop: { width: best.width, height: best.height, x: best.x, y: best.y },
+    has_black_bars: hasBars,
+    black_bars: {
+      top: best.y,
+      bottom: sh - best.y - best.height,
+      left: best.x,
+      right: sw - best.x - best.width,
+    },
+    distinct_values: ranked.slice(0, 3).map(({ width, height, x, y, frames: f }) =>
+      ({ crop: `${width}:${height}:${x}:${y}`, frames: f })),
+    ...(hasBars ? {
+      suggested_crop_command: `mediakit crop ${path.basename(inPath)} --width ${best.width} --height ${best.height} --x ${best.x} --y ${best.y} -o cropped.mp4`,
+    } : {}),
+  };
+}
+
+// ---------------------------------------------------------------- package
+// Delivery bundle (video-edit-mcp's export.package idea + kinocut's
+// Video Receipt): a ZIP with the finished media, a spec.json receipt
+// (measured probe + loudness + optional platform check, so the bundle
+// proves what was delivered), checksums.sha256, and the captions sidecar
+// when given. The ZIP is written by a small pure-Node writer (stored
+// entries, no compression — media is already compressed) so no new
+// dependency and no external `zip` binary are needed.
+
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(buf) {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function dosDateTime(d = new Date()) {
+  const time = ((d.getHours() & 0x1f) << 11) | ((d.getMinutes() & 0x3f) << 5) | ((d.getSeconds() >> 1) & 0x1f);
+  const date = (((d.getFullYear() - 1980) & 0x7f) << 9) | (((d.getMonth() + 1) & 0xf) << 5) | (d.getDate() & 0x1f);
+  return { time, date };
+}
+
+/** Build a ZIP (stored entries) from [{ name, data: Buffer }]. */
+function buildZip(entries) {
+  const { time, date } = dosDateTime();
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+  for (const { name, data } of entries) {
+    const nameBuf = Buffer.from(name, "utf8");
+    const crc = crc32(data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4); // version needed
+    local.writeUInt16LE(0, 6); // flags
+    local.writeUInt16LE(0, 8); // method: stored
+    local.writeUInt16LE(time, 10);
+    local.writeUInt16LE(date, 12);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(nameBuf.length, 26);
+    local.writeUInt16LE(0, 28);
+    locals.push(local, nameBuf, data);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4); // version made by
+    central.writeUInt16LE(20, 6); // version needed
+    central.writeUInt16LE(0, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt16LE(time, 12);
+    central.writeUInt16LE(date, 14);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(data.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(nameBuf.length, 28);
+    central.writeUInt16LE(0, 30); // extra
+    central.writeUInt16LE(0, 32); // comment
+    central.writeUInt16LE(0, 34); // disk
+    central.writeUInt16LE(0, 36); // internal attrs
+    central.writeUInt32LE(0, 38); // external attrs
+    central.writeUInt32LE(offset, 42);
+    centrals.push(central, nameBuf);
+    offset += local.length + nameBuf.length + data.length;
+  }
+  const cdSize = centrals.reduce((s, b) => s + b.length, 0);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0, 4);
+  end.writeUInt16LE(0, 6);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(cdSize, 12);
+  end.writeUInt32LE(offset, 16);
+  end.writeUInt16LE(0, 20);
+  return Buffer.concat([...locals, ...centrals, end]);
+}
+
+export async function packageDelivery({ input, output, captions = null, platform = null }) {
+  const inPath = await requireInput(input);
+  const outPath = await prepareOutput(output, [inPath]);
+  if (!outPath.toLowerCase().endsWith(".zip")) {
+    throw new MediaKitError(`package output must end in .zip, got: ${output}`, "INVALID_ARG");
+  }
+  const mediaName = path.basename(inPath);
+  const mediaData = await readFile(inPath);
+  const mediaSha = createHash("sha256").update(mediaData).digest("hex");
+  const meta = await probe(inPath);
+  const lufs = meta.audio ? await measureLoudness(inPath) : null;
+  let checkResult = null;
+  if (platform) {
+    if (!PLATFORMS[platform]) {
+      throw new MediaKitError(`unknown platform: ${platform} (supported: ${Object.keys(PLATFORMS).join(", ")})`, "INVALID_ARG");
+    }
+    checkResult = await check({ input: inPath, platform });
+  }
+  const files = [{ name: mediaName, data: mediaData, sha256: mediaSha }];
+  let captionsName = null;
+  if (captions) {
+    const capPath = await requireInput(captions, "captions file");
+    const capExt = path.extname(capPath).toLowerCase();
+    if (![".srt", ".ass", ".vtt"].includes(capExt)) {
+      throw new MediaKitError(`captions must be .srt/.ass/.vtt, got ${capExt}`, "INVALID_ARG");
+    }
+    const capData = await readFile(capPath);
+    captionsName = path.basename(capPath);
+    files.push({
+      name: captionsName,
+      data: capData,
+      sha256: createHash("sha256").update(capData).digest("hex"),
+    });
+  }
+  const spec = {
+    tool: "mediakit-for-agents",
+    mediakit_version: MEDIAKIT_VERSION,
+    created_at: new Date().toISOString(),
+    media: mediaName,
+    ...(captionsName ? { captions: captionsName } : {}),
+    probe: meta,
+    loudness_lufs: lufs,
+    ...(checkResult ? { platform_check: { platform, pass: checkResult.pass, checks: checkResult.checks } } : {}),
+  };
+  const specData = Buffer.from(JSON.stringify(spec, null, 2) + "\n", "utf8");
+  files.push({
+    name: "spec.json",
+    data: specData,
+    sha256: createHash("sha256").update(specData).digest("hex"),
+  });
+  const checksumLines = files
+    .map((f) => `${f.sha256}  ${f.name}\n`)
+    .join("");
+  const checksumData = Buffer.from(checksumLines, "utf8");
+  files.push({ name: "checksums.sha256", data: checksumData, sha256: null });
+  const zipData = buildZip(files.map(({ name, data }) => ({ name, data })));
+  await writeFile(outPath, zipData);
+  const info = await fileInfo(outPath);
+  return {
+    operation: "package",
+    input: inPath,
+    output: outPath,
+    ...info,
+    files: files.map((f) => f.name),
+    media_sha256: mediaSha,
+    loudness_lufs: lufs,
+    ...(checkResult ? { platform: checkResult.platform, platform_pass: checkResult.pass } : {}),
+    verify_hint: `unzip -l ${path.basename(outPath)} && sha256sum -c <(unzip -p ${path.basename(outPath)} checksums.sha256)`,
   };
 }

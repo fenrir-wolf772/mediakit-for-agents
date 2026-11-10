@@ -211,6 +211,29 @@ server.tool(
 );
 
 server.tool(
+  "cropdetect",
+  "Measure letterbox/pillarbox black bars with the cropdetect filter: samples frames and returns the most common crop rectangle plus a ready-to-run mediakit crop command. Run before crop/reframe when the source may have black bars.",
+  {
+    input: pathSchema,
+    frames: z.number().int().min(1).max(300).default(30).describe("Frames to sample across the file"),
+    limit: z.number().int().min(0).max(255).default(24).describe("Black threshold (0-255, higher = stricter)"),
+  },
+  async (a) => safe(() => core.cropdetect(a)),
+);
+
+server.tool(
+  "package",
+  "Bundle a finished file for delivery: a ZIP with the media, spec.json (measured probe + loudness + optional platform check receipt), checksums.sha256, and the captions sidecar when given. Run after check passes, before publishing.",
+  {
+    input: pathSchema,
+    output: pathSchema.describe("Output .zip path"),
+    captions: pathSchema.optional().describe("Optional .srt/.ass/.vtt file to include in the bundle"),
+    platform: z.enum(["tiktok", "reels", "shorts", "youtube"]).optional().describe("If given, run check for this platform and record the result in spec.json"),
+  },
+  async (a) => safe(() => core.packageDelivery(a)),
+);
+
+server.tool(
   "doctor",
   "Read-only environment preflight: ffmpeg/ffprobe versions, which filters and encoders this build has, and which mediakit tools that enables. Run first on a new machine — a tool that reports available=false will fail at runtime.",
   {},

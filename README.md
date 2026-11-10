@@ -3,7 +3,7 @@
 Give your coding agent eyes and ears for media. MediaKit is a small MCP
 server + CLI that wraps **ffmpeg** — trim, crop, resize, captions, loudness,
 thumbnails, frame grabs, audio extraction, concat, conversion, silence
-removal, and an environment preflight — so an
+removal, black-bar measurement, delivery packaging, and an environment preflight — so an
 agent can actually *work* with video and audio instead of guessing.
 
 > Coding agents are blind and deaf to media. They can read a 10,000-line
@@ -64,6 +64,8 @@ Then ask your agent things like:
 | `reframe` | Reframe to a target aspect/size in one step (crop, pad, or blurred fill) | `mediakit reframe in.mp4 --mode crop -o vertical.mp4` |
 | `check` | Verify a file against a platform spec (tiktok/reels/shorts/youtube) | `mediakit check out.mp4 --platform tiktok` |
 | `silence` | Remove silent stretches, keeping a margin around speech | `mediakit silence in.mp4 -o tight.mp4` |
+| `cropdetect` | Measure letterbox/pillarbox bars; returns the crop rect + a ready crop command | `mediakit cropdetect in.mp4` |
+| `package` | Bundle a finished file for delivery: media + spec.json receipt + checksums.sha256 (+ captions) | `mediakit package out.mp4 -o delivery.zip --platform tiktok` |
 | `doctor` | Read-only preflight: ffmpeg version, filters/encoders, tool availability | `mediakit doctor` |
 | `convert` | Change container/codec (omit a codec to stream-copy) | `mediakit convert in.mov -o out.mp4 --video-codec libx264` |
 
@@ -87,6 +89,10 @@ mediakit burn-captions vertical.mp4 --captions captions.srt -o short.mp4
 # 4. Normalize loudness, then verify against the TikTok delivery spec
 mediakit loudness short.mp4 -o short-loud.mp4 --target-lufs -14
 mediakit check short-loud.mp4 --platform tiktok   # pass: true when ready
+
+# 5. Bundle it for delivery: media + spec.json receipt + checksums + captions
+mediakit package short-loud.mp4 -o delivery.zip --captions captions.srt --platform tiktok
+# Verify the bundle anywhere: unzip -l delivery.zip, then sha256sum -c checksums.sha256 inside
 ```
 
 `reframe --mode blur` fills the empty area with a blurred copy of the
@@ -98,7 +104,14 @@ a fix hint. Platforms: `tiktok`, `reels`, `shorts`, `youtube`.
 `silence` cuts dead air out of speech/video (detects with `silencedetect`,
 keeps a 0.2s margin around speech so words are never clipped);
 `--detect-only` reports the silence/kept segments without writing a file,
-so probe before you cut. `doctor` is a read-only preflight — run it first
+so probe before you cut. `cropdetect` measures the black bars on a source
+before you crop or reframe it — it samples frames across the whole file
+(the first frames are often a dark fade-in) and returns the most common
+crop rectangle plus a ready-to-run `crop` command. `package` is the last
+step: a ZIP with the finished media, a `spec.json` receipt (measured probe
++ loudness + the platform check result), `checksums.sha256`, and the
+captions sidecar when given — the bundle proves what was delivered, and
+`sha256sum -c` verifies it on any machine. `doctor` is a read-only preflight — run it first
 on a new machine to confirm ffmpeg/ffprobe and every filter/encoder the
 tools need are actually present.
 
