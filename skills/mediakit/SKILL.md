@@ -12,9 +12,13 @@ video or audio file, and instead of writing one-off ffmpeg shell commands.
   (one step; `crop` + `resize` only when you need an exact pixel rectangle).
 - **User asks for the audio, a voiceover, or a soundtrack**: `extract_audio`.
 - **User asks "what does it look like at 0:12?"**: `extract_frame`, then
-  read the image. For an overview of the whole clip: `thumbnail`.
+  read the image. For an overview of the whole clip: `frames` (separate
+  images with timestamps — read several) or `thumbnail` (one contact sheet).
 - **Audio is too quiet/loud or inconsistent**: `loudness` (default −14 LUFS).
-- **User asks to join clips**: `concat`.
+- **User asks to join clips**: `concat`. For a smooth join instead of a
+  hard cut: `concat` with `transition` (`fade`, `wipeleft`, `dissolve`,
+  `circlecrop`, …) and `transition_duration` (seconds, shorter than the
+  shortest clip) — clips are normalized to the first clip's size/fps first.
 - **User asks for captions/subtitles on the video**: `burn_captions`.
 - **User asks for a different format**: `convert`.
 - **Speech has dead air / long pauses**: `silence` — first run it with
@@ -125,6 +129,13 @@ or larger — 24px is for 720p landscape.
 `concat` re-encodes all parts to one codec, so clips with different
 resolutions, codecs, or frame rates join cleanly. It is slower than a
 stream-copy concat, but it doesn't fail on mismatched inputs.
+With `transition`, the join is an `xfade` + `acrossfade` instead of a
+hard cut: clips are normalized to the first clip's size/fps, the
+transition starts `transition_duration` before the end of each clip,
+and the output lasts sum(durations) − (n−1) × transition. The
+transition must be shorter than the shortest clip, and every clip needs
+a video stream. Verify a transition by pulling frames on both sides of
+it (`frames` or `extract_frame`) — never trust the duration alone.
 
 ### 9. Convert: copy what you don't need to change
 `convert` with no codec arguments stream-copies both streams (a fast
@@ -152,6 +163,13 @@ and re-run. If the voice is much quieter than the bed, level it first
 (`loudness` on the voice alone, or `mix`'s own `voice_lufs` levelling).
 If the voice file is a video, its video stream is copied through, so
 `mix` can be the last audio step before `check`/`package`.
+
+### 12. Look at the video before you cut it
+`probe` tells you numbers, not content. `frames` extracts N evenly
+spaced frames as separate images with timestamps — read 3–6 of them to
+see what's actually in the clip (scene changes, framing, captions
+rendering) before choosing trim points or a reframe anchor. `thumbnail`
+is the cheaper one-image overview when you only need the gist.
 
 ## Workflow: vertical captioned clip from a landscape source
 

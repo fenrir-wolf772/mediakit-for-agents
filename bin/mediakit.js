@@ -90,13 +90,26 @@ const COMMANDS = {
     ],
   },
   concat: {
-    usage: "mediakit concat <input1> <input2> [input3...] -o <output> [--video-codec <c>] [--audio-codec <c>]",
-    desc: "Join 2+ media files into one (re-encodes, so mixed codecs are fine).",
+    usage: "mediakit concat <input1> <input2> [input3...] -o <output> [--video-codec <c>] [--audio-codec <c>] [--transition fade|wipeleft|dissolve|...] [--transition-duration <s>]",
+    desc: "Join 2+ media files into one (re-encodes, so mixed codecs are fine). --transition crossfades between clips instead of a hard cut.",
     args: [{ name: "inputs", required: true, variadic: true }],
     options: [
       ["--video-codec", "Video codec (default libx264)"],
       ["--audio-codec", "Audio codec (default aac)"],
+      ["--transition", "xfade transition between clips: fade, wipeleft, dissolve, circlecrop, ..."],
+      ["--transition-duration", "Transition length in seconds (default 1, must be shorter than the shortest clip)"],
       ["-o, --output", "Output file (required)"],
+    ],
+  },
+  frames: {
+    usage: "mediakit frames <input> -o <directory> [--count <n>] [--format png|jpg|webp] [--width <px>]",
+    desc: "Extract N evenly spaced frames as separate images (frame-001.png, ...) so you can look at a video before cutting it.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--count", "Number of frames (default 6)"],
+      ["--format", "Image format png (default) | jpg | webp"],
+      ["--width", "Scale frames to this width (keeps aspect)"],
+      ["-o, --output", "Output directory (required, created if needed)"],
     ],
   },
   "burn-captions": {
@@ -344,6 +357,16 @@ async function main() {
           inputs: positional, output: needOutput(opts),
           videoCodec: opts.video_codec ?? "libx264",
           audioCodec: opts.audio_codec ?? "aac",
+          transition: opts.transition ?? null,
+          transitionDuration: numOpt(opts, "transition_duration") ?? 1,
+        });
+        break;
+      case "frames":
+        result = await core.extractFrames({
+          input: needInput(), outputDir: needOutput(opts),
+          count: numOpt(opts, "count") ?? 6,
+          format: opts.format ?? "png",
+          width: numOpt(opts, "width") ?? null,
         });
         break;
       case "burn-captions": {

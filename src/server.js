@@ -127,14 +127,42 @@ server.tool(
 
 server.tool(
   "concat",
-  "Join 2+ media files into one. Re-encodes, so inputs may differ in codec or size.",
+  "Join 2+ media files into one. Re-encodes, so inputs may differ in codec or size. Set transition (e.g. fade, wipeleft, dissolve, circlecrop) to crossfade between clips instead of a hard cut — clips are normalized to the first clip's size/fps first, and the output is sum(durations) minus (n-1) x transition_duration.",
   {
     inputs: z.array(z.string().min(1)).min(2).describe("Files in order"),
     output: pathSchema,
     video_codec: z.string().default("libx264"),
     audio_codec: z.string().default("aac"),
+    transition: z.string().optional().describe("xfade transition between clips: fade, fadeblack, wipeleft, wiperight, slideleft, dissolve, pixelize, circlecrop, ... (omit for a hard cut)"),
+    transition_duration: z.number().min(0.1).max(10).default(1).describe("Transition length in seconds (must be shorter than the shortest clip)"),
   },
-  async (a) => safe(() => core.concat(a)),
+  async (a) => safe(() => core.concat({
+    inputs: a.inputs,
+    output: a.output,
+    videoCodec: a.video_codec,
+    audioCodec: a.audio_codec,
+    transition: a.transition ?? null,
+    transitionDuration: a.transition_duration,
+  })),
+);
+
+server.tool(
+  "frames",
+  "Extract N evenly spaced frames as separate image files (frame-001.png, ...) into a directory, each with its timestamp — so you can actually look at what is in a video before cutting it. One frame per interval; timestamps are i * duration / count.",
+  {
+    input: pathSchema,
+    output_dir: pathSchema.describe("Directory to write the frame files into (created if needed)"),
+    count: z.number().int().min(1).max(120).default(6).describe("Number of frames to extract"),
+    format: z.enum(["png", "jpg", "webp"]).default("png"),
+    width: z.number().int().min(80).max(3840).optional().describe("Scale frames to this width (keeps aspect)"),
+  },
+  async (a) => safe(() => core.extractFrames({
+    input: a.input,
+    outputDir: a.output_dir,
+    count: a.count,
+    format: a.format,
+    width: a.width ?? null,
+  })),
 );
 
 server.tool(

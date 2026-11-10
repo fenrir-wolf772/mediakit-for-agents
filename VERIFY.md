@@ -256,3 +256,70 @@ Fixture mới: `test/mix-voice.mp3` (9s, tone 660Hz theo nhịp
 - README (bảng 18 tools + đoạn mix), SKILL.md (mục mix + rule 11) đã
   cập nhật. Fixture mix-voice/mix-music đã commit vào test/.
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+
+## Lượt 5 — 2026-11-10 (concat --transition + frames, 19 tools)
+
+### Học: yubraaj11/ffmpeg-mcp (12★, 12 tools, Python/FastMCP)
+Đọc README + code thật (`crop_video.py`, `concat_clips_with_transition.py`,
+`utils/validate_input_video_path.py`). Ý áp dụng được:
+1. `concat_clips_with_transition` — nối clip bằng `xfade` + `acrossfade`,
+   normalize trước (họ normalize ra file trung gian) → đã làm
+   `concat --transition` (normalize trong cùng 1 filter graph, không file
+   trung gian).
+2. `extract_frames` — trích N frame đều nhau thành file riêng → đã làm
+   tool `frames` mới.
+3. Structured JSON errors (`status`/`error_type`/`message`/`time`) +
+   validate input trước khi chạy (tồn tại, không rỗng, ffprobe đọc được) →
+   MediaKit đã có sẵn `MediaKitError` + `requireInput`, không cần thêm.
+4. `get_normalized_clips` — normalize song song trước khi concat → ý này
+   nằm trong (1).
+5. `overlay_image` (logo/watermark có timing + opacity) → chưa làm, backlog
+   (cần cho workflow Shorts: chèn logo góc).
+KHÔNG copy code của họ — chỉ học ý tưởng, tự implement bằng Node/ffmpeg.
+
+### concat --transition (mở rộng tool concat)
+Normalize mọi clip về size/fps của clip đầu (scale + pad + setsar + fps)
+trong 1 filter graph, rồi nối chuỗi `xfade` + `acrossfade` theo cặp.
+Offset của transition thứ k = (tổng duration các clip trước) − k×t.
+Clip không có audio được cấp bed câm bằng `anullsrc` đúng độ dài clip,
+nên acrossfade luôn có 2 audio stream.
+
+| Case | Command | Result |
+|---|---|---|
+| fade 2 clip khác size | `concat test/source.mp4 test/source2.mp4 --transition fade --transition-duration 1 -o outputs/concat-fade.mp4` | **15.022s** (kỳ vọng 10+6−1=15), **1280×720**, 510.7 KB; pixel-check (cùng độ phân giải, scale 640×360 gray): out@5 = source1@5 MAD **0.05**, out@11/12/14 = source2@2/3/5 MAD **0.67–0.71**, giữa fade out@9.5 MAD 6.58 vs source thuần (đúng — frame blend 50/50) |
+| wipeleft 3 clip | `concat source.mp4 source2.mp4 source.mp4 --transition wipeleft --transition-duration 0.5 -o outputs/concat-wipe.mp4` | **25.029s** (kỳ vọng 10+6+10−2×0.5=25), 1280×720, 868.6 KB; pixel-check: out@16/20/24 = source1@1/5/9 MAD **0.05–0.06** (offset xfade thứ 2 = 15.0, tau = t−15) |
+| plain concat (không transition) | `concat source.mp4 source2.mp4 -o outputs/concat-plain.mp4` | **16.037s** (10+6), 410.9 KB — đường cũ không đổi |
+| error cases | `--transition nosuch` | Từ chối đúng: `unknown transition: nosuch` + danh sách 49 transition hợp lệ (exit 2) |
+| error cases | `--transition-duration 7` (clip ngắn nhất 6s) | `transition_duration (7s) must be shorter than the shortest clip (6s)` (exit 2) |
+| error cases | 1 input | `concat needs at least 2 input files` (exit 1) |
+
+- Bẫy đo lường bắt được khi verify: so pixel RAW giữa 2 file khác độ
+  phân giải (640×360 vs 1280×720) cho MAD ~97 vô nghĩa vì hàng pixel
+  lệch nhau — tưởng transition hỏng, soi ảnh trực tiếp mới thấy frame
+  đúng (digit "3" ở out@12 = source2@3). Fix phép đo: scale cả 2 về
+  cùng 640×360 gray trước khi so. Sau khi sửa: MAD 0.05–0.71, khớp
+  đúng tau = t − offset. Bài học: **verify pixel phải cùng độ phân
+  giải; số MAD chỉ có nghĩa khi 2 frame cùng kích thước.**
+- Audio: acrossfade chạy đúng — output có audio aac, duration khớp video
+  (15.022s / 25.029s).
+
+### frames (tool mới)
+`fps=N/D` trích đúng N frame đều nhau thành `frame-001.png`… kèm
+timestamp `i×D/N` mỗi file.
+
+| Case | Command | Result |
+|---|---|---|
+| 5 frame, width 320 | `frames test/source.mp4 -o outputs/frames-test --count 5 --width 320` | **5 file** trên đĩa (11.2–11.9 KB mỗi file), timestamps **0, 2, 4, 6, 8** |
+| qua MCP | `frames` count 5 | extracted 5, timestamps 0,2,4,6,8 |
+
+### Tests
+
+- `npm run check`: `node --check` sạch trên `src/core.js`,
+  `src/server.js`, `bin/mediakit.js`.
+- `npm test`: **all 19 tools present**; `concat` + fade qua MCP:
+  duration 15.022, expected 15, 1280×720; `frames` qua MCP: extracted
+  5; `doctor` qua MCP: ok=true, **19/19 tools available**
+  (xfade/acrossfade/fps có mặt).
+- README (bảng 19 tools + đoạn concat-transition/frames), SKILL.md
+  (mục concat-transition + rule 12 "look before you cut") đã cập nhật.
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).

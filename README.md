@@ -2,9 +2,9 @@
 
 Give your coding agent eyes and ears for media. MediaKit is a small MCP
 server + CLI that wraps **ffmpeg** — trim, crop, resize, captions, loudness,
-thumbnails, frame grabs, audio extraction, concat, conversion, silence
-removal, black-bar measurement, delivery packaging, voice/music mixing
-with sidechain ducking, and an environment preflight — so an
+thumbnails, frame grabs, audio extraction, concat with transitions,
+conversion, silence removal, black-bar measurement, delivery packaging,
+voice/music mixing with sidechain ducking, and an environment preflight — so an
 agent can actually *work* with video and audio instead of guessing.
 
 > Coding agents are blind and deaf to media. They can read a 10,000-line
@@ -59,8 +59,9 @@ Then ask your agent things like:
 | `extract_audio` | Pull the audio track out (mp3/aac/wav/ogg/opus/flac) | `mediakit extract-audio in.mp4 -o out.mp3` |
 | `extract_frame` | Grab one frame at a timestamp | `mediakit extract-frame in.mp4 --timestamp 3.5 -o frame.png` |
 | `thumbnail` | Contact sheet of N evenly spaced frames | `mediakit thumbnail in.mp4 --frames 6 -o sheet.jpg` |
+| `frames` | Extract N evenly spaced frames as separate images, each with its timestamp — so an agent can look at a video before cutting it | `mediakit frames in.mp4 -o frames/ --count 6` |
 | `loudness` | Normalize to a loudness target (default −14 LUFS) | `mediakit loudness in.mp3 -o out.mp3` |
-| `concat` | Join 2+ files into one (re-encodes, mixed codecs OK) | `mediakit concat a.mp4 b.mp4 -o joined.mp4` |
+| `concat` | Join 2+ files into one (re-encodes, mixed codecs OK); `--transition fade` crossfades between clips with xfade + acrossfade | `mediakit concat a.mp4 b.mp4 -o joined.mp4` |
 | `burn_captions` | Burn .srt/.ass/.vtt subtitles into the video | `mediakit burn-captions in.mp4 --captions subs.srt -o out.mp4` |
 | `reframe` | Reframe to a target aspect/size in one step (crop, pad, or blurred fill) | `mediakit reframe in.mp4 --mode crop -o vertical.mp4` |
 | `check` | Verify a file against a platform spec (tiktok/reels/shorts/youtube) | `mediakit check out.mp4 --platform tiktok` |
@@ -121,7 +122,16 @@ length, and the mix is mastered to `--target-lufs` (−14) — if the voice
 file is a video its video stream is copied through. It reports the
 ducking it actually achieved (`ducking_measured_db`, measured on the
 ducked bed alone in a speech window vs a silence window), so tune
-`--duck-db` from a measured number, not a guess. `doctor` is a read-only preflight — run it first
+`--duck-db` from a measured number, not a guess. `concat --transition
+fade|wipeleft|dissolve|...` joins clips with a real crossfade instead of
+a hard cut: every clip is normalized to the first clip's size/fps first
+(in one filter graph, no intermediate files), then chained with `xfade`
++ `acrossfade` — output duration is sum(durations) minus (n−1) ×
+transition length, and a clip without audio gets a silent bed so the
+audio crossfade still works. `frames` pulls N evenly spaced frames out
+as separate `frame-001.png` files with timestamps, so an agent can look
+at what's actually in a clip before deciding where to cut — use it
+instead of guessing from `probe` alone. `doctor` is a read-only preflight — run it first
 on a new machine to confirm ffmpeg/ffprobe and every filter/encoder the
 tools need are actually present.
 

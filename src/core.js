@@ -260,6 +260,59 @@ export async function thumbnail({ input, output, frames = 6, columns = 3, width 
   return { operation: "thumbnail", input: inPath, output: outPath, frames: n, columns: cols, rows, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null };
 }
 
+// ---------------------------------------------------------------- frames
+// Extract N evenly spaced frames as separate image files, so an agent
+// can actually LOOK at a video (ffmpeg-mcp's extract_frames idea):
+// one fps-filter pass, one file per frame, each with its timestamp.
+// Output is a directory; files are frame-001.png, frame-002.png, ...
+
+export async function extractFrames({ input, outputDir, count = 6, format = "png", width = null }) {
+  const inPath = await requireInput(input);
+  const n = num(count, "count", { min: 1, max: 120, integer: true });
+  const fmt = (format || "png").toLowerCase();
+  if (!["png", "jpg", "jpeg", "webp"].includes(fmt)) {
+    throw new MediaKitError(`frames format must be png/jpg/webp, got: ${format}`, "INVALID_ARG");
+  }
+  const ext = fmt === "jpg" ? "jpg" : fmt;
+  if (typeof outputDir !== "string" || !outputDir.trim()) {
+    throw new MediaKitError("output directory is required", "INVALID_OUTPUT");
+  }
+  const dir = path.resolve(outputDir);
+  if (dir === inPath || dir.startsWith(inPath + path.sep)) {
+    throw new MediaKitError("frames output directory must not be inside the input file", "INVALID_OUTPUT");
+  }
+  const w = width === null || width === undefined ? null : num(width, "width", { min: 80, max: 3840, integer: true });
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("frames needs a video input", "INVALID_ARG");
+  const duration = meta.duration_seconds;
+  if (duration === null || duration <= 0) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
+  await mkdir(dir, { recursive: true });
+  // fps=N/D emits one frame per interval [i*D/N, (i+1)*D/N) — exactly
+  // N frames, evenly spaced, timestamps i*D/N.
+  let vf = `fps=${n}/${duration}`;
+  if (w !== null) vf += `,scale=${w}:-2`;
+  const pattern = path.join(dir, `frame-%03d.${ext}`);
+  const q = ext === "png" ? [] : ["-q:v", "2"];
+  await run(FFMPEG, ["-y", "-i", inPath, "-vf", vf, ...q, pattern]);
+  const { readdir } = await import("node:fs/promises");
+  const files = (await readdir(dir))
+    .filter((f) => f.startsWith("frame-") && f.endsWith(`.${ext}`))
+    .sort();
+  const frames = [];
+  for (let i = 0; i < files.length; i++) {
+    const fp = path.join(dir, files[i]);
+    const info = await fileInfo(fp);
+    frames.push({ file: files[i], path: fp, timestamp_seconds: +(i * duration / n).toFixed(3), ...info });
+  }
+  return {
+    operation: "frames", input: inPath, output_dir: dir,
+    requested: n, extracted: frames.length, format: ext,
+    ...(w !== null ? { width: w } : {}),
+    duration_seconds: duration,
+    frames,
+  };
+}
+
 // ---------------------------------------------------------------- loudness
 
 // Video containers loudness can write: audio is re-encoded, video is
@@ -286,14 +339,38 @@ export async function loudness({ input, output, targetLufs = -14, format = null 
 }
 
 // ---------------------------------------------------------------- concat
+// Plain mode: concat demuxer + re-encode (safe across codecs/sizes).
+// Transition mode (ffmpeg-mcp's concat_clips_with_transition idea,
+// rebuilt on ffmpeg directly): normalize every clip to the first
+// clip's size/fps in one filter graph, then chain xfade + acrossfade
+// pairwise. Output duration = sum(durations) - (n-1) * transition.
 
-export async function concat({ inputs, output, videoCodec = "libx264", audioCodec = "aac" }) {
+const XFADE_TRANSITIONS = [
+  "fade", "fadeblack", "fadewhite", "distance",
+  "wipeleft", "wiperight", "wipeup", "wipedown",
+  "slideleft", "slideright", "slideup", "slidedown",
+  "smoothleft", "smoothright", "smoothup", "smoothdown",
+  "circlecrop", "rectcrop", "circleclose", "circleopen",
+  "horzclose", "horzopen", "vertclose", "vertopen",
+  "diagbl", "diagbr", "diagtl", "diagtr",
+  "hlslice", "hrslice", "vuslice", "vdslice",
+  "dissolve", "pixelize", "radial", "hblur",
+  "wipetl", "wipetr", "wipebl", "wipebr",
+  "zoomin", "fadegrays", "squeezev", "squeezeh",
+  "hlwind", "hrwind", "vuwind", "vdwind",
+  "coverleft", "coverright", "coverup", "coverdown",
+];
+
+export async function concat({ inputs, output, videoCodec = "libx264", audioCodec = "aac", transition = null, transitionDuration = 1 }) {
   if (!Array.isArray(inputs) || inputs.length < 2) {
     throw new MediaKitError("concat needs at least 2 input files", "INVALID_ARG");
   }
   const inPaths = [];
   for (const p of inputs) inPaths.push(await requireInput(p, "concat input"));
   const outPath = await prepareOutput(output, inPaths);
+  if (transition !== null && transition !== undefined) {
+    return concatTransition({ inPaths, outPath, videoCodec, audioCodec, transition, transitionDuration });
+  }
   // Concat demuxer with re-encode: safe across differing codecs/sizes.
   // The list file is written to a temp file in the output directory.
   const listPath = path.join(path.dirname(outPath), `.mediakit-concat-${Date.now()}.txt`);
@@ -311,6 +388,76 @@ export async function concat({ inputs, output, videoCodec = "libx264", audioCode
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
   return { operation: "concat", inputs: inPaths, output: outPath, parts: inPaths.length, ...info, duration_seconds: out.duration_seconds };
+}
+
+/** concat with an xfade transition between every pair of clips. */
+async function concatTransition({ inPaths, outPath, videoCodec, audioCodec, transition, transitionDuration }) {
+  if (!XFADE_TRANSITIONS.includes(transition)) {
+    throw new MediaKitError(`unknown transition: ${transition} (supported: ${XFADE_TRANSITIONS.join(", ")})`, "INVALID_ARG");
+  }
+  const t = num(transitionDuration, "transition_duration", { min: 0.1, max: 10 });
+  const metas = [];
+  for (const p of inPaths) metas.push(await probe(p));
+  if (metas.some((m) => !m.video)) {
+    throw new MediaKitError("concat with a transition needs video in every input", "INVALID_ARG");
+  }
+  if (metas.some((m) => m.duration_seconds === null)) {
+    throw new MediaKitError("could not read input durations for transition concat", "PROBE_FAILED");
+  }
+  const minDur = Math.min(...metas.map((m) => m.duration_seconds));
+  if (t >= minDur) {
+    throw new MediaKitError(`transition_duration (${t}s) must be shorter than the shortest clip (${minDur}s)`, "INVALID_ARG");
+  }
+  // Normalize to the first clip's size/fps (xfade needs identical
+  // dimensions and frame rates on both inputs).
+  const tw = metas[0].video.width;
+  const th = metas[0].video.height;
+  const fps = metas[0].video.fps || 30;
+  const graph = [];
+  metas.forEach((m, i) => {
+    graph.push(`[${i}:v]scale=${tw}:${th}:force_original_aspect_ratio=decrease,pad=${tw}:${th}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=${fps}[v${i}]`);
+    if (m.audio) {
+      graph.push(`[${i}:a]aresample=48000,aformat=channel_layouts=stereo[a${i}]`);
+    } else {
+      // Silent bed of exactly this clip's length, so acrossfade always
+      // has two audio streams to work with.
+      graph.push(`anullsrc=r=48000:cl=stereo,atrim=0:${m.duration_seconds},asetpts=PTS-STARTPTS[a${i}]`);
+    }
+  });
+  // Chain xfade pairwise. After joining clips 0..k-1 the running total
+  // is sum(d_0..d_{k-1}) - (k-1)*t, and the next transition starts
+  // t seconds before its end.
+  let vLabel = "v0";
+  let aLabel = "a0";
+  let running = metas[0].duration_seconds;
+  for (let k = 1; k < metas.length; k++) {
+    const offset = +(running - t).toFixed(3);
+    const vOut = `x${k}`;
+    const aOut = `c${k}`;
+    graph.push(`[${vLabel}][v${k}]xfade=transition=${transition}:duration=${t}:offset=${offset}[${vOut}]`);
+    graph.push(`[${aLabel}][a${k}]acrossfade=d=${t}[${aOut}]`);
+    vLabel = vOut;
+    aLabel = aOut;
+    running = +(running + metas[k].duration_seconds - t).toFixed(3);
+  }
+  const args = ["-y"];
+  for (const p of inPaths) args.push("-i", p);
+  args.push(
+    "-filter_complex", graph.join(";"),
+    "-map", `[${vLabel}]`, "-map", `[${aLabel}]`,
+    "-c:v", videoCodec, "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "medium",
+    "-c:a", audioCodec, "-movflags", "+faststart", outPath,
+  );
+  await run(FFMPEG, args);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  return {
+    operation: "concat", inputs: inPaths, output: outPath, parts: inPaths.length,
+    transition, transition_duration: t,
+    expected_duration_seconds: running,
+    ...info, duration_seconds: out.duration_seconds,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+  };
 }
 
 // ---------------------------------------------------------------- burn_captions
@@ -681,6 +828,7 @@ const DOCTOR_FILTERS = [
   "silencedetect", "loudnorm", "subtitles", "ass", "scale", "crop",
   "cropdetect", "gblur", "trim", "atrim", "concat", "select", "tile", "pad", "overlay",
   "drawtext", "volume", "sidechaincompress", "amix", "aresample",
+  "xfade", "acrossfade", "fps", "anullsrc", "setpts", "asetpts",
 ];
 const DOCTOR_ENCODERS = [
   "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4",
@@ -698,7 +846,8 @@ const TOOL_REQUIREMENTS = {
   extract_frame: {},
   thumbnail: { filters: ["select", "scale", "tile"] },
   loudness: { filters: ["loudnorm"] },
-  concat: { filters: ["concat"] },
+  concat: { filters: ["concat", "xfade", "acrossfade", "fps", "scale", "pad"] },
+  frames: { filters: ["fps", "scale"] },
   burn_captions: { filters: ["subtitles", "ass"] },
   reframe: { filters: ["crop", "scale", "pad", "gblur", "overlay"], encoders: ["libx264"] },
   check: { filters: ["loudnorm"] },

@@ -17,9 +17,9 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 18 tools present");
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 19 tools present");
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -113,5 +113,30 @@ const mixRes = await client.callTool({
 });
 const mixJson = JSON.parse(mixRes.content[0].text);
 console.log("mix call: duration", mixJson.duration_seconds, "| output LUFS", mixJson.output_lufs, "| voice gain", mixJson.voice_gain_db, "dB | ducking measured", mixJson.ducking_measured_db, "dB");
+
+const concatTransRes = await client.callTool({
+  name: "concat",
+  arguments: {
+    inputs: [path.join(root, "test/source.mp4"), path.join(root, "test/source2.mp4")],
+    output: path.join(root, "outputs/mcp-concat-fade.mp4"),
+    transition: "fade",
+    transition_duration: 1,
+  },
+});
+const concatTransJson = JSON.parse(concatTransRes.content[0].text);
+console.log("concat+fade call: duration", concatTransJson.duration_seconds, "| expected", concatTransJson.expected_duration_seconds, "|", concatTransJson.dimensions);
+
+const framesRes = await client.callTool({
+  name: "frames",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    output_dir: path.join(root, "outputs/mcp-frames"),
+    count: 5,
+    format: "png",
+    width: 320,
+  },
+});
+const framesJson = JSON.parse(framesRes.content[0].text);
+console.log("frames call: extracted", framesJson.extracted, "| timestamps", framesJson.frames.map((f) => f.timestamp_seconds).join(","));
 await client.close();
 console.log("MCP test done");
