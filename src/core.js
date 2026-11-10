@@ -94,6 +94,31 @@ function num(v, label, { min = null, max = null, integer = false } = {}) {
   return n;
 }
 
+/**
+ * Parse a time value: a number (seconds) or a string "SS", "MM:SS" or
+ * "HH:MM:SS". (video-creator/ffmpeg-mcp accepts the same colon forms
+ * for clip times; agents write "1:30" far more often than "90".)
+ */
+export function parseTime(v, label) {
+  if (typeof v === "number") return num(v, label, { min: 0 });
+  if (typeof v !== "string" || !v.trim()) {
+    throw new MediaKitError(`${label} must be a time (seconds or MM:SS), got: ${v}`, "INVALID_ARG");
+  }
+  const parts = v.trim().split(":").map((p) => p.trim());
+  if (parts.length > 3 || parts.some((p) => p === "" || !/^\d+(\.\d+)?$/.test(p))) {
+    throw new MediaKitError(`${label} must be seconds or MM:SS / HH:MM:SS, got: ${v}`, "INVALID_ARG");
+  }
+  let s = 0;
+  for (const n of parts.map(Number)) s = s * 60 + n;
+  if (!Number.isFinite(s) || s < 0) throw new MediaKitError(`${label} must be >= 0, got: ${v}`, "INVALID_ARG");
+  return s;
+}
+
+function numOrNull(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 // ---------------------------------------------------------------- probe
 
 export async function probe(input) {
@@ -122,11 +147,13 @@ export async function probe(input) {
       height: video.height,
       fps: video.r_frame_rate ? evalFps(video.r_frame_rate) : null,
       pixel_format: video.pix_fmt ?? null,
+      bit_rate: numOrNull(video.bit_rate),
     } : null,
     audio: audio ? {
       codec: audio.codec_name,
       sample_rate: audio.sample_rate ? Number(audio.sample_rate) : null,
       channels: audio.channels ?? null,
+      bit_rate: numOrNull(audio.bit_rate),
     } : null,
     streams: (data.streams ?? []).map((s) => ({ index: s.index, type: s.codec_type, codec: s.codec_name })),
   };
@@ -143,11 +170,12 @@ function evalFps(rate) {
 export async function trim({ input, output, start = 0, duration = null, end = null, streamCopy = false, snapToKeyframe = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
-  const s = num(start, "start", { min: 0 });
+  const s = parseTime(start, "start");
   let dur = null;
-  if (duration !== null && duration !== undefined) dur = num(duration, "duration", { min: 0.0001 });
+  if (duration !== null && duration !== undefined) dur = parseTime(duration, "duration");
+  if (dur !== null && !(dur > 0)) throw new MediaKitError(`duration must be > 0, got: ${duration}`, "INVALID_ARG");
   if (end !== null && end !== undefined) {
-    const e = num(end, "end", { min: 0 });
+    const e = parseTime(end, "end");
     if (e <= s) throw new MediaKitError(`end (${e}) must be greater than start (${s})`, "INVALID_ARG");
     if (dur !== null) throw new MediaKitError("pass duration OR end, not both", "INVALID_ARG");
     dur = e - s;
@@ -191,6 +219,99 @@ export async function trim({ input, output, start = 0, duration = null, end = nu
       snapped, keyframe_start: kfStart, keyframe_end: kfEnd,
     } : {}),
     ...info, duration_actual: meta.duration_seconds,
+  };
+}
+
+// ---------------------------------------------------------------- fit
+// Fit a file to an exact target duration. Three methods:
+//   speed — speed the video/audio up or down (setpts + chained atempo),
+//           the default: keeps the whole clip, just faster/slower.
+//   trim  — cut a longer source down to the target (re-encode, exact).
+//   loop  — loop a shorter source until it reaches the target, then cut.
+// The output duration is measured with ffprobe and reported, so the
+// caller verifies the fit instead of trusting the arithmetic.
+// Speed factor = source/target must stay in [0.25, 4]: outside that,
+// atempo chains get long and quality falls apart — the error says which
+// other method to use.
+
+const FIT_METHODS = ["speed", "trim", "loop"];
+
+/** Split a speed factor into atempo steps, each inside [0.5, 2.0]. */
+function atempoChain(factor) {
+  const steps = [];
+  let f = factor;
+  while (f > 2.0) { steps.push(2.0); f /= 2; }
+  while (f < 0.5) { steps.push(0.5); f /= 0.5; }
+  steps.push(+f.toFixed(4));
+  return steps.map((s) => `atempo=${s}`).join(",");
+}
+
+export async function fitDuration({ input, output, duration, method = "speed" }) {
+  const inPath = await requireInput(input);
+  const outPath = await prepareOutput(output, [inPath]);
+  const target = parseTime(duration, "duration");
+  if (!(target > 0)) throw new MediaKitError(`duration must be > 0, got: ${duration}`, "INVALID_ARG");
+  if (!FIT_METHODS.includes(method)) {
+    throw new MediaKitError(`unknown fit method: ${method} (use ${FIT_METHODS.join(", ")})`, "INVALID_ARG");
+  }
+  const meta = await probe(inPath);
+  const srcDur = meta.duration_seconds;
+  if (srcDur === null) throw new MediaKitError("fit needs an input with a known duration", "PROBE_FAILED");
+  const factor = srcDur / target; // >1 = speed up, <1 = slow down
+  const ext = path.extname(outPath).slice(1).toLowerCase();
+  const audioCodec = AUDIO_FORMATS[ext] ?? VIDEO_CONTAINER_AUDIO[ext] ?? "aac";
+
+  let args;
+  let applied;
+  if (method === "speed") {
+    if (factor < 0.25 || factor > 4) {
+      throw new MediaKitError(
+        `speed fit needs a factor in [0.25, 4] (source ${srcDur}s to ${target}s is ${factor.toFixed(2)}x) — use method=trim to cut a longer source, or method=loop to extend a shorter one`,
+        "INVALID_ARG");
+    }
+    applied = { method: "speed", speed_factor: +factor.toFixed(3) };
+    const f = +factor.toFixed(4);
+    args = ["-y", "-i", inPath];
+    const filters = [];
+    if (meta.video) filters.push(`[0:v]setpts=PTS/${f}[v]`);
+    if (meta.audio) filters.push(`[0:a]${atempoChain(f)}[a]`);
+    if (filters.length) args.push("-filter_complex", filters.join(";"));
+    if (meta.video) args.push("-map", "[v]", "-c:v", "libx264", "-crf", "18", "-preset", "veryfast");
+    if (meta.audio) args.push("-map", "[a]", "-c:a", audioCodec);
+    // -fps_mode passthrough: without it, ffmpeg's default CFR resampling
+    // duplicates frames back onto the source fps grid (300 frames at 2x
+    // came out as 152 frames / 5.067s instead of 5.0s). -t trims the
+    // AAC encoder padding tail so the measured duration lands on target.
+    args.push("-fps_mode", "passthrough", "-t", String(target), outPath);
+  } else if (method === "trim") {
+    if (srcDur <= target) {
+      throw new MediaKitError(`trim fit needs a longer source (${srcDur}s <= target ${target}s) — use method=speed or method=loop`, "INVALID_ARG");
+    }
+    applied = { method: "trim" };
+    args = ["-y", "-i", inPath, "-t", String(target)];
+    if (meta.video) args.push("-c:v", "libx264", "-crf", "18", "-preset", "veryfast");
+    if (meta.audio) args.push("-c:a", audioCodec);
+    args.push(outPath);
+  } else { // loop
+    if (srcDur >= target) {
+      throw new MediaKitError(`loop fit needs a shorter source (${srcDur}s >= target ${target}s) — use method=speed or method=trim`, "INVALID_ARG");
+    }
+    applied = { method: "loop", loops: Math.ceil(target / srcDur) };
+    args = ["-y", "-stream_loop", "-1", "-i", inPath, "-t", String(target)];
+    if (meta.video) args.push("-c:v", "libx264", "-crf", "18", "-preset", "veryfast");
+    if (meta.audio) args.push("-c:a", audioCodec);
+    args.push(outPath);
+  }
+  await run(FFMPEG, args);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  const actual = out.duration_seconds;
+  return {
+    operation: "fit", input: inPath, output: outPath,
+    source_duration_seconds: srcDur, target_duration_seconds: target,
+    ...applied, ...info,
+    duration_actual: actual,
+    duration_error_seconds: actual === null ? null : +(actual - target).toFixed(3),
   };
 }
 
@@ -590,23 +711,65 @@ export const PLATFORMS = {
     label: "TikTok", width: 1080, height: 1920, maxDuration: 600,
     videoCodecs: ["h264"], audioCodecs: ["aac"], maxChannels: 2,
     lufs: [-16, -12], fps: [23, 61],
+    // TikTok publishes no bitrate for regular posts; 8-12 Mbps @1080p
+    // 30fps is the working figure creators converge on (12-16 @60fps).
+    // File cap is the mobile-app upload limit, widely reported.
+    maxFileSizeMB: 287,
+    safeZone: {
+      x0: 64, y0: 200, x1: 1016, y1: 1400,
+      note: "Keep text/subtitles inside this rect: the top bar, right action rail, and bottom caption + buttons cover the rest. Creator guidance, not a platform-published spec.",
+    },
   },
   reels: {
     label: "Instagram Reels", width: 1080, height: 1920, maxDuration: 900,
     videoCodecs: ["h264"], audioCodecs: ["aac"], maxChannels: 2,
     lufs: [-16, -12], fps: [23, 61],
+    safeZone: {
+      x0: 64, y0: 200, x1: 1016, y1: 1400,
+      note: "Keep text/subtitles inside this rect: the top bar, right action rail, and bottom caption + buttons cover the rest. Creator guidance, not a platform-published spec.",
+    },
   },
   shorts: {
     label: "YouTube Shorts", width: 1080, height: 1920, maxDuration: 180,
     videoCodecs: ["h264", "vp9", "av1"], audioCodecs: ["aac", "opus"], maxChannels: 2,
     lufs: [-16, -12], fps: [23, 61],
+    safeZone: {
+      x0: 64, y0: 200, x1: 1016, y1: 1400,
+      note: "Keep text/subtitles inside this rect: the top bar, right action rail, and bottom caption + buttons cover the rest. Creator guidance, not a platform-published spec.",
+    },
   },
   youtube: {
     label: "YouTube (long-form)", width: 1920, height: 1080, maxDuration: null,
     videoCodecs: ["h264", "vp9", "av1"], audioCodecs: ["aac", "opus"], maxChannels: 2,
     lufs: [-16, -12], fps: [23, 61],
+    safeZone: {
+      x0: 96, y0: 64, x1: 1824, y1: 980,
+      note: "Keep titles/text clear of the bottom player bar and the bottom-right end-screen area. Creator guidance, not a platform-published spec.",
+    },
   },
 };
+
+/**
+ * Recommended video bitrate (Mbps) for a resolution + fps band.
+ * YouTube publishes this ladder ("Recommended upload encoding settings":
+ * 1080p 8 Mbps @30fps / 12 @60fps, 720p 5 / 7.5, 1440p 16 / 24,
+ * 2160p 35-45 / 53-68) and states "no bitrate limit is required" — so
+ * check treats bitrate as a warning, never a failure. TikTok/Reels
+ * publish no bitrate; the same ladder is the working figure.
+ */
+export function recommendedVideoBitrateMbps(width, height, fps) {
+  // Resolution class = the SHORTER side: 1080x1920 vertical is "1080p",
+  // not "1920p" (using the longer side would put it in the 1440p tier).
+  const px = Math.min(width ?? 0, height ?? 0);
+  const high = (fps ?? 30) >= 48;
+  if (px >= 2160) return high ? 53 : 35;
+  if (px >= 1440) return high ? 24 : 16;
+  if (px >= 1080) return high ? 12 : 8;
+  if (px >= 720) return high ? 7.5 : 5;
+  if (px >= 480) return high ? 4 : 2.5;
+  if (px > 0) return high ? 1.5 : 1;
+  return null;
+}
 
 /** Measure integrated loudness with a loudnorm analysis pass (no output file). */
 export async function measureLoudness(input) {
@@ -632,8 +795,11 @@ export async function check({ input, platform = "tiktok" }) {
   if (!spec) throw new MediaKitError(`unknown platform: ${platform} (supported: ${Object.keys(PLATFORMS).join(", ")})`, "INVALID_ARG");
   const meta = await probe(inPath);
   const checks = [];
-  const add = (name, expected, actual, pass, hint = null) =>
-    checks.push({ name, expected, actual, pass, ...(hint ? { hint } : {}) });
+  // severity "error" (default) fails the check; "warn" is reported in
+  // `warnings` and does not fail it — bitrate is a recommendation, not
+  // an upload gate, so it warns instead of failing.
+  const add = (name, expected, actual, pass, hint = null, severity = "error") =>
+    checks.push({ name, expected, actual, pass, ...(hint ? { hint } : {}), ...(severity !== "error" ? { severity } : {}) });
 
   if (meta.video) {
     add("dimensions", `${spec.width}x${spec.height}`,
@@ -647,6 +813,26 @@ export async function check({ input, platform = "tiktok" }) {
       add("fps", `${spec.fps[0]}–${spec.fps[1] - 1} fps`, `${meta.video.fps} fps`,
         meta.video.fps >= spec.fps[0] && meta.video.fps < spec.fps[1]);
     }
+    // Video bitrate: warn only. Prefer the video stream's own bit_rate;
+    // fall back to format bit_rate minus audio, then format bit_rate.
+    const vBits = meta.video.bit_rate
+      ?? (meta.bit_rate !== null && meta.audio?.bit_rate ? meta.bit_rate - meta.audio.bit_rate : null)
+      ?? meta.bit_rate;
+    const rec = recommendedVideoBitrateMbps(meta.video.width, meta.video.height, meta.video.fps);
+    if (vBits !== null && vBits !== undefined && rec !== null) {
+      const mbps = vBits / 1e6;
+      const actual = `${mbps.toFixed(1)} Mbps`;
+      const expected = `~${rec} Mbps recommended`;
+      if (mbps < rec * 0.5) {
+        add("video_bitrate", expected, actual, false,
+          `may look soft after the platform re-encodes — export near ${rec} Mbps`, "warn");
+      } else if (mbps > rec * 2) {
+        add("video_bitrate", expected, actual, false,
+          `oversized file, little gain after re-encode — export near ${rec} Mbps`, "warn");
+      } else {
+        add("video_bitrate", expected, actual, true, null, "warn");
+      }
+    }
   } else {
     add("dimensions", `${spec.width}x${spec.height}`, "no video stream", false);
   }
@@ -654,6 +840,12 @@ export async function check({ input, platform = "tiktok" }) {
     add("duration", `<= ${spec.maxDuration}s`, `${meta.duration_seconds}s`,
       meta.duration_seconds <= spec.maxDuration,
       "trim to fit the platform limit");
+  }
+  if (spec.maxFileSizeMB && meta.size_bytes !== null) {
+    const mb = meta.size_bytes / (1024 * 1024);
+    add("file_size", `<= ${spec.maxFileSizeMB} MB`, `${mb.toFixed(1)} MB`,
+      mb <= spec.maxFileSizeMB,
+      "upload from desktop/web, or re-encode at a lower bitrate");
   }
   if (meta.audio) {
     add("audio_codec", spec.audioCodecs.join(" or "), meta.audio.codec,
@@ -671,12 +863,15 @@ export async function check({ input, platform = "tiktok" }) {
   } else {
     checks.push({ name: "audio", expected: "audio stream present", actual: "no audio stream", pass: false });
   }
-  const failed = checks.filter((c) => !c.pass);
+  const failed = checks.filter((c) => !c.pass && c.severity !== "warn");
+  const warnings = checks.filter((c) => !c.pass && c.severity === "warn");
   return {
     operation: "check", input: inPath, platform, platform_label: spec.label,
     pass: failed.length === 0,
     checks,
+    safe_zone: spec.safeZone,
     ...(failed.length ? { issues: failed.map((c) => `${c.name}: ${c.actual} (want ${c.expected})${c.hint ? ` — ${c.hint}` : ""}`) } : {}),
+    ...(warnings.length ? { warnings: warnings.map((c) => `${c.name}: ${c.actual} (want ${c.expected})${c.hint ? ` — ${c.hint}` : ""}`) } : {}),
   };
 }
 
@@ -858,7 +1053,7 @@ const DOCTOR_FILTERS = [
   "cropdetect", "gblur", "trim", "atrim", "concat", "select", "tile", "pad", "overlay",
   "drawtext", "volume", "sidechaincompress", "amix", "aresample",
   "xfade", "acrossfade", "fps", "anullsrc", "setpts", "asetpts",
-  "format", "colorchannelmixer",
+  "format", "colorchannelmixer", "atempo", "aloop",
 ];
 const DOCTOR_ENCODERS = [
   "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4",
@@ -889,6 +1084,7 @@ const TOOL_REQUIREMENTS = {
   overlay: { filters: ["overlay", "format", "scale", "colorchannelmixer"], encoders: ["libx264"] },
   scenes: { filters: ["select"] },
   keyframes: {},
+  fit: { filters: ["setpts", "atempo"], encoders: ["libx264", "aac"] },
   doctor: {},
 };
 

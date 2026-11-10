@@ -54,7 +54,8 @@ Then ask your agent things like:
 | Tool | What it does | CLI |
 |---|---|---|
 | `probe` | Duration, dimensions, codecs, streams (ffprobe) | `mediakit probe in.mp4` |
-| `trim` | Cut a clip by start + duration/end | `mediakit trim in.mp4 --start 2 --duration 5 -o out.mp4` |
+| `trim` | Cut a clip by start + duration/end (times accept seconds or `MM:SS`) | `mediakit trim in.mp4 --start 2 --duration 5 -o out.mp4` |
+| `fit` | Fit a file to an exact target duration: `speed` (up/down, factor 0.25–4x), `trim` (cut longer), `loop` (repeat shorter) — reports the duration actually measured | `mediakit fit in.mp4 --duration 0:30 -o out.mp4` |
 | `crop` | Crop to a rectangle (w, h, x, y) | `mediakit crop in.mp4 --width 720 --height 1280 -o out.mp4` |
 | `resize` | Resize, keeping aspect ratio by default | `mediakit resize in.mp4 --width 1080 -o out.mp4` |
 | `extract_audio` | Pull the audio track out (mp3/aac/wav/ogg/opus/flac) | `mediakit extract-audio in.mp4 -o out.mp3` |
@@ -107,7 +108,20 @@ frame (the classic Shorts look); `--mode pad` uses black bars instead.
 `--x`/`--y` anchor the crop window when the subject isn't centered.
 `check` measures the real file — dimensions, codecs, fps, duration limit,
 audio channels and integrated LUFS — and reports pass/fail per rule with
-a fix hint. Platforms: `tiktok`, `reels`, `shorts`, `youtube`.
+a fix hint. It also checks video bitrate against the platform's
+recommended ladder (YouTube's published figures: 1080p 8 Mbps @30fps /
+12 @60fps, 720p 5 / 7.5 — TikTok/Reels publish no bitrate, so the same
+ladder is the working figure) as a **warning only**: a low or oversized
+bitrate never fails the check, it is listed under `warnings`. TikTok also
+gets a file-size rule (<= 287 MB, the mobile-app upload limit). The
+result reports the platform's text-safe zone — keep captions inside that
+rect, clear of the UI chrome. Platforms: `tiktok`, `reels`, `shorts`,
+`youtube`. `fit` makes a clip exactly N seconds long: `--method speed`
+(default) plays it faster/slower (`setpts` + chained `atempo`, factor
+0.25–4x), `trim` cuts a longer source, `loop` repeats a shorter one —
+the result reports the duration measured on disk (`duration_error_seconds`
+is usually 0.00s). Times everywhere accept seconds or `MM:SS`
+(`--duration 0:30`, `trim --start 1:30`).
 `silence` cuts dead air out of speech/video (detects with `silencedetect`,
 keeps a 0.2s margin around speech so words are never clipped);
 `--detect-only` reports the silence/kept segments without writing a file,

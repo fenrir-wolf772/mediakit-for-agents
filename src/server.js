@@ -220,7 +220,7 @@ server.tool(
 
 server.tool(
   "check",
-  "Verify a finished file against a platform delivery spec (tiktok, reels, shorts, youtube): dimensions, codecs, fps, duration limit, audio channels and measured loudness. Returns pass/fail per rule with fix hints. Run this before publishing.",
+  "Verify a finished file against a platform delivery spec (tiktok, reels, shorts, youtube): dimensions, codecs, fps, duration limit, audio channels and measured loudness, plus a file-size limit where the platform has one. Video bitrate is checked as a warning only (platforms publish recommendations, not gates) and the result also reports the platform's text-safe zone. Returns pass/fail per rule with fix hints. Run this before publishing.",
   {
     input: pathSchema,
     platform: z.enum(["tiktok", "reels", "shorts", "youtube"]).default("tiktok"),
@@ -364,6 +364,23 @@ server.tool(
   "List the keyframe (I-frame) timestamps of a video (probe-only, writes no file), plus GOP min/max/avg interval. Check this before a stream-copy trim — cutting between keyframes silently shifts the cut. Pair with trim snap_to_keyframe=true to snap the cut onto keyframes.",
   { input: pathSchema },
   async (a) => safe(() => core.listKeyframes(a)),
+);
+
+server.tool(
+  "fit",
+  "Fit a media file to an exact target duration in seconds. method speed (default) speeds it up/down with setpts + chained atempo (factor must stay in 0.25-4x); trim cuts a longer source down; loop repeats a shorter source until it reaches the target. Returns the output duration actually measured with ffprobe, plus duration_error_seconds.",
+  {
+    input: pathSchema,
+    output: pathSchema,
+    duration: z.number().positive().describe("Target duration in seconds"),
+    method: z.enum(["speed", "trim", "loop"]).default("speed").describe("speed = change playback speed (keeps the whole clip), trim = cut a longer source, loop = repeat a shorter source"),
+  },
+  async (a) => safe(() => core.fitDuration({
+    input: a.input,
+    output: a.output,
+    duration: a.duration,
+    method: a.method,
+  })),
 );
 
 server.tool(

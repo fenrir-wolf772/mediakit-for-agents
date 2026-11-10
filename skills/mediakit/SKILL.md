@@ -204,6 +204,22 @@ snapped range is wider than you can accept, re-encode instead
 (`trim` without `--stream-copy` is frame-accurate). `--snap` without
 `--stream-copy` is refused: there is nothing to snap.
 
+### 16. Fit the duration before you publish — and read the measured one
+A clip that must be exactly N seconds (a 30s ad slot, a 60s Short) gets
+`fit --duration N`, not a guessed `trim` or a speed change by hand.
+`--method speed` (default) keeps the whole clip and plays it faster or
+slower — factor must stay in 0.25–4x, outside that the tool refuses and
+tells you to use `trim` (longer source) or `loop` (shorter source)
+instead. The result reports `duration_actual` and
+`duration_error_seconds` measured with ffprobe — read them; the fit is
+only done when the measured error is ~0. Times accept `MM:SS` as well as
+seconds (`--duration 0:30`, `trim --start 1:30 --duration 0:05`).
+`check` treats video bitrate as a warning, not a gate: a low or oversized
+bitrate lands in `warnings` and never fails the check — the platforms
+re-encode everything, so bitrate is a quality hint, not an upload
+requirement. The check result also reports the platform's text-safe
+zone: keep captions inside that rect, clear of the UI chrome.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

@@ -16,15 +16,25 @@ const COMMANDS = {
     options: [],
   },
   trim: {
-    usage: "mediakit trim <input> --start <s> (--duration <s> | --end <s>) -o <output> [--stream-copy] [--snap]",
-    desc: "Cut a clip. Re-encodes by default (frame-accurate); --stream-copy is fast but keyframe-only. --snap (with --stream-copy) moves start/end onto the nearest keyframes.",
+    usage: "mediakit trim <input> --start <s|MM:SS> (--duration <s|MM:SS> | --end <s|MM:SS>) -o <output> [--stream-copy] [--snap]",
+    desc: "Cut a clip. Re-encodes by default (frame-accurate); --stream-copy is fast but keyframe-only. --snap (with --stream-copy) moves start/end onto the nearest keyframes. Times accept seconds or MM:SS.",
     args: [{ name: "input", required: true }],
     options: [
-      ["--start", "Start time in seconds (default 0)"],
-      ["--duration", "Clip length in seconds"],
-      ["--end", "End time in seconds (alternative to --duration)"],
+      ["--start", "Start time in seconds or MM:SS (default 0)"],
+      ["--duration", "Clip length in seconds or MM:SS"],
+      ["--end", "End time in seconds or MM:SS (alternative to --duration)"],
       ["--stream-copy", "Copy streams without re-encoding"],
       ["--snap", "Snap start/end to the nearest keyframes (needs --stream-copy)"],
+      ["-o, --output", "Output file (required)"],
+    ],
+  },
+  fit: {
+    usage: "mediakit fit <input> --duration <s|MM:SS> -o <output> [--method speed|trim|loop]",
+    desc: "Fit a file to an exact target duration. speed (default) speeds it up/down (factor 0.25-4x); trim cuts a longer source; loop repeats a shorter source. Times accept seconds or MM:SS.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--duration", "Target duration in seconds or MM:SS (required)"],
+      ["--method", "speed (default) | trim | loop"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -334,11 +344,20 @@ async function main() {
       case "trim": {
         result = await core.trim({
           input: needInput(), output: needOutput(opts),
-          start: numOpt(opts, "start") ?? 0,
-          duration: numOpt(opts, "duration") ?? null,
-          end: numOpt(opts, "end") ?? null,
+          start: opts.start ?? 0,
+          duration: opts.duration ?? null,
+          end: opts.end ?? null,
           streamCopy: opts.stream_copy === true,
           snapToKeyframe: opts.snap === true,
+        });
+        break;
+      }
+      case "fit": {
+        if (opts.duration === undefined) fail("missing required option: --duration <s|MM:SS>");
+        result = await core.fitDuration({
+          input: needInput(), output: needOutput(opts),
+          duration: opts.duration,
+          method: opts.method ?? "speed",
         });
         break;
       }

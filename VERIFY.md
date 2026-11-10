@@ -449,3 +449,105 @@ vào `test/mcp-test.mjs` (trim stream_copy + snap).
 - README (bảng 22 tools + đoạn keyframes/snap), SKILL.md
   (rule 15 "stream-copy cuts must land on keyframes") đã cập nhật.
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+
+## Lượt 8 — 2026-11-10 (fit + check mở rộng + thời gian MM:SS, 23 tools)
+
+### Học: video-creator/ffmpeg-mcp (153★, 8 tools, Python)
+- `clip_video` nhận thời gian dạng `MM:SS`/`HH:MM:SS`, không chỉ số
+  giây → đã làm `parseTime()` dùng chung cho `trim` (start/duration/
+  end) và `fit --duration` (CLI nhận `0:30`, `1:30`; MCP giữ số giây).
+- `concat_videos(fast=True/False)` — probe các clip, giống hệt nhau
+  (codec/res/fps) thì concat demuxer stream-copy, khác thì normalize
+  (scale `force_original_aspect_ratio` increase→crop / decrease→pad
+  theo chênh aspect < 0.15) → backlog mới (MediaKit `concat` hiện luôn
+  re-encode; fast-path tiết kiệm thời gian cho clip đồng nhất).
+- `overlay_video` picture-in-picture (video đè video, 9 vị trí +
+  `amix` weights 3:1) → backlog mới (MediaKit `overlay` hiện chỉ nhận
+  ảnh tĩnh).
+- `find_video_path` tìm file theo tên, đệ quy trong thư mục → backlog
+  (thấp, tiện cho agent).
+- Anti-pattern: repo bundle ffmpeg binary riêng cho macOS (git clone
+  từ gitee lúc chạy, chỉ hỗ trợ macOS) — MediaKit giữ ffmpeg hệ thống
+  + `doctor` kiểm tra, không làm theo.
+KHÔNG copy code của họ — chỉ học ý tưởng, tự implement bằng Node/ffmpeg.
+
+### Tính năng mới
+- `fit` (core+CLI+MCP): fit đúng độ dài đích. `--method speed`
+  (mặc định): video `setpts=PTS/factor`, audio `atempo` chia chuỗi
+  (mỗi bước trong [0.5, 2.0], factor cho phép [0.25, 4]); `trim`: cắt
+  nguồn dài hơn (re-encode, `-t`); `loop`: `-stream_loop -1` nguồn
+  ngắn hơn rồi `-t`. Trả `duration_actual` + `duration_error_seconds`
+  đo thật bằng ffprobe. Chạy được cả audio-only.
+- `check` mở rộng: (1) rule `video_bitrate` — thang khuyến nghị theo
+  độ phân giải + fps (YouTube công bố: 1080p 8 Mbps @30fps / 12 @60fps,
+  720p 5 / 7.5; TikTok/Reels không công bố bitrate nên dùng chung thang
+  này làm working figure), **severity warn** — chỉ vào `warnings`,
+  không làm fail check; (2) rule `file_size` cho TikTok (<= 287 MB,
+  giới hạn upload từ app mobile); (3) kết quả trả thêm `safe_zone`
+  (rect giữ chữ/phụ đề, kèm note là creator guidance, không phải spec
+  công bố). `probe` trả thêm `video.bit_rate` / `audio.bit_rate`.
+- `parseTime`: số giây hoặc `SS` / `MM:SS` / `HH:MM:SS`.
+
+| Case | Command | Result |
+|---|---|---|
+| fit speed 2x | `fit test/source.mp4 --duration 5` | target **5s → actual 5.000s, error 0s**, 244.7 KB |
+| fit speed 0.5x | `fit … --duration 20` | target **20s → actual 19.989s, error −0.011s** |
+| fit speed 4x | `fit … --duration 2.5` | target **2.5s → actual 2.5s, error 0s** (atempo chain 2,2) |
+| fit trim | `fit … --duration 6 --method trim` | target **6s → actual 6s, error 0s** |
+| fit loop | `fit … --duration 15 --method loop` | target **15s → actual 15s, error 0s**, loops 2 |
+| fit audio-only | `fit test/mix-voice.mp3 --duration 4.5` | target **4.5s → actual 4.5s, error 0s**, 35.7 KB |
+| fit MM:SS | `fit … --duration 0:06` | target **6s → actual 6s** |
+| trim MM:SS | `trim … --start 0:01 --duration 0:02` | start **1**, duration **2**, actual **2s** |
+| fit factor quá giới hạn | `fit … --duration 1` (10x) | Từ chối đúng exit 2, INVALID_ARG + gợi ý trim/loop |
+| fit trim nguồn ngắn | `fit … --duration 15 --method trim` | Từ chối đúng exit 2 |
+| fit loop nguồn dài | `fit … --duration 5 --method loop` | Từ chối đúng exit 2 |
+| fit method lạ | `--method stretch` | Từ chối đúng exit 2 |
+| trim chuỗi giờ sai | `--start 1:2:3:4` | Từ chối đúng exit 2 |
+| check bitrate thấp | `check test/source.mp4 --platform tiktok` | video_bitrate **0.1 Mbps vs ~8 Mbps** → warn, vào `warnings`; pass=false chỉ vì dimensions + loudness (lỗi thật) |
+| check bitrate cao | file nhiễu 175 Mbps, `--platform youtube` | video_bitrate **175.0 Mbps vs ~5 Mbps** → warn "oversized file" |
+| check warn không fail | reframe→loudness −14→`check --platform tiktok` | **pass: true**, `warnings` có video_bitrate 0.3 Mbps, `issues` rỗng |
+| check safe_zone | tiktok / youtube | tiktok **x 64–1016, y 200–1400**; youtube **x 96–1824, y 64–980** |
+| check file_size | tiktok | `<= 287 MB`, actual 0.2–0.4 MB pass; youtube không có rule này |
+
+- Bẫy đo lường (2 cái trong lượt này):
+  1. `setpts=PTS/2` lần đầu ra **5.067s / 152 frames** thay vì 5.0s —
+     ffmpeg CFR mặc định duplicate frame về lưới fps gốc (300 frame
+     1/60s bị resample lên lưới 1/30s). Fix: `-fps_mode passthrough`
+     + `-t <target>` để cắt đuôi padding AAC → **5.000s đúng**.
+     Bài học: **speed-change bằng setpts bắt buộc passthrough,
+     không tin CFR mặc định.**
+  2. Thang bitrate dùng `max(width, height)` thì 1080×1920 dọc bị xếp
+     tier 1440p → khuyến nghị sai **~16 Mbps**. Fix: dùng cạnh NGẮN
+     (`min`) làm resolution class (1080×1920 = "1080p") → **~8 Mbps**
+     đúng. Bài học: **ladder bitrate tính theo cạnh ngắn, không phải
+     cạnh dài.**
+  3. Encode testsrc phẳng ở `-b:v 20M` vẫn chỉ ra 0.7 Mbps — encoder
+     không tiêu bit cho nội dung phẳng; muốn test nhánh warn cao phải
+     gen nội dung nhiễu (`testsrc2 + noise`) mới lên 175 Mbps.
+
+### Tests
+
+- `npm run check`: `node --check` sạch trên `src/core.js`,
+  `src/server.js`, `bin/mediakit.js`.
+- `npm test`: **all 23 tools present**; `fit` qua MCP: method speed,
+  factor 2, target 5s, duration_actual **5s, error 0s**; `doctor` qua
+  MCP: ok=true, **23/23 tools available** (fit available). Các case
+  regression cũ vẫn qua (silence 6.867s, cropdetect 1280:720:320:180,
+  mix LUFS −14.1 / ducking 9.9 dB, concat fade 15.022s, keyframes,
+  trim snap 0–8.333).
+- **Assert thật trong `test/mcp-test.mjs`** (theo ghi chú kiểm tra độc
+  lập 2026-11-10, đã dời ra `hidden_files/mediakit-independent-check-2026-11-10.md`
+  để khỏi lẫn vào repo): trước đây test chỉ gọi tool rồi in kết quả —
+  "22/22" nghĩa là gọi không crash, không phải đúng; đó là lý do bug
+  stream_copy sống tới lượt 7. Giờ test có **31 assertions** (probe
+  10s/1280×720, trim actual 2s, reframe 1080×1920, check bitrate warn
+  + safe zone, doctor ok + fit available, silence 6.867s/2 gaps,
+  cropdetect rect chính xác, package có spec.json + checksums, mix
+  −14 LUFS + ducking > 5 dB, concat fade 15s, frames 5 file/timestamp,
+  overlay 1136,24, scenes 5.033s, keyframes [0, 8.333], trim snap
+  stream_copy + 0–8.333, fit factor 2 + actual 5s) — **31/31 PASS,
+  exit 0**; kiểm tra âm tính (đổi kỳ vọng probe 10→11s) → FAIL +
+  **exit 1**, CI sẽ đỏ thật khi output sai.
+- README (bảng 23 tools + đoạn fit/check), SKILL.md
+  (rule 16 "fit the duration before you publish") đã cập nhật.
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
