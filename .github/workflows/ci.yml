@@ -19,19 +19,23 @@ jobs:
         with:
           node-version: 20
       - name: Install ffmpeg
-        # apt on the runner can fail transiently (DNS resolution of
-        # security.ubuntu.com died in run #43036227269). Retry apt 3x,
-        # then fall back to the johnvansickle.com static build so a
-        # registry outage never blocks the whole CI run.
+        # apt on the runner can HANG for many minutes when DNS fails:
+        # run #43036227269 died on security.ubuntu.com, and run
+        # #43056155316 never reached attempt 2 of the retry loop —
+        # a single apt-get install hung ~17 min until the 20-min job
+        # timeout cancelled the job. Bound EVERY apt/curl call with a
+        # hard timeout so a hung attempt fails fast and the static
+        # fallback is actually reached.
         run: |
+          APT_OPTS="-o Acquire::Retries=1 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10"
           for i in 1 2 3; do
-            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg && break
-            echo "apt attempt $i failed, retrying in 30s..."
-            sleep 30
+            timeout 120 sudo apt-get update -qq $APT_OPTS && timeout 180 sudo apt-get install -y -qq $APT_OPTS ffmpeg && break
+            echo "apt attempt $i failed, retrying in 10s..."
+            sleep 10
           done
           if ! command -v ffmpeg >/dev/null; then
             echo "apt failed 3x — falling back to static ffmpeg build"
-            curl -fsSL -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+            curl -fsSL --max-time 180 -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
             tar -xf /tmp/ffmpeg.tar.xz -C /tmp
             sudo install -m 755 /tmp/ffmpeg-*-amd64-static/ffmpeg /usr/local/bin/ffmpeg
             sudo install -m 755 /tmp/ffmpeg-*-amd64-static/ffprobe /usr/local/bin/ffprobe
