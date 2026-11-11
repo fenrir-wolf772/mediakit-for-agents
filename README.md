@@ -4,6 +4,7 @@ Give your coding agent eyes and ears for media. MediaKit is a small MCP
 server + CLI that wraps **ffmpeg** — trim, crop, resize, captions, loudness,
 thumbnails, frame grabs, audio extraction, concat with transitions,
 conversion, silence removal, black-bar measurement, delivery packaging,
+provenance receipts, file compression with named quality presets,
 voice/music mixing with sidechain ducking, logo overlays, scene-cut
 detection, and an environment preflight — so an
 agent can actually *work* with video and audio instead of guessing.
@@ -71,6 +72,7 @@ Then ask your agent things like:
 | `silence` | Remove silent stretches, keeping a margin around speech | `mediakit silence in.mp4 -o tight.mp4` |
 | `cropdetect` | Measure letterbox/pillarbox bars; returns the crop rect + a ready crop command | `mediakit cropdetect in.mp4` |
 | `package` | Bundle a finished file for delivery: media + spec.json receipt + checksums.sha256 (+ captions) | `mediakit package out.mp4 -o delivery.zip --platform tiktok` |
+| `receipt` | Write a provenance receipt (JSON sidecar) for a finished file: probe, SHA-256, size, measured loudness, optional platform check, ffmpeg versions — re-run `sha256sum` against it any time to prove the media has not changed | `mediakit receipt out.mp4 -o out.receipt.json --platform tiktok` |
 | `mix` | Mix voice over a music bed with sidechain ducking (bed drops under speech), then master to target LUFS; reports the ducking actually measured. `--dry-run` prints the exact ffmpeg command and writes no file | `mediakit mix voice.mp3 --music bed.mp3 -o mixed.mp3` |
 | `overlay` | Overlay a logo/watermark image (named position, margin, scale, opacity, optional timing) | `mediakit overlay in.mp4 --image logo.png -o out.mp4 --position top-right` |
 | `pip` | Picture-in-picture: a second video over the main one (9 positions, size by width or scale, opacity, optional timing, audio main/pip/mix) | `mediakit pip main.mp4 --pip facecam.mp4 -o out.mp4 --position bottom-right` |
@@ -83,6 +85,7 @@ Then ask your agent things like:
 | `svg_animate` | Animate an SVG into a video, code-driven (no browser): keyframed translate/scale/rotate/opacity on elements by id, rendered frame by frame via librsvg — slide-ins, fades, bounces, spinning shapes | `mediakit svg-animate in.svg --anim anim.json -o out.mp4 --duration 4` |
 | `doctor` | Read-only preflight: ffmpeg version, filters/encoders, tool availability | `mediakit doctor` |
 | `convert` | Change container/codec (omit a codec to stream-copy) | `mediakit convert in.mov -o out.mp4 --video-codec libx264` |
+| `compress` | Shrink a file with one named quality preset — low (CRF 32), medium (CRF 26), high (CRF 20) — each with its own x264 preset and audio bitrate; optional `--max-width` scales down first. Reports the size before/after and the reduction actually measured on disk | `mediakit compress in.mp4 -o small.mp4 --quality low` |
 
 Every tool returns a concise JSON result: output path, size, and the
 verified duration/dimensions of what it produced.

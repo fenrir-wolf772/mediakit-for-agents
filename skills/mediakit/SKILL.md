@@ -321,6 +321,23 @@ the SVG's own width/height/viewBox unless `--width/--height` override
 it; `background` (default white) paints an opaque rect first because
 video has no alpha.
 
+### 23. Compress by name, receipt the finished file
+`compress` shrinks a file with one named preset instead of a guessed
+CRF: `low` (CRF 32, veryfast, 96k audio), `medium` (CRF 26, medium,
+128k), `high` (CRF 20, slow, 192k). `--crf` / `--preset` override the
+preset's values when you need them. `--max-width` scales the video
+down first (only when the source is wider). Read `reduction_percent`
+in the result — it is measured on disk and can go negative: a source
+already encoded at a very low bitrate can come out bigger at medium
+or high, and the tool says so instead of pretending it shrank.
+Audio-only input is re-encoded at the preset's audio bitrate.
+`receipt` writes a provenance JSON sidecar for a finished file:
+probe, SHA-256, size, measured loudness, optional `--platform` check
+result, and the exact ffmpeg/ffprobe versions. Keep the receipt next
+to the file; `sha256sum` against it proves the media has not changed
+since it was written. `package` already embeds the same receipt
+inside its ZIP — use `receipt` when the file is delivered on its own.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.
@@ -332,6 +349,6 @@ video has no alpha.
 7. `check --platform tiktok` — all rules must pass.
 8. `extract_frame` at a mid timestamp to verify the captions actually render.
 9. `overlay` the channel logo (`--position top-right --opacity 0.8`) when the clip is branded — verify with another `extract_frame` at the logo corner.
-10. `package` the finished file with `--platform tiktok` and the captions — the delivery ZIP.
+10. `package` the finished file with `--platform tiktok` and the captions — the delivery ZIP. When the file goes out on its own (no ZIP), write a `receipt` instead — same provenance, standalone JSON.
 
 See `skills/shorts-video/SKILL.md` for the full scripted workflow.

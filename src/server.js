@@ -256,6 +256,27 @@ server.tool(
 );
 
 server.tool(
+  "compress",
+  "Shrink a file with one named quality preset instead of guessing CRF numbers: low (CRF 32), medium (CRF 26) or high (CRF 20), each with its own x264 preset and audio bitrate. Optional max_width scales the video down first. Returns the size before/after and the reduction percent actually measured on disk, so the agent can check the tradeoff worked.",
+  {
+    input: pathSchema,
+    output: pathSchema.describe("Output file path"),
+    quality: z.enum(["low", "medium", "high"]).default("medium").describe("Size/quality tradeoff: low = smallest, high = best quality"),
+    max_width: z.number().int().min(16).optional().describe("Scale video down to this width first (only when the source is wider)"),
+    crf: z.number().int().min(0).max(51).optional().describe("Override the preset's CRF"),
+    preset: z.string().optional().describe("Override the preset's x264 preset (ultrafast..veryslow)"),
+  },
+  async (a) => safe(() => core.compress({
+    input: a.input,
+    output: a.output,
+    quality: a.quality,
+    maxWidth: a.max_width ?? null,
+    crf: a.crf ?? null,
+    preset: a.preset ?? null,
+  })),
+);
+
+server.tool(
   "silence",
   "Remove silent stretches from speech/video. Detects silence with silencedetect, keeps the speech plus a margin of silence on each side (so words are never clipped), then cuts and re-joins. Set detect_only=true to just report the silence/kept segments without writing a file. Returns removed_seconds and the kept segment list — verify those before trusting the cut.",
   {
@@ -297,6 +318,17 @@ server.tool(
     platform: z.enum(["tiktok", "reels", "shorts", "youtube", "instagram-feed", "instagram-story", "linkedin"]).optional().describe("If given, run check for this platform and record the result in spec.json"),
   },
   async (a) => safe(() => core.packageDelivery(a)),
+);
+
+server.tool(
+  "receipt",
+  "Write a provenance receipt (JSON sidecar) for a finished file: probe data, SHA-256, size, measured loudness, optional platform check result, and the exact ffmpeg/ffprobe versions that produced it. Re-run sha256sum against the receipt any time to prove the media has not changed since it was written.",
+  {
+    input: pathSchema,
+    output: pathSchema.describe("Output .json path for the receipt"),
+    platform: z.enum(["tiktok", "reels", "shorts", "youtube", "instagram-feed", "instagram-story", "linkedin"]).optional().describe("If given, run check for this platform and record the result in the receipt"),
+  },
+  async (a) => safe(() => core.receipt(a)),
 );
 
 server.tool(

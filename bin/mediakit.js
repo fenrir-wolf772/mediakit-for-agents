@@ -244,6 +244,27 @@ const COMMANDS = {
       ["-o, --output", "Output .zip file (required)"],
     ],
   },
+  compress: {
+    usage: "mediakit compress <input> -o <output> [--quality low|medium|high] [--max-width <px>] [--crf <n>] [--preset <p>]",
+    desc: "Shrink a file with one named quality preset (low/medium/high). Reports the size before/after and the reduction actually achieved.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--quality", "low | medium | high (default medium)"],
+      ["--max-width", "Scale video down to this width first (only when wider)"],
+      ["--crf", "Override the preset's CRF (0-51)"],
+      ["--preset", "Override the preset's x264 preset (ultrafast..veryslow)"],
+      ["-o, --output", "Output file (required)"],
+    ],
+  },
+  receipt: {
+    usage: "mediakit receipt <input> -o <output.json> [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin]",
+    desc: "Write a provenance receipt (JSON sidecar): probe, SHA-256, size, measured loudness, optional platform check, ffmpeg versions.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--platform", "Run check for this platform and record it in the receipt"],
+      ["-o, --output", "Output .json file (required)"],
+    ],
+  },
   "convert-captions": {
     usage: "mediakit convert-captions <input.srt|vtt> -o <output.vtt|srt>",
     desc: "Convert a subtitle file between SRT and VTT (cue text carried verbatim; VTT cue settings are dropped and counted). Format is inferred from the output extension.",
@@ -575,6 +596,21 @@ async function main() {
         result = await core.packageDelivery({
           input: needInput(), output: needOutput(opts),
           captions: opts.captions ?? null,
+          platform: opts.platform ?? null,
+        });
+        break;
+      case "compress":
+        result = await core.compress({
+          input: needInput(), output: needOutput(opts),
+          quality: opts.quality ?? "medium",
+          maxWidth: numOpt(opts, "max_width") ?? null,
+          crf: numOpt(opts, "crf") ?? null,
+          preset: opts.preset ?? null,
+        });
+        break;
+      case "receipt":
+        result = await core.receipt({
+          input: needInput(), output: needOutput(opts),
           platform: opts.platform ?? null,
         });
         break;

@@ -1831,6 +1831,68 @@ export async function convert({ input, output, videoCodec = null, audioCodec = n
   };
 }
 
+// ---------------------------------------------------------------- compress
+// Shrink a file with one named quality preset (ffmpeg-mcp-lite's
+// compress idea, rebuilt on libx264): low/medium/high map to a CRF +
+// x264 preset + audio bitrate, so the agent picks a size/quality
+// tradeoff instead of guessing CRF numbers. crf/preset override the
+// preset's values when given. Reports the size before/after and the
+// reduction actually achieved, measured on disk — never assumed.
+// Audio-only input is re-encoded at the preset's audio bitrate.
+const COMPRESS_PRESETS = {
+  low: { crf: 32, preset: "veryfast", audio_bitrate_kbps: 96 },
+  medium: { crf: 26, preset: "medium", audio_bitrate_kbps: 128 },
+  high: { crf: 20, preset: "slow", audio_bitrate_kbps: 192 },
+};
+
+export async function compress({ input, output, quality = "medium", maxWidth = null, crf = null, preset = null }) {
+  const inPath = await requireInput(input);
+  const outPath = await prepareOutput(output, [inPath]);
+  if (!(quality in COMPRESS_PRESETS)) {
+    throw new MediaKitError(`unknown quality: ${quality} (supported: ${Object.keys(COMPRESS_PRESETS).join(", ")})`, "INVALID_ARG");
+  }
+  const settings = COMPRESS_PRESETS[quality];
+  const c = crf === null || crf === undefined ? settings.crf : num(crf, "crf", { min: 0, max: 51, integer: true });
+  const p = preset ?? settings.preset;
+  const X264_PRESETS = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"];
+  if (!X264_PRESETS.includes(p)) throw new MediaKitError(`unknown x264 preset: ${p} (supported: ${X264_PRESETS.join(", ")})`, "INVALID_ARG");
+  const maxW = maxWidth === null || maxWidth === undefined ? null : num(maxWidth, "max_width", { min: 16, integer: true });
+  const meta = await probe(inPath);
+  const before = await fileInfo(inPath);
+  const args = ["-y", "-i", inPath];
+  let scaledTo = null;
+  if (meta.video) {
+    if (maxW !== null && meta.video.width > maxW) {
+      const w = maxW % 2 === 0 ? maxW : maxW - 1;
+      const h = Math.max(2, Math.round((meta.video.height * w) / meta.video.width / 2) * 2);
+      args.push("-vf", `scale=${w}:${h}`);
+      scaledTo = `${w}x${h}`;
+    }
+    args.push("-c:v", "libx264", "-crf", String(c), "-preset", p);
+    if (meta.audio) args.push("-c:a", "aac", "-b:a", `${settings.audio_bitrate_kbps}k`);
+    else args.push("-an");
+  } else if (meta.audio) {
+    args.push("-c:a", "aac", "-b:a", `${settings.audio_bitrate_kbps}k`);
+  } else {
+    throw new MediaKitError("compress needs a video or audio stream", "INVALID_ARG");
+  }
+  args.push(outPath);
+  await run(FFMPEG, args);
+  const after = await fileInfo(outPath);
+  const out = await probe(outPath);
+  const reduction = +(((before.size_bytes - after.size_bytes) / before.size_bytes) * 100).toFixed(1);
+  return {
+    operation: "compress", input: inPath, output: outPath,
+    quality, crf: c, preset: p,
+    ...(scaledTo ? { scaled_to: scaledTo } : {}),
+    size_before_bytes: before.size_bytes, size_before_human: before.size_human,
+    size_after_bytes: after.size_bytes, size_after_human: after.size_human,
+    reduction_percent: reduction,
+    duration_seconds: out.duration_seconds,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+  };
+}
+
 // ---------------------------------------------------------------- silence
 // Remove silent stretches from speech/video. Detection runs the
 // silencedetect filter; speech is kept with a margin of silence on
@@ -2006,6 +2068,8 @@ const TOOL_REQUIREMENTS = {
   reframe: { filters: ["crop", "scale", "pad", "gblur", "overlay"], encoders: ["libx264"] },
   check: { filters: ["loudnorm"] },
   convert: { encoders: ["libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4"] },
+  compress: { filters: ["scale"], encoders: ["libx264", "aac"] },
+  receipt: { filters: ["loudnorm"] },
   silence: { filters: ["silencedetect", "trim", "atrim", "concat"], encoders: ["libx264", "aac"] },
   cropdetect: { filters: ["cropdetect"] },
   package: {},
@@ -2288,6 +2352,71 @@ export async function packageDelivery({ input, output, captions = null, platform
     loudness_lufs: lufs,
     ...(checkResult ? { platform: checkResult.platform, platform_pass: checkResult.pass } : {}),
     verify_hint: `unzip -l ${path.basename(outPath)} && sha256sum -c <(unzip -p ${path.basename(outPath)} checksums.sha256)`,
+  };
+}
+
+// ---------------------------------------------------------------- receipt
+// Provenance receipt for one finished file (kinocut's Video Receipt
+// idea): probe + SHA-256 + size + measured loudness + optional
+// platform check + the exact ffmpeg/ffprobe versions that produced
+// it, written as a JSON sidecar. The file itself is the evidence —
+// re-run `sha256sum` against it any time to prove the media has not
+// changed since the receipt was written. `package` already embeds a
+// spec.json inside its ZIP; `receipt` is the standalone version for
+// a file that is delivered on its own.
+export async function receipt({ input, output, platform = null }) {
+  const inPath = await requireInput(input);
+  const outPath = await prepareOutput(output, [inPath]);
+  if (!outPath.toLowerCase().endsWith(".json")) {
+    throw new MediaKitError(`receipt output must end in .json, got: ${output}`, "INVALID_ARG");
+  }
+  const data = await readFile(inPath);
+  const sha256 = createHash("sha256").update(data).digest("hex");
+  const meta = await probe(inPath);
+  const lufs = meta.audio ? await measureLoudness(inPath) : null;
+  let checkResult = null;
+  if (platform) {
+    if (!PLATFORMS[platform]) {
+      throw new MediaKitError(`unknown platform: ${platform} (supported: ${Object.keys(PLATFORMS).join(", ")})`, "INVALID_ARG");
+    }
+    checkResult = await check({ input: inPath, platform });
+  }
+  const { stdout: ffmpegVer } = await run(FFMPEG, ["-version"]);
+  const { stdout: ffprobeVer } = await run(FFPROBE, ["-version"]);
+  const rec = {
+    tool: "mediakit-for-agents",
+    mediakit_version: MEDIAKIT_VERSION,
+    created_at: new Date().toISOString(),
+    media: path.basename(inPath),
+    sha256,
+    size_bytes: data.length,
+    size_human: humanSize(data.length),
+    probe: meta,
+    loudness_lufs: lufs,
+    ...(checkResult ? { platform_check: { platform, pass: checkResult.pass, checks: checkResult.checks } } : {}),
+    environment: {
+      ffmpeg_version: (ffmpegVer.match(/ffmpeg version (\S+)/) || [])[1] ?? null,
+      ffprobe_version: (ffprobeVer.match(/ffprobe version (\S+)/) || [])[1] ?? null,
+      node_version: process.version,
+      platform: `${process.platform}-${process.arch}`,
+    },
+  };
+  await writeFile(outPath, JSON.stringify(rec, null, 2) + "\n");
+  const info = await fileInfo(outPath);
+  return {
+    operation: "receipt",
+    input: inPath,
+    output: outPath,
+    ...info,
+    media: path.basename(inPath),
+    sha256,
+    size_bytes: data.length,
+    size_human: humanSize(data.length),
+    duration_seconds: meta.duration_seconds,
+    dimensions: meta.video ? `${meta.video.width}x${meta.video.height}` : null,
+    loudness_lufs: lufs,
+    ...(checkResult ? { platform: checkResult.platform, platform_pass: checkResult.pass } : {}),
+    verify_hint: `sha256sum ${path.basename(inPath)}`,
   };
 }
 

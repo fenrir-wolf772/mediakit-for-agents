@@ -26,5 +26,7 @@ jobs:
           node bin/mediakit.js loudness outputs/ci-reframe.mp4 -o outputs/ci-reframe-loud.mp4 --target-lufs -14
           node bin/mediakit.js check outputs/ci-reframe-loud.mp4 --platform tiktok | grep '"pass": true'
           node bin/mediakit.js svg-animate test/svg-demo.svg --anim test/svg-demo-anim.json --duration 2 --fps 10 --background 0F172A -o outputs/ci-svg.mp4
+          node bin/mediakit.js compress test/source.mp4 --quality low -o outputs/ci-compress.mp4
+          node bin/mediakit.js receipt outputs/ci-compress.mp4 -o outputs/ci-receipt.json --platform tiktok
       - name: MCP test
         run: npm test

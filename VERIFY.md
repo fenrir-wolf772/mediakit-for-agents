@@ -847,3 +847,25 @@ tone [6,10)), `test/content-lead-black.mp4` (đen 1s đầu + testsrc 9s),
 - **Demo**: `~/workspace/svg-animate-demo-v3.mp4` (1080×1920, 4s, 30fps, 120 frame, 9 animation: mặt trời bob, sao xoay 360°, card trượt vào, chữ fade-in, bóng nảy 2 nhịp) + contact sheet `svg-animate-demo-frames-v3.png` (t=0.5/2.0/3.5) — soi mắt OK.
 - `npm run check` sạch; `npm test`: **150/150 PASS, exit 0** (30 tools, doctor 30/30 available). CI smoke test thêm dòng svg-animate (fixture `test/svg-demo.svg` + `test/svg-demo-anim.json`).
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+
+---
+
+## Lượt 13 — 2026-11-11 08:58 (+07): compress + receipt (tools 31–32)
+
+- **Học: kevinwatt/ffmpeg-mcp-lite** (28★, Python/FastMCP, 8 tools, 32 pytest). Ý áp dụng được:
+  1. `compress` — quality presets low/medium/high + báo size reduction stats → đã làm tool `compress` (CRF 32/26/20 + x264 preset veryfast/medium/slow + audio 96/128/192k, `--max-width`, trả `reduction_percent` đo thật trên đĩa).
+  2. Subtitle styles (outline/shadow/background/glow) cho burn_captions → backlog mới (burn_captions thêm `--style`).
+  3. Tip docs cho `frames`: screen recording nên dùng png/webp thay vì jpg (JPEG chroma subsampling làm nhòe text/border 1px) → backlog nhỏ (ghi vào SKILL.md mục frames).
+  4. Một file một tool (modular) → KHÔNG áp dụng (MediaKit cố ý 1 core.js để agent đọc hết trong 1 lần).
+  5. `FFMPEG_OUTPUT_DIR` env → không cần (MediaKit đã có `MEDIAKIT_FFMPEG`/`MEDIAKIT_FFPROBE`).
+  KHÔNG copy code của họ — chỉ học ý tưởng, tự implement bằng Node/ffmpeg.
+- **Làm**:
+  - `compress` (core+CLI+MCP, tool 31): preset low/medium/high; `--crf`/`--preset` override; `--max-width` scale xuống trước (tính kích thước chẵn bằng JS từ probe, không dùng filter expression); audio-only re-encode aac theo preset; trả size trước/sau + `reduction_percent` đo thật.
+  - `receipt` (core+CLI+MCP, tool 32): provenance receipt JSON sidecar — probe + SHA-256 + size + loudness đo thật + platform check (tùy chọn) + ffmpeg/ffprobe/node version + timestamp; output phải `.json`. `package` đã nhúng spec.json trong ZIP; `receipt` là bản standalone cho file giao lẻ.
+  - `doctor`: thêm `compress: {filters: [scale], encoders: [libx264, aac]}`, `receipt: {filters: [loudnorm]}` (32/32 available).
+  - README (bảng 32 tools + intro), SKILL.md (rule 23 + workflow bước 10), CI smoke thêm 2 dòng compress/receipt.
+- **Test** (ffmpeg 8.1.2, source 1280×720 10s, 243.932 B, 195 kbps): compress low **207.729 B, −14,8%**, medium 255.167 B (−4,6%), high 313.901 B (−28,7%) — **thứ tự low < medium < high nghiêm ngặt, CRF đúng preset (32/26/20)**; max-width 640 → **640×360, scaled_to 640x360**; audio-only mp3 9s → .m4a, dimensions null, 9s; quality lạ → lỗi enum MCP. Receipt: SHA-256 trong file **khớp đúng `sha256sum` độc lập** (7e32a197…9018f08), size 243.932, loudness −21,8 LUFS, platform_pass false (source 1280×720 chưa phải TikTok 1080×1920 — đúng), file ghi ffmpeg 8.1.2 + platform_check + probe; không platform → không có key platform_check.
+- **Bẫy đo lường**: source fixture đã encode ở bitrate rất thấp (195 kbps) nên medium/high ra file LỚN HƠN source — `reduction_percent` âm là báo thật, không phải bug; assert đúng là thứ tự kích thước theo preset, không phải "mọi preset đều nhỏ hơn source". Ghi rõ vào SKILL.md rule 23.
+- **Bug bắt được**: test file có dynamic import `readFile` trùng tên với import tĩnh mới thêm ở đầu file → SyntaxError crash cả test run trước khi chạy test nào. Fix: bỏ dynamic import, dùng import tĩnh chung (dòng manifest social).
+- `npm run check` sạch; `npm test`: **177/177 PASS, exit 0** (32 tools, doctor 32/32 available). Assert mới (27): compress 17 + receipt 10.
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).

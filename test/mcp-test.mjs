@@ -7,6 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -44,10 +45,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "find", "svg_animate"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "find", "svg_animate", "compress", "receipt"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 30 tools present");
-checkOk(missing.length === 0, "tools/list has all 30 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 32 tools present");
+checkOk(missing.length === 0, "tools/list has all 32 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -581,7 +582,6 @@ for (const o of socialJson.outputs) {
   checkOk(typeof o.lufs === "number" && o.lufs >= -16 && o.lufs <= -12, `social ${o.platform} LUFS in platform window`, `got ${o.lufs}`);
   checkOk(o.trimmed === false, `social ${o.platform} did not trim a 10s source`, `got trimmed=${o.trimmed}`);
 }
-const { readFile } = await import("node:fs/promises");
 const manifestJson = JSON.parse(await readFile(path.join(root, "outputs/mcp-social/manifest.json"), "utf8"));
 checkOk(manifestJson.outputs.length === 3 && manifestJson.strategy === "blur", "social manifest.json lists all 3 outputs + strategy", `got ${manifestJson.outputs?.length} outputs`);
 // An unknown platform is rejected by the MCP schema itself (enum
@@ -817,6 +817,80 @@ console.log("svg chain ball R: early-mid", chainEarlyR, "mid", chainMidR, "end",
 checkOk(chainMidR !== null && chainMidR > 150, "svg_animate chain reaches the end at the window boundary (t=1.0)", `got R=${chainMidR}`);
 checkOk(chainEndR !== null && chainEndR < 50, "svg_animate chain returns the ball to the start (t=1.9)", `got R=${chainEndR}`);
 checkOk(chainEarlyR !== null && chainEarlyR > 150, "svg_animate chain is halfway out before the second window starts (t=0.5)", `got R=${chainEarlyR}`);
+
+// compress: named quality presets. The fixture source is already
+// encoded at a very low bitrate (195 kbps), so medium/high can come
+// out LARGER than the source — reduction_percent honestly goes
+// negative there. What must hold is the ordering: higher quality
+// always means a bigger file, and low must shrink the source.
+const compressSizes = {};
+let compressLowJson = null;
+for (const q of ["low", "medium", "high"]) {
+  const cRes = await client.callTool({
+    name: "compress",
+    arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, `outputs/mcp-compress-${q}.mp4`), quality: q },
+  });
+  const cJson = JSON.parse(cRes.content[0].text);
+  console.log(`compress ${q}:`, JSON.stringify(cJson));
+  compressSizes[q] = cJson.size_after_bytes;
+  if (q === "low") compressLowJson = cJson;
+  checkOk(cJson.size_before_bytes === 243932, `compress ${q} reports the true source size`, `got ${cJson.size_before_bytes}`);
+  checkOk(near(cJson.duration_seconds, 10, 0.1), `compress ${q} keeps 10s`, `got ${cJson.duration_seconds}`);
+  checkOk(cJson.dimensions === "1280x720", `compress ${q} keeps 1280x720`, `got ${cJson.dimensions}`);
+  checkOk(cJson.crf === { low: 32, medium: 26, high: 20 }[q], `compress ${q} uses the preset CRF`, `got CRF ${cJson.crf}`);
+}
+checkOk(compressSizes.low < compressSizes.medium && compressSizes.medium < compressSizes.high, "compress sizes strictly increase low < medium < high", JSON.stringify(compressSizes));
+checkOk(compressLowJson.reduction_percent > 0, "compress low actually shrinks the source", `got ${compressLowJson.reduction_percent}%`);
+// max-width scales down first.
+const compressWRes = await client.callTool({
+  name: "compress",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-compress-w640.mp4"), quality: "medium", max_width: 640 },
+});
+const compressWJson = JSON.parse(compressWRes.content[0].text);
+checkOk(compressWJson.dimensions === "640x360" && compressWJson.scaled_to === "640x360", "compress --max-width 640 scales to 640x360", JSON.stringify(compressWJson));
+// Audio-only input: re-encodes the audio track, no video.
+const compressARes = await client.callTool({
+  name: "compress",
+  arguments: { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-compress-audio.m4a"), quality: "medium" },
+});
+const compressAJson = JSON.parse(compressARes.content[0].text);
+checkOk(compressAJson.dimensions === null && near(compressAJson.duration_seconds, 9, 0.1), "compress works on audio-only input", JSON.stringify(compressAJson));
+// Bad quality: the MCP layer rejects the enum value before the tool runs.
+const compressBadRes = await client.callTool({
+  name: "compress",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-compress-bad.mp4"), quality: "tiny" },
+});
+const compressBadText = compressBadRes.content?.[0]?.text ?? "";
+checkOk(/quality/.test(compressBadText) && /tiny/.test(compressBadText), "compress errors on an unknown quality", compressBadText.slice(0, 200));
+
+// receipt: provenance sidecar. The SHA-256 in the receipt must match
+// an independent sha256sum of the same file — that is the whole point.
+const receiptRes = await client.callTool({
+  name: "receipt",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-receipt.json"), platform: "tiktok" },
+});
+const receiptJson = JSON.parse(receiptRes.content[0].text);
+console.log("receipt call:", JSON.stringify(receiptJson));
+const { stdout: shaOut } = await execFileAsync("sha256sum", [path.join(root, "test/source.mp4")]);
+const realSha = shaOut.split(/\s+/)[0];
+checkOk(receiptJson.sha256 === realSha, "receipt SHA-256 matches independent sha256sum", `receipt ${receiptJson.sha256} vs ${realSha}`);
+checkOk(receiptJson.size_bytes === 243932, "receipt size is 243932 bytes", `got ${receiptJson.size_bytes}`);
+checkOk(near(receiptJson.duration_seconds, 10, 0.01), "receipt duration is 10s", `got ${receiptJson.duration_seconds}`);
+checkOk(typeof receiptJson.loudness_lufs === "number", "receipt measures loudness", `got ${receiptJson.loudness_lufs}`);
+checkOk(receiptJson.platform_pass === false, "receipt records the TikTok check failing on 1280x720 source", `got ${receiptJson.platform_pass}`);
+const receiptFile = JSON.parse(await readFile(path.join(root, "outputs/mcp-receipt.json"), "utf8"));
+checkOk(receiptFile.sha256 === realSha, "receipt file on disk carries the same SHA-256", `got ${receiptFile.sha256}`);
+checkOk(receiptFile.environment?.ffmpeg_version === "8.1.2", "receipt file records the ffmpeg version", JSON.stringify(receiptFile.environment));
+checkOk(receiptFile.platform_check?.pass === false && receiptFile.probe?.duration_seconds === 10, "receipt file embeds the platform check and probe", JSON.stringify(receiptFile.platform_check));
+// No platform: no platform_check key in the file.
+const receiptPlainRes = await client.callTool({
+  name: "receipt",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-receipt-plain.json") },
+});
+const receiptPlainJson = JSON.parse(receiptPlainRes.content[0].text);
+checkOk(receiptPlainJson.platform_pass === undefined, "receipt without platform has no platform_pass", JSON.stringify(receiptPlainJson));
+const receiptPlainFile = JSON.parse(await readFile(path.join(root, "outputs/mcp-receipt-plain.json"), "utf8"));
+checkOk(!("platform_check" in receiptPlainFile), "receipt file without platform has no platform_check key", Object.keys(receiptPlainFile).join(","));
 
 await client.close();
 if (failures.length) {
