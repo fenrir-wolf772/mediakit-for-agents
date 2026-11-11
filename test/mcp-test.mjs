@@ -488,6 +488,61 @@ checkOk(capsBand !== null && capsBand < 30, "burn_captions text lands in the saf
 const capsStrip = await bandPsnr(path.join(root, "test/source.mp4"), path.join(root, "outputs/mcp-captions.mp4"), 3.5, 680, 40);
 checkOk(capsStrip !== null && capsStrip > 40, "burn_captions text stays out of the bottom strip (high PSNR there)", `got PSNR ${capsStrip}`);
 
+// burn_captions --style: all four styles render text in the safe band,
+// echo their name, and render differently from each other. The
+// background box is the regression trap: libass draws the BorderStyle 3
+// box from the Outline width, so Outline=0 silently drops the whole
+// box (white text on white footage becomes invisible). A solid-white
+// clip catches it — only a real box darkens the band there, white
+// glyphs alone are invisible on white.
+for (const style of ["background", "outline", "shadow", "glow"]) {
+  const res = await client.callTool({
+    name: "burn_captions",
+    arguments: {
+      input: path.join(root, "test/source.mp4"),
+      captions: path.join(root, "test/captions.srt"),
+      output: path.join(root, `outputs/mcp-captions-${style}.mp4`),
+      style,
+    },
+  });
+  const j = JSON.parse(res.content[0].text);
+  checkOk(j.style === style, `burn_captions style=${style} echoes its style`, `got ${j.style}`);
+  checkOk(j.style_applied === true, `burn_captions style=${style} applies to .srt`, `got ${j.style_applied}`);
+  const p = await bandPsnr(path.join(root, "test/source.mp4"), path.join(root, `outputs/mcp-captions-${style}.mp4`), 3.5, 480, 60);
+  checkOk(p !== null && p < 30, `burn_captions style=${style} text lands in the safe band`, `got PSNR ${p}`);
+}
+const styleCross = await bandPsnr(path.join(root, "outputs/mcp-captions-background.mp4"), path.join(root, "outputs/mcp-captions-outline.mp4"), 3.5, 480, 60);
+checkOk(styleCross !== null && styleCross < 30, "burn_captions background and outline render differently", `got PSNR ${styleCross}`);
+
+// White-clip box regression: generate a solid-white 2s clip (lavfi,
+// no fixture file) and burn two styles onto it. On white, white
+// glyphs are invisible — only the semi-transparent black box (or the
+// black outline) can darken the band. If the box ever stops rendering,
+// the background PSNR goes to ~inf (re-encode noise only).
+await execFileAsync("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", "color=white:1280x720:d=2", "-f", "lavfi", "-i", "sine=frequency=440:d=2", "-shortest", path.join(root, "outputs/mcp-white.mp4")]);
+for (const style of ["background", "outline"]) {
+  await client.callTool({
+    name: "burn_captions",
+    arguments: {
+      input: path.join(root, "outputs/mcp-white.mp4"),
+      captions: path.join(root, "test/captions.srt"),
+      output: path.join(root, `outputs/mcp-white-${style}.mp4`),
+      style,
+    },
+  });
+  const p = await bandPsnr(path.join(root, "outputs/mcp-white.mp4"), path.join(root, `outputs/mcp-white-${style}.mp4`), 1, 500, 60);
+  console.log(`burn_captions ${style} on white: band PSNR ${p}`);
+  checkOk(p !== null && p < 30, `burn_captions ${style} is visible on a white clip (box/outline really renders)`, `got PSNR ${p}`);
+}
+
+// Bad style: the MCP layer rejects the enum value before the tool runs.
+const capsBadRes = await client.callTool({
+  name: "burn_captions",
+  arguments: { input: path.join(root, "test/source.mp4"), captions: path.join(root, "test/captions.srt"), output: path.join(root, "outputs/mcp-captions-bad.mp4"), style: "neon" },
+});
+const capsBadText = capsBadRes.content?.[0]?.text ?? "";
+checkOk(/style/.test(capsBadText) && /neon/.test(capsBadText), "burn_captions errors on an unknown style", capsBadText.slice(0, 200));
+
 // loudness: two-pass must hit -14 LUFS on representative content.
 // Voice (test/mix-voice.mp3, -22.1 LUFS in) reaches -14 ±0.5.
 // The quiet music bed (test/quiet-source.mp3, -26.1 LUFS in) is

@@ -126,13 +126,15 @@ const COMMANDS = {
     ],
   },
   "burn-captions": {
-    usage: "mediakit burn-captions <input> --captions <file.srt|ass|vtt> -o <output> [--font-size <n>] [--margin-v <n>]",
+    usage: "mediakit burn-captions <input> --captions <file.srt|ass|vtt> -o <output> [--font-size <n>] [--margin-v <n>] [--style background|outline|shadow|glow] [--outline-color <name|hex>]",
     desc: "Burn subtitles into the video (hardcoded, always visible).",
     args: [{ name: "input", required: true }],
     options: [
       ["--captions", "Subtitle file .srt/.ass/.vtt (required)"],
       ["--font-size", "Font size in px (default: scales with frame height, ~60px at 1920 high)"],
       ["--margin-v", "Distance from bottom edge in px (default: 26% of frame height, above platform UI)"],
+      ["--style", "Caption style: background (default, white text on a semi-transparent black box) | outline | shadow | glow (halo in the text colour). Ignored for .ass files, which carry their own styles"],
+      ["--outline-color", "Outline colour for outline/shadow styles: name or RRGGBB hex (default black)"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -543,6 +545,7 @@ async function main() {
           input: needInput(), output: needOutput(opts),
           captions: opts.captions, fontSize: numOpt(opts, "font_size") ?? null,
           marginV: numOpt(opts, "margin_v") ?? null,
+          style: opts.style ?? null, outlineColor: opts.outline_color ?? "black",
         });
         break;
       }

@@ -189,13 +189,15 @@ server.tool(
 
 server.tool(
   "burn_captions",
-  "Burn subtitles into the video (hardcoded, always visible). Accepts .srt, .ass or .vtt. Style: white bold text on a semi-transparent black box. Defaults scale with frame height: ~60px type on 1080x1920, sitting ~500px above the bottom edge so platform UI (bottom ~480px) never covers the text. Explicit font_size / margin_v override.",
+  "Burn subtitles into the video (hardcoded, always visible). Accepts .srt, .ass or .vtt. Style: background (default — white text on a semi-transparent black box), outline (black outline, no box), shadow (thin outline + drop shadow), or glow (thick halo in the text's own colour, reads on bright footage). Defaults scale with frame height: ~60px type on 1080x1920, sitting ~500px above the bottom edge so platform UI (bottom ~480px) never covers the text. Explicit font_size / margin_v override. .ass files carry their own styles, so style is ignored there (style_applied=false).",
   {
     input: pathSchema,
     output: pathSchema,
     captions: pathSchema.describe("Path to the .srt/.ass/.vtt file"),
     font_size: z.number().int().min(8).max(200).optional().describe("Font size in px; default scales with frame height (~60px at 1920 high)"),
     margin_v: z.number().int().min(0).optional().describe("Distance from bottom edge in px; default is 26% of frame height (above platform UI)"),
+    style: z.enum(["background", "outline", "shadow", "glow"]).optional().describe("Caption style; default background (boxed). Ignored for .ass inputs"),
+    outline_color: z.string().optional().describe("Outline colour for outline/shadow styles: name (white/black/yellow/cyan/red/green/blue/orange/magenta) or RRGGBB hex; default black"),
   },
   async (a) => safe(() => core.burnCaptions({
     input: a.input,
@@ -203,6 +205,8 @@ server.tool(
     captions: a.captions,
     fontSize: a.font_size ?? null,
     marginV: a.margin_v ?? null,
+    style: a.style ?? null,
+    outlineColor: a.outline_color ?? "black",
   })),
 );
 

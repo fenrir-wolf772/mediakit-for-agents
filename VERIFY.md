@@ -850,6 +850,27 @@ tone [6,10)), `test/content-lead-black.mp4` (đen 1s đầu + testsrc 9s),
 
 ---
 
+## Lượt 14 — 2026-11-11 10:58 (+07): burn_captions --style + tip frames (32 tools)
+
+- **Học: Ashutos1997/ffmpeg-mcp-server** (4★, 19 tools, TS/Zod). Ý áp dụng được:
+  1. `burn_subtitles` có `outlineColor` (ASS hex) → đã làm `burn_captions --style` (outline/shadow/background/glow + `--outline-color`).
+  2. `compress_video` có `targetSizeMB` (nén về đúng dung lượng đích, vd GitHub PR <10MB, Discord <25MB) → backlog mới.
+  3. `extract_audio` preset 16kHz mono WAV cho Whisper → backlog mới (đường vào cho `transcribe` sau này).
+  4. `mux_media` — gộp/thay audio+video bằng stream copy, có audio offset → backlog mới (tool `mux`).
+  5. `media://capabilities` resource (ffmpeg version + hardware accel đã detect) → KHÔNG áp dụng (`doctor` đã làm phần này; hardware accel ngoài phạm vi — VM CPU-only).
+  6. Hardware acceleration tự detect (VideoToolbox/NVENC/QSV/AMF/VA-API) → KHÔNG áp dụng (máy Milo CPU-only, CI runner cũng vậy).
+  KHÔNG copy code của họ — chỉ học ý tưởng, tự implement bằng Node/ffmpeg.
+- **Làm**:
+  - `burn_captions --style` (core+CLI+MCP, không thêm tool): 4 style qua libass `force_style` — `background` (mặc định, BorderStyle 3 hộp đen mờ 50% — giữ đúng hành vi cũ), `outline` (BorderStyle 1, outline đen 2px), `shadow` (outline 1px + drop shadow 2px), `glow` (outline 4px màu chữ ở alpha 50% — halo đọc được trên footage sáng). `--outline-color` nhận tên màu hoặc hex RRGGBB (helper `assColor` đổi sang ASS BBGGRR). Style thắng flag `box` cũ (box=true → background, false → outline); `.ass` mang style riêng nên `style` bị bỏ qua, trả `style_applied: false`. Trả thêm `style` + `style_applied` trong JSON.
+  - Tip `frames`: png (mặc định)/webp thay vì jpg cho screen recording/text-heavy — ghi vào README (bảng tools), SKILL.md (§12) và comment trong `core.js` (JPEG chroma subsampling làm nhòe text/border 1px).
+  - CI smoke thêm dòng `burn-captions --style glow`.
+- **Test** (ffmpeg 8.1.2, source 1280×720 10s): 4 style đều render chữ trong band an toàn @t=3.5s (PSNR band 18.6–24.4, đều < 30); PSNR chéo background↔outline 20.3, outline↔glow 18.6 — các style khác nhau thật, không phải đổi tên. Style lạ → lỗi enum MCP; CLI `--style neon` / `--outline-color notacolor` → exit 2 `INVALID_ARG`.
+- **Bug bắt được (quan trọng — nhờ soi bằng mắt, không phải nhờ test pass)**: bản đầu đặt `Outline=0` cho style background → **hộp đen biến mất hoàn toàn** (chữ trắng trên nền trắng vô hình). Kiểm chứng: burn lên clip trắng đặc → frame trắng tinh, không thấy gì; variant cũ `Outline=2` → hộp xám hiện rõ. Nguyên nhân: libass vẽ hộp BorderStyle 3 từ độ rộng Outline — Outline=0 làm hộp co về 0. Fix: background giữ `Outline=2` (đúng hành vi cũ từ lượt 1). YAVG vùng text-line trên clip trắng: background 215.5 = bản cũ 215.5 (khớp tuyệt đối), outline 217.5 — YAVG không phân biệt được 2 style (hộp xám 50% và outline đen cho số gần nhau), nên test regression dùng **PSNR band trên clip trắng**: background **18.79**, outline **16.73** (đều < 30; hộp hỏng thì PSNR → ~inf vì chữ trắng vô hình trên trắng). Assert mới (16): 4 style × (echo style + style_applied + PSNR band) + PSNR chéo + 2 white-clip + 1 style lạ.
+- `npm run check` sạch; `npm test`: **193/193 PASS, exit 0** (32 tools, doctor 32/32 available).
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+
+---
+
 ## Lượt 13 — 2026-11-11 08:58 (+07): compress + receipt (tools 31–32)
 
 - **Học: kevinwatt/ffmpeg-mcp-lite** (28★, Python/FastMCP, 8 tools, 32 pytest). Ý áp dụng được:

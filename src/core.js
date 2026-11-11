@@ -489,6 +489,10 @@ export async function thumbnail({ input, output, frames = 6, columns = 3, width 
 // can actually LOOK at a video (ffmpeg-mcp's extract_frames idea):
 // one fps-filter pass, one file per frame, each with its timestamp.
 // Output is a directory; files are frame-001.png, frame-002.png, ...
+// Format tip: for screen recordings or any text-heavy footage use png
+// (default) or webp, not jpg — JPEG chroma subsampling smears 1px
+// text and thin borders, so a jpg frame can look broken when the
+// video itself is fine.
 
 export async function extractFrames({ input, outputDir, count = 6, format = "png", width = null }) {
   const inPath = await requireInput(input);
@@ -781,8 +785,33 @@ async function concatTransition({ inPaths, outPath, videoCodec, audioCodec, tran
 }
 
 // ---------------------------------------------------------------- burn_captions
+// Styles (SRT/VTT only — .ass carries its own styles, style is ignored
+// there): background = white text on a semi-transparent black box
+// (BorderStyle 3, the default — the YouTube-style boxed caption);
+// outline = white text with a black outline; shadow = thin outline +
+// drop shadow; glow = thick outline in the text's own colour at 50%
+// alpha, a halo that reads on bright footage. outline_color accepts a
+// name (white/black/yellow/cyan/red/green/blue/orange/magenta) or a
+// 6-digit RRGGBB hex (converted to ASS BBGGRR) or 8-digit AARRGGBB.
+const CAPTION_STYLES = ["background", "outline", "shadow", "glow"];
+const ASS_COLOR_NAMES = {
+  white: "FFFFFF", black: "000000", yellow: "FFFF00", cyan: "00FFFF",
+  red: "FF0000", green: "00FF00", blue: "0000FF", orange: "FFA500",
+  magenta: "FF00FF",
+};
 
-export async function burnCaptions({ input, output, captions, fontSize = null, fontColor = "white", box = true, marginV = null }) {
+function assColor(value, label) {
+  const v = String(value).trim();
+  if (/^&H[0-9a-fA-F]{8}&$/.test(v)) return v.toUpperCase();
+  const named = ASS_COLOR_NAMES[v.toLowerCase()];
+  const hex = named ?? (/^[0-9a-fA-F]{6}$/.test(v) ? v.toUpperCase()
+    : /^[0-9a-fA-F]{8}$/.test(v) ? v.toUpperCase() : null);
+  if (!hex) throw new MediaKitError(`${label} must be a colour name or RRGGBB hex, got: ${value}`, "INVALID_ARG");
+  if (hex.length === 8) return `&H${hex.slice(0, 2)}${hex.slice(6, 8)}${hex.slice(4, 6)}${hex.slice(2, 4)}&`;
+  return `&H00${hex.slice(4, 6)}${hex.slice(2, 4)}${hex.slice(0, 2)}&`;
+}
+
+export async function burnCaptions({ input, output, captions, fontSize = null, fontColor = "white", box = true, marginV = null, style = null, outlineColor = "black" }) {
   const inPath = await requireInput(input);
   const capPath = await requireInput(captions, "captions file");
   const outPath = await prepareOutput(output, [inPath]);
@@ -800,6 +829,26 @@ export async function burnCaptions({ input, output, captions, fontSize = null, f
   // .ass files carry their own styles.
   const size = fontSize === null ? Math.round(vh * 0.031) : num(fontSize, "font_size", { min: 8, max: 200, integer: true });
   const margin = marginV === null ? Math.round(vh * 0.26) : num(marginV, "margin_v", { min: 0, max: vh, integer: true });
+  // style wins over the legacy box flag; without style, box=true keeps
+  // the old default (background box) and box=false means outline.
+  const styleName = style === null ? (box ? "background" : "outline") : String(style).toLowerCase();
+  if (!CAPTION_STYLES.includes(styleName)) {
+    throw new MediaKitError(`style must be one of ${CAPTION_STYLES.join(", ")}, got: ${style}`, "INVALID_ARG");
+  }
+  const outlineAss = assColor(outlineColor, "outline_color");
+  // Glow halo = the text's own colour at 50% alpha. PrimaryColour is
+  // &HFFFFFF& for white, else &H<raw fontColor>& (callers pass BGR hex);
+  // reuse the same six digits so the halo matches the text by
+  // construction, whatever the caller meant by the colour.
+  const primaryDigits = fontColor.toLowerCase() === "white" ? "FFFFFF"
+    : /^[0-9a-fA-F]{6}$/.test(fontColor) ? fontColor.toUpperCase()
+    : /^[0-9a-fA-F]{8}$/.test(fontColor) ? fontColor.slice(2).toUpperCase() : null;
+  if (styleName === "glow" && primaryDigits === null) {
+    throw new MediaKitError(`glow style needs font_color as a hex value, got: ${fontColor}`, "INVALID_ARG");
+  }
+  const glowAss = styleName === "glow"
+    ? `&H80${primaryDigits.slice(4, 6)}${primaryDigits.slice(2, 4)}${primaryDigits.slice(0, 2)}&`
+    : null;
   // libass scales FontSize against the ASS PlayRes (default 384x288) when
   // converting SRT -> ASS, so a "48px" font would render ~6x too big on
   // a 1080x1920 frame. Pin PlayRes to the real video size so FontSize
@@ -811,14 +860,22 @@ export async function burnCaptions({ input, output, captions, fontSize = null, f
   if (ext === ".ass") {
     vf = `ass='${esc}'`;
   } else {
-    const forceStyle = `PlayResX=${vw},PlayResY=${vh},FontSize=${size},PrimaryColour=&HFFFFFF&,OutlineColour=&H80000000&,BorderStyle=${box ? 3 : 1},BackColour=&H80000000&,Outline=2,Shadow=0,MarginV=${margin}`;
+    // BorderStyle 3 = opaque box behind the text (background style);
+    // BorderStyle 1 = outline/shadow/glow around the glyphs.
+    const styleBits = {
+      background: `BorderStyle=3,BackColour=&H80000000&,OutlineColour=&H80000000&,Outline=2,Shadow=0`,
+      outline: `BorderStyle=1,OutlineColour=${outlineAss},Outline=2,Shadow=0`,
+      shadow: `BorderStyle=1,OutlineColour=${outlineAss},Outline=1,Shadow=2`,
+      glow: `BorderStyle=1,OutlineColour=${glowAss},Outline=4,Shadow=0`,
+    }[styleName];
+    const forceStyle = `PlayResX=${vw},PlayResY=${vh},FontSize=${size},PrimaryColour=&HFFFFFF&,${styleBits},MarginV=${margin}`;
     const color = fontColor.toLowerCase() === "white" ? "" : `,PrimaryColour=&H${fontColor}&`;
     vf = `subtitles='${esc}':force_style='${forceStyle}${color}'`;
   }
   await run(FFMPEG, ["-y", "-i", inPath, "-vf", vf, "-c:a", "copy", outPath]);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
-  return { operation: "burn_captions", input: inPath, output: outPath, captions: capPath, font_size: size, margin_v: margin, ...info, duration_seconds: out.duration_seconds };
+  return { operation: "burn_captions", input: inPath, output: outPath, captions: capPath, font_size: size, margin_v: margin, style: styleName, style_applied: ext !== ".ass", ...info, duration_seconds: out.duration_seconds };
 }
 
 // ---------------------------------------------------------------- convert_captions

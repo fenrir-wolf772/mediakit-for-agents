@@ -139,7 +139,15 @@ Keep lines short (≤ 42 chars), max 2 lines per cue, and never let a cue
 span a sentence break awkwardly. Font size and position default to the
 safe zone and scale with frame height (~60px type on 1080x1920, sitting
 ~500px above the bottom edge so TikTok/Shorts UI never covers the
-text) — pass `--font-size` / `--margin-v` only to override.
+text) — pass `--font-size` / `--margin-v` only to override. Style with
+`--style`: `background` (default — white text on a semi-transparent
+black box, the YouTube look), `outline` (black outline, no box),
+`shadow` (thin outline + drop shadow), `glow` (thick halo in the text's
+own colour — the one that still reads on bright footage). Pick the style
+for the footage, not from habit: white text with no box vanishes on a
+bright sky, and the box is what makes the default safe. `.ass` files
+carry their own styles, so `--style` is ignored there — edit the `.ass`
+directly instead.
 
 ### 8. Concat re-encodes — that's a feature
 `concat` re-encodes all parts to one codec, so clips with different
@@ -185,7 +193,11 @@ If the voice file is a video, its video stream is copied through, so
 spaced frames as separate images with timestamps — read 3–6 of them to
 see what's actually in the clip (scene changes, framing, captions
 rendering) before choosing trim points or a reframe anchor. `thumbnail`
-is the cheaper one-image overview when you only need the gist.
+is the cheaper one-image overview when you only need the gist. Format
+tip: for screen recordings or any text-heavy footage use png (the
+default) or webp, not jpg — JPEG chroma subsampling smears 1px text and
+thin borders, so a jpg frame can look broken when the video itself is
+fine.
 
 ### 13. Logos go on with `overlay`, not by hand-built filter graphs
 `overlay` takes a PNG (transparency recommended), a named position
