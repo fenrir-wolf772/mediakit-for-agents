@@ -28,6 +28,28 @@ async function safe(fn) {
   }
 }
 
+// Errors end with the exact retry command (kinocut's eyes-free design
+// law, backlog since turn 2): every tool error carries
+// `retry: {tool, arguments}` so an agent can re-issue the identical
+// call instead of reconstructing it from the message. One choke point
+// here — the per-tool handlers keep calling safe() unchanged, and this
+// wrapper enriches any isError result with the tool name + the exact
+// arguments the call carried (zod defaults already applied).
+const registerTool = server.tool.bind(server);
+server.tool = (name, description, schema, handler) => registerTool(name, description, schema, async (a) => {
+  const res = await handler(a);
+  if (res && res.isError) {
+    try {
+      const body = JSON.parse(res.content?.[0]?.text ?? "");
+      if (body && typeof body === "object" && body.error) {
+        body.retry = { tool: name, arguments: a };
+        return { content: [{ type: "text", text: JSON.stringify(body, null, 2) }], isError: true };
+      }
+    } catch { /* error text is not JSON — leave it as-is */ }
+  }
+  return res;
+});
+
 const pathSchema = z.string().min(1).describe("Path to the file (relative or absolute)");
 
 server.tool(
@@ -536,6 +558,29 @@ server.tool(
     output: a.output,
     duration: a.duration,
     method: a.method,
+  })),
+);
+
+server.tool(
+  "export_gif",
+  "Export a clip (or segment) as an animated GIF with a two-pass palette (palettegen + paletteuse from the actual frames). Fits under max_size_mb (default 10 MB, the GitHub README limit; Slack only auto-plays GIFs under ~2 MB) by stepping down fps, then width, then palette colours — each attempt is measured on disk, and size_budget_met says honestly whether the budget was met.",
+  {
+    input: pathSchema,
+    output: pathSchema.describe("Output file path, must end in .gif"),
+    start: z.number().min(0).optional().describe("Segment start in seconds (default 0)"),
+    end: z.number().positive().optional().describe("Segment end in seconds (default: end of file)"),
+    fps: z.number().int().min(1).max(30).optional().describe("Frames per second (default 15; stepped down if the size budget needs it)"),
+    width: z.number().int().min(16).max(4096).optional().describe("GIF width in pixels (default 640; stepped down if the size budget needs it)"),
+    max_size_mb: z.number().min(0.01).max(10000).default(10).describe("Size budget in decimal MB (default 10)"),
+  },
+  async (a) => safe(() => core.exportGif({
+    input: a.input,
+    output: a.output,
+    start: a.start ?? null,
+    end: a.end ?? null,
+    fps: a.fps ?? null,
+    width: a.width ?? null,
+    maxSizeMb: a.max_size_mb,
   })),
 );
 

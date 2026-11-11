@@ -126,6 +126,19 @@ const COMMANDS = {
       ["-o, --output", "Output directory (required, created if needed)"],
     ],
   },
+  "export-gif": {
+    usage: "mediakit export-gif <input> -o <output.gif> [--start <s|MM:SS>] [--end <s|MM:SS>] [--fps 15] [--width 640] [--max-size-mb 10]",
+    desc: "Export a clip (or segment) as an animated GIF with a two-pass palette. Fits under --max-size-mb (default 10 MB, the GitHub README limit; Slack auto-plays only under ~2 MB) by stepping down fps, then width, then palette colours; reports size_budget_met measured on disk.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--start", "Segment start in seconds or MM:SS (default 0)"],
+      ["--end", "Segment end in seconds or MM:SS (default end of file)"],
+      ["--fps", "Frames per second (default 15)"],
+      ["--width", "GIF width in pixels (default 640)"],
+      ["--max-size-mb", "Size budget in decimal MB (default 10)"],
+      ["-o, --output", "Output .gif file (required)"],
+    ],
+  },
   "burn-captions": {
     usage: "mediakit burn-captions <input> --captions <file.srt|ass|vtt> -o <output> [--font-size <n>] [--margin-v <n>] [--style background|outline|shadow|glow] [--outline-color <name|hex>]",
     desc: "Burn subtitles into the video (hardcoded, always visible).",
@@ -419,8 +432,15 @@ function printHelp(cmd) {
   console.log("Requires ffmpeg + ffprobe on PATH.");
 }
 
+function shellQuote(s) {
+  // Quote an argv token for re-pasting into a shell (kinocut's
+  // eyes-free law: an error ends with the exact command to retry).
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
 function fail(message, code = 1) {
   console.error(`Error: ${message}`);
+  console.error(`Retry: mediakit ${process.argv.slice(2).map(shellQuote).join(" ")}`);
   process.exit(code);
 }
 
@@ -560,6 +580,16 @@ async function main() {
           count: numOpt(opts, "count") ?? 6,
           format: opts.format ?? "png",
           width: numOpt(opts, "width") ?? null,
+        });
+        break;
+      case "export-gif":
+        result = await core.exportGif({
+          input: needInput(), output: needOutput(opts),
+          start: opts.start ?? null,
+          end: opts.end ?? null,
+          fps: numOpt(opts, "fps") ?? null,
+          width: numOpt(opts, "width") ?? null,
+          maxSizeMb: numOpt(opts, "max_size_mb") ?? 10,
         });
         break;
       case "burn-captions": {

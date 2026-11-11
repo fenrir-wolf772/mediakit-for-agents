@@ -637,6 +637,87 @@ export async function extractFrames({ input, outputDir, count = 6, format = "png
   };
 }
 
+// ---------------------------------------------------------------- export_gif
+// Animated GIF for READMEs / chat: two-pass palette in a single ffmpeg
+// call (split + palettegen + paletteuse — the palette is built from
+// the actual frames, not a generic one, which cuts size 30-50% at the
+// same quality). Fits under a size budget (default 10 MB, the GitHub
+// README limit; Slack only auto-plays GIFs under ~2 MB) by stepping
+// down fps, then width, then palette colours — each attempt is
+// measured on disk, and the result says honestly whether the budget
+// was met instead of silently shipping an oversize file. (Idea:
+// TMHSDigital/screencast-mcp's export_gif, which lowers fps/width/
+// quality until the budget fits.)
+
+export async function exportGif({ input, output, start = null, end = null, fps = null, width = null, maxSizeMb = 10 }) {
+  const inPath = await requireInput(input);
+  const outPath = await prepareOutput(output, [inPath]);
+  if (!/\.gif$/i.test(outPath)) {
+    throw new MediaKitError(`export_gif output must end in .gif, got: ${output}`, "INVALID_ARG");
+  }
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("export_gif needs a video input", "INVALID_ARG");
+  const duration = meta.duration_seconds;
+  if (duration === null || duration <= 0) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
+  const s = start === null || start === undefined ? 0 : parseTime(start, "start");
+  const e = end === null || end === undefined ? duration : parseTime(end, "end");
+  if (s >= duration) throw new MediaKitError(`start ${s}s is past the end of the file (${duration}s)`, "INVALID_ARG");
+  if (e <= s) throw new MediaKitError(`end (${e}s) must be after start (${s}s)`, "INVALID_ARG");
+  const clipEnd = Math.min(e, duration);
+  const clipLen = clipEnd - s;
+  const wantFps = fps === null || fps === undefined ? 15 : num(fps, "fps", { min: 1, max: 30, integer: true });
+  const wantW = width === null || width === undefined ? 640 : num(width, "width", { min: 16, max: 4096, integer: true });
+  const budgetMb = num(maxSizeMb, "max_size_mb", { min: 0.01, max: 10000 });
+  const budgetBytes = Math.floor(budgetMb * 1_000_000);
+
+  // Ladder: fps down (15/12/10/8), then width down (640/480/320),
+  // then palette colours down (256/128/64). Each step only goes below
+  // the requested start value, so an explicit --fps 8 --width 320
+  // starts at the bottom and only steps the colours down.
+  const ladder = [];
+  const push = (f, w, c) => {
+    const last = ladder[ladder.length - 1];
+    if (!last || last.fps !== f || last.width !== w || last.colors !== c) ladder.push({ fps: f, width: w, colors: c });
+  };
+  push(wantFps, wantW, 256);
+  let f = wantFps, w = wantW;
+  for (const nf of [12, 10, 8]) if (nf < f) { f = nf; push(f, w, 256); }
+  for (const nw of [480, 320]) if (nw < w) { w = nw; push(f, w, 256); }
+  for (const nc of [128, 64]) push(f, w, nc);
+
+  const before = await fileInfo(inPath);
+  const attempts = [];
+  let chosen = null;
+  for (const step of ladder) {
+    const vf = `fps=${step.fps},scale=${step.width}:-2:flags=lanczos,split[a][b];[a]palettegen=max_colors=${step.colors}[p];[b][p]paletteuse`;
+    await run(FFMPEG, ["-y", "-ss", String(s), "-i", inPath, "-t", String(clipLen), "-vf", vf, "-an", outPath]);
+    const info = await fileInfo(outPath);
+    attempts.push({ ...step, size_bytes: info.size_bytes, size_human: info.size_human });
+    chosen = info;
+    if (info.size_bytes <= budgetBytes) break;
+  }
+  const out = await probe(outPath);
+  let frames = null;
+  try {
+    const { stdout } = await run(FFPROBE, ["-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", outPath]);
+    const n = parseInt(stdout.trim(), 10);
+    if (Number.isFinite(n)) frames = n;
+  } catch { /* frame count is informational; the GIF itself is already verified by probe */ }
+  const met = chosen.size_bytes <= budgetBytes;
+  const last = attempts[attempts.length - 1];
+  return {
+    operation: "export_gif", input: inPath, output: outPath,
+    start_seconds: s, end_seconds: clipEnd, duration_seconds: out.duration_seconds,
+    width: out.video?.width ?? null, height: out.video?.height ?? null,
+    fps: out.video?.fps ?? null, frames,
+    size_bytes: chosen.size_bytes, size_human: chosen.size_human,
+    size_before_bytes: before.size_bytes,
+    size_budget_mb: budgetMb, size_budget_bytes: budgetBytes,
+    size_budget_met: met, attempts_tried: attempts.length, attempts,
+    ...(met ? {} : { warning: `size budget ${budgetMb} MB could not be met even at ${last.width}px / ${last.fps}fps / ${last.colors} colours — smallest output is ${chosen.size_human} (${chosen.size_bytes} bytes)` }),
+  };
+}
+
 // ---------------------------------------------------------------- loudness
 
 // Video containers loudness can write: audio is re-encoded, video is
@@ -2338,6 +2419,7 @@ const DOCTOR_FILTERS = [
   "drawtext", "volume", "sidechaincompress", "amix", "aresample",
   "xfade", "acrossfade", "fps", "anullsrc", "setpts", "asetpts",
   "format", "colorchannelmixer", "atempo", "aloop", "geq", "color",
+  "palettegen", "paletteuse",
 ];
 const DOCTOR_ENCODERS = [
   "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4",
@@ -2360,6 +2442,7 @@ const TOOL_REQUIREMENTS = {
   loudness: { filters: ["loudnorm"] },
   concat: { filters: ["concat", "xfade", "acrossfade", "fps", "scale", "pad"] },
   frames: { filters: ["fps", "scale"] },
+  export_gif: { filters: ["palettegen", "paletteuse", "fps", "scale"] },
   burn_captions: { filters: ["subtitles", "ass"] },
   reframe: { filters: ["crop", "scale", "pad", "gblur", "overlay"], encoders: ["libx264"] },
   check: { filters: ["loudnorm"] },

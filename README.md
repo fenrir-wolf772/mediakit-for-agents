@@ -88,6 +88,7 @@ Then ask your agent things like:
 | `doctor` | Read-only preflight: ffmpeg version, filters/encoders, tool availability, and the `MEDIAKIT_WORKDIR` sandbox state when set | `mediakit doctor` |
 | `convert` | Change container/codec (omit a codec to stream-copy) | `mediakit convert in.mov -o out.mp4 --video-codec libx264` |
 | `compress` | Shrink a file with one named quality preset — low (CRF 32), medium (CRF 26), high (CRF 20) — each with its own x264 preset and audio bitrate; optional `--max-width` scales down first. `--target-size <MB>` encodes to an exact size instead (two-pass ABR, e.g. 10 for a Discord upload) and reports `target_met` measured on disk. Reports the size before/after and the reduction actually measured on disk | `mediakit compress in.mp4 -o small.mp4 --quality low` |
+| `export_gif` | Export a clip (or segment) as an animated GIF with a two-pass palette (palettegen + paletteuse from the actual frames). Fits under `--max-size-mb` (default 10 MB, the GitHub README limit; Slack auto-plays only under ~2 MB) by stepping down fps, then width, then palette colours; reports `size_budget_met` measured on disk, with a warning when the budget cannot be met | `mediakit export-gif in.mp4 -o demo.gif --max-size-mb 2` |
 
 Every tool returns a concise JSON result: output path, size, and the
 verified duration/dimensions of what it produced.

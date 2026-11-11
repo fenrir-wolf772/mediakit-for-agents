@@ -390,6 +390,24 @@ missing). Unset, there is no restriction (the default). Internal
 scratch (ffmpeg passlogs, svg temp frames) is exempt; only paths the
 caller supplies are checked.
 
+### 26. GIFs for READMEs: `export_gif`, and read the retry line on errors
+`export_gif` turns a clip (or a `--start`/`--end` segment) into an
+animated GIF with a two-pass palette — the palette is built from the
+actual frames, so colours stay true at a much smaller size than a
+single-pass GIF. It fits under `--max-size-mb` (default 10 MB, the
+GitHub README limit; Slack only auto-plays GIFs under ~2 MB) by
+stepping down fps, then width, then palette colours; each attempt is
+measured on disk and the result reports `size_budget_met` honestly —
+when the budget cannot be met even at 320px/8fps/64 colours, the
+result says so with a `warning` instead of silently shipping an
+oversize file. Defaults are 15fps at 640px wide.
+
+When a call fails, the error ends with the exact retry command: the
+CLI prints `Retry: mediakit <the command you ran>` on stderr, and an
+MCP error carries `retry: {tool, arguments}` with the identical call.
+Re-issue that call (after fixing the flagged argument) instead of
+reconstructing the command from memory.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

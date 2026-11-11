@@ -6,7 +6,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "node:url";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { copyFile, mkdir, readFile, rm, symlink } from "node:fs/promises";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -28,7 +28,7 @@ async function measureLufs(file) {
 
 async function probeStreams(file) {
   try {
-    const { stdout } = await execFileAsync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,codec_name,start_time,duration", "-show_entries", "format=duration", "-of", "json", file]);
+    const { stdout } = await execFileAsync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,codec_name,width,height,start_time,duration", "-show_entries", "format=duration", "-of", "json", file]);
     return JSON.parse(stdout);
   } catch {
     return null;
@@ -54,10 +54,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 34 tools present");
-checkOk(missing.length === 0, "tools/list has all 34 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 35 tools present");
+checkOk(missing.length === 0, "tools/list has all 35 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -213,6 +213,7 @@ checkOk(doctorJson.ok === true, "doctor ok=true", JSON.stringify(doctorJson.tool
 checkOk(Object.values(doctorJson.tools).every((t) => t.available), "doctor: all tools available");
 checkOk(doctorJson.tools.fit?.available === true, "doctor: fit is available");
 checkOk(doctorJson.tools.generate_srt?.available === true, "doctor: generate_srt is available (pure Node, no ffmpeg filter needed)");
+checkOk(doctorJson.tools.export_gif?.available === true, "doctor: export_gif is available (palettegen/paletteuse present)");
 checkOk(doctorJson.sandbox?.enabled === false, "doctor: sandbox disabled when MEDIAKIT_WORKDIR is unset", JSON.stringify(doctorJson.sandbox));
 
 const silenceRes = await client.callTool({
@@ -1108,6 +1109,79 @@ const muxBadOffRes = await client.callTool({
 // social bad-platform assertion), don't JSON.parse it.
 const muxBadOffText = muxBadOffRes.content[0].text;
 checkOk(/3600/.test(muxBadOffText) && /audio_offset_seconds/.test(muxBadOffText), "mux refuses an offset outside ±3600s (MCP schema validation)", muxBadOffText.slice(0, 200));
+
+// export_gif: two-pass palette GIF that fits a size budget.
+// Default: 10s source -> 640x360, 15fps, 150 frames, under 10 MB.
+const gifRes = await client.callTool({
+  name: "export_gif",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-demo.gif") },
+});
+const gifJson = JSON.parse(gifRes.content[0].text);
+console.log("export_gif call:", JSON.stringify(gifJson).slice(0, 400));
+checkOk(gifJson.width === 640 && gifJson.height === 360, "export_gif default is 640x360", JSON.stringify({ w: gifJson.width, h: gifJson.height }));
+checkOk(gifJson.fps === 15, "export_gif default fps is 15", `got ${gifJson.fps}`);
+checkOk(near(gifJson.duration_seconds, 10, 0.05), "export_gif keeps 10s duration", `got ${gifJson.duration_seconds}`);
+checkOk(gifJson.frames === 150, "export_gif counts 150 frames (10s x 15fps)", `got ${gifJson.frames}`);
+checkOk(gifJson.size_budget_met === true && gifJson.attempts_tried === 1 && gifJson.size_bytes <= 10_000_000, "export_gif meets the 10 MB default budget on the first attempt", JSON.stringify({ size: gifJson.size_bytes, attempts: gifJson.attempts_tried }));
+// Independent check: the file really is a GIF of the reported size.
+const gifProbe = await probeStreams(path.join(root, "outputs/mcp-demo.gif"));
+checkOk(gifProbe?.streams?.[0]?.codec_name === "gif" && gifProbe?.streams?.[0]?.width === 640, "independent ffprobe sees a 640-wide GIF", JSON.stringify(gifProbe?.streams));
+checkOk(statSync(path.join(root, "outputs/mcp-demo.gif")).size === gifJson.size_bytes, "on-disk file size matches the reported size_bytes", `disk ${statSync(path.join(root, "outputs/mcp-demo.gif")).size} vs ${gifJson.size_bytes}`);
+// Tight budget (0.5 MB): the ladder must step fps, then width, down.
+const gifTightRes = await client.callTool({
+  name: "export_gif",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-demo-tight.gif"), max_size_mb: 0.5 },
+});
+const gifTightJson = JSON.parse(gifTightRes.content[0].text);
+console.log("export_gif tight ladder:", JSON.stringify(gifTightJson.attempts));
+checkOk(gifTightJson.size_budget_met === true && gifTightJson.size_bytes <= 500_000, "export_gif fits the 0.5 MB budget", JSON.stringify({ size: gifTightJson.size_bytes, attempts: gifTightJson.attempts_tried }));
+checkOk(gifTightJson.attempts_tried >= 4 && gifTightJson.width === 320 && gifTightJson.fps === 8, "export_gif steps the ladder down (fps, then width) to meet a tight budget", JSON.stringify(gifTightJson.attempts));
+checkOk(gifTightJson.attempts.every((a, i) => i === 0 || a.size_bytes <= gifTightJson.attempts[i - 1].size_bytes), "export_gif attempts shrink the file as the ladder steps down", JSON.stringify(gifTightJson.attempts.map((a) => a.size_bytes)));
+// Impossible budget (0.02 MB): all 8 ladder steps, met=false, warning.
+const gifImpossRes = await client.callTool({
+  name: "export_gif",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-demo-imposs.gif"), max_size_mb: 0.02 },
+});
+const gifImpossJson = JSON.parse(gifImpossRes.content[0].text);
+checkOk(gifImpossJson.size_budget_met === false && gifImpossJson.attempts_tried === 8 && typeof gifImpossJson.warning === "string" && /could not be met/.test(gifImpossJson.warning), "export_gif reports honestly when the budget cannot be met (all 8 ladder steps + warning)", JSON.stringify({ met: gifImpossJson.size_budget_met, attempts: gifImpossJson.attempts_tried }));
+// Segment 2-4s: 2s / 30 frames.
+const gifSegRes = await client.callTool({
+  name: "export_gif",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-demo-seg.gif"), start: 2, end: 4 },
+});
+const gifSegJson = JSON.parse(gifSegRes.content[0].text);
+checkOk(near(gifSegJson.duration_seconds, 2, 0.05) && gifSegJson.frames === 30 && gifSegJson.start_seconds === 2 && gifSegJson.end_seconds === 4, "export_gif segment 2-4s is 2s / 30 frames", JSON.stringify(gifSegJson));
+// Errors: non-.gif output, audio-only input, end <= start.
+const gifBadExtRes = await client.callTool({
+  name: "export_gif",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-demo.mp4") },
+});
+const gifBadExtJson = JSON.parse(gifBadExtRes.content[0].text);
+checkOk(gifBadExtRes.isError === true && /\.gif/.test(gifBadExtJson.error ?? ""), "export_gif refuses a non-.gif output", JSON.stringify(gifBadExtJson));
+const gifBadAudioRes = await client.callTool({
+  name: "export_gif",
+  arguments: { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-demo-audio.gif") },
+});
+const gifBadAudioJson = JSON.parse(gifBadAudioRes.content[0].text);
+checkOk(gifBadAudioRes.isError === true && /video input/.test(gifBadAudioJson.error ?? ""), "export_gif refuses an audio-only input", JSON.stringify(gifBadAudioJson));
+const gifBadRangeRes = await client.callTool({
+  name: "export_gif",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-demo-range.gif"), start: 8, end: 2 },
+});
+const gifBadRangeJson = JSON.parse(gifBadRangeRes.content[0].text);
+checkOk(gifBadRangeRes.isError === true && /after start/.test(gifBadRangeJson.error ?? ""), "export_gif refuses end <= start", JSON.stringify(gifBadRangeJson));
+
+// Errors carry the exact retry call (kinocut eyes-free law).
+const retryRes = await client.callTool({
+  name: "trim",
+  arguments: { input: path.join(root, "test/no-such-file.mp4"), output: path.join(root, "outputs/mcp-retry.mp4"), start: 0, duration: 1 },
+});
+const retryJson = JSON.parse(retryRes.content[0].text);
+checkOk(retryRes.isError === true && retryJson.retry?.tool === "trim" && retryJson.retry?.arguments?.input === path.join(root, "test/no-such-file.mp4"), "MCP errors carry retry {tool, arguments} for the exact failed call", JSON.stringify(retryJson.retry));
+// CLI errors end with the exact command to retry (runCli is defined
+// below in the sandbox section; function declarations hoist).
+const cliRetry = await runCli(["trim", path.join(root, "test/source.mp4"), "--start", "99", "-o", path.join(root, "outputs/mcp-cli-retry.mp4")]);
+checkOk(cliRetry.code !== 0 && /Retry: mediakit trim/.test(cliRetry.out) && /--start 99/.test(cliRetry.out), "CLI errors print the exact retry command", cliRetry.out.slice(0, 300));
 
 // generate_srt: deterministic .srt from a cue list. Times mix seconds
 // and "MM:SS"; the third cue touches the second's end (allowed).
