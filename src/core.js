@@ -10,6 +10,7 @@ import { access, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat
 import { constants as fsConstants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const MEDIAKIT_VERSION = "0.1.0";
 
@@ -81,6 +82,22 @@ export class MediaKitError extends Error {
     this.name = "MediaKitError";
     this.code = code;
   }
+}
+
+function runCapture(cmd, args, { timeoutMs = 300_000 } = {}) {
+  // Like run(), but for non-ffmpeg helpers (the ASR python script):
+  // same timeout/buffer discipline, a neutral error code, and the
+  // helper's own stderr instead of an ffmpeg-labelled message.
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) {
+        const detail = (stderr || "").trim().split("\n").filter(Boolean).slice(-5).join(" | ");
+        reject(new MediaKitError(`${cmd} failed: ${err.message}${detail ? ` — ${detail}` : ""}`, "ASR_FAILED"));
+      } else {
+        resolve({ stdout, stderr });
+      }
+    });
+  });
 }
 
 function run(cmd, args, { timeoutMs = 300_000 } = {}) {
@@ -1229,6 +1246,14 @@ export async function convertCaptions({ input, output }) {
 
 const MAX_SRT_CUES = 10_000;
 
+// One SRT body builder for generate_srt and transcribe, so both tools
+// emit byte-identical cue formatting (index, HH:MM:SS,mmm, blank line).
+function formatSrtBody(normalized) {
+  return normalized
+    .map((c, i) => `${i + 1}\n${formatCaptionTimestamp(c.startMs, ",")} --> ${formatCaptionTimestamp(c.endMs, ",")}\n${c.text}`)
+    .join("\n\n") + (normalized.length ? "\n" : "");
+}
+
 export async function generateSrt({ cues, output }) {
   if (!Array.isArray(cues) || cues.length === 0) {
     throw new MediaKitError("generate_srt needs a non-empty cues array", "INVALID_ARG");
@@ -1267,9 +1292,7 @@ export async function generateSrt({ cues, output }) {
   if (path.extname(outPath).toLowerCase() !== ".srt") {
     throw new MediaKitError(`generate_srt output must end in .srt, got ${path.extname(outPath) || "(no extension)"}`, "INVALID_ARG");
   }
-  const body = normalized
-    .map((c, i) => `${i + 1}\n${formatCaptionTimestamp(c.startMs, ",")} --> ${formatCaptionTimestamp(c.endMs, ",")}\n${c.text}`)
-    .join("\n\n") + "\n";
+  const body = formatSrtBody(normalized);
   await writeFile(outPath, body, "utf8");
   const info = await fileInfo(outPath);
   return {
@@ -1280,6 +1303,111 @@ export async function generateSrt({ cues, output }) {
     last_end_seconds: +(normalized[normalized.length - 1].endMs / 1000).toFixed(3),
     ...info,
   };
+}
+
+// ---------------------------------------------------------------- transcribe
+// Speech-to-text with a LOCAL engine — faster-whisper, on this machine,
+// audio never uploaded (the ffmpeg-skill pattern: optional local ASR,
+// refuse with install lines rather than guessing). Pipeline: probe for
+// an audio stream, extract 16 kHz mono WAV to a temp dir with ffmpeg,
+// run scripts/asr_faster_whisper.py (stdlib wave + numpy, so PyAV's
+// version never matters), write the segments as .srt with the same
+// formatter generate_srt uses. Silence transcribes to 0 segments and
+// an empty .srt — that is a correct result, not a failure.
+// Env: MEDIAKIT_ASR_PYTHON (default "python3") picks the python that
+// has faster-whisper; MEDIAKIT_ASR_MODEL (default "tiny") picks the
+// default model. Model weights (~75 MB for tiny) download from
+// Hugging Face on first use. whisper.cpp support is a follow-up — the
+// engine parameter only accepts auto/faster-whisper for now.
+
+const ASR_MODELS = [
+  "tiny", "tiny.en", "base", "base.en", "small", "small.en",
+  "medium", "medium.en", "large-v1", "large-v2", "large-v3",
+  "large-v3-turbo", "distil-small.en", "distil-medium.en",
+  "distil-large-v2", "distil-large-v3",
+];
+const ASR_INSTALL_HINT = "no speech engine found — transcribe needs faster-whisper on this machine (local only, audio is never uploaded): python3 -m venv ~/.local/venv/mediakit-asr && ~/.local/venv/mediakit-asr/bin/pip install faster-whisper, then set MEDIAKIT_ASR_PYTHON to that venv's python (or point it at a python that already has faster-whisper). Model weights (~75 MB for tiny) download from Hugging Face on first use.";
+
+function asrPython() {
+  return process.env.MEDIAKIT_ASR_PYTHON || "python3";
+}
+
+export async function detectAsrEngine() {
+  const python = asrPython();
+  try {
+    await runCapture(python, ["-c", "import faster_whisper"], { timeoutMs: 60_000 });
+    return { engine: "faster-whisper", python, available: true };
+  } catch {
+    return { engine: "faster-whisper", python, available: false };
+  }
+}
+
+export async function transcribe({ input, output, model = "tiny", language = "auto", engine = "auto" }) {
+  const inPath = await requireInput(input);
+  const eng = String(engine ?? "auto").toLowerCase();
+  if (!["auto", "faster-whisper"].includes(eng)) {
+    throw new MediaKitError(`transcribe engine "${engine}" is not supported yet — only "faster-whisper" (whisper.cpp support is a follow-up); the engine runs locally, audio is never uploaded`, "INVALID_ARG");
+  }
+  const mdl = String(model ?? process.env.MEDIAKIT_ASR_MODEL ?? "tiny").toLowerCase();
+  if (!ASR_MODELS.includes(mdl)) {
+    throw new MediaKitError(`unknown ASR model "${model}" (supported: ${ASR_MODELS.join(", ")})`, "INVALID_ARG");
+  }
+  const lang = String(language ?? "auto").toLowerCase();
+  if (lang !== "auto" && !/^[a-z]{2,3}$/.test(lang)) {
+    throw new MediaKitError(`language must be "auto" or an ISO 639-1 code (e.g. en, vi), got "${language}"`, "INVALID_ARG");
+  }
+  const outPath = await prepareOutput(output, [inPath]);
+  if (path.extname(outPath).toLowerCase() !== ".srt") {
+    throw new MediaKitError(`transcribe output must end in .srt, got ${path.extname(outPath) || "(no extension)"}`, "INVALID_ARG");
+  }
+  const meta = await probe(inPath);
+  if (!meta.audio) throw new MediaKitError("transcribe needs an input with an audio stream", "INVALID_ARG");
+  const detected = await detectAsrEngine();
+  if (!detected.available) {
+    throw new MediaKitError(`transcribe: ${ASR_INSTALL_HINT}`, "ASR_NOT_INSTALLED");
+  }
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-asr-"));
+  try {
+    const wav = path.join(tmpDir, "asr.wav");
+    await run(FFMPEG, ["-y", "-i", inPath, "-vn", "-c:a", "pcm_s16le", "-ar", "16000", "-ac", "1", wav]);
+    const helper = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "asr_faster_whisper.py");
+    const args = [helper, "--wav", wav, "--model", mdl];
+    if (lang !== "auto") args.push("--language", lang);
+    const { stdout } = await runCapture(detected.python, args, { timeoutMs: 1_800_000 });
+    let asr;
+    try {
+      asr = JSON.parse(stdout);
+    } catch {
+      throw new MediaKitError(`transcribe: the ASR helper returned unparseable output: ${String(stdout).slice(0, 200)}`, "ASR_FAILED");
+    }
+    const segments = (asr.segments ?? [])
+      .map((s) => ({
+        start: num(s.start, "segment start", { min: 0 }),
+        end: num(s.end, "segment end", { min: 0 }),
+        text: String(s.text ?? "").trim(),
+      }))
+      .filter((s) => s.end > s.start && s.text)
+      .sort((a, b) => a.start - b.start);
+    const normalized = segments.map((s) => ({ startMs: Math.round(s.start * 1000), endMs: Math.round(s.end * 1000), text: s.text }));
+    await writeFile(outPath, formatSrtBody(normalized), "utf8");
+    const info = await fileInfo(outPath);
+    return {
+      operation: "transcribe",
+      input: inPath,
+      output: outPath,
+      engine: detected.engine,
+      model: mdl,
+      language: asr.language ?? null,
+      language_probability: asr.language_probability ?? null,
+      duration_seconds: asr.duration_seconds ?? meta.duration_seconds ?? null,
+      segment_count: segments.length,
+      segments: segments.map((s) => ({ start: +s.start.toFixed(3), end: +s.end.toFixed(3), text: s.text })),
+      text: segments.map((s) => s.text).join(" "),
+      ...info,
+    };
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 // ---------------------------------------------------------------- titlecard
@@ -2581,6 +2709,7 @@ const TOOL_REQUIREMENTS = {
   find: {},
   mux: {},
   svg_animate: { decoders: ["librsvg"], encoders: ["libx264"] },
+  transcribe: {},
   doctor: {},
 };
 
@@ -2634,6 +2763,13 @@ export async function doctor() {
     sandbox = { enabled: true, workdir: process.env[WORKDIR_ENV] ?? null, error: err.message };
     allOk = false;
   }
+  // transcribe is optional (ffmpeg-skill's ASR rule: a speech engine is
+  // never required): report the engine state, but a missing engine
+  // must not fail ok — everything else still works without it.
+  const asr = await detectAsrEngine();
+  tools.transcribe = asr.available
+    ? { available: true, engine: asr.engine, python: asr.python }
+    : { available: false, engine: asr.engine, python: asr.python, fix: ASR_INSTALL_HINT };
   return {
     operation: "doctor",
     ffmpeg_version: ffmpegVersion,

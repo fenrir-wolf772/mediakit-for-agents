@@ -56,11 +56,27 @@ function checkOk(cond, label, detail = "") {
 }
 const near = (a, b, tol) => typeof a === "number" && Math.abs(a - b) <= tol;
 
+// A call that fails MCP schema validation (bad enum etc.) throws on the
+// client instead of returning a tool result — capture the message either
+// way (same inline try/catch pattern as the social enum test below).
+async function callExpectThrow(name, args) {
+  try {
+    const res = await client.callTool({ name, arguments: args });
+    return res.content?.[0]?.text ?? "";
+  } catch (e) {
+    return e.message ?? String(e);
+  }
+}
+
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: [path.join(root, "src/server.js")],
   stderr: "ignore",
+  // The SDK does NOT inherit process.env by default: without this,
+  // MEDIAKIT_ASR_PYTHON / MEDIAKIT_TEST_ASR never reach the server
+  // and the gated transcribe block tests a no-engine server.
+  env: process.env,
 });
 const client = new Client({ name: "mediakit-test", version: "0.1.0" }, { capabilities: {} });
 await client.connect(transport);
@@ -68,10 +84,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 35 tools present");
-checkOk(missing.length === 0, "tools/list has all 35 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 36 tools present");
+checkOk(missing.length === 0, "tools/list has all 36 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -224,11 +240,22 @@ const doctorRes = await client.callTool({
 const doctorJson = JSON.parse(doctorRes.content[0].text);
 console.log("doctor call: ok =", doctorJson.ok, "| ffmpeg", doctorJson.ffmpeg_version, "| tools available:", Object.values(doctorJson.tools).filter((t) => t.available).length + "/" + Object.keys(doctorJson.tools).length);
 checkOk(doctorJson.ok === true, "doctor ok=true", JSON.stringify(doctorJson.tools));
-checkOk(Object.values(doctorJson.tools).every((t) => t.available), "doctor: all tools available");
+// transcribe is optional (no engine on a fresh machine): every OTHER
+// tool must be available, and transcribe reports its own engine state.
+const { transcribe: doctorAsr, ...otherTools } = doctorJson.tools;
+checkOk(Object.values(otherTools).every((t) => t.available), "doctor: all ffmpeg tools available");
+checkOk(doctorAsr && typeof doctorAsr.available === "boolean" && doctorAsr.engine === "faster-whisper", "doctor: transcribe reports an engine status");
+if (process.env.MEDIAKIT_TEST_ASR === "1") {
+  checkOk(doctorAsr.available === true && doctorAsr.python === process.env.MEDIAKIT_ASR_PYTHON, "doctor: transcribe available with faster-whisper when the engine is installed", JSON.stringify(doctorAsr));
+} else {
+  checkOk(doctorAsr.available === false && /faster-whisper/.test(doctorAsr.fix ?? "") && /MEDIAKIT_ASR_PYTHON/.test(doctorAsr.fix ?? ""), "doctor: transcribe unavailable without an engine, with install hint", JSON.stringify(doctorAsr));
+}
 checkOk(doctorJson.tools.fit?.available === true, "doctor: fit is available");
 checkOk(doctorJson.tools.generate_srt?.available === true, "doctor: generate_srt is available (pure Node, no ffmpeg filter needed)");
 checkOk(doctorJson.tools.export_gif?.available === true, "doctor: export_gif is available (palettegen/paletteuse present)");
-checkOk(Object.values(doctorJson.tools).every((t) => !("fix" in t)), "doctor: no fix hint when every tool is available", JSON.stringify(doctorJson.tools));
+// transcribe is the exception: it carries a fix hint whenever its
+// optional engine is missing, even on a healthy ffmpeg install.
+checkOk(Object.entries(doctorJson.tools).filter(([n]) => n !== "transcribe").every(([, t]) => !("fix" in t)), "doctor: no fix hint on ffmpeg tools when all are available", JSON.stringify(doctorJson.tools));
 // fixForMissing is a pure function: a healthy machine has nothing
 // missing, so the fix text is unit-tested directly instead of by
 // breaking the local ffmpeg install.
@@ -1417,6 +1444,76 @@ const genBadExtRes = await client.callTool({
 });
 const genBadExtJson = JSON.parse(genBadExtRes.content[0].text);
 checkOk(genBadExtRes.isError === true && /\.srt/.test(genBadExtJson.error ?? ""), "generate_srt refuses a non-.srt output", JSON.stringify(genBadExtJson));
+
+// transcribe: validation errors need no engine (checked before the
+// ASR engine is probed). The no-engine path is tested through a second
+// server with MEDIAKIT_ASR_PYTHON pointed at a python that cannot
+// exist, so the result is deterministic on any machine.
+const trBadModelErr = await callExpectThrow("transcribe", { input: path.join(root, "test/speech-jfk.flac"), output: path.join(root, "outputs/mcp-jfk-badmodel.srt"), model: "huge" });
+checkOk(/huge/.test(trBadModelErr ?? ""), "transcribe refuses an unknown model (zod enum)", trBadModelErr ?? "");
+const trBadExtRes = await client.callTool({
+  name: "transcribe",
+  arguments: { input: path.join(root, "test/speech-jfk.flac"), output: path.join(root, "outputs/mcp-jfk.txt") },
+});
+const trBadExtJson = JSON.parse(trBadExtRes.content[0].text);
+checkOk(trBadExtRes.isError === true && /\.srt/.test(trBadExtJson.error ?? ""), "transcribe refuses a non-.srt output", JSON.stringify(trBadExtJson));
+const trBadEngineErr = await callExpectThrow("transcribe", { input: path.join(root, "test/speech-jfk.flac"), output: path.join(root, "outputs/mcp-jfk.srt"), engine: "whisper" });
+checkOk(/whisper/.test(trBadEngineErr ?? ""), "transcribe refuses the not-yet-implemented whisper.cpp engine (zod enum)", trBadEngineErr ?? "");
+const noAsrTransport = new StdioClientTransport({
+  command: process.execPath,
+  args: [path.join(root, "src/server.js")],
+  stderr: "ignore",
+  env: { ...process.env, MEDIAKIT_ASR_PYTHON: "/nonexistent/python3" },
+});
+const noAsrClient = new Client({ name: "mediakit-test-noasr", version: "0.1.0" }, { capabilities: {} });
+await noAsrClient.connect(noAsrTransport);
+const trNoEngRes = await noAsrClient.callTool({
+  name: "transcribe",
+  arguments: { input: path.join(root, "test/speech-jfk.flac"), output: path.join(root, "outputs/mcp-jfk-noengine.srt") },
+});
+const trNoEngJson = JSON.parse(trNoEngRes.content[0].text);
+checkOk(trNoEngRes.isError === true && trNoEngJson.code === "ASR_NOT_INSTALLED" && /faster-whisper/.test(trNoEngJson.error ?? "") && /MEDIAKIT_ASR_PYTHON/.test(trNoEngJson.error ?? ""), "transcribe without an engine refuses with install lines", JSON.stringify(trNoEngJson).slice(0, 200));
+await noAsrClient.close();
+
+// transcribe end-to-end needs a real engine + the tiny model (~75 MB
+// from Hugging Face on first use): too heavy for CI, so this block
+// only runs with MEDIAKIT_TEST_ASR=1 and MEDIAKIT_ASR_PYTHON pointing
+// at a python with faster-whisper.
+if (process.env.MEDIAKIT_TEST_ASR === "1") {
+  const trRes = await client.callTool({
+    name: "transcribe",
+    arguments: { input: path.join(root, "test/speech-jfk.flac"), output: path.join(root, "outputs/mcp-jfk.srt"), model: "tiny", language: "en" },
+  });
+  const trJson = JSON.parse(trRes.content[0].text);
+  console.log("transcribe JFK:", JSON.stringify(trJson.segments), "| lang", trJson.language);
+  checkOk(trRes.isError !== true, "transcribe JFK with the tiny model succeeds", JSON.stringify(trJson).slice(0, 300));
+  checkOk(trJson.language === "en" && trJson.segment_count >= 1, "transcribe detects English with >= 1 segment", `lang=${trJson.language} segments=${trJson.segment_count}`);
+  checkOk(/fellow Americans/.test(trJson.text ?? ""), "transcribe JFK contains 'fellow Americans'", trJson.text ?? "");
+  checkOk(near(trJson.segments?.[0]?.end, 11, 0.5), "transcribe JFK first segment ends near 11s", JSON.stringify(trJson.segments?.[0]));
+  const trSrtText = await readFile(path.join(root, "outputs/mcp-jfk.srt"), "utf8");
+  checkOk(/^1\n00:00:00,000 --> 00:00:11,000\n/.test(trSrtText) && /ask not what your country/.test(trSrtText), "transcribe writes a valid .srt with the JFK line", trSrtText.slice(0, 160).replace(/\n/g, " "));
+  // A tone has no speech: 0 segments and an empty .srt is correct.
+  const trToneRes = await client.callTool({
+    name: "transcribe",
+    arguments: { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-tone.srt") },
+  });
+  const trToneJson = JSON.parse(trToneRes.content[0].text);
+  checkOk(trToneRes.isError !== true && trToneJson.segment_count === 0 && trToneJson.text === "" && trToneJson.size_bytes === 0, "transcribe of a tone (no speech) yields 0 segments and an empty .srt", JSON.stringify(trToneJson).slice(0, 200));
+  // An image has no audio stream (reached only once the engine exists).
+  const trNoAudioRes = await client.callTool({
+    name: "transcribe",
+    arguments: { input: path.join(root, "test/logo.png"), output: path.join(root, "outputs/mcp-noaudio.srt") },
+  });
+  const trNoAudioJson = JSON.parse(trNoAudioRes.content[0].text);
+  checkOk(trNoAudioRes.isError === true && /audio stream/.test(trNoAudioJson.error ?? ""), "transcribe refuses an image (no audio stream)", JSON.stringify(trNoAudioJson));
+  // Full chain: transcribed cues burn onto the video.
+  const trBurnRes = await client.callTool({
+    name: "burn_captions",
+    arguments: { input: path.join(root, "test/source.mp4"), captions: path.join(root, "outputs/mcp-jfk.srt"), output: path.join(root, "outputs/mcp-jfk-burned.mp4") },
+  });
+  const trBurnJson = JSON.parse(trBurnRes.content[0].text);
+  checkOk(trBurnRes.isError !== true && near(trBurnJson.duration_seconds, 10, 0.05), "transcribe -> burn_captions chain renders a 10s captioned video", JSON.stringify(trBurnJson).slice(0, 200));
+}
 
 // Sandbox (MEDIAKIT_WORKDIR), tested through the CLI so the env var
 // only reaches the spawned child — never process.env here, or the MCP

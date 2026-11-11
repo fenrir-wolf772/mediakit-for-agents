@@ -444,6 +444,20 @@ so it punches through instead of being ducked with the bed. A timestamp
 past the voice end is refused rather than silently cut; the mix still
 masters to target LUFS and still reports the measured ducking.
 
+### 30. Transcribe locally — never upload speech to get captions
+When the words already exist as recorded speech, don't type them:
+`transcribe speech.mp3 -o subs.srt` runs faster-whisper on this machine
+(no cloud, audio never uploaded) and writes the .srt — the direct input
+for `burn_captions`. `tiny` is fast and fine for clear speech; `base` /
+`small` are more accurate; `large-v3-turbo` is the slow, accurate end.
+The engine is optional: on a machine without faster-whisper the call
+fails with install lines instead of guessing — install it in a venv and
+point `MEDIAKIT_ASR_PYTHON` at that python (`MEDIAKIT_ASR_MODEL` sets
+the default model). `doctor` reports the engine state, but a missing
+engine never fails `doctor` — everything else still works. Silence
+transcribes to 0 segments and an empty .srt: that is a correct result,
+not a failure, so don't re-run it hoping for words.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

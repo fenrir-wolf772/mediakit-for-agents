@@ -303,6 +303,17 @@ const COMMANDS = {
       ["-o, --output", "Output .srt file (required)"],
     ],
   },
+  transcribe: {
+    usage: "mediakit transcribe <input> -o <output.srt> [--model tiny] [--language auto|en|vi|...] [--engine auto|faster-whisper]",
+    desc: "Transcribe speech to a .srt with a LOCAL faster-whisper engine (no cloud, audio never uploaded). Needs faster-whisper installed (see doctor); without it the call fails with install lines. Env: MEDIAKIT_ASR_PYTHON picks the python, MEDIAKIT_ASR_MODEL the default model.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--model", "Whisper model: tiny (default, fast), base, small, medium, large-v3, large-v3-turbo, ..."],
+      ["--language", "Language: auto (default, detect) or ISO 639-1 code, e.g. en, vi"],
+      ["--engine", "ASR engine: auto (default) or faster-whisper"],
+      ["-o, --output", "Output .srt file (required)"],
+    ],
+  },
   mix: {
     usage: "mediakit mix <voice> --music <file> -o <output> [--music-volume 0.3] [--duck-db 12] [--attack-ms 100] [--release-ms 400] [--voice-lufs -16] [--target-lufs -14] [--no-master] [--dry-run] [--sfx <file>@<s|MM:SS>[@<volume>]]",
     desc: "Mix voice over a music bed with sidechain ducking (bed drops under speech), then master to target LUFS. --sfx drops a short sound at an exact timestamp (repeatable, mixed after ducking). --dry-run prints the exact ffmpeg command and writes nothing.",
@@ -732,6 +743,14 @@ async function main() {
         result = await core.generateSrt({ cues, output: needOutput(opts) });
         break;
       }
+      case "transcribe":
+        result = await core.transcribe({
+          input: needInput(), output: needOutput(opts),
+          model: opts.model ?? null,
+          language: opts.language ?? "auto",
+          engine: opts.engine ?? "auto",
+        });
+        break;
       case "mix": {
         if (!opts.music) fail("missing required option: --music <file>");
         result = await core.mix({
