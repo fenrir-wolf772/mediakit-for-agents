@@ -421,6 +421,15 @@ When `doctor` reports a tool `available: false`, read its `fix` field —
 one sentence with the install command for a full ffmpeg build — instead
 of working around the missing capability.
 
+### 28. Resize by preset name, and never upscale by accident
+When the target is a standard size, say it by name: `resize --preset
+720p` (360p=640×360, 480p=854×480, 720p=1280×720, 1080p=1920×1080,
+2160p=3840×2160). The preset fits the frame inside that box preserving
+aspect ratio, and it never upscales — a 1280×720 source asked for 1080p
+stays 1280×720 and reports `scaled_down: false`, instead of blowing up
+to 1920×1080 with no new detail. Use `--width`/`--height` only when you
+need exact pixels, and never combine them with `--preset`.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

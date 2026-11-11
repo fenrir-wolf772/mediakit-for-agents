@@ -52,12 +52,13 @@ const COMMANDS = {
     ],
   },
   resize: {
-    usage: "mediakit resize <input> [--width <px>] [--height <px>] [--no-keep-aspect] -o <output>",
-    desc: "Resize a video. With --keep-aspect (default) the missing dimension follows the aspect ratio.",
+    usage: "mediakit resize <input> [--width <px>] [--height <px>] [--preset 360p|480p|720p|1080p|2160p] [--no-keep-aspect] -o <output>",
+    desc: "Resize a video. With --keep-aspect (default) the missing dimension follows the aspect ratio. --preset fits the frame inside a named box (e.g. 720p = 1280x720) and never upscales; it cannot be combined with --width/--height.",
     args: [{ name: "input", required: true }],
     options: [
       ["--width", "Target width in pixels"],
       ["--height", "Target height in pixels"],
+      ["--preset", "Named preset: 360p (640x360), 480p (854x480), 720p (1280x720), 1080p (1920x1080), 2160p (3840x2160)"],
       ["--no-keep-aspect", "Stretch to exact dimensions (needs both --width and --height)"],
       ["-o, --output", "Output file (required)"],
     ],
@@ -536,6 +537,7 @@ async function main() {
           input: needInput(), output: needOutput(opts),
           width: numOpt(opts, "width") ?? null, height: numOpt(opts, "height") ?? null,
           keepAspect: opts.keep_aspect !== false,
+          preset: opts.preset ?? null,
         });
         break;
       case "extract-audio":

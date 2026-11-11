@@ -9,13 +9,35 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Bound the whole job: run #43036227269 sat 1h3m on a hung apt
+    # install (DNS failure resolving security.ubuntu.com) before
+    # failing — a stuck job must fail fast instead of burning an hour.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
       - name: Install ffmpeg
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+        # apt on the runner can fail transiently (DNS resolution of
+        # security.ubuntu.com died in run #43036227269). Retry apt 3x,
+        # then fall back to the johnvansickle.com static build so a
+        # registry outage never blocks the whole CI run.
+        run: |
+          for i in 1 2 3; do
+            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg && break
+            echo "apt attempt $i failed, retrying in 30s..."
+            sleep 30
+          done
+          if ! command -v ffmpeg >/dev/null; then
+            echo "apt failed 3x — falling back to static ffmpeg build"
+            curl -fsSL -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+            tar -xf /tmp/ffmpeg.tar.xz -C /tmp
+            sudo install -m 755 /tmp/ffmpeg-*-amd64-static/ffmpeg /usr/local/bin/ffmpeg
+            sudo install -m 755 /tmp/ffmpeg-*-amd64-static/ffprobe /usr/local/bin/ffprobe
+          fi
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
       - run: npm ci
       - name: Syntax check
         run: npm run check
@@ -35,5 +57,7 @@ jobs:
           node bin/mediakit.js generate-srt --cues-file test/cues.json -o outputs/ci-gen.srt
           node bin/mediakit.js export-gif test/source.mp4 --start 2 --end 4 -o outputs/ci-demo.gif --max-size-mb 2
           node bin/mediakit.js fit test/source.mp4 --duration 5 --max-fps 15 -o outputs/ci-fit15.mp4
+          node bin/mediakit.js resize test/source.mp4 --preset 360p -o outputs/ci-resize360.mp4
+          ffprobe -v error -show_entries stream=width,height -of csv=p=0 outputs/ci-resize360.mp4 | grep '^640,360$'
       - name: MCP test
         run: npm test

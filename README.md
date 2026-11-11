@@ -58,7 +58,7 @@ Then ask your agent things like:
 | `trim` | Cut a clip by start + duration/end (times accept seconds or `MM:SS`) | `mediakit trim in.mp4 --start 2 --duration 5 -o out.mp4` |
 | `fit` | Fit a file to an exact target duration: `speed` (up/down, factor 0.25–4x), `trim` (cut longer), `loop` (repeat shorter) — reports the duration actually measured. `--max-fps` caps the output frame rate (only ever lowers it) | `mediakit fit in.mp4 --duration 0:30 -o out.mp4` |
 | `crop` | Crop to a rectangle (w, h, x, y) | `mediakit crop in.mp4 --width 720 --height 1280 -o out.mp4` |
-| `resize` | Resize, keeping aspect ratio by default | `mediakit resize in.mp4 --width 1080 -o out.mp4` |
+| `resize` | Resize, keeping aspect ratio by default; `--preset 360p|480p|720p|1080p|2160p` fits the frame inside that box and never upscales | `mediakit resize in.mp4 --preset 720p -o out.mp4` |
 | `extract_audio` | Pull the audio track out (mp3/aac/wav/ogg/opus/flac); `--whisper` forces the Whisper ASR preset — 16 kHz mono WAV, output renamed to .wav when needed | `mediakit extract-audio in.mp4 -o out.mp3` |
 | `extract_frame` | Grab one frame at a timestamp | `mediakit extract-frame in.mp4 --timestamp 3.5 -o frame.png` |
 | `thumbnail` | Contact sheet of N evenly spaced frames | `mediakit thumbnail in.mp4 --frames 6 -o sheet.jpg` |

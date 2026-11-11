@@ -418,6 +418,44 @@ checkOk(fitTrimCapJson.fps_capped === true && fitTrimCapJson.fps === 15 && near(
 const fitBadFps = await runCli(["fit", path.join(root, "test/source.mp4"), "--duration", "5", "--max-fps", "0", "-o", path.join(root, "outputs/mcp-fit-bad.mp4")]);
 checkOk(fitBadFps.code !== 0 && fitBadFps.out.includes("max_fps"), "CLI fit --max-fps 0 is rejected", fitBadFps.out.slice(0, 200));
 
+// resize --preset: fit inside the named box, keep aspect, never
+// upscale. Source is 1280x720, so 720p is already a fit (no scale),
+// 360p downscales to 640x360, 1080p must NOT upscale to 1920x1080.
+const resize720Res = await client.callTool({
+  name: "resize",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-resize-720p.mp4"), preset: "720p" },
+});
+const resize720Json = JSON.parse(resize720Res.content[0].text);
+console.log("resize 720p:", resize720Json.dimensions, "| scaled_down", resize720Json.scaled_down, "| box", resize720Json.preset_box);
+checkOk(resize720Json.dimensions === "1280x720" && resize720Json.scaled_down === false && resize720Json.preset === "720p", "resize preset 720p on a 1280x720 source keeps 1280x720 (already fits)", JSON.stringify(resize720Json.dimensions));
+const resize360Res = await client.callTool({
+  name: "resize",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-resize-360p.mp4"), preset: "360p" },
+});
+const resize360Json = JSON.parse(resize360Res.content[0].text);
+checkOk(resize360Json.dimensions === "640x360" && resize360Json.scaled_down === true, "resize preset 360p downscales 1280x720 to 640x360", JSON.stringify(resize360Json.dimensions));
+const resize1080Res = await client.callTool({
+  name: "resize",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-resize-1080p.mp4"), preset: "1080p" },
+});
+const resize1080Json = JSON.parse(resize1080Res.content[0].text);
+checkOk(resize1080Json.dimensions === "1280x720" && resize1080Json.scaled_down === false, "resize preset 1080p does NOT upscale a 1280x720 source", JSON.stringify(resize1080Json.dimensions));
+// Preset + width is a conflict; an unknown preset is rejected.
+const resizeBadRes = await client.callTool({
+  name: "resize",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-resize-bad.mp4"), preset: "720p", width: 640 },
+});
+const resizeBadText = resizeBadRes.content?.[0]?.text ?? "";
+checkOk(/preset/.test(resizeBadText) && /width/.test(resizeBadText), "resize preset + width is rejected", resizeBadText.slice(0, 200));
+const resizeBadPresetRes = await client.callTool({
+  name: "resize",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-resize-bad2.mp4"), preset: "144p" },
+});
+const resizeBadPresetText = resizeBadPresetRes.content?.[0]?.text ?? "";
+checkOk(/preset/.test(resizeBadPresetText) && /144p/.test(resizeBadPresetText), "resize rejects an unknown preset", resizeBadPresetText.slice(0, 200));
+const resizeCliBad = await runCli(["resize", path.join(root, "test/source.mp4"), "--preset", "720p", "--width", "640", "-o", path.join(root, "outputs/mcp-resize-cli-bad.mp4")]);
+checkOk(resizeCliBad.code !== 0 && resizeCliBad.out.includes("preset"), "CLI resize --preset + --width is rejected", resizeCliBad.out.slice(0, 200));
+
 // concat --fast: identical clips stream-copy (20s, no re-encode);
 // differing clips fall back to re-encode with the reason named;
 // fast=true on differing clips is an error, not a silent fallback.

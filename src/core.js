@@ -502,11 +502,51 @@ export async function crop({ input, output, width, height, x = 0, y = 0 }) {
 
 // ---------------------------------------------------------------- resize
 
-export async function resize({ input, output, width = null, height = null, keepAspect = true }) {
+// Named resolution presets: the box the frame must fit inside,
+// preserving aspect ratio. "720p" on a 1280x720 source is already a
+// fit (no upscale — upscaling adds no detail, only bytes).
+export const RESIZE_PRESETS = {
+  "360p": [640, 360],
+  "480p": [854, 480],
+  "720p": [1280, 720],
+  "1080p": [1920, 1080],
+  "2160p": [3840, 2160],
+};
+
+export async function resize({ input, output, width = null, height = null, keepAspect = true, preset = null }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
+  if (preset !== null && preset !== undefined) {
+    if (width !== null || height !== null) {
+      throw new MediaKitError("resize --preset cannot be combined with --width/--height", "INVALID_ARG");
+    }
+    if (!keepAspect) {
+      throw new MediaKitError("resize --preset keeps the aspect ratio; --no-keep-aspect is not compatible with it", "INVALID_ARG");
+    }
+    const box = RESIZE_PRESETS[preset];
+    if (!box) {
+      throw new MediaKitError(`unknown resize preset: ${preset} (supported: ${Object.keys(RESIZE_PRESETS).join(", ")})`, "INVALID_ARG");
+    }
+    const meta = await probe(inPath);
+    if (!meta.video) throw new MediaKitError("resize needs a video stream", "INVALID_ARG");
+    const [boxW, boxH] = box;
+    const srcW = meta.video.width, srcH = meta.video.height;
+    // Fit inside the box, never upscale; round to even (x264 yuv420p).
+    const factor = Math.min(boxW / srcW, boxH / srcH, 1);
+    const even = (n) => Math.max(2, Math.round(n / 2) * 2);
+    const tw = even(srcW * factor), th = even(srcH * factor);
+    await run(FFMPEG, ["-y", "-i", inPath, "-vf", `scale=${tw}:${th}`, "-c:a", "copy", outPath]);
+    const info = await fileInfo(outPath);
+    const out = await probe(outPath);
+    return {
+      operation: "resize", input: inPath, output: outPath, preset,
+      preset_box: `${boxW}x${boxH}`, scaled_down: factor < 1,
+      source_dimensions: `${srcW}x${srcH}`, ...info,
+      dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+    };
+  }
   if (width === null && height === null) {
-    throw new MediaKitError("resize needs width and/or height", "INVALID_ARG");
+    throw new MediaKitError("resize needs width and/or height (or --preset)", "INVALID_ARG");
   }
   const w = width === null ? null : num(width, "width", { min: 2, integer: true });
   const h = height === null ? null : num(height, "height", { min: 2, integer: true });

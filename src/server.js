@@ -98,13 +98,14 @@ server.tool(
 
 server.tool(
   "resize",
-  "Resize a video. Give width and/or height; with keep_aspect (default) the other dimension follows the aspect ratio and is rounded to an even number.",
+  "Resize a video. Give width and/or height; with keep_aspect (default) the other dimension follows the aspect ratio and is rounded to an even number. Or give preset (360p/480p/720p/1080p/2160p): the frame is fit inside that box, preserving aspect, and never upscaled.",
   {
     input: pathSchema,
     output: pathSchema,
     width: z.number().int().min(2).optional(),
     height: z.number().int().min(2).optional(),
     keep_aspect: z.boolean().default(true),
+    preset: z.enum(["360p", "480p", "720p", "1080p", "2160p"]).optional().describe("Named preset box: 360p=640x360, 480p=854x480, 720p=1280x720, 1080p=1920x1080, 2160p=3840x2160; fit inside, never upscale; cannot combine with width/height"),
   },
   async (a) => safe(() => core.resize({
     input: a.input,
@@ -112,6 +113,7 @@ server.tool(
     width: a.width ?? null,
     height: a.height ?? null,
     keepAspect: a.keep_aspect,
+    preset: a.preset ?? null,
   })),
 );
 
