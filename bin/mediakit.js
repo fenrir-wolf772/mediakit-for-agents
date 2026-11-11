@@ -62,11 +62,12 @@ const COMMANDS = {
     ],
   },
   "extract-audio": {
-    usage: "mediakit extract-audio <input> -o <output.mp3|aac|wav|ogg|opus|flac> [--format <fmt>]",
-    desc: "Extract the audio track.",
+    usage: "mediakit extract-audio <input> -o <output.mp3|aac|wav|ogg|opus|flac> [--format <fmt>] [--whisper]",
+    desc: "Extract the audio track. --whisper forces the Whisper ASR preset (16 kHz mono WAV) and renames the output to .wav when needed.",
     args: [{ name: "input", required: true }],
     options: [
-      ["--format", "Audio format (overrides output extension)"],
+      ["--format", "Audio format (overrides output extension; ignored with --whisper)"],
+      ["--whisper", "Whisper preset: 16 kHz mono WAV, the direct input for transcription"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -247,14 +248,15 @@ const COMMANDS = {
     ],
   },
   compress: {
-    usage: "mediakit compress <input> -o <output> [--quality low|medium|high] [--max-width <px>] [--crf <n>] [--preset <p>]",
-    desc: "Shrink a file with one named quality preset (low/medium/high). Reports the size before/after and the reduction actually achieved.",
+    usage: "mediakit compress <input> -o <output> [--quality low|medium|high] [--max-width <px>] [--crf <n>] [--preset <p>] [--target-size <MB>]",
+    desc: "Shrink a file with one named quality preset (low/medium/high). Reports the size before/after and the reduction actually achieved. --target-size <MB> encodes to fit under an exact size instead (two-pass ABR, e.g. 10 for Discord); it ignores --quality and cannot combine with --crf.",
     args: [{ name: "input", required: true }],
     options: [
-      ["--quality", "low | medium | high (default medium)"],
+      ["--quality", "low | medium | high (default medium; ignored with --target-size)"],
       ["--max-width", "Scale video down to this width first (only when wider)"],
-      ["--crf", "Override the preset's CRF (0-51)"],
+      ["--crf", "Override the preset's CRF (0-51; cannot combine with --target-size)"],
       ["--preset", "Override the preset's x264 preset (ultrafast..veryslow)"],
+      ["--target-size", "Target size in decimal MB (1 MB = 1,000,000 bytes); two-pass encode to fit under it"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -497,6 +499,7 @@ async function main() {
       case "extract-audio":
         result = await core.extractAudio({
           input: needInput(), output: needOutput(opts), format: opts.format ?? null,
+          whisper: opts.whisper === true,
         });
         break;
       case "extract-frame":
@@ -609,6 +612,7 @@ async function main() {
           maxWidth: numOpt(opts, "max_width") ?? null,
           crf: numOpt(opts, "crf") ?? null,
           preset: opts.preset ?? null,
+          targetSizeMb: numOpt(opts, "target_size") ?? null,
         });
         break;
       case "receipt":

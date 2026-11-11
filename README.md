@@ -59,7 +59,7 @@ Then ask your agent things like:
 | `fit` | Fit a file to an exact target duration: `speed` (up/down, factor 0.25–4x), `trim` (cut longer), `loop` (repeat shorter) — reports the duration actually measured | `mediakit fit in.mp4 --duration 0:30 -o out.mp4` |
 | `crop` | Crop to a rectangle (w, h, x, y) | `mediakit crop in.mp4 --width 720 --height 1280 -o out.mp4` |
 | `resize` | Resize, keeping aspect ratio by default | `mediakit resize in.mp4 --width 1080 -o out.mp4` |
-| `extract_audio` | Pull the audio track out (mp3/aac/wav/ogg/opus/flac) | `mediakit extract-audio in.mp4 -o out.mp3` |
+| `extract_audio` | Pull the audio track out (mp3/aac/wav/ogg/opus/flac); `--whisper` forces the Whisper ASR preset — 16 kHz mono WAV, output renamed to .wav when needed | `mediakit extract-audio in.mp4 -o out.mp3` |
 | `extract_frame` | Grab one frame at a timestamp | `mediakit extract-frame in.mp4 --timestamp 3.5 -o frame.png` |
 | `thumbnail` | Contact sheet of N evenly spaced frames | `mediakit thumbnail in.mp4 --frames 6 -o sheet.jpg` |
 | `frames` | Extract N evenly spaced frames as separate images, each with its timestamp — so an agent can look at a video before cutting it. For screen recordings or text-heavy footage use png (default) or webp, not jpg — JPEG chroma subsampling smears 1px text and thin borders | `mediakit frames in.mp4 -o frames/ --count 6` |
@@ -85,7 +85,7 @@ Then ask your agent things like:
 | `svg_animate` | Animate an SVG into a video, code-driven (no browser): keyframed translate/scale/rotate/opacity on elements by id, rendered frame by frame via librsvg — slide-ins, fades, bounces, spinning shapes | `mediakit svg-animate in.svg --anim anim.json -o out.mp4 --duration 4` |
 | `doctor` | Read-only preflight: ffmpeg version, filters/encoders, tool availability | `mediakit doctor` |
 | `convert` | Change container/codec (omit a codec to stream-copy) | `mediakit convert in.mov -o out.mp4 --video-codec libx264` |
-| `compress` | Shrink a file with one named quality preset — low (CRF 32), medium (CRF 26), high (CRF 20) — each with its own x264 preset and audio bitrate; optional `--max-width` scales down first. Reports the size before/after and the reduction actually measured on disk | `mediakit compress in.mp4 -o small.mp4 --quality low` |
+| `compress` | Shrink a file with one named quality preset — low (CRF 32), medium (CRF 26), high (CRF 20) — each with its own x264 preset and audio bitrate; optional `--max-width` scales down first. `--target-size <MB>` encodes to an exact size instead (two-pass ABR, e.g. 10 for a Discord upload) and reports `target_met` measured on disk. Reports the size before/after and the reduction actually measured on disk | `mediakit compress in.mp4 -o small.mp4 --quality low` |
 
 Every tool returns a concise JSON result: output path, size, and the
 verified duration/dimensions of what it produced.

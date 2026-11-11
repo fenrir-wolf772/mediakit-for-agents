@@ -37,7 +37,7 @@
     "url": "https://github.com/fenrir-wolf772/mediakit-for-agents.git"
   },
   "scripts": {
-    "check": "node --check src/core.js && node --check src/server.js && node --check bin/mediakit.js",
+    "check": "node --check src/core.js && node --check src/server.js && node --check bin/mediakit.js && node scripts/check-docs.mjs",
     "start": "node bin/mediakit.js mcp",
     "test": "node test/mcp-test.mjs"
   },

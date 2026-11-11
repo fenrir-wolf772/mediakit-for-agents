@@ -918,6 +918,73 @@ const compressBadRes = await client.callTool({
 const compressBadText = compressBadRes.content?.[0]?.text ?? "";
 checkOk(/quality/.test(compressBadText) && /tiny/.test(compressBadText), "compress errors on an unknown quality", compressBadText.slice(0, 200));
 
+// compress --target-size: two-pass ABR to an exact size. The fixture
+// source is only 243,932 bytes, so a 1 MB target makes the file
+// BIGGER — reduction honestly goes negative; what must hold is the
+// measured size landing under the target.
+const compressTRes = await client.callTool({
+  name: "compress",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-compress-target1.mp4"), target_size_mb: 1 },
+});
+const compressTJson = JSON.parse(compressTRes.content[0].text);
+console.log("compress target-size 1MB:", JSON.stringify(compressTJson));
+checkOk(compressTJson.mode === "target_size" && compressTJson.passes === 2, "compress target-size runs two passes in target_size mode", JSON.stringify(compressTJson));
+checkOk(compressTJson.target_met === true && compressTJson.size_after_bytes <= 1000000, "compress target-size 1MB lands under the target", `got ${compressTJson.size_after_bytes} bytes`);
+checkOk(near(compressTJson.duration_seconds, 10, 0.1) && compressTJson.dimensions === "1280x720", "compress target-size keeps 10s and 1280x720", JSON.stringify(compressTJson));
+checkOk(compressTJson.video_bitrate_kbps === 656 && compressTJson.audio_bitrate_kbps === 128, "compress target-size budgets 656k video + 128k audio for 1MB/10s", JSON.stringify(compressTJson));
+// Tighter target still met.
+const compressT05Res = await client.callTool({
+  name: "compress",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-compress-target05.mp4"), target_size_mb: 0.5 },
+});
+const compressT05Json = JSON.parse(compressT05Res.content[0].text);
+checkOk(compressT05Json.target_met === true && compressT05Json.size_after_bytes <= 500000, "compress target-size 0.5MB lands under the target", `got ${compressT05Json.size_after_bytes} bytes`);
+// Audio-only target-size: single pass, all budget to audio.
+const compressTARes = await client.callTool({
+  name: "compress",
+  arguments: { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-compress-target-audio.m4a"), target_size_mb: 0.1 },
+});
+const compressTAJson = JSON.parse(compressTARes.content[0].text);
+checkOk(compressTAJson.mode === "target_size" && compressTAJson.passes === 1 && compressTAJson.target_met === true && compressTAJson.size_after_bytes <= 100000, "compress target-size works on audio-only input (1 pass)", JSON.stringify(compressTAJson));
+// Too small a target: refused with the minimum spelled out.
+const compressTinyRes = await client.callTool({
+  name: "compress",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-compress-tiny.mp4"), target_size_mb: 0.1 },
+});
+const compressTinyText = compressTinyRes.content?.[0]?.text ?? "";
+checkOk(/too small/.test(compressTinyText) && /0\.29/.test(compressTinyText), "compress target-size 0.1MB is refused with the minimum size", compressTinyText.slice(0, 200));
+// target-size + crf: mutually exclusive, not silently ignored.
+const compressConflictRes = await client.callTool({
+  name: "compress",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-compress-conflict.mp4"), target_size_mb: 1, crf: 28 },
+});
+const compressConflictText = compressConflictRes.content?.[0]?.text ?? "";
+checkOk(/mutually exclusive/.test(compressConflictText), "compress target-size + crf is rejected as mutually exclusive", compressConflictText.slice(0, 200));
+
+// extract_audio --whisper: 16 kHz mono WAV, the direct input for a
+// transcribe step. The output was requested as .mp3 — whisper renames
+// it to .wav and reports the real path.
+const whisperRes = await client.callTool({
+  name: "extract_audio",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-whisper.mp3"), whisper: true },
+});
+const whisperJson = JSON.parse(whisperRes.content[0].text);
+console.log("extract_audio whisper:", JSON.stringify(whisperJson));
+checkOk(whisperJson.output.endsWith("mcp-whisper.wav") && whisperJson.format === "wav" && whisperJson.whisper_preset === true, "extract_audio --whisper renames output to .wav and reports it", JSON.stringify(whisperJson));
+checkOk(whisperJson.sample_rate_hz === 16000 && whisperJson.channels === 1, "extract_audio --whisper is 16 kHz mono", JSON.stringify(whisperJson));
+checkOk(near(whisperJson.duration_seconds, 10, 0.1), "extract_audio --whisper keeps 10s", `got ${whisperJson.duration_seconds}`);
+// Independent check: ffprobe the file on disk, not just the tool's claim.
+const { stdout: whisperProbeOut } = await execFileAsync("ffprobe", ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name,sample_rate,channels", "-of", "json", path.join(root, "outputs/mcp-whisper.wav")]);
+const whisperProbe = JSON.parse(whisperProbeOut).streams[0];
+checkOk(whisperProbe.codec_name === "pcm_s16le" && Number(whisperProbe.sample_rate) === 16000 && whisperProbe.channels === 1, "ffprobe confirms the whisper file is pcm_s16le 16kHz mono", JSON.stringify(whisperProbe));
+// whisper + format mp3: the preset wins, format is ignored (documented).
+const whisperFmtRes = await client.callTool({
+  name: "extract_audio",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-whisper-fmt.wav"), format: "mp3", whisper: true },
+});
+const whisperFmtJson = JSON.parse(whisperFmtRes.content[0].text);
+checkOk(whisperFmtJson.format === "wav" && whisperFmtJson.codec === "pcm_s16le", "extract_audio --whisper overrides --format mp3", JSON.stringify(whisperFmtJson));
+
 // receipt: provenance sidecar. The SHA-256 in the receipt must match
 // an independent sha256sum of the same file — that is the whole point.
 const receiptRes = await client.callTool({

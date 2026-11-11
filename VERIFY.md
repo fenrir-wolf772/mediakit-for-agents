@@ -891,3 +891,23 @@ tone [6,10)), `test/content-lead-black.mp4` (đen 1s đầu + testsrc 9s),
 - **CI đỏ lần đầu (a7c9761, run #42944221958)**: 176/177 PASS — assert `ffmpeg_version === "8.1.2"` sai trên runner GitHub (ffmpeg 8.0.1-3ubuntu2, máy local 8.1.2). Bài học: không hardcode version môi trường vào assert — so với version đo độc lập (`ffmpeg -version`) ngay trong test. Fix xong, chạy lại local 177/177 PASS rồi push fix.
 - `npm run check` sạch; `npm test`: **177/177 PASS, exit 0** (32 tools, doctor 32/32 available). Assert mới (27): compress 17 + receipt 10.
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+
+---
+
+## Lượt 15 — 2026-11-11 12:58 (+07): compress --target-size + extract_audio --whisper + docs drift guard (32 tools)
+
+- **Học: ffmpeg-micro/ffmpeg-micro-mcp** (1★, 71 commit, TS, cloud API wrapper — không phải local ffmpeg). Ý áp dụng được:
+  1. Version-sync guard — CI fail khi `package.json.version` lệch khỏi `server.json`/`src/version.ts` (kèm script `sync-server-version.mjs`) → đã làm `scripts/check-docs.mjs`: đếm `server.tool(` trong `src/server.js` so với bảng tools trong README (cùng số lượng + cùng tên), chạy trong `npm run check` nên CI fail khi drift.
+  2. Blueprints — workflow đóng gói sẵn (caption-video pause chờ duyệt transcript, multi-output có label) → chưa làm (lớn; `social` đã là mini-blueprint).
+  3. `transcode_and_wait` (tạo job + poll trong 1 call) → KHÔNG áp dụng (MediaKit chạy đồng bộ local, không có job).
+  4. Changesets/release flow + MCP Registry publish → KHÔNG áp dụng (npm đang stage tay, Tony duyệt).
+  5. Smoke test chạy API thật, unit test mock fetch → MediaKit đã làm theo hướng này (test chạy ffmpeg thật).
+  KHÔNG copy code của họ — chỉ học ý tưởng, tự implement bằng Node/ffmpeg.
+- **Làm**:
+  - `compress --target-size <MB>` (core+CLI+MCP, không thêm tool): two-pass ABR libx264 từ ngân sách size + duration (video 100 kbps min + audio 128k; audio-only dồn hết ngân sách cho audio, 1 pass). Decimal MB (1 MB = 1.000.000 B, như giới hạn Discord 10/25 MB); margin an toàn 2% cho container overhead; passlog trong temp dir `mkdtemp` (dọn sạch sau mỗi lần chạy, đã kiểm chứng không còn sót `/tmp/mediakit-pass-*`); trả `mode: target_size`, `target_size_bytes`, `video_bitrate_kbps`, `audio_bitrate_kbps`, `passes`, `target_met` đo thật. Target dưới sàn bị từ chối kèm size tối thiểu tính được; `--crf` + `--target-size` bị từ chối (mutually exclusive); `--quality` bị bỏ qua trong mode này (ghi rõ trong help + MCP description, không lặng lẽ).
+  - `extract_audio --whisper` (core+CLI+MCP, không thêm tool): preset Whisper ASR — 16 kHz mono WAV (`pcm_s16le`, `-ar 16000 -ac 1`); output đổi đuôi thành `.wav` khi cần, trả đúng đường dẫn thật + `whisper_preset: true`, `sample_rate_hz`, `channels` (probe lại output). `--format` bị preset thắng (ghi rõ trong help). Đường vào cho `transcribe` sau này.
+  - `scripts/check-docs.mjs` + nối vào `npm run check` (xem Học #1). CI smoke thêm 2 dòng (compress target-size 1MB, extract-audio --whisper).
+  - README (2 dòng bảng tools), SKILL.md (§23 mở rộng: target-size + whisper), VERIFY.md (mục này).
+- **Test** (ffmpeg 8.1.2, source 1280×720 10s, 243.932 B): compress target-size 1 MB → **953.813 B, target_met: true, passes 2, video 656k + audio 128k** (đúng ngân sách: (1.000.000×0,98×8/10 − 128k) = 656k); 0,5 MB → met; audio-only mp3 9s target 0,1 MB → met, 1 pass; target 0,1 MB video → exit 2 "too small — minimum is about 0.29 MB"; target-size + crf → exit 2 "mutually exclusive". Whisper: output `.mp3` yêu cầu → ghi **`.wav` thật, 320.328 B, pcm_s16le 16000 Hz mono** — ffprobe độc lập xác nhận; whisper + format mp3 → vẫn wav. `npm run check` sạch (check-docs: 32 tools khớp README); `npm test`: **206/206 PASS, exit 0** (32 tools, doctor 32/32 available). Assert mới (13): target-size 8 + whisper 5.
+- **Bẫy đo lường**: target 1 MB ra file 953 KB — LỚN HƠN source 244 KB, `reduction_percent` −291% là báo thật (source đã encode 195 kbps); assert đúng là `target_met`, không phải "nhỏ hơn source". Tương tự bẫy ở lượt 13.
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).

@@ -95,13 +95,19 @@ server.tool(
 
 server.tool(
   "extract_audio",
-  "Extract the audio track to mp3, aac, wav, ogg, opus or flac (from the output extension).",
+  "Extract the audio track to mp3, aac, wav, ogg, opus or flac (from the output extension). Set whisper=true for the Whisper ASR preset: 16 kHz mono WAV (the output is renamed to .wav when needed) — the direct input for a transcribe step.",
   {
     input: pathSchema,
     output: pathSchema,
-    format: z.enum(["mp3", "aac", "wav", "ogg", "opus", "flac"]).optional().describe("Overrides the output extension"),
+    format: z.enum(["mp3", "aac", "wav", "ogg", "opus", "flac"]).optional().describe("Overrides the output extension (ignored when whisper=true)"),
+    whisper: z.boolean().default(false).describe("Whisper preset: force 16 kHz mono WAV, rename output to .wav"),
   },
-  async (a) => safe(() => core.extractAudio(a)),
+  async (a) => safe(() => core.extractAudio({
+    input: a.input,
+    output: a.output,
+    format: a.format ?? null,
+    whisper: a.whisper,
+  })),
 );
 
 server.tool(
@@ -261,14 +267,15 @@ server.tool(
 
 server.tool(
   "compress",
-  "Shrink a file with one named quality preset instead of guessing CRF numbers: low (CRF 32), medium (CRF 26) or high (CRF 20), each with its own x264 preset and audio bitrate. Optional max_width scales the video down first. Returns the size before/after and the reduction percent actually measured on disk, so the agent can check the tradeoff worked.",
+  "Shrink a file with one named quality preset instead of guessing CRF numbers: low (CRF 32), medium (CRF 26) or high (CRF 20), each with its own x264 preset and audio bitrate. Optional max_width scales the video down first. Set target_size_mb to hit an exact size instead (e.g. 10 for a Discord upload): two-pass ABR encoding from the size + duration budget, with a 2% safety margin; reports target_met measured on disk. target_size_mb ignores quality and cannot be combined with crf. Returns the size before/after and the reduction percent actually measured on disk, so the agent can check the tradeoff worked.",
   {
     input: pathSchema,
     output: pathSchema.describe("Output file path"),
-    quality: z.enum(["low", "medium", "high"]).default("medium").describe("Size/quality tradeoff: low = smallest, high = best quality"),
+    quality: z.enum(["low", "medium", "high"]).default("medium").describe("Size/quality tradeoff: low = smallest, high = best quality (ignored when target_size_mb is set)"),
     max_width: z.number().int().min(16).optional().describe("Scale video down to this width first (only when the source is wider)"),
-    crf: z.number().int().min(0).max(51).optional().describe("Override the preset's CRF"),
+    crf: z.number().int().min(0).max(51).optional().describe("Override the preset's CRF (cannot combine with target_size_mb)"),
     preset: z.string().optional().describe("Override the preset's x264 preset (ultrafast..veryslow)"),
+    target_size_mb: z.number().min(0.05).max(10000).optional().describe("Target size in decimal MB (1 MB = 1,000,000 bytes): two-pass encode to fit under it"),
   },
   async (a) => safe(() => core.compress({
     input: a.input,
@@ -277,6 +284,7 @@ server.tool(
     maxWidth: a.max_width ?? null,
     crf: a.crf ?? null,
     preset: a.preset ?? null,
+    targetSizeMb: a.target_size_mb ?? null,
   })),
 );
 

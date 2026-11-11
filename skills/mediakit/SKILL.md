@@ -343,6 +343,17 @@ in the result — it is measured on disk and can go negative: a source
 already encoded at a very low bitrate can come out bigger at medium
 or high, and the tool says so instead of pretending it shrank.
 Audio-only input is re-encoded at the preset's audio bitrate.
+When a platform caps the size (Discord 10/25 MB, GitHub PR 10 MB),
+use `--target-size <MB>` instead of a preset: two-pass ABR encoding
+from the size + duration budget, with a 2% safety margin, and the
+result reports `target_met` measured on disk. It ignores `--quality`
+and refuses `--crf` outright (the bitrate comes from the size, not a
+CRF). A target below the floor (100 kbps video + 128 kbps audio) is
+refused with the minimum size spelled out — raise the target or
+`--max-width` the video down first.
+`extract_audio --whisper` is the Whisper ASR preset: 16 kHz mono WAV
+(the output is renamed to .wav when needed, and the real path is
+reported) — the direct input for a transcribe step.
 `receipt` writes a provenance JSON sidecar for a finished file:
 probe, SHA-256, size, measured loudness, optional `--platform` check
 result, and the exact ffmpeg/ffprobe versions. Keep the receipt next

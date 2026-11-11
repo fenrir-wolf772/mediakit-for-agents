@@ -6,8 +6,9 @@
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, copyFile, mkdir, readFile, readdir, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 export const MEDIAKIT_VERSION = "0.1.0";
@@ -437,16 +438,33 @@ export async function resize({ input, output, width = null, height = null, keepA
 
 const AUDIO_FORMATS = { mp3: "libmp3lame", aac: "aac", wav: "pcm_s16le", ogg: "libvorbis", opus: "libopus", flac: "flac" };
 
-export async function extractAudio({ input, output, format = null }) {
+export async function extractAudio({ input, output, format = null, whisper = false }) {
   const inPath = await requireInput(input);
-  const outPath = await prepareOutput(output, [inPath]);
-  const ext = (format || path.extname(outPath).slice(1) || "mp3").toLowerCase();
+  // --whisper forces the Whisper ASR preset (16 kHz mono WAV) and
+  // renames the output to .wav when needed; the real output path is
+  // reported back, so the caller never has to guess where it went.
+  let outArg = output;
+  if (whisper) {
+    const parsed = path.parse(String(output));
+    outArg = path.format({ dir: parsed.dir, name: parsed.name, ext: ".wav" });
+  }
+  const outPath = await prepareOutput(outArg, [inPath]);
+  const ext = whisper ? "wav" : (format || path.extname(outPath).slice(1) || "mp3").toLowerCase();
   const codec = AUDIO_FORMATS[ext];
   if (!codec) throw new MediaKitError(`unsupported audio format: ${ext} (supported: ${Object.keys(AUDIO_FORMATS).join(", ")})`, "INVALID_ARG");
-  await run(FFMPEG, ["-y", "-i", inPath, "-vn", "-c:a", codec, outPath]);
+  const args = ["-y", "-i", inPath, "-vn", "-c:a", codec];
+  if (whisper) args.push("-ar", "16000", "-ac", "1");
+  args.push(outPath);
+  await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
-  return { operation: "extract_audio", input: inPath, output: outPath, format: ext, codec, ...info, duration_seconds: out.duration_seconds };
+  return {
+    operation: "extract_audio", input: inPath, output: outPath, format: ext, codec, ...info,
+    duration_seconds: out.duration_seconds,
+    sample_rate_hz: out.audio ? out.audio.sample_rate : null,
+    channels: out.audio ? out.audio.channels : null,
+    ...(whisper ? { whisper_preset: true } : {}),
+  };
 }
 
 // ---------------------------------------------------------------- extract_frame
@@ -1902,29 +1920,110 @@ const COMPRESS_PRESETS = {
   high: { crf: 20, preset: "slow", audio_bitrate_kbps: 192 },
 };
 
-export async function compress({ input, output, quality = "medium", maxWidth = null, crf = null, preset = null }) {
+export async function compress({ input, output, quality = "medium", maxWidth = null, crf = null, preset = null, targetSizeMb = null }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
+  const targetMb = targetSizeMb === null || targetSizeMb === undefined ? null : num(targetSizeMb, "target_size_mb", { min: 0.05, max: 10000 });
+  if (targetMb !== null && crf !== null && crf !== undefined) {
+    throw new MediaKitError("compress --target-size and --crf are mutually exclusive (target size picks the bitrate itself)", "INVALID_ARG");
+  }
   if (!(quality in COMPRESS_PRESETS)) {
     throw new MediaKitError(`unknown quality: ${quality} (supported: ${Object.keys(COMPRESS_PRESETS).join(", ")})`, "INVALID_ARG");
   }
   const settings = COMPRESS_PRESETS[quality];
-  const c = crf === null || crf === undefined ? settings.crf : num(crf, "crf", { min: 0, max: 51, integer: true });
-  const p = preset ?? settings.preset;
   const X264_PRESETS = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"];
+  const p = preset ?? settings.preset;
   if (!X264_PRESETS.includes(p)) throw new MediaKitError(`unknown x264 preset: ${p} (supported: ${X264_PRESETS.join(", ")})`, "INVALID_ARG");
   const maxW = maxWidth === null || maxWidth === undefined ? null : num(maxWidth, "max_width", { min: 16, integer: true });
   const meta = await probe(inPath);
   const before = await fileInfo(inPath);
-  const args = ["-y", "-i", inPath];
   let scaledTo = null;
-  if (meta.video) {
-    if (maxW !== null && meta.video.width > maxW) {
-      const w = maxW % 2 === 0 ? maxW : maxW - 1;
-      const h = Math.max(2, Math.round((meta.video.height * w) / meta.video.width / 2) * 2);
-      args.push("-vf", `scale=${w}:${h}`);
-      scaledTo = `${w}x${h}`;
+  let scaleFilter = null;
+  if (meta.video && maxW !== null && meta.video.width > maxW) {
+    const w = maxW % 2 === 0 ? maxW : maxW - 1;
+    const h = Math.max(2, Math.round((meta.video.height * w) / meta.video.width / 2) * 2);
+    scaleFilter = `scale=${w}:${h}`;
+    scaledTo = `${w}x${h}`;
+  }
+
+  if (targetMb !== null) {
+    // Target-size mode (Ashutos1997/ffmpeg-mcp-server's compress_video
+    // targetSizeMB idea, rebuilt as two-pass ABR): the bitrate budget
+    // comes from the size + duration, not from a CRF. A 2% safety
+    // margin absorbs container overhead so the measured size lands
+    // under the target instead of just near it. quality/crf are
+    // ignored in this mode — the result says so (mode: target_size).
+    const duration = meta.duration_seconds;
+    if (!duration || duration <= 0) {
+      throw new MediaKitError("compress --target-size needs a file with a known duration", "INVALID_ARG");
     }
+    const targetBytes = Math.floor(targetMb * 1_000_000); // decimal MB, like Discord's 10 MB / 25 MB limits
+    const budgetBytes = Math.floor(targetBytes * 0.98);
+    const totalKbps = (budgetBytes * 8) / duration / 1000;
+    const MIN_VIDEO_KBPS = 100;
+    const MIN_AUDIO_KBPS = 32;
+    let audioKbps;
+    let videoKbps = null;
+    if (meta.video) {
+      audioKbps = meta.audio ? 128 : 0;
+      videoKbps = Math.floor(totalKbps - audioKbps);
+      if (videoKbps < MIN_VIDEO_KBPS) {
+        const minMb = (((MIN_VIDEO_KBPS + audioKbps) * 1000 * duration) / 8 / 0.98 / 1_000_000).toFixed(2);
+        throw new MediaKitError(`target ${targetMb} MB is too small for ${duration}s — minimum is about ${minMb} MB (${MIN_VIDEO_KBPS} kbps video + ${audioKbps} kbps audio)`, "INVALID_ARG");
+      }
+    } else if (meta.audio) {
+      audioKbps = Math.floor(totalKbps);
+      if (audioKbps < MIN_AUDIO_KBPS) {
+        const minMb = ((MIN_AUDIO_KBPS * 1000 * duration) / 8 / 0.98 / 1_000_000).toFixed(2);
+        throw new MediaKitError(`target ${targetMb} MB is too small for ${duration}s of audio — minimum is about ${minMb} MB (${MIN_AUDIO_KBPS} kbps audio)`, "INVALID_ARG");
+      }
+    } else {
+      throw new MediaKitError("compress needs a video or audio stream", "INVALID_ARG");
+    }
+    let passes = 1;
+    if (meta.video) {
+      // Two-pass libx264: pass 1 analyses (no audio, no output file),
+      // pass 2 encodes to the bitrate budget. The passlog lives in a
+      // temp dir that is always cleaned up afterwards.
+      const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-pass-"));
+      const passlog = path.join(tmpDir, "pass");
+      try {
+        const vf = scaleFilter ? ["-vf", scaleFilter] : [];
+        const vArgs = ["-c:v", "libx264", "-b:v", `${videoKbps}k`, "-maxrate", `${videoKbps * 2}k`, "-bufsize", `${videoKbps * 4}k`, "-preset", p];
+        await run(FFMPEG, ["-y", "-i", inPath, ...vf, ...vArgs, "-pass", "1", "-passlogfile", passlog, "-an", "-f", "null", "-"]);
+        const pass2 = ["-y", "-i", inPath, ...vf, ...vArgs, "-pass", "2", "-passlogfile", passlog];
+        if (meta.audio) pass2.push("-c:a", "aac", "-b:a", `${audioKbps}k`);
+        else pass2.push("-an");
+        pass2.push(outPath);
+        await run(FFMPEG, pass2);
+        passes = 2;
+      } finally {
+        await rm(tmpDir, { recursive: true, force: true });
+      }
+    } else {
+      await run(FFMPEG, ["-y", "-i", inPath, "-vn", "-c:a", "aac", "-b:a", `${audioKbps}k`, outPath]);
+    }
+    const after = await fileInfo(outPath);
+    const out = await probe(outPath);
+    const reduction = +(((before.size_bytes - after.size_bytes) / before.size_bytes) * 100).toFixed(1);
+    return {
+      operation: "compress", input: inPath, output: outPath, mode: "target_size",
+      target_size_mb: targetMb, target_size_bytes: targetBytes,
+      video_bitrate_kbps: videoKbps, audio_bitrate_kbps: audioKbps, passes,
+      ...(scaledTo ? { scaled_to: scaledTo } : {}),
+      size_before_bytes: before.size_bytes, size_before_human: before.size_human,
+      size_after_bytes: after.size_bytes, size_after_human: after.size_human,
+      target_met: after.size_bytes <= targetBytes,
+      reduction_percent: reduction,
+      duration_seconds: out.duration_seconds,
+      dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+    };
+  }
+
+  const c = crf === null || crf === undefined ? settings.crf : num(crf, "crf", { min: 0, max: 51, integer: true });
+  const args = ["-y", "-i", inPath];
+  if (meta.video) {
+    if (scaleFilter) args.push("-vf", scaleFilter);
     args.push("-c:v", "libx264", "-crf", String(c), "-preset", p);
     if (meta.audio) args.push("-c:a", "aac", "-b:a", `${settings.audio_bitrate_kbps}k`);
     else args.push("-an");
@@ -1939,7 +2038,7 @@ export async function compress({ input, output, quality = "medium", maxWidth = n
   const out = await probe(outPath);
   const reduction = +(((before.size_bytes - after.size_bytes) / before.size_bytes) * 100).toFixed(1);
   return {
-    operation: "compress", input: inPath, output: outPath,
+    operation: "compress", input: inPath, output: outPath, mode: "quality",
     quality, crf: c, preset: p,
     ...(scaledTo ? { scaled_to: scaledTo } : {}),
     size_before_bytes: before.size_bytes, size_before_human: before.size_human,
