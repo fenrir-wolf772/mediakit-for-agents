@@ -56,7 +56,7 @@ Then ask your agent things like:
 |---|---|---|
 | `probe` | Duration, dimensions, codecs, streams (ffprobe) | `mediakit probe in.mp4` |
 | `trim` | Cut a clip by start + duration/end (times accept seconds or `MM:SS`) | `mediakit trim in.mp4 --start 2 --duration 5 -o out.mp4` |
-| `fit` | Fit a file to an exact target duration: `speed` (up/down, factor 0.25–4x), `trim` (cut longer), `loop` (repeat shorter) — reports the duration actually measured | `mediakit fit in.mp4 --duration 0:30 -o out.mp4` |
+| `fit` | Fit a file to an exact target duration: `speed` (up/down, factor 0.25–4x), `trim` (cut longer), `loop` (repeat shorter) — reports the duration actually measured. `--max-fps` caps the output frame rate (only ever lowers it) | `mediakit fit in.mp4 --duration 0:30 -o out.mp4` |
 | `crop` | Crop to a rectangle (w, h, x, y) | `mediakit crop in.mp4 --width 720 --height 1280 -o out.mp4` |
 | `resize` | Resize, keeping aspect ratio by default | `mediakit resize in.mp4 --width 1080 -o out.mp4` |
 | `extract_audio` | Pull the audio track out (mp3/aac/wav/ogg/opus/flac); `--whisper` forces the Whisper ASR preset — 16 kHz mono WAV, output renamed to .wav when needed | `mediakit extract-audio in.mp4 -o out.mp3` |
@@ -85,7 +85,7 @@ Then ask your agent things like:
 | `keyframes` | List keyframe (I-frame) timestamps + GOP min/max/avg interval (probe-only) — check before a stream-copy trim | `mediakit keyframes in.mp4` |
 | `find` | Find media files by name, recursively under a directory (case-insensitive substring); each match comes back with probe info (duration, dimensions, codecs) so you pick the right file without guessing paths | `mediakit find clips/ --name moon` |
 | `svg_animate` | Animate an SVG into a video, code-driven (no browser): keyframed translate/scale/rotate/opacity on elements by id, rendered frame by frame via librsvg — slide-ins, fades, bounces, spinning shapes | `mediakit svg-animate in.svg --anim anim.json -o out.mp4 --duration 4` |
-| `doctor` | Read-only preflight: ffmpeg version, filters/encoders, tool availability, and the `MEDIAKIT_WORKDIR` sandbox state when set | `mediakit doctor` |
+| `doctor` | Read-only preflight: ffmpeg version, filters/encoders, tool availability, and the `MEDIAKIT_WORKDIR` sandbox state when set. An unavailable tool also reports a one-sentence `fix` telling you how to repair the ffmpeg install | `mediakit doctor` |
 | `convert` | Change container/codec (omit a codec to stream-copy) | `mediakit convert in.mov -o out.mp4 --video-codec libx264` |
 | `compress` | Shrink a file with one named quality preset — low (CRF 32), medium (CRF 26), high (CRF 20) — each with its own x264 preset and audio bitrate; optional `--max-width` scales down first. `--target-size <MB>` encodes to an exact size instead (two-pass ABR, e.g. 10 for a Discord upload) and reports `target_met` measured on disk. Reports the size before/after and the reduction actually measured on disk | `mediakit compress in.mp4 -o small.mp4 --quality low` |
 | `export_gif` | Export a clip (or segment) as an animated GIF with a two-pass palette (palettegen + paletteuse from the actual frames). Fits under `--max-size-mb` (default 10 MB, the GitHub README limit; Slack auto-plays only under ~2 MB) by stepping down fps, then width, then palette colours; reports `size_budget_met` measured on disk, with a warning when the budget cannot be met | `mediakit export-gif in.mp4 -o demo.gif --max-size-mb 2` |
@@ -133,7 +133,10 @@ rect, clear of the UI chrome. Platforms: `tiktok`, `reels`, `shorts`,
 (default) plays it faster/slower (`setpts` + chained `atempo`, factor
 0.25–4x), `trim` cuts a longer source, `loop` repeats a shorter one —
 the result reports the duration measured on disk (`duration_error_seconds`
-is usually 0.00s). Times everywhere accept seconds or `MM:SS`
+is usually 0.00s). `--max-fps` caps the output frame rate (1–120) —
+it only ever lowers fps, never raises it by duplicating frames, and it
+is measured against the *effective* fps: a 2x speed-up turns a 30fps
+source into 60fps, so `--max-fps 30` still caps it. Times everywhere accept seconds or `MM:SS`
 (`--duration 0:30`, `trim --start 1:30`).
 `silence` cuts dead air out of speech/video (detects with `silencedetect`,
 keeps a 0.2s margin around speech so words are never clipped);
@@ -192,7 +195,10 @@ instead of a fake zero. `find clips/ --name moon` searches a folder
 tree for media files by name and returns each match with its probe
 info, so you stop guessing paths. `doctor` is a read-only preflight — run it first
 on a new machine to confirm ffmpeg/ffprobe and every filter/encoder the
-tools need are actually present.
+tools need are actually present; a tool that reports `available: false`
+also carries a one-sentence `fix` with the install command that repairs
+the ffmpeg build (apt/brew/static build), so a missing capability is a
+fixable machine problem, not a dead end.
 
 See [`skills/shorts-video/SKILL.md`](skills/shorts-video/SKILL.md) for the
 full script → captioned vertical-video workflow.

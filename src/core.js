@@ -399,7 +399,7 @@ function atempoChain(factor) {
   return steps.map((s) => `atempo=${s}`).join(",");
 }
 
-export async function fitDuration({ input, output, duration, method = "speed" }) {
+export async function fitDuration({ input, output, duration, method = "speed", maxFps = null }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const target = parseTime(duration, "duration");
@@ -407,10 +407,19 @@ export async function fitDuration({ input, output, duration, method = "speed" })
   if (!FIT_METHODS.includes(method)) {
     throw new MediaKitError(`unknown fit method: ${method} (use ${FIT_METHODS.join(", ")})`, "INVALID_ARG");
   }
+  const maxF = maxFps === null || maxFps === undefined ? null : num(maxFps, "max_fps", { min: 1, max: 120, integer: true });
   const meta = await probe(inPath);
   const srcDur = meta.duration_seconds;
   if (srcDur === null) throw new MediaKitError("fit needs an input with a known duration", "PROBE_FAILED");
+  // Cap the output fps only when it actually lowers it: asking for 60 on
+  // a 30fps source must not duplicate frames up to 60. Compare against
+  // the EFFECTIVE fps, not the source fps — a 2x speed-up turns 30fps
+  // into 60fps, so max_fps 30 on a 2x fit must still cap. Audio-only
+  // input has no video chain, so max_fps is ignored there (fps_capped false).
+  const srcFps = meta.video?.fps ?? null;
   const factor = srcDur / target; // >1 = speed up, <1 = slow down
+  const effFps = srcFps === null ? null : (method === "speed" ? srcFps * factor : srcFps);
+  const capFps = (maxF !== null && meta.video && (effFps === null || maxF < effFps)) ? maxF : null;
   const ext = path.extname(outPath).slice(1).toLowerCase();
   const audioCodec = AUDIO_FORMATS[ext] ?? VIDEO_CONTAINER_AUDIO[ext] ?? "aac";
 
@@ -426,7 +435,7 @@ export async function fitDuration({ input, output, duration, method = "speed" })
     const f = +factor.toFixed(4);
     args = ["-y", "-i", inPath];
     const filters = [];
-    if (meta.video) filters.push(`[0:v]setpts=PTS/${f}[v]`);
+    if (meta.video) filters.push(`[0:v]setpts=PTS/${f}${capFps ? `,fps=${capFps}` : ""}[v]`);
     if (meta.audio) filters.push(`[0:a]${atempoChain(f)}[a]`);
     if (filters.length) args.push("-filter_complex", filters.join(";"));
     if (meta.video) args.push("-map", "[v]", "-c:v", "libx264", "-crf", "18", "-preset", "veryfast");
@@ -442,6 +451,7 @@ export async function fitDuration({ input, output, duration, method = "speed" })
     }
     applied = { method: "trim" };
     args = ["-y", "-i", inPath, "-t", String(target)];
+    if (capFps) args.push("-vf", `fps=${capFps}`);
     if (meta.video) args.push("-c:v", "libx264", "-crf", "18", "-preset", "veryfast");
     if (meta.audio) args.push("-c:a", audioCodec);
     args.push(outPath);
@@ -451,6 +461,7 @@ export async function fitDuration({ input, output, duration, method = "speed" })
     }
     applied = { method: "loop", loops: Math.ceil(target / srcDur) };
     args = ["-y", "-stream_loop", "-1", "-i", inPath, "-t", String(target)];
+    if (capFps) args.push("-vf", `fps=${capFps}`);
     if (meta.video) args.push("-c:v", "libx264", "-crf", "18", "-preset", "veryfast");
     if (meta.audio) args.push("-c:a", audioCodec);
     args.push(outPath);
@@ -465,6 +476,8 @@ export async function fitDuration({ input, output, duration, method = "speed" })
     ...applied, ...info,
     duration_actual: actual,
     duration_error_seconds: actual === null ? null : +(actual - target).toFixed(3),
+    max_fps: maxF, fps_capped: capFps !== null,
+    fps: out.video ? out.video.fps : null,
   };
 }
 
@@ -2456,7 +2469,7 @@ const TOOL_REQUIREMENTS = {
   overlay: { filters: ["overlay", "format", "scale", "colorchannelmixer"], encoders: ["libx264"] },
   scenes: { filters: ["select"] },
   keyframes: {},
-  fit: { filters: ["setpts", "atempo"], encoders: ["libx264", "aac"] },
+  fit: { filters: ["setpts", "atempo", "fps"], encoders: ["libx264", "aac"] },
   pip: { filters: ["overlay", "format", "scale", "colorchannelmixer", "amix"], encoders: ["libx264"] },
   titlecard: { filters: ["drawtext", "geq"] },
   intro: { filters: ["color", "drawtext"], encoders: ["libx264"] },
@@ -2474,6 +2487,16 @@ async function listCapabilities(kind) {
   // "crop" does not match "cropdetect".
   const { stdout } = await run(FFMPEG, ["-hide_banner", `-${kind}`]);
   return stdout;
+}
+
+// One-sentence fix for a list of missing capabilities, so `doctor`
+// tells the caller HOW to fix the machine, not just what is missing
+// (davinci-resolve-mcp reports a fix per problem; most ffmpeg MCP
+// servers only list install steps in their README). Pure function —
+// unit-tested directly, since a healthy machine has nothing missing.
+export function fixForMissing(missing) {
+  if (!missing?.length) return null;
+  return `missing ${missing.join(", ")} — install a full ffmpeg build with those capabilities (Debian/Ubuntu: sudo apt install ffmpeg; macOS: brew install ffmpeg; static build: johnvansickle.com). A minimal ffmpeg build ships without some filters/encoders.`;
 }
 
 export async function doctor() {
@@ -2496,7 +2519,7 @@ export async function doctor() {
     for (const d of req.decoders ?? []) if (!decoders[d]) missing.push(`decoder:${d}`);
     const enc = req.encoders ?? [];
     if (enc.length && !enc.some((e) => encoders[e])) missing.push(`encoder:${enc.join("|")}`);
-    tools[name] = { available: missing.length === 0, ...(missing.length ? { missing } : {}) };
+    tools[name] = { available: missing.length === 0, ...(missing.length ? { missing, fix: fixForMissing(missing) } : {}) };
     if (missing.length) allOk = false;
   }
   // Sandbox status: enabled only when MEDIAKIT_WORKDIR is set; a set

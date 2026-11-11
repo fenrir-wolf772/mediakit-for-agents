@@ -408,6 +408,19 @@ MCP error carries `retry: {tool, arguments}` with the identical call.
 Re-issue that call (after fixing the flagged argument) instead of
 reconstructing the command from memory.
 
+### 27. Cap fps with `fit --max-fps`, and read `doctor`'s fix line
+Speeding a clip up also raises its frame rate — a 2x speed-up turns
+30fps into 60fps, because the same frames now play in half the time.
+`fit --max-fps <n>` caps the *output* frame rate (1–120) by dropping
+frames, and it is measured against that effective fps, not the source
+fps. It only ever lowers fps: asking for 60 on a 30fps source (or on a
+2x speed-up that already runs at 60fps) applies no filter and reports
+`fps_capped: false`, instead of duplicating frames up to the cap. The
+result reports `fps` measured on disk, so verify the cap landed.
+When `doctor` reports a tool `available: false`, read its `fix` field —
+one sentence with the install command for a full ffmpeg build — instead
+of working around the missing capability.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

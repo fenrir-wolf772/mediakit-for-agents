@@ -34,5 +34,6 @@ jobs:
           node bin/mediakit.js mux test/source.mp4 test/mix-voice.mp3 -o outputs/ci-mux.mp4 --audio-offset 0.5
           node bin/mediakit.js generate-srt --cues-file test/cues.json -o outputs/ci-gen.srt
           node bin/mediakit.js export-gif test/source.mp4 --start 2 --end 4 -o outputs/ci-demo.gif --max-size-mb 2
+          node bin/mediakit.js fit test/source.mp4 --duration 5 --max-fps 15 -o outputs/ci-fit15.mp4
       - name: MCP test
         run: npm test

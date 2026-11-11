@@ -546,18 +546,20 @@ server.tool(
 
 server.tool(
   "fit",
-  "Fit a media file to an exact target duration in seconds. method speed (default) speeds it up/down with setpts + chained atempo (factor must stay in 0.25-4x); trim cuts a longer source down; loop repeats a shorter source until it reaches the target. Returns the output duration actually measured with ffprobe, plus duration_error_seconds.",
+  "Fit a media file to an exact target duration in seconds. method speed (default) speeds it up/down with setpts + chained atempo (factor must stay in 0.25-4x); trim cuts a longer source down; loop repeats a shorter source until it reaches the target. max_fps caps the output frame rate (e.g. 15 for a smaller file) — it only ever lowers the fps, never raises it by duplicating frames. Returns the output duration and fps actually measured with ffprobe, plus duration_error_seconds.",
   {
     input: pathSchema,
     output: pathSchema,
     duration: z.number().positive().describe("Target duration in seconds"),
     method: z.enum(["speed", "trim", "loop"]).default("speed").describe("speed = change playback speed (keeps the whole clip), trim = cut a longer source, loop = repeat a shorter source"),
+    max_fps: z.number().int().min(1).max(120).optional().describe("Cap the output frame rate (1-120). Only lowers fps — a 30fps source with max_fps 60 keeps 30fps; video only, ignored for audio-only input"),
   },
   async (a) => safe(() => core.fitDuration({
     input: a.input,
     output: a.output,
     duration: a.duration,
     method: a.method,
+    maxFps: a.max_fps ?? null,
   })),
 );
 
@@ -586,7 +588,7 @@ server.tool(
 
 server.tool(
   "doctor",
-  "Read-only environment preflight: ffmpeg/ffprobe versions, which filters and encoders this build has, and which mediakit tools that enables. Run first on a new machine — a tool that reports available=false will fail at runtime.",
+  "Read-only environment preflight: ffmpeg/ffprobe versions, which filters and encoders this build has, and which mediakit tools that enables. An unavailable tool also reports a one-sentence fix telling you how to repair the ffmpeg install. Run first on a new machine — a tool that reports available=false will fail at runtime.",
   {},
   async () => safe(() => core.doctor()),
 );

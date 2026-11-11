@@ -11,6 +11,7 @@ import { copyFile, mkdir, readFile, rm, symlink } from "node:fs/promises";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { fixForMissing } from "../src/core.js";
 
 const execFileAsync = promisify(execFile);
 // Independent loudness measurement: run ffmpeg's loudnorm analysis
@@ -214,6 +215,17 @@ checkOk(Object.values(doctorJson.tools).every((t) => t.available), "doctor: all 
 checkOk(doctorJson.tools.fit?.available === true, "doctor: fit is available");
 checkOk(doctorJson.tools.generate_srt?.available === true, "doctor: generate_srt is available (pure Node, no ffmpeg filter needed)");
 checkOk(doctorJson.tools.export_gif?.available === true, "doctor: export_gif is available (palettegen/paletteuse present)");
+checkOk(Object.values(doctorJson.tools).every((t) => !("fix" in t)), "doctor: no fix hint when every tool is available", JSON.stringify(doctorJson.tools));
+// fixForMissing is a pure function: a healthy machine has nothing
+// missing, so the fix text is unit-tested directly instead of by
+// breaking the local ffmpeg install.
+checkOk(fixForMissing([]) === null && fixForMissing(null) === null, "doctor fix: empty/missing list returns null");
+const fixFilter = fixForMissing(["filter:fps"]);
+checkOk(typeof fixFilter === "string" && fixFilter.includes("fps") && fixFilter.includes("apt install ffmpeg"), "doctor fix: filter hint names the filter + the install command", fixFilter ?? "");
+const fixEnc = fixForMissing(["encoder:libx264|aac"]);
+checkOk(typeof fixEnc === "string" && fixEnc.includes("libx264|aac"), "doctor fix: encoder hint names the encoder group", fixEnc ?? "");
+const fixMixed = fixForMissing(["filter:crop", "decoder:librsvg"]);
+checkOk(typeof fixMixed === "string" && fixMixed.includes("filter:crop") && fixMixed.includes("decoder:librsvg"), "doctor fix: one hint covers all missing capabilities", fixMixed ?? "");
 checkOk(doctorJson.sandbox?.enabled === false, "doctor: sandbox disabled when MEDIAKIT_WORKDIR is unset", JSON.stringify(doctorJson.sandbox));
 
 const silenceRes = await client.callTool({
@@ -362,6 +374,49 @@ const fitJson = JSON.parse(fitRes.content[0].text);
 console.log("fit call: method", fitJson.method, "| factor", fitJson.speed_factor, "| target", fitJson.target_duration_seconds + "s", "| duration_actual", fitJson.duration_actual + "s", "| error", fitJson.duration_error_seconds + "s");
 checkOk(fitJson.method === "speed" && fitJson.speed_factor === 2, "fit speed factor is 2x", `got ${fitJson.speed_factor}`);
 checkOk(near(fitJson.duration_actual, 5, 0.05) && near(fitJson.duration_error_seconds, 0, 0.05), "fit lands on 5s (error ~0)", `got actual ${fitJson.duration_actual}s, error ${fitJson.duration_error_seconds}s`);
+checkOk(fitJson.max_fps === null && fitJson.fps_capped === false && fitJson.fps === 60, "fit without max_fps: 2x speed-up really runs at 60fps (effective fps, not source fps)", `got max_fps ${fitJson.max_fps}, capped ${fitJson.fps_capped}, fps ${fitJson.fps}`);
+
+// fit --max-fps: cap against the EFFECTIVE fps (source x factor for
+// speed), never raise fps by duplicating frames.
+const fitCapRes = await client.callTool({
+  name: "fit",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    output: path.join(root, "outputs/mcp-fit-cap15.mp4"),
+    duration: 5,
+    method: "speed",
+    max_fps: 15,
+  },
+});
+const fitCapJson = JSON.parse(fitCapRes.content[0].text);
+console.log("fit cap call: max_fps", fitCapJson.max_fps, "| capped", fitCapJson.fps_capped, "| fps", fitCapJson.fps, "| duration_actual", fitCapJson.duration_actual + "s");
+checkOk(fitCapJson.fps_capped === true && fitCapJson.fps === 15 && near(fitCapJson.duration_actual, 5, 0.05), "fit max_fps 15 on a 2x speed-up caps output to 15fps at 5s", JSON.stringify({ capped: fitCapJson.fps_capped, fps: fitCapJson.fps, actual: fitCapJson.duration_actual }));
+const fitNoCapRes = await client.callTool({
+  name: "fit",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    output: path.join(root, "outputs/mcp-fit-cap60.mp4"),
+    duration: 5,
+    method: "speed",
+    max_fps: 60,
+  },
+});
+const fitNoCapJson = JSON.parse(fitNoCapRes.content[0].text);
+checkOk(fitNoCapJson.fps_capped === false && fitNoCapJson.fps === 60, "fit max_fps 60 on a 2x speed-up (effective 60fps) applies no filter — never duplicates frames up", JSON.stringify({ capped: fitNoCapJson.fps_capped, fps: fitNoCapJson.fps }));
+const fitTrimCapRes = await client.callTool({
+  name: "fit",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    output: path.join(root, "outputs/mcp-fit-trim-cap.mp4"),
+    duration: 6,
+    method: "trim",
+    max_fps: 15,
+  },
+});
+const fitTrimCapJson = JSON.parse(fitTrimCapRes.content[0].text);
+checkOk(fitTrimCapJson.fps_capped === true && fitTrimCapJson.fps === 15 && near(fitTrimCapJson.duration_actual, 6, 0.05), "fit trim + max_fps 15 caps output to 15fps at 6s", JSON.stringify({ capped: fitTrimCapJson.fps_capped, fps: fitTrimCapJson.fps, actual: fitTrimCapJson.duration_actual }));
+const fitBadFps = await runCli(["fit", path.join(root, "test/source.mp4"), "--duration", "5", "--max-fps", "0", "-o", path.join(root, "outputs/mcp-fit-bad.mp4")]);
+checkOk(fitBadFps.code !== 0 && fitBadFps.out.includes("max_fps"), "CLI fit --max-fps 0 is rejected", fitBadFps.out.slice(0, 200));
 
 // concat --fast: identical clips stream-copy (20s, no re-encode);
 // differing clips fall back to re-encode with the reason named;

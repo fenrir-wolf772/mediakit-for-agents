@@ -29,12 +29,13 @@ const COMMANDS = {
     ],
   },
   fit: {
-    usage: "mediakit fit <input> --duration <s|MM:SS> -o <output> [--method speed|trim|loop]",
-    desc: "Fit a file to an exact target duration. speed (default) speeds it up/down (factor 0.25-4x); trim cuts a longer source; loop repeats a shorter source. Times accept seconds or MM:SS.",
+    usage: "mediakit fit <input> --duration <s|MM:SS> -o <output> [--method speed|trim|loop] [--max-fps <n>]",
+    desc: "Fit a file to an exact target duration. speed (default) speeds it up/down (factor 0.25-4x); trim cuts a longer source; loop repeats a shorter source. --max-fps caps the output frame rate (only ever lowers it). Times accept seconds or MM:SS.",
     args: [{ name: "input", required: true }],
     options: [
       ["--duration", "Target duration in seconds or MM:SS (required)"],
       ["--method", "speed (default) | trim | loop"],
+      ["--max-fps", "Cap the output frame rate, 1-120 (only lowers fps, never raises it)"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -519,6 +520,7 @@ async function main() {
           input: needInput(), output: needOutput(opts),
           duration: opts.duration,
           method: opts.method ?? "speed",
+          maxFps: numOpt(opts, "max_fps") ?? null,
         });
         break;
       }
