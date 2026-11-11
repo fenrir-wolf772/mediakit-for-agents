@@ -622,6 +622,116 @@ const concatFastFailJson = JSON.parse(concatFastFailRes.content[0].text);
 console.log("concat fast-fail call: isError", concatFastFailRes.isError, "|", concatFastFailJson.error);
 checkOk(concatFastFailRes.isError === true && /size 640x360/.test(concatFastFailJson.error ?? ""), "concat fast=true errors on differing clips with the mismatch", JSON.stringify(concatFastFailJson));
 
+// concat per-clip trim: {file, start, end} objects (MCP) and
+// path@start-end (CLI). Trims re-encode through the filter graph —
+// the concat demuxer's inpoint/outpoint was measured to NOT cut
+// accurately (2–5s + 1–4s stream-copied 8.09s instead of 6s).
+async function bandPsnrAt(fileA, tA, fileB, tB, y, h) {
+  const aPng = path.join(root, "outputs/mcp-band-a.png");
+  const bPng = path.join(root, "outputs/mcp-band-b.png");
+  await execFileAsync("ffmpeg", ["-v", "error", "-y", "-ss", String(tA), "-i", fileA, "-frames:v", "1", aPng]);
+  await execFileAsync("ffmpeg", ["-v", "error", "-y", "-ss", String(tB), "-i", fileB, "-frames:v", "1", bPng]);
+  const { stderr } = await execFileAsync("ffmpeg", ["-i", aPng, "-i", bPng, "-filter_complex", `[0:v]crop=iw:${h}:0:${y}[a];[1:v]crop=iw:${h}:0:${y}[b];[a][b]psnr`, "-f", "null", "-"]);
+  const m = stderr.match(/average:\s*(inf|[0-9.]+)/);
+  if (!m) return null;
+  return m[1] === "inf" ? Infinity : parseFloat(m[1]);
+}
+const concatTrimRes = await client.callTool({
+  name: "concat",
+  arguments: {
+    inputs: [
+      { file: path.join(root, "test/source.mp4"), start: 2, end: 5 },
+      { file: path.join(root, "test/source2.mp4"), start: "0:01", end: "0:04" },
+    ],
+    output: path.join(root, "outputs/mcp-concat-trim.mp4"),
+  },
+});
+const concatTrimJson = JSON.parse(concatTrimRes.content[0].text);
+console.log("concat trim call: mode", concatTrimJson.mode, "| duration", concatTrimJson.duration_seconds, "| expected", concatTrimJson.expected_duration_seconds, "| parts", JSON.stringify(concatTrimJson.parts));
+checkOk(concatTrimJson.mode === "trim" && near(concatTrimJson.duration_seconds, 6, 0.1) && near(concatTrimJson.expected_duration_seconds, 6, 0.01), "concat per-clip trim gives 6s (3+3) in trim mode", JSON.stringify(concatTrimJson));
+checkOk(concatTrimJson.parts?.[0]?.duration === 3 && concatTrimJson.parts?.[1]?.duration === 3 && concatTrimJson.parts?.[0]?.start === 2 && concatTrimJson.parts?.[1]?.end === 4, "concat trim reports per-clip ranges 2–5s and 1–4s (MM:SS parsed)", JSON.stringify(concatTrimJson.parts));
+// Content check: the trimmed output at 0.5s must be the source at
+// 2.5s (PSNR high), not the source at 0.5s (PSNR low) — the trim
+// really moved the picture, the duration alone does not prove it.
+const trimPsnrRight = await bandPsnrAt(path.join(root, "outputs/mcp-concat-trim.mp4"), 0.5, path.join(root, "test/source.mp4"), 2.5, 0, 360);
+const trimPsnrWrong = await bandPsnrAt(path.join(root, "outputs/mcp-concat-trim.mp4"), 0.5, path.join(root, "test/source.mp4"), 0.5, 0, 360);
+console.log("concat trim pixels: PSNR vs source@2.5s =", trimPsnrRight, "| vs source@0.5s =", trimPsnrWrong);
+checkOk(trimPsnrRight !== null && trimPsnrRight > 30, "concat trim content matches source at 2.5s (PSNR high)", `got ${trimPsnrRight}`);
+checkOk(trimPsnrWrong !== null && trimPsnrWrong < 30, "concat trim content differs from source at 0.5s (PSNR low)", `got ${trimPsnrWrong}`);
+// Trim + transition: 5s + 4s minus 1s fade = 8s.
+const concatTrimFadeRes = await client.callTool({
+  name: "concat",
+  arguments: {
+    inputs: [
+      { file: path.join(root, "test/source.mp4"), start: 0, end: 5 },
+      { file: path.join(root, "test/source2.mp4"), start: 0, end: 4 },
+    ],
+    output: path.join(root, "outputs/mcp-concat-trim-fade.mp4"),
+    transition: "fade",
+    transition_duration: 1,
+  },
+});
+const concatTrimFadeJson = JSON.parse(concatTrimFadeRes.content[0].text);
+console.log("concat trim+fade call: duration", concatTrimFadeJson.duration_seconds, "| expected", concatTrimFadeJson.expected_duration_seconds);
+checkOk(near(concatTrimFadeJson.duration_seconds, 8, 0.1) && near(concatTrimFadeJson.expected_duration_seconds, 8, 0.01), "concat trim + fade gives 8s (5+4 minus 1s transition)", JSON.stringify(concatTrimFadeJson));
+// Trim errors: end past duration, end <= start, and --fast + trim.
+const concatTrimBadEnd = await callExpectThrow("concat", {
+  inputs: [{ file: path.join(root, "test/source.mp4"), start: 0, end: 99 }, path.join(root, "test/source2.mp4")],
+  output: path.join(root, "outputs/mcp-concat-trim-bad.mp4"),
+});
+checkOk(/past its duration/.test(concatTrimBadEnd), "concat trim end past duration is refused", concatTrimBadEnd.slice(0, 200));
+const concatTrimBadOrder = await callExpectThrow("concat", {
+  inputs: [{ file: path.join(root, "test/source.mp4"), start: 5, end: 2 }, path.join(root, "test/source2.mp4")],
+  output: path.join(root, "outputs/mcp-concat-trim-bad2.mp4"),
+});
+checkOk(/must be after its start/.test(concatTrimBadOrder), "concat trim end <= start is refused", concatTrimBadOrder.slice(0, 200));
+const concatTrimFast = await callExpectThrow("concat", {
+  inputs: [{ file: path.join(root, "test/source.mp4"), start: 2, end: 5 }, path.join(root, "test/source.mp4")],
+  output: path.join(root, "outputs/mcp-concat-trim-fast.mp4"),
+  fast: true,
+});
+checkOk(/cannot trim clips/.test(concatTrimFast), "concat --fast + trim is refused with the keyframe reason", concatTrimFast.slice(0, 200));
+// CLI path@start-end syntax: same 3+3 = 6s.
+const concatCliTrim = await runCli(["concat", `${path.join(root, "test/source.mp4")}@2-5`, `${path.join(root, "test/source2.mp4")}@1-4`, "-o", path.join(root, "outputs/mcp-concat-cli-trim.mp4")]);
+let concatCliTrimJson = null;
+try { concatCliTrimJson = JSON.parse(concatCliTrim.out); } catch { /* not JSON */ }
+checkOk(concatCliTrim.code === 0 && concatCliTrimJson?.mode === "trim" && near(concatCliTrimJson?.duration_seconds, 6, 0.1), "CLI concat path@start-end trims to 6s", concatCliTrim.out.slice(0, 200));
+
+// extract_audio --channel: fixture test/stereo-lr.mp3 is stereo with a
+// 440 Hz tone on the left and silence on the right. Channel 0 must
+// come back mono with the tone (~-22 dB); channel 1 mono and silent
+// (mean_volume -inf -> helper returns null, or below -60 dB);
+// channel 2 is out of range.
+const ch0Res = await client.callTool({
+  name: "extract_audio",
+  arguments: { input: path.join(root, "test/stereo-lr.mp3"), output: path.join(root, "outputs/mcp-ch0.mp3"), channel: 0 },
+});
+const ch0Json = JSON.parse(ch0Res.content[0].text);
+console.log("extract_audio channel 0:", JSON.stringify(ch0Json));
+checkOk(ch0Json.channels === 1 && ch0Json.channel === 0, "extract_audio --channel 0 returns mono and reports channel 0", JSON.stringify(ch0Json));
+const ch0Vol = await meanVolume(path.join(root, "outputs/mcp-ch0.mp3"), 1, 2);
+console.log("channel 0 mean volume:", ch0Vol);
+checkOk(ch0Vol !== null && ch0Vol > -30 && ch0Vol < -10, "extract_audio channel 0 keeps the left tone (~-22 dB)", `got ${ch0Vol}`);
+const ch1Res = await client.callTool({
+  name: "extract_audio",
+  arguments: { input: path.join(root, "test/stereo-lr.mp3"), output: path.join(root, "outputs/mcp-ch1.mp3"), channel: 1 },
+});
+const ch1Json = JSON.parse(ch1Res.content[0].text);
+checkOk(ch1Json.channels === 1 && ch1Json.channel === 1, "extract_audio --channel 1 returns mono and reports channel 1", JSON.stringify(ch1Json));
+const ch1Vol = await meanVolume(path.join(root, "outputs/mcp-ch1.mp3"), 1, 2);
+console.log("channel 1 mean volume:", ch1Vol);
+checkOk(ch1Vol === null || ch1Vol < -60, "extract_audio channel 1 is (near-)silent — the right channel really is silence", `got ${ch1Vol}`);
+const ch2Text = await callExpectThrow("extract_audio", {
+  input: path.join(root, "test/stereo-lr.mp3"),
+  output: path.join(root, "outputs/mcp-ch2.mp3"),
+  channel: 2,
+});
+checkOk(/out of range/.test(ch2Text) && /2 channel/.test(ch2Text), "extract_audio --channel 2 is refused (input has 2 channels)", ch2Text.slice(0, 200));
+const chCli = await runCli(["extract-audio", path.join(root, "test/stereo-lr.mp3"), "--channel", "0", "-o", path.join(root, "outputs/mcp-ch0-cli.mp3")]);
+let chCliJson = null;
+try { chCliJson = JSON.parse(chCli.out); } catch { /* not JSON */ }
+checkOk(chCli.code === 0 && chCliJson?.channels === 1 && chCliJson?.channel === 0, "CLI extract-audio --channel 0 returns mono", chCli.out.slice(0, 200));
+
 // pip: source2 (640x360) over source (1280x720) at default scale 0.25
 // -> 320x180 at bottom-right (936,516); output keeps 1280x720 / 10s.
 const pipRes = await client.callTool({

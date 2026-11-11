@@ -458,6 +458,21 @@ engine never fails `doctor` — everything else still works. Silence
 transcribes to 0 segments and an empty .srt: that is a correct result,
 not a failure, so don't re-run it hoping for words.
 
+### 31. Trim clips inside concat — never trust the demuxer's inpoint
+To join only part of each clip, write the input as `path@start-end`
+(CLI) or `{file, start, end}` (MCP) — times in seconds or MM:SS, either
+side may be empty (`a.mp4@2-` keeps from 2s to the end). Trims are cut
+with `trim`/`atrim` in one filter graph and joined with the `concat`
+filter, so they are frame-accurate — and they always re-encode: the
+concat demuxer's `inpoint`/`outpoint` does NOT cut accurately (measured
+2026-11-12: 2–5s + 1–4s stream-copied 8.09s instead of 6s), so `--fast`
+refuses a trim outright instead of silently snapping to keyframes.
+Trims also work with `--transition`: the fade is computed on the trimmed
+timeline. To pull one channel out of a stereo (or multi-channel) file,
+use `extract_audio --channel <n>` (0-based) — it returns that channel as
+mono through `pan`; the index is validated against the probed channel
+count, so `--channel 2` on a stereo file is refused instead of guessing.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

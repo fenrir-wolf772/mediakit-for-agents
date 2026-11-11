@@ -1046,3 +1046,24 @@ tone [6,10)), `test/content-lead-black.mp4` (đen 1s đầu + testsrc 9s),
   3. `StdioClientTransport` KHÔNG kế thừa `process.env` theo mặc định — lượt gated đầu server con thấy `python3` (không engine) dù test process đã có `MEDIAKIT_ASR_PYTHON`; fix bằng `env: process.env` khi tạo transport chính.
   4. Edit đầu tay làm mất header hàm `run()` (replace nhầm) — bắt được ngay bằng `node --check`, khôi phục trước khi chạy test.
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+
+## Lượt 23 — 2026-11-12 04:58 (+07): concat per-clip trim + extract_audio --channel (36 tools)
+- **Học: matthensleyio/FFMpeg.MCP** (.NET 9, 1★, 6 audio tools, FFMpegCore + channel-based task queue + real-time progress notifications). Ý áp dụng được:
+  1. `extract_audio_channel` — tách 1 kênh ra mono → đã làm `extract_audio --channel <n>` (filter `pan`, validate theo số kênh probe được).
+  2. Real-time progress notifications cho op dài (MCP `notifications/progress`) → backlog mới (cần plumbing progressToken qua server.js → core runFfmpeg; chưa làm lượt này).
+  3. Channel-based task queue / async jobs → KHÔNG áp dụng (MediaKit single-shot đồng bộ; queue sẽ giấu input đổi).
+  4. Validate bitrate/sample-rate theo format → MediaKit đã có (num/zod enum).
+  KHÔNG copy code của họ — chỉ học ý tưởng, tự implement bằng Node/ffmpeg.
+- **Làm**:
+  - `concat` per-clip trim (core+CLI+MCP, không thêm tool; backlog từ lượt 9, ý từ studiomeyer-io/mcp-video): mỗi input nhận `{file, start, end}` (MCP) hoặc `path@start-end` (CLI; giây hoặc MM:SS, đầu/cuối được để trống — `a.mp4@2-`, `a.mp4@-5`). Cắt bằng `trim`/`atrim` + `setpts` reset trong 1 filter graph, normalize về size/fps clip đầu, nối bằng filter `concat` — luôn re-encode; `--fast` + trim bị từ chối kèm lý do đo được. Trim cũng chạy với `--transition` (fade tính trên timeline đã trim). Trả `parts` [{file, start, end, duration}] + `mode: "trim"` + `expected_duration_seconds`; kết quả plain/transition cũng trả `parts` (thay cho `parts: <số>` cũ).
+  - `extract_audio --channel <n>` (core+CLI+MCP, không thêm tool): `pan=mono|c0=c<n>`; index 0-based, validate với số kênh probe được (mono → lỗi, vượt → lỗi kèm số kênh thật); trả `channel`. Kết hợp được với `--whisper` (pan rồi mới 16 kHz mono). `doctor` thêm filter `pan` vào danh sách detect.
+  - Fixture mới `test/stereo-lr.mp3` (stereo 4s: trái sine 440 Hz, phải im lặng — lavfi `amerge`).
+  - README (2 dòng bảng + đoạn prose concat), SKILL.md (rule 31), CI smoke thêm 3 dòng (concat trim → duration 6 + extract-audio channel 0 → 1 kênh).
+- **Test** (ffmpeg 8.1.2):
+  - Đo trước khi code: concat demuxer `inpoint`/`outpoint` KHÔNG cắt chính xác — trim 2–5s + 1–4s stream-copy ra **8.09s** thay vì 6s (re-encode qua demuxer **8.13s**); `-ss 2 -t 3` input-seek ra đúng 3.0s. Vì vậy trim đi đường filter graph, không dùng inpoint/outpoint.
+  - Concat trim MCP: source 2–5s + source2 1–4s (MM:SS `0:01`–`0:04`) → **6.0s, mode trim, expected 6**; pixel-check độc lập: frame output @0.5s vs source @2.5s **PSNR 67.2**, vs source @0.5s **PSNR 23.8** (trim thật sự dời hình, không chỉ đúng độ dài). Trim + fade 5s+4s−1s → **8.0s**.
+  - Lỗi đúng: end 99s → "past its duration"; end<=start → "must be after its start"; `--fast` + trim → "cannot trim clips" kèm lý do keyframe; CLI `path@start-end` → 6s.
+  - Extract channel: ch0 mono, volumedetect độc lập **−22.2 dB** (tone trái còn nguyên); ch1 mono, **−91.0 dB** (phải im lặng — mức nền encoder mp3); ch2 → exit 2 "out of range: the input has 2 channel(s)"; CLI `--channel 0` → mono.
+  - `npm run check` sạch (check-docs: 36 tools khớp README); `npm test`: **304/304 PASS, exit 0** (36 tools, doctor 36/36 available). Assert mới (15): concat trim 9 + channel 6.
+- **Bẫy đo lường**: PSNR band testsrc @0.5s vs @2.5s chỉ 23.8, không < 20 như đoán ban đầu (phần lớn khung testsrc là tĩnh — chỉ vùng chuyển động đổi); ngưỡng assert sai phải là < 30 (đúng 67.2 vs sai 23.8, cách xa nhau). Đã đo trước rồi mới chốt ngưỡng.
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).

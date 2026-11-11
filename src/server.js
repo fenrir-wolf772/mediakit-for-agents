@@ -119,18 +119,20 @@ server.tool(
 
 server.tool(
   "extract_audio",
-  "Extract the audio track to mp3, aac, wav, ogg, opus or flac (from the output extension). Set whisper=true for the Whisper ASR preset: 16 kHz mono WAV (the output is renamed to .wav when needed) — the direct input for a transcribe step.",
+  "Extract the audio track to mp3, aac, wav, ogg, opus or flac (from the output extension). Set whisper=true for the Whisper ASR preset: 16 kHz mono WAV (the output is renamed to .wav when needed) — the direct input for a transcribe step. Set channel (0-based) to pick one channel out of a multi-channel input and return it as mono.",
   {
     input: pathSchema,
     output: pathSchema,
     format: z.enum(["mp3", "aac", "wav", "ogg", "opus", "flac"]).optional().describe("Overrides the output extension (ignored when whisper=true)"),
     whisper: z.boolean().default(false).describe("Whisper preset: force 16 kHz mono WAV, rename output to .wav"),
+    channel: z.number().int().min(0).max(63).optional().describe("Channel index (0-based) to extract as mono from a multi-channel input; refused when out of range"),
   },
   async (a) => safe(() => core.extractAudio({
     input: a.input,
     output: a.output,
     format: a.format ?? null,
     whisper: a.whisper,
+    channel: a.channel ?? null,
   })),
 );
 
@@ -177,9 +179,16 @@ server.tool(
 
 server.tool(
   "concat",
-  "Join 2+ media files into one. By default it probes the clips first: identical clips (codec, size, fps, audio) are stream-copied with no re-encoding (fast, lossless); differing clips are re-encoded so the join still works. Set fast=true to require the stream-copy path (errors with the exact mismatch if clips differ), or fast=false to always re-encode. Set transition (e.g. fade, wipeleft, dissolve, circlecrop) to crossfade between clips instead of a hard cut — clips are normalized to the first clip's size/fps first, and the output is sum(durations) minus (n-1) x transition_duration.",
+  "Join 2+ media files into one. By default it probes the clips first: identical clips (codec, size, fps, audio) are stream-copied with no re-encoding (fast, lossless); differing clips are re-encoded so the join still works. Set fast=true to require the stream-copy path (errors with the exact mismatch if clips differ), or fast=false to always re-encode. Set transition (e.g. fade, wipeleft, dissolve, circlecrop) to crossfade between clips instead of a hard cut — clips are normalized to the first clip's size/fps first, and the output is sum(durations) minus (n-1) x transition_duration. Per-clip trim: give an input as {file, start, end} (seconds or MM:SS) — trims always re-encode with exact cuts, and fast=true refuses them (stream-copy cuts snap to keyframes).",
   {
-    inputs: z.array(z.string().min(1)).min(2).describe("Files in order"),
+    inputs: z.array(z.union([
+      z.string().min(1),
+      z.object({
+        file: z.string().min(1),
+        start: z.union([z.number(), z.string()]).optional().describe("Trim start in seconds or MM:SS (omit = clip start)"),
+        end: z.union([z.number(), z.string()]).optional().describe("Trim end in seconds or MM:SS (omit = clip end)"),
+      }),
+    ])).min(2).describe("Files in order; each may be a plain path or {file, start, end} to trim that clip"),
     output: pathSchema,
     video_codec: z.string().default("libx264"),
     audio_codec: z.string().default("aac"),

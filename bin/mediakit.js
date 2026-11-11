@@ -64,12 +64,13 @@ const COMMANDS = {
     ],
   },
   "extract-audio": {
-    usage: "mediakit extract-audio <input> -o <output.mp3|aac|wav|ogg|opus|flac> [--format <fmt>] [--whisper]",
-    desc: "Extract the audio track. --whisper forces the Whisper ASR preset (16 kHz mono WAV) and renames the output to .wav when needed.",
+    usage: "mediakit extract-audio <input> -o <output.mp3|aac|wav|ogg|opus|flac> [--format <fmt>] [--whisper] [--channel <n>]",
+    desc: "Extract the audio track. --whisper forces the Whisper ASR preset (16 kHz mono WAV) and renames the output to .wav when needed. --channel <n> (0-based) picks one channel out of a multi-channel input and returns it as mono.",
     args: [{ name: "input", required: true }],
     options: [
       ["--format", "Audio format (overrides output extension; ignored with --whisper)"],
       ["--whisper", "Whisper preset: 16 kHz mono WAV, the direct input for transcription"],
+      ["--channel", "Channel index (0-based) to extract as mono from a multi-channel input"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -105,7 +106,7 @@ const COMMANDS = {
   },
   concat: {
     usage: "mediakit concat <input1> <input2> [input3...] -o <output> [--video-codec <c>] [--audio-codec <c>] [--transition fade|wipeleft|dissolve|...] [--transition-duration <s>] [--fast] [--no-fast]",
-    desc: "Join 2+ media files into one. Auto-detects: identical clips are stream-copied (fast, lossless), differing clips are re-encoded. --fast requires identical clips (errors otherwise), --no-fast always re-encodes. --transition crossfades between clips instead of a hard cut.",
+    desc: "Join 2+ media files into one. Auto-detects: identical clips are stream-copied (fast, lossless), differing clips are re-encoded. --fast requires identical clips (errors otherwise), --no-fast always re-encodes. --transition crossfades between clips instead of a hard cut. Per-clip trim: write an input as path@start-end (seconds or MM:SS, either side may be empty) — trims always re-encode, and --fast refuses them.",
     args: [{ name: "inputs", required: true, variadic: true }],
     options: [
       ["--video-codec", "Video codec (default libx264)"],
@@ -592,6 +593,7 @@ async function main() {
         result = await core.extractAudio({
           input: needInput(), output: needOutput(opts), format: opts.format ?? null,
           whisper: opts.whisper === true,
+          channel: numOpt(opts, "channel") ?? null,
         });
         break;
       case "extract-frame":

@@ -59,12 +59,12 @@ Then ask your agent things like:
 | `fit` | Fit a file to an exact target duration: `speed` (up/down, factor 0.25–4x), `trim` (cut longer), `loop` (repeat shorter) — reports the duration actually measured. `--max-fps` caps the output frame rate (only ever lowers it) | `mediakit fit in.mp4 --duration 0:30 -o out.mp4` |
 | `crop` | Crop to a rectangle (w, h, x, y) | `mediakit crop in.mp4 --width 720 --height 1280 -o out.mp4` |
 | `resize` | Resize, keeping aspect ratio by default; `--preset 360p|480p|720p|1080p|2160p` fits the frame inside that box and never upscales | `mediakit resize in.mp4 --preset 720p -o out.mp4` |
-| `extract_audio` | Pull the audio track out (mp3/aac/wav/ogg/opus/flac); `--whisper` forces the Whisper ASR preset — 16 kHz mono WAV, output renamed to .wav when needed | `mediakit extract-audio in.mp4 -o out.mp3` |
+| `extract_audio` | Pull the audio track out (mp3/aac/wav/ogg/opus/flac); `--whisper` forces the Whisper ASR preset — 16 kHz mono WAV, output renamed to .wav when needed; `--channel <n>` (0-based) picks one channel out of a multi-channel input and returns it as mono | `mediakit extract-audio in.mp4 -o out.mp3` |
 | `extract_frame` | Grab one frame at a timestamp | `mediakit extract-frame in.mp4 --timestamp 3.5 -o frame.png` |
 | `thumbnail` | Contact sheet of N evenly spaced frames | `mediakit thumbnail in.mp4 --frames 6 -o sheet.jpg` |
 | `frames` | Extract N evenly spaced frames as separate images, each with its timestamp — so an agent can look at a video before cutting it. For screen recordings or text-heavy footage use png (default) or webp, not jpg — JPEG chroma subsampling smears 1px text and thin borders | `mediakit frames in.mp4 -o frames/ --count 6` |
 | `loudness` | Normalize to a loudness target (default −14 LUFS) — two-pass: measures first, applies the exact gain, re-measures the output and reports the real `output_lufs`; warns when the input is peak-limited and the target cannot be reached | `mediakit loudness in.mp3 -o out.mp3` |
-| `concat` | Join 2+ files into one; auto-detects identical clips and stream-copies them (fast, lossless), otherwise re-encodes; `--transition fade` crossfades between clips with xfade + acrossfade | `mediakit concat a.mp4 b.mp4 -o joined.mp4` |
+| `concat` | Join 2+ files into one; auto-detects identical clips and stream-copies them (fast, lossless), otherwise re-encodes; `--transition fade` crossfades between clips with xfade + acrossfade; per-clip trim with `path@start-end` (seconds or MM:SS) or `{file, start, end}` — trims always re-encode with exact cuts | `mediakit concat a.mp4 b.mp4 -o joined.mp4` |
 | `burn_captions` | Burn .srt/.ass/.vtt subtitles into the video — font size and position default to the safe zone and scale with frame height (~60px type on 1080x1920, ~500px above the bottom edge so platform UI never covers the text); `--style background|outline|shadow|glow` (background = white text on a semi-transparent black box, the default; glow = halo in the text colour, reads on bright footage; .ass files carry their own styles) | `mediakit burn-captions in.mp4 --captions subs.srt -o out.mp4 --style outline` |
 | `convert_captions` | Convert a subtitle file between SRT and VTT (cue text carried verbatim; VTT cue settings are dropped and counted) | `mediakit convert-captions subs.srt -o subs.vtt` |
 | `generate_srt` | Build a deterministic .srt from a cue list [{start, end, text}] — pure text, no ffmpeg; times in seconds or MM:SS; cues must be in order and must not overlap | `mediakit generate-srt --cues-file cues.json -o subs.srt` |
@@ -180,7 +180,17 @@ inside its window, and the output is capped at the main video's length.
 fps, pixel format, audio) it stream-copies them — fast and lossless —
 and otherwise re-encodes, naming every mismatch in `fast_skipped`;
 `--fast` requires the copy path (errors with the mismatch instead of
-falling back) and `--no-fast` always re-encodes. `scenes` is probe-only: it lists hard cuts and the
+falling back) and `--no-fast` always re-encodes. Per-clip trim: give an
+input as `path@start-end` on the CLI or `{file, start, end}` over MCP
+(times in seconds or MM:SS, either side may be empty) — each clip is
+cut with `trim`/`atrim` in one filter graph and joined with the `concat`
+filter, so the cuts are frame-accurate; that path always re-encodes, and
+`--fast` refuses a trim outright. Do NOT implement trims with the concat
+demuxer's `inpoint`/`outpoint`: measured 2026-11-12, trimming 2–5s +
+1–4s stream-copied 8.09s instead of 6s (8.13s re-encoded through the
+demuxer) — the demuxer does not cut accurately on this ffmpeg. Trims
+also work with `--transition`: the fade is computed on the trimmed
+timeline (output is sum of trimmed durations minus (n−1) × transition). `scenes` is probe-only: it lists hard cuts and the
 segments between them so you trim on real boundaries; the default
 threshold 0.3 catches real cuts, and a hard cut between flat colours
 scores ~0.4, so keep the threshold at or below 0.4. `keyframes` is

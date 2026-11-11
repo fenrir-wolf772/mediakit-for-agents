@@ -586,7 +586,7 @@ export async function resize({ input, output, width = null, height = null, keepA
 
 const AUDIO_FORMATS = { mp3: "libmp3lame", aac: "aac", wav: "pcm_s16le", ogg: "libvorbis", opus: "libopus", flac: "flac" };
 
-export async function extractAudio({ input, output, format = null, whisper = false }) {
+export async function extractAudio({ input, output, format = null, whisper = false, channel = null }) {
   const inPath = await requireInput(input);
   // --whisper forces the Whisper ASR preset (16 kHz mono WAV) and
   // renames the output to .wav when needed; the real output path is
@@ -600,7 +600,25 @@ export async function extractAudio({ input, output, format = null, whisper = fal
   const ext = whisper ? "wav" : (format || path.extname(outPath).slice(1) || "mp3").toLowerCase();
   const codec = AUDIO_FORMATS[ext];
   if (!codec) throw new MediaKitError(`unsupported audio format: ${ext} (supported: ${Object.keys(AUDIO_FORMATS).join(", ")})`, "INVALID_ARG");
-  const args = ["-y", "-i", inPath, "-vn", "-c:a", codec];
+  // --channel N picks one channel out of a multi-channel input
+  // (matthensleyio/FFMpeg.MCP's extract_audio_channel idea) and
+  // returns it as mono — e.g. the left mic of a stereo interview.
+  // Validated against the probed channel count, never assumed.
+  let channelIdx = null;
+  if (channel !== null && channel !== undefined) {
+    channelIdx = num(channel, "channel", { integer: true, min: 0, max: 63 });
+    const inMeta = await probe(inPath);
+    const ch = inMeta.audio ? inMeta.audio.channels : null;
+    if (ch === null) {
+      throw new MediaKitError("extract_audio --channel needs an input with an audio stream", "INVALID_ARG");
+    }
+    if (channelIdx >= ch) {
+      throw new MediaKitError(`extract_audio --channel ${channelIdx} is out of range: the input has ${ch} channel(s) (0-based)`, "INVALID_ARG");
+    }
+  }
+  const args = ["-y", "-i", inPath, "-vn"];
+  if (channelIdx !== null) args.push("-af", `pan=mono|c0=c${channelIdx}`);
+  args.push("-c:a", codec);
   if (whisper) args.push("-ar", "16000", "-ac", "1");
   args.push(outPath);
   await run(FFMPEG, args);
@@ -612,6 +630,7 @@ export async function extractAudio({ input, output, format = null, whisper = fal
     sample_rate_hz: out.audio ? out.audio.sample_rate : null,
     channels: out.audio ? out.audio.channels : null,
     ...(whisper ? { whisper_preset: true } : {}),
+    ...(channelIdx !== null ? { channel: channelIdx } : {}),
   };
 }
 
@@ -868,22 +887,103 @@ const XFADE_TRANSITIONS = [
   "coverleft", "coverright", "coverup", "coverdown",
 ];
 
+/**
+ * A concat clip spec: a plain path, "path@start-end" (either side may
+ * be empty — "a.mp4@2-" trims from 2s to the end, "a.mp4@-5" keeps the
+ * first 5s; times are seconds or MM:SS), or an object
+ * {file, start, end}. Plain strings without a trailing @range pass
+ * through untouched, so a filename that happens to contain "@" is
+ * only treated as a trim when the part after it parses as a time range.
+ */
+function parseConcatInput(spec, idx) {
+  if (typeof spec === "string") {
+    const m = spec.match(/^(.+)@([0-9:.]*)-([0-9:.]*)$/);
+    if (m && (m[2] !== "" || m[3] !== "")) {
+      return {
+        file: m[1],
+        start: m[2] === "" ? null : parseTime(m[2], `clip ${idx} start`),
+        end: m[3] === "" ? null : parseTime(m[3], `clip ${idx} end`),
+      };
+    }
+    return { file: spec, start: null, end: null };
+  }
+  if (spec && typeof spec === "object" && !Array.isArray(spec)) {
+    if (typeof spec.file !== "string" || !spec.file) {
+      throw new MediaKitError(`concat clip ${idx} needs a file path`, "INVALID_ARG");
+    }
+    return {
+      file: spec.file,
+      start: spec.start === null || spec.start === undefined ? null : parseTime(spec.start, `clip ${idx} start`),
+      end: spec.end === null || spec.end === undefined ? null : parseTime(spec.end, `clip ${idx} end`),
+    };
+  }
+  throw new MediaKitError(`concat clip ${idx} must be a file path, "path@start-end", or {file, start, end}`, "INVALID_ARG");
+}
+
+/** Validate trims against the probed durations and fill in effective ranges. */
+function resolveConcatTrims(clips, metas) {
+  clips.forEach((c, i) => {
+    const dur = metas[i].duration_seconds;
+    if (dur === null || dur === undefined) {
+      throw new MediaKitError(`could not read the duration of clip ${i + 1} (${c.file})`, "PROBE_FAILED");
+    }
+    if (c.start !== null && c.start >= dur) {
+      throw new MediaKitError(`clip ${i + 1} start (${c.start}s) is at or past its duration (${dur}s)`, "INVALID_ARG");
+    }
+    if (c.end !== null && c.end > dur) {
+      throw new MediaKitError(`clip ${i + 1} end (${c.end}s) is past its duration (${dur}s)`, "INVALID_ARG");
+    }
+    if (c.start !== null && c.end !== null && c.end <= c.start) {
+      throw new MediaKitError(`clip ${i + 1} end (${c.end}s) must be after its start (${c.start}s)`, "INVALID_ARG");
+    }
+    c.effStart = c.start ?? 0;
+    c.effEnd = c.end ?? dur;
+    c.effDur = +(c.effEnd - c.effStart).toFixed(3);
+    if (c.effDur <= 0) {
+      throw new MediaKitError(`clip ${i + 1} has a zero-length trim (${c.effStart}s–${c.effEnd}s)`, "INVALID_ARG");
+    }
+  });
+}
+
+function concatParts(clips) {
+  return clips.map((c) => ({
+    file: c.file,
+    ...(c.start !== null ? { start: c.start } : {}),
+    ...(c.end !== null ? { end: c.end } : {}),
+    duration: c.effDur,
+  }));
+}
+
 export async function concat({ inputs, output, videoCodec = "libx264", audioCodec = "aac", transition = null, transitionDuration = 1, fast = null }) {
   if (!Array.isArray(inputs) || inputs.length < 2) {
     throw new MediaKitError("concat needs at least 2 input files", "INVALID_ARG");
   }
+  const clips = inputs.map((s, i) => parseConcatInput(s, i + 1));
   const inPaths = [];
-  for (const p of inputs) inPaths.push(await requireInput(p, "concat input"));
+  for (const c of clips) inPaths.push(await requireInput(c.file, "concat input"));
   const outPath = await prepareOutput(output, inPaths);
+  // Probe once: the fast-path decision, the trim validation and the
+  // transition graph all need the same durations.
+  const metas = [];
+  for (const p of inPaths) metas.push(await probe(p));
+  resolveConcatTrims(clips, metas);
+  const hasTrim = clips.some((c) => c.start !== null || c.end !== null);
+  if (hasTrim && fast === true) {
+    // Measured 2026-11-12: the concat demuxer's inpoint/outpoint does
+    // NOT cut accurately — trimming 2–5s + 1–4s stream-copied 8.09s
+    // instead of 6s (and re-encoded through the demuxer, 8.13s).
+    // Accurate trims need the filter graph, so they always re-encode.
+    throw new MediaKitError("concat --fast (stream copy) cannot trim clips — stream-copy cuts snap to keyframes (measured: inpoint/outpoint 2–5s + 1–4s copied 8.09s instead of 6s); omit --fast to re-encode with exact trims", "INVALID_ARG");
+  }
   if (transition !== null && transition !== undefined) {
     if (fast === true) {
       throw new MediaKitError("concat --fast (stream copy) cannot be combined with --transition — transitions need re-encoding", "INVALID_ARG");
     }
-    return concatTransition({ inPaths, outPath, videoCodec, audioCodec, transition, transitionDuration });
+    return concatTransition({ inPaths, outPath, videoCodec, audioCodec, transition, transitionDuration, clips, metas });
   }
-  // Probe once for the fast-path decision (also reused for the result).
-  const metas = [];
-  for (const p of inPaths) metas.push(await probe(p));
+  if (hasTrim) {
+    return concatTrimmed({ inPaths, outPath, videoCodec, audioCodec, clips, metas });
+  }
   const compat = checkConcatCompat(metas);
   const useFast = fast === true ? true : fast === false ? false : compat.ok;
   if (fast === true && !compat.ok) {
@@ -913,12 +1013,71 @@ export async function concat({ inputs, output, videoCodec = "libx264", audioCode
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
   return {
-    operation: "concat", inputs: inPaths, output: outPath, parts: inPaths.length,
+    operation: "concat", inputs: inPaths, output: outPath, parts: concatParts(clips),
     mode: useFast ? "fast" : "reencode",
     ...(useFast
       ? { fast_reason: "all clips identical (codec, size, fps, pixel format, audio) — stream-copied without re-encoding" }
       : { fast_skipped: compat.reasons.length ? compat.reasons : ["fast mode disabled"] }),
     ...info, duration_seconds: out.duration_seconds,
+  };
+}
+
+/**
+ * Concat with per-clip trims: trim/atrim each clip in one filter
+ * graph, normalize to the first clip's size/fps (like the transition
+ * path), then join with the concat filter. Always re-encodes — the
+ * demuxer's inpoint/outpoint cannot cut accurately (see the --fast
+ * error above), so there is no fast path here.
+ */
+async function concatTrimmed({ inPaths, outPath, videoCodec, audioCodec, clips, metas }) {
+  const hasVideo = metas.some((m) => m.video);
+  if (hasVideo && metas.some((m) => !m.video)) {
+    throw new MediaKitError("concat with per-clip trims needs video in every input (or audio in every input) — mixed video/audio-only clips are not supported", "INVALID_ARG");
+  }
+  const firstVideo = metas.find((m) => m.video);
+  const tw = firstVideo ? firstVideo.video.width : null;
+  const th = firstVideo ? firstVideo.video.height : null;
+  const fps = firstVideo ? firstVideo.video.fps || 30 : null;
+  const graph = [];
+  metas.forEach((m, i) => {
+    const c = clips[i];
+    const s = +c.effStart.toFixed(3);
+    const e = +c.effEnd.toFixed(3);
+    if (m.video) {
+      graph.push(`[${i}:v]trim=start=${s}:end=${e},setpts=PTS-STARTPTS,scale=${tw}:${th}:force_original_aspect_ratio=decrease,pad=${tw}:${th}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=${fps}[v${i}]`);
+    }
+    if (m.audio) {
+      graph.push(`[${i}:a]atrim=start=${s}:end=${e},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo[a${i}]`);
+    } else if (hasVideo) {
+      graph.push(`anullsrc=r=48000:cl=stereo,atrim=0:${c.effDur},asetpts=PTS-STARTPTS[a${i}]`);
+    }
+  });
+  const n = metas.length;
+  if (hasVideo) {
+    const ins = metas.map((_, i) => `[v${i}][a${i}]`).join("");
+    graph.push(`${ins}concat=n=${n}:v=1:a=1[vout][aout]`);
+  } else {
+    const ins = metas.map((_, i) => `[a${i}]`).join("");
+    graph.push(`${ins}concat=n=${n}:v=0:a=1[aout]`);
+  }
+  const expected = +clips.reduce((acc, c) => acc + c.effDur, 0).toFixed(3);
+  const args = ["-y"];
+  for (const p of inPaths) args.push("-i", p);
+  args.push("-filter_complex", graph.join(";"));
+  if (hasVideo) {
+    args.push("-map", "[vout]", "-map", "[aout]", "-c:v", videoCodec, "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "medium");
+  } else {
+    args.push("-map", "[aout]");
+  }
+  args.push("-c:a", audioCodec, "-movflags", "+faststart", outPath);
+  await run(FFMPEG, args);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  return {
+    operation: "concat", inputs: inPaths, output: outPath, parts: concatParts(clips),
+    mode: "trim", expected_duration_seconds: expected,
+    ...info, duration_seconds: out.duration_seconds,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
   };
 }
 
@@ -962,37 +1121,42 @@ function checkConcatCompat(metas) {
 }
 
 /** concat with an xfade transition between every pair of clips. */
-async function concatTransition({ inPaths, outPath, videoCodec, audioCodec, transition, transitionDuration }) {
+async function concatTransition({ inPaths, outPath, videoCodec, audioCodec, transition, transitionDuration, clips, metas }) {
   if (!XFADE_TRANSITIONS.includes(transition)) {
     throw new MediaKitError(`unknown transition: ${transition} (supported: ${XFADE_TRANSITIONS.join(", ")})`, "INVALID_ARG");
   }
   const t = num(transitionDuration, "transition_duration", { min: 0.1, max: 10 });
-  const metas = [];
-  for (const p of inPaths) metas.push(await probe(p));
   if (metas.some((m) => !m.video)) {
     throw new MediaKitError("concat with a transition needs video in every input", "INVALID_ARG");
   }
-  if (metas.some((m) => m.duration_seconds === null)) {
+  // Effective durations are the trimmed ones (or the full clip when
+  // no trim was given), so transitions land on the trimmed timeline.
+  const durations = clips.map((c) => c.effDur);
+  if (durations.some((d) => d === null)) {
     throw new MediaKitError("could not read input durations for transition concat", "PROBE_FAILED");
   }
-  const minDur = Math.min(...metas.map((m) => m.duration_seconds));
+  const minDur = Math.min(...durations);
   if (t >= minDur) {
     throw new MediaKitError(`transition_duration (${t}s) must be shorter than the shortest clip (${minDur}s)`, "INVALID_ARG");
   }
   // Normalize to the first clip's size/fps (xfade needs identical
-  // dimensions and frame rates on both inputs).
+  // dimensions and frame rates on both inputs). A trimmed clip is cut
+  // first (trim/atrim + PTS reset), then scaled like an untrimmed one.
   const tw = metas[0].video.width;
   const th = metas[0].video.height;
   const fps = metas[0].video.fps || 30;
   const graph = [];
   metas.forEach((m, i) => {
-    graph.push(`[${i}:v]scale=${tw}:${th}:force_original_aspect_ratio=decrease,pad=${tw}:${th}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=${fps}[v${i}]`);
+    const c = clips[i];
+    const s = +c.effStart.toFixed(3);
+    const e = +c.effEnd.toFixed(3);
+    graph.push(`[${i}:v]trim=start=${s}:end=${e},setpts=PTS-STARTPTS,scale=${tw}:${th}:force_original_aspect_ratio=decrease,pad=${tw}:${th}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=${fps}[v${i}]`);
     if (m.audio) {
-      graph.push(`[${i}:a]aresample=48000,aformat=channel_layouts=stereo[a${i}]`);
+      graph.push(`[${i}:a]atrim=start=${s}:end=${e},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo[a${i}]`);
     } else {
       // Silent bed of exactly this clip's length, so acrossfade always
       // has two audio streams to work with.
-      graph.push(`anullsrc=r=48000:cl=stereo,atrim=0:${m.duration_seconds},asetpts=PTS-STARTPTS[a${i}]`);
+      graph.push(`anullsrc=r=48000:cl=stereo,atrim=0:${c.effDur},asetpts=PTS-STARTPTS[a${i}]`);
     }
   });
   // Chain xfade pairwise. After joining clips 0..k-1 the running total
@@ -1000,7 +1164,7 @@ async function concatTransition({ inPaths, outPath, videoCodec, audioCodec, tran
   // t seconds before its end.
   let vLabel = "v0";
   let aLabel = "a0";
-  let running = metas[0].duration_seconds;
+  let running = durations[0];
   for (let k = 1; k < metas.length; k++) {
     const offset = +(running - t).toFixed(3);
     const vOut = `x${k}`;
@@ -1009,7 +1173,7 @@ async function concatTransition({ inPaths, outPath, videoCodec, audioCodec, tran
     graph.push(`[${aLabel}][a${k}]acrossfade=d=${t}[${aOut}]`);
     vLabel = vOut;
     aLabel = aOut;
-    running = +(running + metas[k].duration_seconds - t).toFixed(3);
+    running = +(running + durations[k] - t).toFixed(3);
   }
   const args = ["-y"];
   for (const p of inPaths) args.push("-i", p);
@@ -1023,7 +1187,7 @@ async function concatTransition({ inPaths, outPath, videoCodec, audioCodec, tran
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
   return {
-    operation: "concat", inputs: inPaths, output: outPath, parts: inPaths.length,
+    operation: "concat", inputs: inPaths, output: outPath, parts: concatParts(clips),
     transition, transition_duration: t,
     expected_duration_seconds: running,
     ...info, duration_seconds: out.duration_seconds,
@@ -2662,7 +2826,7 @@ const DOCTOR_FILTERS = [
   "drawtext", "volume", "sidechaincompress", "amix", "aresample",
   "xfade", "acrossfade", "fps", "anullsrc", "setpts", "asetpts",
   "format", "colorchannelmixer", "atempo", "aloop", "geq", "color",
-  "palettegen", "paletteuse", "adelay",
+  "palettegen", "paletteuse", "adelay", "pan",
 ];
 const DOCTOR_ENCODERS = [
   "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4",

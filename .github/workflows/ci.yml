@@ -72,5 +72,9 @@ jobs:
           node bin/mediakit.js convert test/source.mp4 --video-codec libx264 --gop-seconds 2 -o outputs/ci-gop.mp4
           ffprobe -v quiet -skip_frame nokey -select_streams v:0 -show_entries frame=pts_time -of csv=p=0 outputs/ci-gop.mp4 | grep -c '^' | grep '^5$'
           node bin/mediakit.js mix test/mix-voice.mp3 --music test/mix-music.mp3 -o outputs/ci-mix-sfx.mp3 --sfx test/sfx-beep.mp3@3
+          node bin/mediakit.js concat test/source.mp4@2-5 test/source2.mp4@1-4 -o outputs/ci-concat-trim.mp4
+          ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-concat-trim.mp4 | grep '^6'
+          node bin/mediakit.js extract-audio test/stereo-lr.mp3 --channel 0 -o outputs/ci-ch0.mp3
+          ffprobe -v error -show_entries stream=channels -of csv=p=0 outputs/ci-ch0.mp3 | grep '^1$'
       - name: MCP test
         run: npm test
