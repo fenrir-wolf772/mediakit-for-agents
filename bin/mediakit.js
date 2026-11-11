@@ -277,6 +277,15 @@ const COMMANDS = {
       ["-o, --output", "Output file .srt or .vtt (required, must differ from the input format)"],
     ],
   },
+  "generate-srt": {
+    usage: "mediakit generate-srt --cues-file <cues.json> -o <output.srt>",
+    desc: "Build a .srt from a JSON cue list [{start, end, text}] (times in seconds or MM:SS; cues must be in order, non-overlapping). Pure text, no ffmpeg.",
+    args: [],
+    options: [
+      ["--cues-file", "JSON file with the cue array (required; may also be {\"cues\": [...]})"],
+      ["-o, --output", "Output .srt file (required)"],
+    ],
+  },
   mix: {
     usage: "mediakit mix <voice> --music <file> -o <output> [--music-volume 0.3] [--duck-db 12] [--attack-ms 100] [--release-ms 400] [--voice-lufs -16] [--target-lufs -14] [--no-master] [--dry-run]",
     desc: "Mix voice over a music bed with sidechain ducking (bed drops under speech), then master to target LUFS. --dry-run prints the exact ffmpeg command and writes nothing.",
@@ -637,6 +646,19 @@ async function main() {
           input: needInput(), output: needOutput(opts),
         });
         break;
+      case "generate-srt": {
+        if (!opts.cues_file) fail("missing required option: --cues-file <cues.json>");
+        const { readFile } = await import("node:fs/promises");
+        let cuesJson;
+        try {
+          cuesJson = JSON.parse(await readFile(opts.cues_file, "utf8"));
+        } catch (e) {
+          fail(`could not read cues JSON ${opts.cues_file}: ${e.message}`);
+        }
+        const cues = Array.isArray(cuesJson) ? cuesJson : cuesJson.cues;
+        result = await core.generateSrt({ cues, output: needOutput(opts) });
+        break;
+      }
       case "mix": {
         if (!opts.music) fail("missing required option: --music <file>");
         result = await core.mix({

@@ -928,3 +928,23 @@ tone [6,10)), `test/content-lead-black.mp4` (đen 1s đầu + testsrc 9s),
 - **Bẫy đo lường**: assert offset 9999 ban đầu `JSON.parse` kết quả MCP — zod từ chối trước khi vào core nên trả về chuỗi lỗi, không phải JSON → crash cả test run. Fix: đọc text + regex (cùng pattern assert social platform lạ ở lượt 10). Audio start_time 1.974 ≠ 2.025: mp3 encoder delay 26ms bị trừ khi copy — đo start_time với dung sai 0.1 thay vì so bằng.
 - `npm run check` sạch (check-docs: 33 tools khớp README); `npm test`: **221/221 PASS, exit 0** (33 tools, doctor 33/33 available). Assert mới (15).
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+
+---
+
+## Lượt 17 — 2026-11-11 16:58 (+07): generate_srt + workspace sandbox MEDIAKIT_WORKDIR (34 tools)
+
+- **Học: samuelgursky/davinci-resolve-mcp** (4.046★, 1.257 commit, MCP server cho DaVinci Resolve Studio; repo video-MCP lớn nhất còn active theo delivvo.io 27/10). Ý áp dụng được:
+  1. Workspace sandboxing là tính năng lõi của họ (loopback-only, HMAC, chặn traversal) → đã làm `MEDIAKIT_WORKDIR` opt-in (backlog từ alanveloper-epam lượt 16).
+  2. Verified-Trap Guard — ledger các hành vi API "báo success nhưng không làm gì", đính `known_limitation` tại callsite; hành vi phá hoại thì từ chối trừ khi `acknowledge_trap: true` → backlog mới (MediaKit đã có các trap đo được: compress ra file lớn hơn source, Outline=0 nuốt hộp caption, `-stream_loop -1` encode vô hạn — đáng gom thành ledger thay vì ghi rải rác trong log).
+  3. Operation envelope thống nhất (`_operation`: status/verification/changes/warnings/execution_id; "unverified" ≠ "checked and clean") → backlog mới (lớn; hiện mỗi tool trả JSON riêng).
+  4. Source Media Safety — source bất khả xâm phạm, chỉ ghi sidecar/scratch → MediaKit đã có (cấm đè input); sandbox lần này siết thêm phía output.
+  5. Optional extras từ chối thẳng kèm dòng cài đặt thay vì đoán mò → củng cố backlog "doctor kèm hướng fix".
+  KHÔNG copy code của họ — chỉ học ý tưởng, tự implement bằng Node/ffmpeg.
+- **Làm**:
+  - `generate_srt` (core+CLI+MCP, tool 34): sinh .srt xác định từ mảng cue `{start, end, text}` — thuần Node, không ffmpeg; thời gian nhận giây hoặc `MM:SS`/`HH:MM:SS` (reuse `parseTime`); cue phải đúng thứ tự, không chồng lấn (chạm nhau được), text không rỗng, tối đa 1000 ký tự/cue và 10.000 cue; output bắt buộc `.srt`; CLI `--cues-file` (array hoặc `{"cues": [...]}`).
+  - Workspace sandbox opt-in `MEDIAKIT_WORKDIR`: chặn ở đúng 2 điểm nghẽn mọi tool đều qua — `requireInput` (input) và `prepareOutput` (output) + `prepareOutputDir` mới cho `frames`/`social`. Kiểm tra lexical (`..`) rồi `realpath` tổ tiên gần nhất còn tồn tại để bắt symlink escape; `prepareOutput` kiểm tra lại sau `mkdir`. Workdir không tồn tại → lỗi `SANDBOX_WORKDIR_MISSING` ngay lần dùng đầu (không lặng lẽ tắt sandbox). Unset = không giới hạn (hành vi cũ). Scratch nội bộ (passlog, temp frame svg, .ass tạm) được miễn — chỉ đường dẫn người gọi đưa vào mới bị kiểm tra.
+  - `doctor`: thêm `sandbox: {enabled, workdir}` (hoặc `error` khi workdir hỏng → `ok: false`); thêm `generate_srt: {}` vào `TOOL_REQUIREMENTS` (34/34 available).
+  - README (bảng 34 tools + dòng doctor), SKILL.md (rule 25 + workflow bước 4 gọi tên `generate_srt`), fixture `test/cues.json`, CI smoke thêm dòng `generate-srt`.
+- **Test** (ffmpeg 8.1.2, source 1280×720 10s): generate_srt 3 cue 0–8s → **file 171 B, đúng format** (`1\n00:00:00,000 --> 00:00:02,500\nMediaKit gives agents`, cue 2 nhận `0:03` + text 2 dòng); lỗi đúng (chồng lấn, end<=start, text trắng, output .txt). Sandbox qua CLI (env chỉ truyền cho process con, không set `process.env` trong test — nếu không MCP server test sẽ thừa hưởng và mọi call sau đều fail): probe trong workdir OK; probe ngoài workdir / symlink trỏ ra ngoài / `..` / ghi output ra ngoài / frames outputDir ra ngoài đều bị từ chối `SANDBOX_ESCAPE` (ghi output bị chặn trước khi ghi — file không tồn tại); `doctor` báo `enabled: true` + đúng realpath workdir, unset → `enabled: false`; workdir không tồn tại → lỗi to thay vì tắt lén. `npm run check` sạch (check-docs: 34 tools khớp README); `npm test`: **239/239 PASS, exit 0** (34 tools, doctor 34/34 available). Assert mới (18): generate_srt 6 + sandbox 10 + doctor 2.
+- **Bẫy đo lường**: `path.join(wd, "..", "source.mp4")` normalize mất `..` ngay phía test — assert traversal phải truyền chuỗi thô `${wd}/../source.mp4` thì `..` mới tới được `path.resolve` trong core. Review bắt được: `extractFrames` tạo thư mục trước khi kiểm tra "không nằm trong input" — đã đổi thứ tự kiểm tra trước, tạo sau.
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).

@@ -6,7 +6,7 @@
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -15,6 +15,65 @@ export const MEDIAKIT_VERSION = "0.1.0";
 
 export const FFMPEG = process.env.MEDIAKIT_FFMPEG || "ffmpeg";
 export const FFPROBE = process.env.MEDIAKIT_FFPROBE || "ffprobe";
+
+// ---------------------------------------------------------------- sandbox
+// Workspace sandbox (opt-in). Idea from alanveloper-epam/ffmpeg-mcp-server
+// (FFMPEG_MCP_WORKDIR) and the sandboxing in
+// samuelgursky/davinci-resolve-mcp: when MEDIAKIT_WORKDIR is set, every
+// user-supplied input/output path must stay inside it — `..` traversal
+// and symlink escapes are refused with SANDBOX_ESCAPE. Unset = no
+// restriction (existing behaviour, default). Internal scratch — ffmpeg
+// two-pass logs, svg frame temp dirs, burn_captions temp .ass — is not
+// a user-supplied path and is exempt.
+const WORKDIR_ENV = "MEDIAKIT_WORKDIR";
+
+async function workdirRoot() {
+  const raw = process.env[WORKDIR_ENV];
+  if (!raw || !raw.trim()) return null;
+  const abs = path.resolve(raw.trim());
+  let real;
+  try {
+    real = await realpath(abs);
+  } catch {
+    throw new MediaKitError(`MEDIAKIT_WORKDIR does not exist or is not readable: ${raw}`, "SANDBOX_WORKDIR_MISSING");
+  }
+  if (!(await stat(real)).isDirectory()) {
+    throw new MediaKitError(`MEDIAKIT_WORKDIR is not a directory: ${raw}`, "SANDBOX_WORKDIR_MISSING");
+  }
+  return real;
+}
+
+function isInsideDir(dir, p) {
+  const rel = path.relative(dir, p);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+async function assertInsideWorkdir(abs, label) {
+  const root = await workdirRoot();
+  if (!root) return;
+  if (!isInsideDir(root, abs)) {
+    throw new MediaKitError(`${label} escapes MEDIAKIT_WORKDIR (${root}): ${abs}`, "SANDBOX_ESCAPE");
+  }
+  // Symlink escape: resolve the nearest existing ancestor. If abs
+  // itself exists its realpath is checked; if it does not exist yet,
+  // every component below the nearest existing ancestor is new, so it
+  // cannot be a symlink pointing outside.
+  let cur = abs;
+  for (;;) {
+    try {
+      const real = await realpath(cur);
+      if (!isInsideDir(root, real)) {
+        throw new MediaKitError(`${label} escapes MEDIAKIT_WORKDIR via symlink (${root}): ${abs} -> ${real}`, "SANDBOX_ESCAPE");
+      }
+      return;
+    } catch (err) {
+      if (err instanceof MediaKitError) throw err;
+      const parent = path.dirname(cur);
+      if (parent === cur) return; // filesystem root; the lexical check above already passed
+      cur = parent;
+    }
+  }
+}
 
 export class MediaKitError extends Error {
   constructor(message, code = "MEDIAKIT_ERROR") {
@@ -43,6 +102,7 @@ export async function requireInput(p, label = "input") {
     throw new MediaKitError(`${label} path is required`, "INVALID_INPUT");
   }
   const abs = path.resolve(p);
+  await assertInsideWorkdir(abs, label);
   try {
     await access(abs, fsConstants.R_OK);
   } catch {
@@ -68,7 +128,25 @@ export async function prepareOutput(p, inputs = []) {
       throw new MediaKitError(`output must not overwrite input: ${p}`, "OUTPUT_OVERWRITES_INPUT");
     }
   }
+  await assertInsideWorkdir(abs, "output");
   await mkdir(path.dirname(abs), { recursive: true });
+  await assertInsideWorkdir(abs, "output"); // re-check now the parent exists (symlinks resolved)
+  return abs;
+}
+
+/**
+ * Resolve an output directory, create it, enforce the sandbox.
+ * Used by tools that write a folder of files (frames, social) instead
+ * of a single output file.
+ */
+export async function prepareOutputDir(dir) {
+  if (typeof dir !== "string" || !dir.trim()) {
+    throw new MediaKitError("output directory is required", "INVALID_OUTPUT");
+  }
+  const abs = path.resolve(dir);
+  await assertInsideWorkdir(abs, "output directory");
+  await mkdir(abs, { recursive: true });
+  await assertInsideWorkdir(abs, "output directory");
   return abs;
 }
 
@@ -523,16 +601,16 @@ export async function extractFrames({ input, outputDir, count = 6, format = "png
   if (typeof outputDir !== "string" || !outputDir.trim()) {
     throw new MediaKitError("output directory is required", "INVALID_OUTPUT");
   }
-  const dir = path.resolve(outputDir);
-  if (dir === inPath || dir.startsWith(inPath + path.sep)) {
+  const rawDir = path.resolve(outputDir);
+  if (rawDir === inPath || rawDir.startsWith(inPath + path.sep)) {
     throw new MediaKitError("frames output directory must not be inside the input file", "INVALID_OUTPUT");
   }
+  const dir = await prepareOutputDir(outputDir);
   const w = width === null || width === undefined ? null : num(width, "width", { min: 80, max: 3840, integer: true });
   const meta = await probe(inPath);
   if (!meta.video) throw new MediaKitError("frames needs a video input", "INVALID_ARG");
   const duration = meta.duration_seconds;
   if (duration === null || duration <= 0) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
-  await mkdir(dir, { recursive: true });
   // fps=N/D emits one frame per interval [i*D/N, (i+1)*D/N) — exactly
   // N frames, evenly spaced, timestamps i*D/N.
   let vf = `fps=${n}/${duration}`;
@@ -1007,6 +1085,69 @@ export async function convertCaptions({ input, output }) {
   };
 }
 
+// ---------------------------------------------------------------- generate_srt
+// Build a deterministic .srt from a cue list [{start, end, text}].
+// Pure Node, no ffmpeg (the counterpart of convert_captions, and the
+// input `burn_captions` wants). Times accept seconds or "MM:SS" /
+// "HH:MM:SS" via parseTime. Cues must be in order and must not overlap;
+// touching cues (next start == previous end) are fine. Text may span
+// lines with \n; \r is stripped.
+
+const MAX_SRT_CUES = 10_000;
+
+export async function generateSrt({ cues, output }) {
+  if (!Array.isArray(cues) || cues.length === 0) {
+    throw new MediaKitError("generate_srt needs a non-empty cues array", "INVALID_ARG");
+  }
+  if (cues.length > MAX_SRT_CUES) {
+    throw new MediaKitError(`generate_srt accepts at most ${MAX_SRT_CUES} cues, got ${cues.length}`, "INVALID_ARG");
+  }
+  const normalized = cues.map((c, i) => {
+    const n = i + 1;
+    if (!c || typeof c !== "object" || Array.isArray(c)) {
+      throw new MediaKitError(`cue ${n} must be an object {start, end, text}`, "INVALID_ARG");
+    }
+    const start = parseTime(c.start, `cue ${n} start`);
+    const end = parseTime(c.end, `cue ${n} end`);
+    if (!(end > start)) {
+      throw new MediaKitError(`cue ${n}: end (${c.end}) must be after start (${c.start})`, "INVALID_ARG");
+    }
+    if (typeof c.text !== "string" || !c.text.trim()) {
+      throw new MediaKitError(`cue ${n}: text must be a non-empty string`, "INVALID_ARG");
+    }
+    const text = c.text.replace(/\r\n?/g, "\n").trim();
+    if (text.length > 1000) {
+      throw new MediaKitError(`cue ${n}: text exceeds 1000 characters`, "INVALID_ARG");
+    }
+    return { startMs: Math.round(start * 1000), endMs: Math.round(end * 1000), text };
+  });
+  for (let i = 1; i < normalized.length; i++) {
+    if (normalized[i].startMs < normalized[i - 1].endMs) {
+      throw new MediaKitError(
+        `cue ${i + 1} starts at ${(normalized[i].startMs / 1000).toFixed(3)}s, before cue ${i} ends at ${(normalized[i - 1].endMs / 1000).toFixed(3)}s — cues must be in order and must not overlap`,
+        "INVALID_ARG",
+      );
+    }
+  }
+  const outPath = await prepareOutput(output, []);
+  if (path.extname(outPath).toLowerCase() !== ".srt") {
+    throw new MediaKitError(`generate_srt output must end in .srt, got ${path.extname(outPath) || "(no extension)"}`, "INVALID_ARG");
+  }
+  const body = normalized
+    .map((c, i) => `${i + 1}\n${formatCaptionTimestamp(c.startMs, ",")} --> ${formatCaptionTimestamp(c.endMs, ",")}\n${c.text}`)
+    .join("\n\n") + "\n";
+  await writeFile(outPath, body, "utf8");
+  const info = await fileInfo(outPath);
+  return {
+    operation: "generate_srt",
+    output: outPath,
+    cue_count: normalized.length,
+    first_start_seconds: +(normalized[0].startMs / 1000).toFixed(3),
+    last_end_seconds: +(normalized[normalized.length - 1].endMs / 1000).toFixed(3),
+    ...info,
+  };
+}
+
 // ---------------------------------------------------------------- titlecard
 // Title card image: a big bold hook (3-6 words) on a coloured box, on a
 // transparent canvas so it overlays cleanly onto any frame (see overlay).
@@ -1366,8 +1507,7 @@ const SOCIAL_PLATFORMS = ["tiktok", "reels", "shorts", "instagram-feed", "instag
 export async function social({ input, outputDir, platforms = ["tiktok", "reels", "shorts"], strategy = "blur", targetLufs = -14, trimToMax = true }) {
   const inPath = await requireInput(input);
   if (!outputDir || !String(outputDir).trim()) throw new MediaKitError("social needs an output directory", "INVALID_OUTPUT");
-  const outDir = path.resolve(outputDir);
-  await mkdir(outDir, { recursive: true });
+  const outDir = await prepareOutputDir(outputDir);
   if (!["crop", "pad", "blur"].includes(strategy)) throw new MediaKitError(`social strategy must be crop, pad or blur, got: ${strategy}`, "INVALID_ARG");
   const target = num(targetLufs, "target_lufs", { min: -70, max: 0 });
   const list = Array.isArray(platforms) ? platforms : String(platforms).split(",").map((s) => s.trim()).filter(Boolean);
@@ -2239,6 +2379,7 @@ const TOOL_REQUIREMENTS = {
   intro: { filters: ["color", "drawtext"], encoders: ["libx264"] },
   social: { filters: ["crop", "scale", "pad", "gblur", "overlay", "loudnorm"], encoders: ["libx264"] },
   convert_captions: {},
+  generate_srt: {},
   find: {},
   mux: {},
   svg_animate: { decoders: ["librsvg"], encoders: ["libx264"] },
@@ -2275,12 +2416,23 @@ export async function doctor() {
     tools[name] = { available: missing.length === 0, ...(missing.length ? { missing } : {}) };
     if (missing.length) allOk = false;
   }
+  // Sandbox status: enabled only when MEDIAKIT_WORKDIR is set; a set
+  // but broken workdir is a config error, so ok goes false.
+  let sandbox = { enabled: false, workdir: null };
+  try {
+    const root = await workdirRoot();
+    if (root) sandbox = { enabled: true, workdir: root };
+  } catch (err) {
+    sandbox = { enabled: true, workdir: process.env[WORKDIR_ENV] ?? null, error: err.message };
+    allOk = false;
+  }
   return {
     operation: "doctor",
     ffmpeg_version: ffmpegVersion,
     ffprobe_version: ffprobeVersion,
     node_version: process.version,
     platform: `${process.platform}-${process.arch}`,
+    sandbox,
     filters,
     encoders,
     decoders,

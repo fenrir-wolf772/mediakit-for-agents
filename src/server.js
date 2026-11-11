@@ -354,6 +354,20 @@ server.tool(
 );
 
 server.tool(
+  "generate_srt",
+  "Build a deterministic .srt subtitle file from a cue list [{start, end, text}] — pure text, no ffmpeg. Times accept seconds or \"MM:SS\" / \"HH:MM:SS\". Cues must be in order and must not overlap (touching is fine); each text must be non-empty and may span lines with \\n. This is the input burn_captions wants.",
+  {
+    cues: z.array(z.object({
+      start: z.union([z.number(), z.string()]).describe("Cue start: seconds or \"MM:SS\""),
+      end: z.union([z.number(), z.string()]).describe("Cue end: seconds or \"MM:SS\" (must be after start)"),
+      text: z.string().min(1).describe("Cue text (may contain \\n for multiple lines)"),
+    })).min(1).max(10000).describe("Cue list, in timeline order, non-overlapping"),
+    output: pathSchema.describe("Output .srt file path"),
+  },
+  async (a) => safe(() => core.generateSrt({ cues: a.cues, output: a.output })),
+);
+
+server.tool(
   "find",
   "Find media files by filename, recursively under a directory (case-insensitive substring match). Returns each match with probe info (duration, dimensions, codecs) so the agent can pick the right file without guessing paths. Skips .git, node_modules and hidden folders; does not follow symlinked directories.",
   {

@@ -373,12 +373,29 @@ the offset, and the stream `start_time` on disk proves it). Use
 you want the output to end with it. `--dry-run` prints the exact
 ffmpeg command and writes no file — inspect it before you render.
 
+### 25. Write captions from data with `generate_srt`, and sandbox paths with `MEDIAKIT_WORKDIR`
+`generate_srt` builds a deterministic .srt from a cue list
+`[{start, end, text}]` — pure text, no ffmpeg, the counterpart of
+`convert_captions` and the input `burn_captions` wants. Times accept
+seconds or `MM:SS`; cues must be in timeline order and must not
+overlap (touching is fine); text may span lines with `\n`. On the CLI
+the cues come from a JSON file (`--cues-file cues.json`, array or
+`{"cues": [...]}`); over MCP they are passed directly.
+
+When `MEDIAKIT_WORKDIR` is set, every user-supplied input/output path
+must stay inside that directory — `..` traversal and symlink escapes
+are refused with `SANDBOX_ESCAPE`, and `doctor` reports the sandbox
+state (`enabled`, `workdir`, or an `error` when the directory is
+missing). Unset, there is no restriction (the default). Internal
+scratch (ffmpeg passlogs, svg temp frames) is exempt; only paths the
+caller supplies are checked.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.
 2. `cropdetect` — if it reports black bars, `crop` to the suggested rectangle first.
 3. `reframe --mode crop` to 1080×1920 (or `--mode blur` for the blurred-fill look).
-4. Write an SRT from the script/voiceover.
+4. Write an SRT from the script/voiceover with `generate_srt`.
 5. `burn_captions` with a large font size.
 6. `loudness` to −14 LUFS.
 7. `check --platform tiktok` — all rules must pass.

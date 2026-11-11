@@ -7,7 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, symlink } from "node:fs/promises";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -54,10 +54,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "find", "svg_animate", "compress", "receipt", "mux"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 33 tools present");
-checkOk(missing.length === 0, "tools/list has all 33 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 34 tools present");
+checkOk(missing.length === 0, "tools/list has all 34 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -212,6 +212,8 @@ console.log("doctor call: ok =", doctorJson.ok, "| ffmpeg", doctorJson.ffmpeg_ve
 checkOk(doctorJson.ok === true, "doctor ok=true", JSON.stringify(doctorJson.tools));
 checkOk(Object.values(doctorJson.tools).every((t) => t.available), "doctor: all tools available");
 checkOk(doctorJson.tools.fit?.available === true, "doctor: fit is available");
+checkOk(doctorJson.tools.generate_srt?.available === true, "doctor: generate_srt is available (pure Node, no ffmpeg filter needed)");
+checkOk(doctorJson.sandbox?.enabled === false, "doctor: sandbox disabled when MEDIAKIT_WORKDIR is unset", JSON.stringify(doctorJson.sandbox));
 
 const silenceRes = await client.callTool({
   name: "silence",
@@ -1106,6 +1108,94 @@ const muxBadOffRes = await client.callTool({
 // social bad-platform assertion), don't JSON.parse it.
 const muxBadOffText = muxBadOffRes.content[0].text;
 checkOk(/3600/.test(muxBadOffText) && /audio_offset_seconds/.test(muxBadOffText), "mux refuses an offset outside ±3600s (MCP schema validation)", muxBadOffText.slice(0, 200));
+
+// generate_srt: deterministic .srt from a cue list. Times mix seconds
+// and "MM:SS"; the third cue touches the second's end (allowed).
+const genSrtRes = await client.callTool({
+  name: "generate_srt",
+  arguments: {
+    cues: [
+      { start: 0, end: 2.5, text: "MediaKit gives agents" },
+      { start: "0:03", end: 5, text: "real video tools\ntwo lines" },
+      { start: 6, end: 8, text: "No shell, no guesswork." },
+    ],
+    output: path.join(root, "outputs/mcp-gen.srt"),
+  },
+});
+const genSrtJson = JSON.parse(genSrtRes.content[0].text);
+console.log("generate_srt call:", JSON.stringify(genSrtJson));
+checkOk(genSrtJson.cue_count === 3 && genSrtJson.first_start_seconds === 0 && genSrtJson.last_end_seconds === 8, "generate_srt reports 3 cues spanning 0s..8s", JSON.stringify(genSrtJson));
+const genSrtText = await readFile(path.join(root, "outputs/mcp-gen.srt"), "utf8");
+checkOk(genSrtText.startsWith("1\n00:00:00,000 --> 00:00:02,500\nMediaKit gives agents") && genSrtText.includes("2\n00:00:03,000 --> 00:00:05,000\nreal video tools\ntwo lines") && genSrtText.includes("3\n00:00:06,000 --> 00:00:08,000\nNo shell, no guesswork."), "generate_srt file has numbered cues with comma timestamps (incl. MM:SS input + multi-line text)", genSrtText.slice(0, 120).replace(/\n/g, " "));
+// Errors: overlapping cues, end <= start, empty text, non-.srt output.
+const genOverlapRes = await client.callTool({
+  name: "generate_srt",
+  arguments: { cues: [{ start: 0, end: 3, text: "a" }, { start: 2, end: 4, text: "b" }], output: path.join(root, "outputs/mcp-gen-overlap.srt") },
+});
+const genOverlapJson = JSON.parse(genOverlapRes.content[0].text);
+checkOk(genOverlapRes.isError === true && /must not overlap/.test(genOverlapJson.error ?? ""), "generate_srt refuses overlapping cues", JSON.stringify(genOverlapJson));
+const genBadEndRes = await client.callTool({
+  name: "generate_srt",
+  arguments: { cues: [{ start: 5, end: 5, text: "a" }], output: path.join(root, "outputs/mcp-gen-badend.srt") },
+});
+const genBadEndJson = JSON.parse(genBadEndRes.content[0].text);
+checkOk(genBadEndRes.isError === true && /must be after start/.test(genBadEndJson.error ?? ""), "generate_srt refuses end <= start", JSON.stringify(genBadEndJson));
+const genBadTextRes = await client.callTool({
+  name: "generate_srt",
+  arguments: { cues: [{ start: 0, end: 2, text: "   " }], output: path.join(root, "outputs/mcp-gen-badtext.srt") },
+});
+const genBadTextJson = JSON.parse(genBadTextRes.content[0].text);
+checkOk(genBadTextRes.isError === true && /non-empty/.test(genBadTextJson.error ?? ""), "generate_srt refuses blank cue text", JSON.stringify(genBadTextJson));
+const genBadExtRes = await client.callTool({
+  name: "generate_srt",
+  arguments: { cues: [{ start: 0, end: 2, text: "a" }], output: path.join(root, "outputs/mcp-gen.txt") },
+});
+const genBadExtJson = JSON.parse(genBadExtRes.content[0].text);
+checkOk(genBadExtRes.isError === true && /\.srt/.test(genBadExtJson.error ?? ""), "generate_srt refuses a non-.srt output", JSON.stringify(genBadExtJson));
+
+// Sandbox (MEDIAKIT_WORKDIR), tested through the CLI so the env var
+// only reaches the spawned child — never process.env here, or the MCP
+// server above would inherit it and every later call would fail.
+// Workdir lives under outputs/ (writable, uncommitted); the symlink
+// points at test/source.mp4, outside the workdir.
+async function runCli(args, env = {}) {
+  try {
+    const { stdout, stderr } = await execFileAsync(process.execPath, [path.join(root, "bin/mediakit.js"), ...args], { env: { ...process.env, ...env } });
+    return { code: 0, out: `${stdout ?? ""}${stderr ?? ""}` };
+  } catch (e) {
+    return { code: e.code ?? 1, out: `${e.stdout ?? ""}${e.stderr ?? ""}` };
+  }
+}
+const sandboxDir = path.join(root, "outputs/sandbox-wd");
+await rm(sandboxDir, { recursive: true, force: true });
+await mkdir(sandboxDir, { recursive: true });
+await copyFile(path.join(root, "test/source.mp4"), path.join(sandboxDir, "source.mp4"));
+await symlink(path.join(root, "test/source.mp4"), path.join(sandboxDir, "link.mp4"));
+const sandboxEnv = { MEDIAKIT_WORKDIR: sandboxDir };
+const sbIn = await runCli(["probe", path.join(sandboxDir, "source.mp4")], sandboxEnv);
+checkOk(sbIn.code === 0, "sandbox: probe of a file inside the workdir succeeds", sbIn.out.slice(0, 200));
+const sbOut = await runCli(["probe", path.join(root, "test/source.mp4")], sandboxEnv);
+checkOk(sbOut.code !== 0 && /escapes MEDIAKIT_WORKDIR/.test(sbOut.out), "sandbox: probe of a file outside the workdir is refused", sbOut.out.slice(0, 200));
+const sbLink = await runCli(["probe", path.join(sandboxDir, "link.mp4")], sandboxEnv);
+checkOk(sbLink.code !== 0 && /escapes MEDIAKIT_WORKDIR/.test(sbLink.out), "sandbox: symlink inside the workdir pointing outside is refused", sbLink.out.slice(0, 200));
+const sbTraversal = await runCli(["probe", `${sandboxDir}/../source.mp4`], sandboxEnv);
+checkOk(sbTraversal.code !== 0 && /escapes MEDIAKIT_WORKDIR/.test(sbTraversal.out), "sandbox: '..' traversal out of the workdir is refused", sbTraversal.out.slice(0, 200));
+const sbWrite = await runCli(["trim", path.join(sandboxDir, "source.mp4"), "--start", "1", "--duration", "2", "-o", path.join(root, "outputs/mcp-sandbox-out.mp4")], sandboxEnv);
+checkOk(sbWrite.code !== 0 && /escapes MEDIAKIT_WORKDIR/.test(sbWrite.out) && !existsSync(path.join(root, "outputs/mcp-sandbox-out.mp4")), "sandbox: writing an output outside the workdir is refused (and writes nothing)", sbWrite.out.slice(0, 200));
+const sbFrames = await runCli(["frames", path.join(sandboxDir, "source.mp4"), "-o", path.join(root, "outputs/sandbox-frames-out"), "--count", "2"], sandboxEnv);
+checkOk(sbFrames.code !== 0 && /escapes MEDIAKIT_WORKDIR/.test(sbFrames.out), "sandbox: frames output directory outside the workdir is refused", sbFrames.out.slice(0, 200));
+const sbGen = await runCli(["generate-srt", "--cues-file", path.join(root, "test/cues.json"), "-o", path.join(sandboxDir, "gen.srt")], sandboxEnv);
+checkOk(sbGen.code === 0 && existsSync(path.join(sandboxDir, "gen.srt")), "sandbox: generate-srt inside the workdir succeeds (CLI path)", sbGen.out.slice(0, 200));
+const sbDoctor = await runCli(["doctor"], sandboxEnv);
+let sbDoctorJson = null;
+try { sbDoctorJson = JSON.parse(sbDoctor.out); } catch { /* not JSON */ }
+checkOk(sbDoctor.code === 0 && sbDoctorJson?.sandbox?.enabled === true && sbDoctorJson?.sandbox?.workdir === sandboxDir, "sandbox: doctor reports enabled + the real workdir path", sbDoctor.out.slice(0, 200));
+const sbDoctorOff = await runCli(["doctor"]);
+let sbDoctorOffJson = null;
+try { sbDoctorOffJson = JSON.parse(sbDoctorOff.out); } catch { /* not JSON */ }
+checkOk(sbDoctorOff.code === 0 && sbDoctorOffJson?.sandbox?.enabled === false, "sandbox: doctor reports disabled when MEDIAKIT_WORKDIR is unset", sbDoctorOff.out.slice(0, 200));
+const sbBadWd = await runCli(["probe", path.join(sandboxDir, "source.mp4")], { MEDIAKIT_WORKDIR: path.join(root, "outputs/no-such-workdir") });
+checkOk(sbBadWd.code !== 0 && /MEDIAKIT_WORKDIR does not exist/.test(sbBadWd.out), "sandbox: a missing MEDIAKIT_WORKDIR fails loudly instead of silently disabling the sandbox", sbBadWd.out.slice(0, 200));
 
 await client.close();
 if (failures.length) {
