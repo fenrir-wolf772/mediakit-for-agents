@@ -12,7 +12,7 @@ jobs:
     # Bound the whole job: run #43036227269 sat 1h3m on a hung apt
     # install (DNS failure resolving security.ubuntu.com) before
     # failing — a stuck job must fail fast instead of burning an hour.
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -25,20 +25,25 @@ jobs:
         # a single apt-get install hung ~17 min until the 20-min job
         # timeout cancelled the job. Bound EVERY apt/curl call with a
         # hard timeout so a hung attempt fails fast and the static
-        # fallback is actually reached.
+        # fallback is actually reached. The fallback MUST be the
+        # BtbN GPL build, not johnvansickle.com: the johnvansickle
+        # build has no librsvg decoder, so svg_animate fails on it
+        # (run #43060050768: "no decoder found for: svg"). BtbN's
+        # GPL build ships librsvg + all filters/encoders MediaKit
+        # needs — verified locally (svg_animate renders 2s/20 frames).
         run: |
           APT_OPTS="-o Acquire::Retries=1 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10"
           for i in 1 2 3; do
-            timeout 120 sudo apt-get update -qq $APT_OPTS && timeout 180 sudo apt-get install -y -qq $APT_OPTS ffmpeg && break
+            timeout 90 sudo apt-get update -qq $APT_OPTS && timeout 120 sudo apt-get install -y -qq $APT_OPTS ffmpeg && break
             echo "apt attempt $i failed, retrying in 10s..."
             sleep 10
           done
           if ! command -v ffmpeg >/dev/null; then
-            echo "apt failed 3x — falling back to static ffmpeg build"
-            curl -fsSL --max-time 180 -o /tmp/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+            echo "apt failed 3x — falling back to BtbN static ffmpeg build (with librsvg)"
+            curl -fsSL --max-time 300 -o /tmp/ffmpeg.tar.xz https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
             tar -xf /tmp/ffmpeg.tar.xz -C /tmp
-            sudo install -m 755 /tmp/ffmpeg-*-amd64-static/ffmpeg /usr/local/bin/ffmpeg
-            sudo install -m 755 /tmp/ffmpeg-*-amd64-static/ffprobe /usr/local/bin/ffprobe
+            sudo install -m 755 /tmp/ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/ffmpeg
+            sudo install -m 755 /tmp/ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/ffprobe
           fi
           ffmpeg -version | head -1
           ffprobe -version | head -1

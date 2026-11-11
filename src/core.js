@@ -2536,7 +2536,7 @@ async function listCapabilities(kind) {
 // unit-tested directly, since a healthy machine has nothing missing.
 export function fixForMissing(missing) {
   if (!missing?.length) return null;
-  return `missing ${missing.join(", ")} — install a full ffmpeg build with those capabilities (Debian/Ubuntu: sudo apt install ffmpeg; macOS: brew install ffmpeg; static build: johnvansickle.com). A minimal ffmpeg build ships without some filters/encoders.`;
+  return `missing ${missing.join(", ")} — install a full ffmpeg build with those capabilities (Debian/Ubuntu: sudo apt install ffmpeg; macOS: brew install ffmpeg; static build with librsvg: BtbN GPL build from github.com/BtbN/FFmpeg-Builds — the johnvansickle.com static build has no librsvg decoder, so svg_animate will not work on it). A minimal ffmpeg build ships without some filters/encoders.`;
 }
 
 export async function doctor() {
