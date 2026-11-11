@@ -301,6 +301,26 @@ For the final render, `check --content` (rule 4) catches what the
 spec checks cannot see: black holes, frozen video and dead air — all
 three from one decode pass, judged by where they sit in the timeline.
 
+### 22. Animate SVGs in code, not in the browser
+`svg_animate` turns an SVG into a video with no browser: give it
+`animations` — a list of `{target, property, from, to, start, end,
+easing, center?}` where `target` is an element `id` and `property` is
+`translate` (`[x, y]`), `scale` (number or `[sx, sy]`), `rotate`
+(degrees, about `center` `[cx, cy]`, default 0,0) or `opacity` (0–1).
+ffmpeg cannot play SVG animation (librsvg renders one static frame),
+so Node interpolates every frame and muxes the sequence — the tool
+needs the `librsvg` decoder (`doctor` reports it). Semantics that
+matter: before a window opens the element sits at the first
+animation's `from` value (a slide-in starts off-screen, a fade-in
+starts invisible); the last started window governs and holds at `to`
+after it ends; adjacent windows on one element+property chain (down
+then up = a bounce) when the boundary values match. A missing target
+id is reported in `missing_targets`, never fatal. SVG `<text>` renders
+with the system font (DejaVu Sans) — keep it short. Size comes from
+the SVG's own width/height/viewBox unless `--width/--height` override
+it; `background` (default white) paints an opaque rect first because
+video has no alpha.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

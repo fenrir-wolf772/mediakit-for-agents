@@ -80,6 +80,7 @@ Then ask your agent things like:
 | `scenes` | Detect scene changes / hard cuts; returns cut timestamps + segments (probe-only) | `mediakit scenes in.mp4` |
 | `keyframes` | List keyframe (I-frame) timestamps + GOP min/max/avg interval (probe-only) — check before a stream-copy trim | `mediakit keyframes in.mp4` |
 | `find` | Find media files by name, recursively under a directory (case-insensitive substring); each match comes back with probe info (duration, dimensions, codecs) so you pick the right file without guessing paths | `mediakit find clips/ --name moon` |
+| `svg_animate` | Animate an SVG into a video, code-driven (no browser): keyframed translate/scale/rotate/opacity on elements by id, rendered frame by frame via librsvg — slide-ins, fades, bounces, spinning shapes | `mediakit svg-animate in.svg --anim anim.json -o out.mp4 --duration 4` |
 | `doctor` | Read-only preflight: ffmpeg version, filters/encoders, tool availability | `mediakit doctor` |
 | `convert` | Change container/codec (omit a codec to stream-copy) | `mediakit convert in.mov -o out.mp4 --video-codec libx264` |
 

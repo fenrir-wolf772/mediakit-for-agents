@@ -1,0 +1,1 @@
+{"animations":[{"easing":"linear","end":2,"from":[0,0],"property":"translate","start":0,"target":"ball","to":[600,0]},{"easing":"linear","end":2,"from":1,"property":"opacity","start":1,"target":"box","to":0},{"easing":"ease-in-out","end":2,"from":1,"property":"scale","start":0,"target":"dot","to":2}]}

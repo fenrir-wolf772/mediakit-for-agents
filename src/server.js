@@ -325,6 +325,40 @@ server.tool(
 );
 
 server.tool(
+  "svg_animate",
+  "Animate an SVG file into an MP4, code-driven: Node interpolates keyframed translate/scale/rotate/opacity on elements (by id) per frame and ffmpeg's librsvg rasterizes each frame — no browser, no SMIL (ffmpeg cannot play SVG animation). Give animations as a list with target id, property, from/to, start/end seconds and easing. A target id that does not exist in the SVG is reported in missing_targets, not fatal.",
+  {
+    svg: pathSchema.describe("Input SVG file (elements to animate need an id attribute)"),
+    animations: z.array(z.object({
+      target: z.string().min(1).describe("id of the SVG element to animate"),
+      property: z.enum(["translate", "scale", "rotate", "opacity"]).describe("What to animate"),
+      from: z.union([z.number(), z.array(z.number()).length(2)]).describe("Start value: [x, y] for translate, a number or [sx, sy] for scale, degrees for rotate, 0-1 for opacity"),
+      to: z.union([z.number(), z.array(z.number()).length(2)]).describe("End value, same shape as from"),
+      start: z.number().min(0).default(0).describe("Animation start time in seconds"),
+      end: z.number().min(0).describe("Animation end time in seconds (must be <= duration)"),
+      easing: z.enum(["linear", "ease-in", "ease-out", "ease-in-out"]).default("linear").describe("Easing curve"),
+      center: z.array(z.number()).length(2).optional().describe("Rotation center [cx, cy] for rotate (default 0,0)"),
+    })).min(1).describe("Animations to apply, in order"),
+    output: pathSchema,
+    duration: z.number().min(0.5).max(30).default(3).describe("Clip duration in seconds"),
+    fps: z.number().int().min(1).max(60).default(30).describe("Frames per second"),
+    width: z.number().int().min(2).optional().describe("Output width in pixels (default: the SVG's own size; must be even)"),
+    height: z.number().int().min(2).optional().describe("Output height in pixels"),
+    background: z.string().default("FFFFFF").describe("Background hex color (e.g. 0F172A) or 'transparent' for no background rect (flattens to black in video)"),
+  },
+  async (a) => safe(() => core.svgAnimate({
+    svg: a.svg,
+    animations: a.animations,
+    output: a.output,
+    duration: a.duration,
+    fps: a.fps,
+    width: a.width ?? null,
+    height: a.height ?? null,
+    background: a.background,
+  })),
+);
+
+server.tool(
   "mix",
   "Mix voice over a music bed with sidechain ducking: the bed drops by duck_db whenever the voice speaks (attack/release in ms), the voice is levelled to voice_lufs first, the music loops to the voice length, and the mix is mastered to target_lufs. Returns the ducking actually measured (ducking_measured_db, speech vs silence window on the ducked bed). If the voice file is a video, its video stream is copied through. Set dry_run=true to print the exact ffmpeg command that would run and write no file (probes and the loudnorm measurement still run, read-only, to compute the voice gain).",
   {

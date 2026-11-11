@@ -44,10 +44,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "find"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "find", "svg_animate"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 29 tools present");
-checkOk(missing.length === 0, "tools/list has all 29 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 30 tools present");
+checkOk(missing.length === 0, "tools/list has all 30 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -706,6 +706,117 @@ const findBadRes = await client.callTool({
 });
 const findBadJson = JSON.parse(findBadRes.content[0].text);
 checkOk(findBadRes.isError === true && /not found/.test(findBadJson.error ?? ""), "find errors on a missing directory", JSON.stringify(findBadJson));
+
+// svg_animate: code-driven SVG animation, no browser. Fixture has a
+// ball (orange circle at 200,360), a box (teal rect at 900,280) and a
+// dot (yellow circle at 640,120); background is dark navy 0F172A.
+const svgRes = await client.callTool({
+  name: "svg_animate",
+  arguments: {
+    svg: path.join(root, "test/svg-demo.svg"),
+    animations: [
+      { target: "ball", property: "translate", from: [0, 0], to: [600, 0], start: 0, end: 2, easing: "linear" },
+      { target: "box", property: "opacity", from: 1, to: 0, start: 1, end: 2, easing: "linear" },
+      { target: "dot", property: "scale", from: 1, to: 2, start: 0, end: 2, easing: "ease-in-out" },
+    ],
+    output: path.join(root, "outputs/mcp-svg-animate.mp4"),
+    duration: 2,
+    fps: 10,
+    background: "0F172A",
+  },
+});
+const svgJson = JSON.parse(svgRes.content[0].text);
+console.log("svg_animate call:", JSON.stringify(svgJson));
+checkOk(svgJson.dimensions === "1280x720", "svg_animate output is 1280x720", `got ${svgJson.dimensions}`);
+checkOk(svgJson.frames === 20, "svg_animate renders 20 frames (2s x 10fps)", `got ${svgJson.frames}`);
+checkOk(near(svgJson.duration_seconds, 2, 0.1), "svg_animate output is 2s long", `got ${svgJson.duration_seconds}`);
+checkOk(svgJson.animations_applied === 3 && svgJson.missing_targets.length === 0, "svg_animate applies all 3 animations, no missing targets", JSON.stringify(svgJson.missing_targets));
+// The picture really moves: extract the first and last frames and
+// compare them, then check the ball's end position is orange only in
+// the last frame, and the box has faded out by then.
+const svgOut = path.join(root, "outputs/mcp-svg-animate.mp4");
+const svgFirst = path.join(root, "outputs/mcp-svg-first.png");
+const svgLast = path.join(root, "outputs/mcp-svg-last.png");
+await execFileAsync("ffmpeg", ["-v", "error", "-y", "-ss", "0", "-i", svgOut, "-frames:v", "1", svgFirst]);
+await execFileAsync("ffmpeg", ["-v", "error", "-y", "-ss", "1.9", "-i", svgOut, "-frames:v", "1", svgLast]);
+const { stderr: svgPsnrErr } = await execFileAsync("ffmpeg", ["-i", svgFirst, "-i", svgLast, "-filter_complex", "psnr", "-f", "null", "-"]);
+const svgPsnrM = svgPsnrErr.match(/average:\s*(inf|[0-9.]+)/);
+const svgPsnr = svgPsnrM ? (svgPsnrM[1] === "inf" ? Infinity : parseFloat(svgPsnrM[1])) : null;
+console.log("svg first vs last frame PSNR:", svgPsnr);
+checkOk(svgPsnr !== null && svgPsnr < 30, "svg_animate first and last frames differ (the picture moves)", `got PSNR ${svgPsnr}`);
+const ballEndLast = await planeMean(svgLast, "120:120:740:300", "r");
+const ballEndFirst = await planeMean(svgFirst, "120:120:740:300", "r");
+console.log("svg ball end-position R: first", ballEndFirst, "last", ballEndLast);
+checkOk(ballEndLast !== null && ballEndLast > 150, "svg_animate ball arrives at the right end (orange at 800,360)", `got R=${ballEndLast}`);
+checkOk(ballEndFirst !== null && ballEndFirst < 50, "svg_animate ball is not at the end position in the first frame", `got R=${ballEndFirst}`);
+const boxFirst = await planeMean(svgFirst, "120:120:900:280", "g");
+const boxLast = await planeMean(svgLast, "120:120:900:280", "g");
+console.log("svg box region G: first", boxFirst, "last", boxLast);
+checkOk(boxFirst !== null && boxFirst > 100, "svg_animate box is visible (teal) in the first frame", `got G=${boxFirst}`);
+checkOk(boxLast !== null && boxLast < 60, "svg_animate box has faded out by the last frame", `got G=${boxLast}`);
+// Missing target: reported, not fatal.
+const svgGhostRes = await client.callTool({
+  name: "svg_animate",
+  arguments: {
+    svg: path.join(root, "test/svg-demo.svg"),
+    animations: [{ target: "ghost", property: "translate", from: [0, 0], to: [100, 0], start: 0, end: 1 }],
+    output: path.join(root, "outputs/mcp-svg-ghost.mp4"),
+    duration: 1,
+    fps: 10,
+    background: "0F172A",
+  },
+});
+const svgGhostJson = JSON.parse(svgGhostRes.content[0].text);
+checkOk(svgGhostJson.missing_targets.includes("ghost") && svgGhostJson.dimensions === "1280x720", "svg_animate reports a missing target id but still renders", JSON.stringify(svgGhostJson));
+// Bad property: the MCP layer rejects the enum value before the tool
+// runs, so the result is an error text, not JSON.
+const svgBadRes = await client.callTool({
+  name: "svg_animate",
+  arguments: {
+    svg: path.join(root, "test/svg-demo.svg"),
+    animations: [{ target: "ball", property: "spin", from: 0, to: 90, start: 0, end: 1 }],
+    output: path.join(root, "outputs/mcp-svg-bad.mp4"),
+    duration: 1,
+    fps: 10,
+  },
+});
+const svgBadText = svgBadRes.content?.[0]?.text ?? "";
+checkOk(/property/.test(svgBadText) && /spin/.test(svgBadText), "svg_animate errors on an unknown property", svgBadText.slice(0, 200));
+
+// Chained animations on one element+property (right then back left):
+// the second window must not overwrite the first before it starts,
+// and the ball must return to its start by the end.
+const svgChainRes = await client.callTool({
+  name: "svg_animate",
+  arguments: {
+    svg: path.join(root, "test/svg-demo.svg"),
+    animations: [
+      { target: "ball", property: "translate", from: [0, 0], to: [600, 0], start: 0, end: 1, easing: "linear" },
+      { target: "ball", property: "translate", from: [600, 0], to: [0, 0], start: 1, end: 2, easing: "linear" },
+    ],
+    output: path.join(root, "outputs/mcp-svg-chain.mp4"),
+    duration: 2,
+    fps: 10,
+    background: "0F172A",
+  },
+});
+const svgChainJson = JSON.parse(svgChainRes.content[0].text);
+checkOk(svgChainJson.animations_applied === 2, "svg_animate chain applies both windows", JSON.stringify(svgChainJson));
+const svgChainMid = path.join(root, "outputs/mcp-svg-chain-mid.png");
+const svgChainEnd = path.join(root, "outputs/mcp-svg-chain-end.png");
+const svgChainEarly = path.join(root, "outputs/mcp-svg-chain-early.png");
+await execFileAsync("ffmpeg", ["-v", "error", "-y", "-ss", "1.0", "-i", path.join(root, "outputs/mcp-svg-chain.mp4"), "-frames:v", "1", svgChainMid]);
+await execFileAsync("ffmpeg", ["-v", "error", "-y", "-ss", "1.9", "-i", path.join(root, "outputs/mcp-svg-chain.mp4"), "-frames:v", "1", svgChainEnd]);
+await execFileAsync("ffmpeg", ["-v", "error", "-y", "-ss", "0.5", "-i", path.join(root, "outputs/mcp-svg-chain.mp4"), "-frames:v", "1", svgChainEarly]);
+const chainMidR = await planeMean(svgChainMid, "120:120:740:300", "r");
+const chainEndR = await planeMean(svgChainEnd, "120:120:740:300", "r");
+// At t=0.5 the ball is halfway out (center ~500,360): the second
+// window (which starts at 1.0) must not yank it to the end early.
+const chainEarlyR = await planeMean(svgChainEarly, "120:120:440:300", "r");
+console.log("svg chain ball R: early-mid", chainEarlyR, "mid", chainMidR, "end", chainEndR);
+checkOk(chainMidR !== null && chainMidR > 150, "svg_animate chain reaches the end at the window boundary (t=1.0)", `got R=${chainMidR}`);
+checkOk(chainEndR !== null && chainEndR < 50, "svg_animate chain returns the ball to the start (t=1.9)", `got R=${chainEndR}`);
+checkOk(chainEarlyR !== null && chainEarlyR > 150, "svg_animate chain is halfway out before the second window starts (t=0.5)", `got R=${chainEarlyR}`);
 
 await client.close();
 if (failures.length) {

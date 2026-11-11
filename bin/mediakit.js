@@ -325,6 +325,20 @@ const COMMANDS = {
       ["--max-results", "Max matches to return with probe info (default 20)"],
     ],
   },
+  "svg-animate": {
+    usage: "mediakit svg-animate <svg> --anim <animations.json> -o <output.mp4> [--duration 3] [--fps 30] [--width 1080] [--height 1920] [--background FFFFFF]",
+    desc: "Animate an SVG into a video, code-driven (no browser): keyframed translate/scale/rotate/opacity on elements by id, rendered frame by frame. --anim is a JSON file: {\"animations\": [{target, property, from, to, start, end, easing, center?}]}.",
+    args: [{ name: "svg", required: true }],
+    options: [
+      ["--anim", "JSON file with the animations list (required)"],
+      ["--duration", "Clip duration in seconds (default 3)"],
+      ["--fps", "Frames per second (default 30)"],
+      ["--width", "Output width in pixels (default: the SVG's own size)"],
+      ["--height", "Output height in pixels"],
+      ["--background", "Background hex color (default FFFFFF) or 'transparent'"],
+      ["-o, --output", "Output file (required)"],
+    ],
+  },
   doctor: {
     usage: "mediakit doctor",
     desc: "Read-only preflight: ffmpeg/ffprobe versions, available filters/encoders, and which tools that enables.",
@@ -663,6 +677,26 @@ async function main() {
           directory: needInput("directory"), name: opts.name,
           extensions: opts.extensions ?? null,
           maxResults: numOpt(opts, "max_results") ?? 20,
+        });
+        break;
+      }
+      case "svg-animate": {
+        if (!opts.anim) fail("missing required option: --anim <animations.json>");
+        const { readFile } = await import("node:fs/promises");
+        let animJson;
+        try {
+          animJson = JSON.parse(await readFile(opts.anim, "utf8"));
+        } catch (e) {
+          fail(`could not read animations JSON ${opts.anim}: ${e.message}`);
+        }
+        const animations = Array.isArray(animJson) ? animJson : animJson.animations;
+        result = await core.svgAnimate({
+          svg: needInput("svg"), animations, output: needOutput(opts),
+          duration: numOpt(opts, "duration") ?? 3,
+          fps: numOpt(opts, "fps") ?? 30,
+          width: numOpt(opts, "width") ?? null,
+          height: numOpt(opts, "height") ?? null,
+          background: opts.background ?? "FFFFFF",
         });
         break;
       }

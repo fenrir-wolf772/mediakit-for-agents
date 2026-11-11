@@ -831,3 +831,19 @@ tone [6,10)), `test/content-lead-black.mp4` (đen 1s đầu + testsrc 9s),
   - Sự cố hạ tầng: 1 lần service restart giữa `npm test` (lệnh bị cắt,
     chưa ghi output) — chạy lại 1 lần, 135/135 PASS.
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+
+---
+
+## svg_animate (tool 30) — 2026-11-11, Tony yêu cầu ("tool có làm video kiểu svg animation không")
+
+- **Vì sao cần code-driven**: ffmpeg đọc được SVG tĩnh qua librsvg nhưng KHÔNG chạy animation trong SVG (SMIL/CSS bị bỏ qua, chỉ render 1 frame). Đường browser (Chromium headless quay từng frame) thì Chromium trên máy Milo chết. Nên tool tự nội suy keyframe bằng Node rồi mux — không cần browser.
+- **Kiểm chứng đường render trước khi code**: probe 2 frame SVG → `ffmpeg -framerate 2 -i f-%04d.svg` (image2) ra đúng 640×360, 1.0s, 2 frame; pixel check: frame0 ball cam tại (100,180), frame1 ball cam tại (540,180), chỗ cũ về nền (15,23,41). Image2 nhận `.svg` qua librsvg, không cần rasterize từng frame bằng tay.
+- **Tool**: `svg_animate` — animations `[{target (id), property: translate|scale|rotate|opacity, from, to, start, end, easing: linear|ease-in|ease-out|ease-in-out, center?}]`. Size từ width/height/viewBox của SVG (override được, phải chẵn); background mặc định trắng (video không có alpha — không vẽ rect thì nền trong suốt sẽ thành đen). Giới hạn: duration ≤30s, fps ≤60, ≤1800 frame. `doctor` thêm nhóm `decoders` (librsvg) + `svg_animate: {decoders: [librsvg], encoders: [libx264]}`.
+- **Ngữ nghĩa thời gian (quan trọng)**: tại thời điểm t, animation áp dụng là cửa sổ cuối cùng đã bắt đầu (giữ `to` sau khi hết); TRƯỚC cửa sổ đầu tiên, phần tử ở giá trị `from` của animation đầu — slide-in bắt đầu ngoài khung, fade-in bắt đầu vô hình, không bị nhảy. Hai cửa sổ kề nhau trên cùng element+property nối tiếp nhau (xuống rồi lên = nảy) khi giá trị biên khớp.
+- **Test** (`test/svg-demo.svg` + `test/svg-demo-anim.json`): 1280×720, 2s×10fps = 20 frame; ball translate 600px (PSNR frame đầu/cuối 18.2), ball tới đúng đích (R cuối 161.5 vs đầu 15), box mờ dần (G đầu 182 → cuối 37); target không tồn tại → `missing_targets: ["ghost"]`, vẫn render; property lạ → lỗi MCP enum. **Assert mới (11)**: chain (phải rồi về trái): tại t=1.0 tới đích (R 197.1), t=1.9 về đầu (R 15.0), **t=0.5 đang ở giữa đường (R >150 tại vị trí giữa)** — assert này bắt đúng bug dưới.
+- **Bug bắt được (2 lần, đều nhờ verify bằng mắt + đo pixel, không phải nhờ test pass)**:
+  1. Bản đầu: mọi animation áp dụng theo thứ tự, cửa sổ sau ghi đè cửa sổ trước dù chưa bắt đầu — ball nảy ở t=2.0 đo được centroid y=1649 thay vì 1500 (đang ở giá trị `from` của cửa sổ 3–4s). Fix lần 1 (skip animation chưa bắt đầu) sai ngữ nghĩa: card slide-in lúc 0–0.3s hiện nguyên rồi mới nhảy ra ngoài trượt vào; chữ fade-in hiện sẵn trước 1.2s. Fix đúng: nhóm theo (target, property), chọn cửa sổ cuối đã bắt đầu, chưa có cửa sổ nào thì lấy `from` của cửa sổ đầu. Kiểm chứng lại: ball t=2.0 centroid y=1499.3 (đúng 1500), t=0.5 centroid y=1574.4 (đúng ~1575, đang rơi), chữ ở t=0.5 chưa hiện (0 pixel trắng trong vùng card).
+  2. Lúc sửa test: `JSON.parse` trên kết quả lỗi MCP (Zod chặn enum trước khi tool chạy → content là text "MCP error...", không phải JSON) làm crash cả test run. Fix: assert trực tiếp trên text lỗi.
+- **Demo**: `~/workspace/svg-animate-demo-v3.mp4` (1080×1920, 4s, 30fps, 120 frame, 9 animation: mặt trời bob, sao xoay 360°, card trượt vào, chữ fade-in, bóng nảy 2 nhịp) + contact sheet `svg-animate-demo-frames-v3.png` (t=0.5/2.0/3.5) — soi mắt OK.
+- `npm run check` sạch; `npm test`: **150/150 PASS, exit 0** (30 tools, doctor 30/30 available). CI smoke test thêm dòng svg-animate (fixture `test/svg-demo.svg` + `test/svg-demo-anim.json`).
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).

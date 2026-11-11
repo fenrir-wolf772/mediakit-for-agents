@@ -6,7 +6,7 @@
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, copyFile, mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, readFile, readdir, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 
@@ -1040,6 +1040,242 @@ export async function intro({ text, output, width = 1280, height = 720, duration
   return { operation: "intro", output: outPath, text: String(text).trim(), lines, font_size: size, bg_color: bg, text_color: fg, fade_in: fi, fade_out: fo, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null, duration_seconds: out.duration_seconds };
 }
 
+// ---------------------------------------------------------------- svg_animate
+// Animate an SVG into a video, code-driven: Node interpolates keyframed
+// translate/scale/rotate/opacity on elements (by id) for every frame,
+// and ffmpeg's librsvg rasterizes each frame — no browser, no SMIL.
+// (ffmpeg cannot play SVG animation: librsvg renders a static SVG, so
+// the animation has to be computed outside, one SVG per frame, and the
+// frames muxed through ffmpeg's image2 demuxer, which picks up .svg
+// via librsvg — verified with a 2-frame probe: correct size, correct
+// pixels, frames differ as expected.) An element's existing transform
+// is kept as a prefix; the animated transform is appended. Two
+// animations on the same element+property with adjacent windows chain
+// (e.g. down then up = a bounce) as long as the boundary values match:
+// at any time the last window that has started governs (holding at
+// `to` after it ends), and before the first window the element sits
+// at the first animation's `from` value — so a slide-in starts
+// off-screen and a fade-in starts invisible, with no jump when the
+// window opens.
+
+const SVG_ANIM_PROPERTIES = ["translate", "scale", "rotate", "opacity"];
+const SVG_ANIM_EASINGS = ["linear", "ease-in", "ease-out", "ease-in-out"];
+
+function svgEase(easing, p) {
+  switch (easing) {
+    case "ease-in": return p * p;
+    case "ease-out": return 1 - (1 - p) * (1 - p);
+    case "ease-in-out": return p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+    default: return p;
+  }
+}
+
+function svgNum2(v, label) {
+  if (!Array.isArray(v) || v.length !== 2 || v.some((n) => !Number.isFinite(Number(n)))) {
+    throw new MediaKitError(`svg_animate ${label} must be [x, y], got: ${JSON.stringify(v)}`, "INVALID_ARG");
+  }
+  return [Number(v[0]), Number(v[1])];
+}
+
+function svgInterp(a, e) {
+  if (a.property === "translate" || a.property === "scale") {
+    return [a.from[0] + (a.to[0] - a.from[0]) * e, a.from[1] + (a.to[1] - a.from[1]) * e];
+  }
+  return a.from + (a.to - a.from) * e;
+}
+
+function svgScalar(v, label, { min = null, max = null } = {}) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) throw new MediaKitError(`svg_animate ${label} must be a number, got: ${JSON.stringify(v)}`, "INVALID_ARG");
+  if (min !== null && n < min) throw new MediaKitError(`svg_animate ${label} must be >= ${min}, got: ${v}`, "INVALID_ARG");
+  if (max !== null && n > max) throw new MediaKitError(`svg_animate ${label} must be <= ${max}, got: ${v}`, "INVALID_ARG");
+  return n;
+}
+
+// Set (or replace) one attribute on an element's opening tag.
+function svgSetAttr(tag, name, value) {
+  const re = new RegExp(`\\b${name}\\s*=\\s*(?:"[^"]*"|'[^']*')`);
+  if (re.test(tag)) return tag.replace(re, `${name}="${value}"`);
+  return tag.replace(/\/?>$/, (m) => ` ${name}="${value}"${m}`);
+}
+
+function svgGetAttr(tag, name) {
+  const m = tag.match(new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`));
+  return m ? (m[1] ?? m[2]) : null;
+}
+
+function svgEscapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const svgFmt = (n) => String(Math.round(n * 1000) / 1000);
+
+export async function svgAnimate({ svg, animations, output, duration = 3, fps = 30, width = null, height = null, background = "FFFFFF" }) {
+  const svgPath = await requireInput(svg, "svg");
+  const outPath = await prepareOutput(output, [svgPath]);
+  if (!Array.isArray(animations) || animations.length === 0) {
+    throw new MediaKitError("svg_animate needs at least one animation", "INVALID_ARG");
+  }
+  const d = num(duration, "duration", { min: 0.5, max: 30 });
+  const f = num(fps, "fps", { min: 1, max: 60, integer: true });
+  const frames = Math.round(d * f);
+  if (frames < 2) throw new MediaKitError("svg_animate needs duration * fps >= 2 frames", "INVALID_ARG");
+  if (frames > 1800) throw new MediaKitError(`svg_animate caps at 1800 frames, got ${frames} (duration ${d}s x ${f}fps)`, "INVALID_ARG");
+
+  const src = await readFile(svgPath, "utf8");
+  const rootMatch = src.match(/<svg\b[^>]*>/);
+  if (!rootMatch) throw new MediaKitError("svg_animate could not find a root <svg> element", "INVALID_ARG");
+  const rootTag = rootMatch[0];
+  const rootId = svgGetAttr(rootTag, "id");
+  let w = width === null || width === undefined ? null : num(width, "width", { min: 2, integer: true });
+  let h = height === null || height === undefined ? null : num(height, "height", { min: 2, integer: true });
+  if ((w === null) !== (h === null)) throw new MediaKitError("svg_animate width and height must be given together", "INVALID_ARG");
+  if (w === null) {
+    const rw = svgGetAttr(rootTag, "width");
+    const rh = svgGetAttr(rootTag, "height");
+    const vb = svgGetAttr(rootTag, "viewBox");
+    if (rw && rh) { w = Math.round(parseFloat(rw)); h = Math.round(parseFloat(rh)); }
+    else if (vb) {
+      const parts = vb.trim().split(/[\s,]+/).map(Number);
+      if (parts.length === 4 && parts.every(Number.isFinite)) { w = Math.round(parts[2]); h = Math.round(parts[3]); }
+    }
+    if (!w || !h) throw new MediaKitError("svg_animate could not determine the canvas size: give width/height or a width/height/viewBox on the root <svg>", "INVALID_ARG");
+  }
+  if (w % 2 !== 0 || h % 2 !== 0) throw new MediaKitError("svg_animate width/height must be even (H.264)", "INVALID_ARG");
+
+  // Validate + normalize every animation before rendering anything.
+  const anims = animations.map((a, i) => {
+    const label = `animations[${i}]`;
+    if (!a || typeof a !== "object") throw new MediaKitError(`${label} must be an object`, "INVALID_ARG");
+    if (typeof a.target !== "string" || !a.target.trim()) throw new MediaKitError(`${label}.target (element id) is required`, "INVALID_ARG");
+    const target = a.target.trim();
+    if (rootId && target === rootId) throw new MediaKitError(`${label}.target must not be the root <svg> element`, "INVALID_ARG");
+    if (!SVG_ANIM_PROPERTIES.includes(a.property)) throw new MediaKitError(`${label}.property must be one of ${SVG_ANIM_PROPERTIES.join(", ")}, got: ${a.property}`, "INVALID_ARG");
+    const start = a.start === undefined || a.start === null ? 0 : num(a.start, `${label}.start`, { min: 0 });
+    const end = num(a.end, `${label}.end`, { min: 0 });
+    if (end <= start) throw new MediaKitError(`${label}.end (${end}) must be greater than start (${start})`, "INVALID_ARG");
+    if (end > d) throw new MediaKitError(`${label}.end (${end}) exceeds duration (${d})`, "INVALID_ARG");
+    const easing = a.easing ?? "linear";
+    if (!SVG_ANIM_EASINGS.includes(easing)) throw new MediaKitError(`${label}.easing must be one of ${SVG_ANIM_EASINGS.join(", ")}, got: ${easing}`, "INVALID_ARG");
+    let from, to, center = null;
+    if (a.property === "translate") { from = svgNum2(a.from, `${label}.from`); to = svgNum2(a.to, `${label}.to`); }
+    else if (a.property === "scale") {
+      const norm = (v, side) => Array.isArray(v) ? svgNum2(v, `${label}.${side}`)
+        : [svgScalar(v, `${label}.${side}`, { min: 0 }), svgScalar(v, `${label}.${side}`, { min: 0 })];
+      from = norm(a.from, "from");
+      to = norm(a.to, "to");
+    } else if (a.property === "rotate") {
+      from = svgScalar(a.from, `${label}.from`);
+      to = svgScalar(a.to, `${label}.to`);
+      center = a.center === undefined || a.center === null ? [0, 0] : svgNum2(a.center, `${label}.center`);
+    } else {
+      from = svgScalar(a.from, `${label}.from`, { min: 0, max: 1 });
+      to = svgScalar(a.to, `${label}.to`, { min: 0, max: 1 });
+    }
+    return { target, property: a.property, from, to, start, end, easing, center };
+  });
+
+  // Resolve each distinct target id once, on the source text.
+  const targetTags = new Map();
+  const missingTargets = [];
+  for (const t of new Set(anims.map((a) => a.target))) {
+    const re = new RegExp(`<([a-zA-Z][\\w:.-]*)\\b[^>]*\\bid=["']${svgEscapeRegExp(t)}["'][^>]*\\/?>`);
+    const m = src.match(re);
+    if (!m) { missingTargets.push(t); continue; }
+    targetTags.set(t, m[0]);
+  }
+
+  // Base frame: explicit size on the root (so librsvg sizes every frame
+  // identically even when the source only has a viewBox) + an opaque
+  // background rect first (video has no alpha; without it the video
+  // would flatten transparency to black).
+  let base = src;
+  const sizedRoot = svgSetAttr(svgSetAttr(rootTag, "width", String(w)), "height", String(h));
+  base = base.replace(rootTag, () => sizedRoot);
+  const bg = String(background ?? "FFFFFF").trim();
+  if (bg.toLowerCase() !== "transparent") {
+    const bgHex = normalizeColor(bg, "background");
+    base = base.replace(sizedRoot, () => `${sizedRoot}<rect x="0" y="0" width="${w}" height="${h}" fill="#${bgHex}"/>`);
+  }
+
+  // Group animations by (target, property), sorted by start. At time t
+  // the applicable animation is the last one whose window has started
+  // (holding at `to` after it ends); before the first window the
+  // element sits at the first animation's `from` value — so a slide-in
+  // starts off-screen and a fade-in starts invisible, with no jump
+  // when the window opens.
+  const animGroups = [];
+  {
+    const byKey = new Map();
+    for (const a of anims) {
+      if (!targetTags.has(a.target)) continue;
+      const key = `${a.target}\0${a.property}`;
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push(a);
+    }
+    for (const list of byKey.values()) {
+      list.sort((x, y) => x.start - y.start);
+      animGroups.push({ target: list[0].target, property: list[0].property, list });
+    }
+  }
+
+  const tmpDir = path.join(path.dirname(outPath), `.svg-animate-${process.pid}`);
+  await mkdir(tmpDir, { recursive: true });
+  try {
+    for (let i = 0; i < frames; i++) {
+      const t = i / f;
+      const perTarget = new Map();
+      for (const g of animGroups) {
+        let active = null;
+        for (const a of g.list) { if (a.start <= t) active = a; else break; }
+        const value = active === null ? g.list[0].from
+          : svgInterp(active, svgEase(active.easing, Math.min(1, (t - active.start) / (active.end - active.start))));
+        const cur = perTarget.get(g.target) ?? {};
+        if (g.property === "translate") cur.translate = value;
+        else if (g.property === "scale") cur.scale = value;
+        else if (g.property === "rotate") cur.rotate = { angle: value, center: (active ?? g.list[0]).center };
+        else cur.opacity = value;
+        perTarget.set(g.target, cur);
+      }
+      let frame = base;
+      for (const [id, vals] of perTarget) {
+        const orig = targetTags.get(id);
+        let tag = orig;
+        const parts = [];
+        if (vals.translate) parts.push(`translate(${svgFmt(vals.translate[0])} ${svgFmt(vals.translate[1])})`);
+        if (vals.rotate) parts.push(`rotate(${svgFmt(vals.rotate.angle)} ${svgFmt(vals.rotate.center[0])} ${svgFmt(vals.rotate.center[1])})`);
+        if (vals.scale) parts.push(`scale(${svgFmt(vals.scale[0])} ${svgFmt(vals.scale[1])})`);
+        if (parts.length) {
+          const existing = svgGetAttr(tag, "transform");
+          tag = svgSetAttr(tag, "transform", existing ? `${existing} ${parts.join(" ")}` : parts.join(" "));
+        }
+        if (vals.opacity !== undefined) tag = svgSetAttr(tag, "opacity", svgFmt(vals.opacity));
+        frame = frame.replace(orig, () => tag);
+      }
+      await writeFile(path.join(tmpDir, `frame-${String(i + 1).padStart(4, "0")}.svg`), frame, "utf8");
+    }
+    await run(FFMPEG, [
+      "-y", "-framerate", String(f), "-i", path.join(tmpDir, "frame-%04d.svg"),
+      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-preset", "veryfast",
+      "-movflags", "+faststart", outPath,
+    ]);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  return {
+    operation: "svg_animate", output: outPath, svg: svgPath,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+    duration_seconds: out.duration_seconds, fps: f, frames,
+    animations_applied: anims.filter((a) => targetTags.has(a.target)).length,
+    animations_total: anims.length,
+    missing_targets: missingTargets,
+    ...(missingTargets.length ? { warning: `target id(s) not found in the SVG and skipped: ${missingTargets.join(", ")}` } : {}),
+    ...info,
+  };
+}
+
 // ---------------------------------------------------------------- social
 // One call, every platform: reframe each platform's size (blur keeps
 // the whole frame by default), trim to the platform's max duration,
@@ -1749,6 +1985,9 @@ const DOCTOR_ENCODERS = [
   "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4",
   "aac", "libopus", "libmp3lame", "libvorbis", "flac", "pcm_s16le",
 ];
+const DOCTOR_DECODERS = [
+  "librsvg",
+];
 // Tool -> capabilities it needs. A tool is available when all listed
 // filters exist and at least one listed encoder exists (empty list =
 // no requirement).
@@ -1781,6 +2020,7 @@ const TOOL_REQUIREMENTS = {
   social: { filters: ["crop", "scale", "pad", "gblur", "overlay", "loudnorm"], encoders: ["libx264"] },
   convert_captions: {},
   find: {},
+  svg_animate: { decoders: ["librsvg"], encoders: ["libx264"] },
   doctor: {},
 };
 
@@ -1798,14 +2038,17 @@ export async function doctor() {
   const ffprobeVersion = (ffprobeVer.match(/ffprobe version (\S+)/) || [])[1] ?? null;
   const filtersOut = await listCapabilities("filters");
   const encodersOut = await listCapabilities("encoders");
+  const decodersOut = await listCapabilities("decoders");
   const has = (text, name) => new RegExp(`\\b${name}\\b`).test(text);
   const filters = Object.fromEntries(DOCTOR_FILTERS.map((f) => [f, has(filtersOut, f)]));
   const encoders = Object.fromEntries(DOCTOR_ENCODERS.map((e) => [e, has(encodersOut, e)]));
+  const decoders = Object.fromEntries(DOCTOR_DECODERS.map((d) => [d, has(decodersOut, d)]));
   const tools = {};
   let allOk = Boolean(ffmpegVersion && ffprobeVersion);
   for (const [name, req] of Object.entries(TOOL_REQUIREMENTS)) {
     const missing = [];
     for (const f of req.filters ?? []) if (!filters[f]) missing.push(`filter:${f}`);
+    for (const d of req.decoders ?? []) if (!decoders[d]) missing.push(`decoder:${d}`);
     const enc = req.encoders ?? [];
     if (enc.length && !enc.some((e) => encoders[e])) missing.push(`encoder:${enc.join("|")}`);
     tools[name] = { available: missing.length === 0, ...(missing.length ? { missing } : {}) };
@@ -1819,6 +2062,7 @@ export async function doctor() {
     platform: `${process.platform}-${process.arch}`,
     filters,
     encoders,
+    decoders,
     tools,
     ok: allOk,
   };
