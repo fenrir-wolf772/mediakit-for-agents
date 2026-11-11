@@ -270,7 +270,7 @@ server.tool(
 
 server.tool(
   "convert",
-  "Change container or codec. Omit video_codec/audio_codec to stream-copy that stream. crf 23 is a good default for H.264.",
+  "Change container or codec. Omit video_codec/audio_codec to stream-copy that stream. crf 23 is a good default for H.264. gop (frames) or gop_seconds sets an exact keyframe interval on re-encode (scene-cut keyframes disabled for libx264/libx265/mpeg4); the result measures the keyframes on the output file. A GOP is required for keyframe-snapped stream-copy cuts.",
   {
     input: pathSchema,
     output: pathSchema,
@@ -278,6 +278,8 @@ server.tool(
     audio_codec: z.string().optional().describe("e.g. aac, libmp3lame, copy"),
     crf: z.number().int().min(0).max(51).default(23),
     preset: z.string().default("medium"),
+    gop: z.number().int().min(1).max(10000).optional().describe("Keyframe interval in frames (needs a video re-encode; mutually exclusive with gop_seconds)"),
+    gop_seconds: z.number().min(0.1).max(3600).optional().describe("Keyframe interval in seconds, converted to frames from the source fps (mutually exclusive with gop)"),
   },
   async (a) => safe(() => core.convert({
     input: a.input,
@@ -286,6 +288,8 @@ server.tool(
     audioCodec: a.audio_codec ?? null,
     crf: a.crf,
     preset: a.preset,
+    gop: a.gop ?? null,
+    gopSeconds: a.gop_seconds ?? null,
   })),
 );
 
@@ -442,7 +446,7 @@ server.tool(
 
 server.tool(
   "mix",
-  "Mix voice over a music bed with sidechain ducking: the bed drops by duck_db whenever the voice speaks (attack/release in ms), the voice is levelled to voice_lufs first, the music loops to the voice length, and the mix is mastered to target_lufs. Returns the ducking actually measured (ducking_measured_db, speech vs silence window on the ducked bed). If the voice file is a video, its video stream is copied through. Set dry_run=true to print the exact ffmpeg command that would run and write no file (probes and the loudnorm measurement still run, read-only, to compute the voice gain).",
+  "Mix voice over a music bed with sidechain ducking: the bed drops by duck_db whenever the voice speaks (attack/release in ms), the voice is levelled to voice_lufs first, the music loops to the voice length, and the mix is mastered to target_lufs. Returns the ducking actually measured (ducking_measured_db, speech vs silence window on the ducked bed). sfx drops short sounds at exact timestamps (each {file, at_seconds, volume 0-1}, max 16) — they are mixed in after the ducking, so a sting punches through; a timestamp past the voice end is refused. If the voice file is a video, its video stream is copied through. Set dry_run=true to print the exact ffmpeg command that would run and write no file (probes and the loudnorm measurement still run, read-only, to compute the voice gain).",
   {
     voice: pathSchema.describe("Voice/speech file (audio or video with an audio track)"),
     music: pathSchema.describe("Music bed audio file (looped to the voice length)"),
@@ -455,6 +459,11 @@ server.tool(
     target_lufs: z.number().min(-70).max(0).default(-14).describe("Master the mix to this LUFS"),
     master: z.boolean().default(true).describe("Master the mix (false = leave the raw mix levels)"),
     dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command that would run, write no file"),
+    sfx: z.array(z.object({
+      file: pathSchema.describe("Short sound file with an audio track"),
+      at_seconds: z.number().min(0).max(3600).describe("Timestamp in the voice where the sound lands (must be before the voice ends)"),
+      volume: z.number().min(0).max(1).default(1).describe("SFX level (0-1, default 1)"),
+    })).max(16).optional().describe("Short sounds to drop at exact timestamps, mixed after ducking"),
   },
   async (a) => safe(() => core.mix({
     voice: a.voice,
@@ -468,6 +477,7 @@ server.tool(
     targetLufs: a.target_lufs,
     master: a.master,
     dryRun: a.dry_run,
+    sfx: (a.sfx ?? []).map((s) => ({ file: s.file, at: s.at_seconds, volume: s.volume })),
   })),
 );
 

@@ -220,14 +220,16 @@ const COMMANDS = {
     ],
   },
   convert: {
-    usage: "mediakit convert <input> -o <output> [--video-codec <c>] [--audio-codec <c>] [--crf <n>] [--preset <p>]",
-    desc: "Change container or codec. Omit a codec to stream-copy that stream.",
+    usage: "mediakit convert <input> -o <output> [--video-codec <c>] [--audio-codec <c>] [--crf <n>] [--preset <p>] [--gop <frames>] [--gop-seconds <s>]",
+    desc: "Change container or codec. Omit a codec to stream-copy that stream. --gop / --gop-seconds sets an exact keyframe interval on re-encode (measured on the output file).",
     args: [{ name: "input", required: true }],
     options: [
       ["--video-codec", "libx264 | libx265 | vp9 | av1 | mpeg4 | copy"],
       ["--audio-codec", "e.g. aac, libmp3lame, copy"],
       ["--crf", "Quality 0-51, lower is better (default 23)"],
       ["--preset", "Encoding preset (default medium)"],
+      ["--gop", "Keyframe interval in frames (needs --video-codec re-encode)"],
+      ["--gop-seconds", "Keyframe interval in seconds (from source fps; needs --video-codec re-encode)"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -302,8 +304,8 @@ const COMMANDS = {
     ],
   },
   mix: {
-    usage: "mediakit mix <voice> --music <file> -o <output> [--music-volume 0.3] [--duck-db 12] [--attack-ms 100] [--release-ms 400] [--voice-lufs -16] [--target-lufs -14] [--no-master] [--dry-run]",
-    desc: "Mix voice over a music bed with sidechain ducking (bed drops under speech), then master to target LUFS. --dry-run prints the exact ffmpeg command and writes nothing.",
+    usage: "mediakit mix <voice> --music <file> -o <output> [--music-volume 0.3] [--duck-db 12] [--attack-ms 100] [--release-ms 400] [--voice-lufs -16] [--target-lufs -14] [--no-master] [--dry-run] [--sfx <file>@<s|MM:SS>[@<volume>]]",
+    desc: "Mix voice over a music bed with sidechain ducking (bed drops under speech), then master to target LUFS. --sfx drops a short sound at an exact timestamp (repeatable, mixed after ducking). --dry-run prints the exact ffmpeg command and writes nothing.",
     args: [{ name: "voice", required: true }],
     options: [
       ["--music", "Music bed audio file (required, looped to voice length)"],
@@ -315,6 +317,7 @@ const COMMANDS = {
       ["--target-lufs", "Master the mix to this LUFS (default -14)"],
       ["--no-master", "Skip mastering, leave raw mix levels"],
       ["--dry-run", "Print the exact ffmpeg command that would run, write no file"],
+      ["--sfx", "Short sound at a timestamp: <file>@<seconds|MM:SS>[@<volume 0-1>] — repeatable, max 16"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -450,20 +453,32 @@ function fail(message, code = 1) {
 function parseArgs(argv) {
   const positional = [];
   const opts = {};
+  // A repeated flag accumulates into an array (e.g. --sfx twice);
+  // a flag given once stays a plain scalar, so existing commands
+  // are unaffected. Repeating a scalar-only flag still fails loudly
+  // downstream (Number([...]) is NaN -> validation error).
+  const setOpt = (key, value) => {
+    if (opts[key] === undefined) opts[key] = value;
+    // A repeated boolean flag stays true (don't turn --dry-run twice
+    // into [true, true], which `opts.dry_run === true` would miss).
+    else if (value === true && opts[key] === true) { /* keep true */ }
+    else if (Array.isArray(opts[key])) opts[key].push(value);
+    else opts[key] = [opts[key], value];
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--help" || a === "-h") { opts.help = true; continue; }
     if (a.startsWith("--no-")) { opts[a.slice(5).replace(/-/g, "_")] = false; continue; }
     if (a.startsWith("--")) {
       const eq = a.indexOf("=");
-      if (eq !== -1) { opts[a.slice(2, eq).replace(/-/g, "_")] = a.slice(eq + 1); continue; }
+      if (eq !== -1) { setOpt(a.slice(2, eq).replace(/-/g, "_"), a.slice(eq + 1)); continue; }
       const key = a.slice(2).replace(/-/g, "_");
       const next = argv[i + 1];
       // A value may be a negative number (e.g. --target-lufs -14):
       // it starts with "-" but is not a flag.
       const nextIsNegativeNumber = next !== undefined && /^-\d/.test(next);
-      if (next === undefined || (next.startsWith("-") && !nextIsNegativeNumber)) { opts[key] = true; }
-      else { opts[key] = next; i++; }
+      if (next === undefined || (next.startsWith("-") && !nextIsNegativeNumber)) { setOpt(key, true); }
+      else { setOpt(key, next); i++; }
       continue;
     }
     if (a === "-o") {
@@ -477,6 +492,28 @@ function parseArgs(argv) {
 }
 
 const numOpt = (opts, key) => (opts[key] === undefined ? undefined : Number(opts[key]));
+
+// Parse --sfx specs: <file>@<seconds|MM:SS>[@<volume 0-1>]. Split from
+// the right, so a file path may itself contain "@". Volume defaults
+// to 1; the time is left as a string for core.parseTime (MM:SS works).
+function parseSfxSpecs(raw) {
+  if (raw === undefined) return [];
+  const specs = Array.isArray(raw) ? raw : [raw];
+  return specs.map((spec) => {
+    if (typeof spec !== "string") fail(`bad --sfx value: ${spec}`);
+    const parts = spec.split("@");
+    if (parts.length < 2) fail(`bad --sfx value (want <file>@<seconds>[@<volume>]): ${spec}`);
+    let volume = 1;
+    if (parts.length >= 3) {
+      volume = Number(parts.pop());
+      if (!Number.isFinite(volume)) fail(`bad --sfx volume in: ${spec}`);
+    }
+    const at = parts.pop();
+    const file = parts.join("@");
+    if (!file || !at) fail(`bad --sfx value (want <file>@<seconds>[@<volume>]): ${spec}`);
+    return { file, at, volume };
+  });
+}
 
 function needOutput(opts) {
   if (!opts.output) fail("missing required option: -o <output>");
@@ -631,6 +668,8 @@ async function main() {
           audioCodec: opts.audio_codec ?? null,
           crf: numOpt(opts, "crf") ?? 23,
           preset: opts.preset ?? "medium",
+          gop: numOpt(opts, "gop") ?? null,
+          gopSeconds: numOpt(opts, "gop_seconds") ?? null,
         });
         break;
       case "silence": {
@@ -705,6 +744,7 @@ async function main() {
           targetLufs: numOpt(opts, "target_lufs") ?? -14,
           master: opts.master !== false,
           dryRun: opts.dry_run === true,
+          sfx: parseSfxSpecs(opts.sfx),
         });
         break;
       }

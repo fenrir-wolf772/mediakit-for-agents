@@ -2154,15 +2154,58 @@ export async function detectContent(input, { blackMinDuration = 0.5, freezeMinDu
 
 const VIDEO_CODECS = { libx264: "mp4", libx265: "mp4", vp9: "webm", av1: "mp4", mpeg4: "mp4", copy: null };
 
-export async function convert({ input, output, videoCodec = null, audioCodec = null, crf = 23, preset = "medium" }) {
+// ---------------------------------------------------------------- convert
+// Change container/codec. --gop / --gop-seconds (beambuilder's
+// increase_keyframes idea) set the keyframe interval on re-encode:
+// -g N -keyint_min N, with scene-cut keyframes disabled for the
+// codecs that support it (libx264/mpeg4: -sc_threshold 0, libx265:
+// -x265-params scenecut=0), so keyframes land exactly every N
+// frames — what trim --snap and stream-copy cuts need. Other codecs
+// (vp9/av1) take -g only and may still insert scene-cut keyframes,
+// so the GOP there is a maximum, not an exact spacing. The result
+// measures the keyframes on the output file (count + gap stats), so
+// the spacing is verified, not assumed.
+export async function convert({ input, output, videoCodec = null, audioCodec = null, crf = 23, preset = "medium", gop = null, gopSeconds = null }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const c = num(crf, "crf", { min: 0, max: 51, integer: true });
+  if (gop !== null && gop !== undefined && gopSeconds !== null && gopSeconds !== undefined) {
+    throw new MediaKitError("convert --gop and --gop-seconds are mutually exclusive (one way to set the interval)", "INVALID_ARG");
+  }
+  const gopFramesReq = (gop === null || gop === undefined) ? null : num(gop, "gop", { min: 1, max: 10000, integer: true });
+  const gopSecsReq = (gopSeconds === null || gopSeconds === undefined) ? null : num(gopSeconds, "gop_seconds", { min: 0.1, max: 3600 });
+  const meta = gopFramesReq !== null || gopSecsReq !== null ? await probe(inPath) : null;
+  let gopFrames = null;
+  let gopSecondsOut = null;
+  if (meta) {
+    if (!meta.video) throw new MediaKitError("convert --gop needs a video input", "INVALID_ARG");
+    if (!videoCodec || videoCodec === "copy") {
+      throw new MediaKitError("convert --gop needs a video re-encode (pass --video-codec libx264); stream-copy cannot move keyframes", "INVALID_ARG");
+    }
+    if (gopFramesReq !== null) {
+      gopFrames = gopFramesReq;
+      gopSecondsOut = meta.video.fps ? +(gopFrames / meta.video.fps).toFixed(3) : null;
+    } else {
+      if (!meta.video.fps) throw new MediaKitError("convert --gop-seconds needs a source with a known frame rate", "INVALID_ARG");
+      gopFrames = Math.max(1, Math.round(meta.video.fps * gopSecsReq));
+      gopSecondsOut = gopSecsReq;
+    }
+  }
   const args = ["-y", "-i", inPath];
   if (videoCodec) {
     if (!(videoCodec in VIDEO_CODECS)) throw new MediaKitError(`unsupported video codec: ${videoCodec}`, "INVALID_ARG");
     args.push("-c:v", videoCodec);
-    if (videoCodec !== "copy") args.push("-crf", String(c), "-preset", preset);
+    if (videoCodec !== "copy") {
+      args.push("-crf", String(c), "-preset", preset);
+      if (gopFrames !== null) {
+        // -keyint_min is a libx264/libx265/mpeg4 option; libvpx/aom
+        // take -g only. Scene-cut suppression is codec-specific too.
+        args.push("-g", String(gopFrames));
+        if (["libx264", "libx265", "mpeg4"].includes(videoCodec)) args.push("-keyint_min", String(gopFrames));
+        if (["libx264", "mpeg4"].includes(videoCodec)) args.push("-sc_threshold", "0");
+        if (videoCodec === "libx265") args.push("-x265-params", "scenecut=0");
+      }
+    }
   } else {
     args.push("-c:v", "copy");
   }
@@ -2172,9 +2215,23 @@ export async function convert({ input, output, videoCodec = null, audioCodec = n
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
+  let keyframes = null;
+  if (gopFrames !== null) {
+    // Measure the spacing on the output file — the GOP is only real
+    // if the keyframes actually land where they should.
+    const kf = await listKeyframes({ input: outPath });
+    const gaps = kf.gop_seconds;
+    keyframes = {
+      count: kf.count,
+      min_gap_seconds: gaps?.min_seconds ?? null,
+      max_gap_seconds: gaps?.max_seconds ?? null,
+      avg_gap_seconds: gaps?.avg_seconds ?? null,
+    };
+  }
   return {
     operation: "convert", input: inPath, output: outPath,
     video_codec: videoCodec ?? "copy", audio_codec: audioCodec ?? "copy",
+    gop_frames: gopFrames, gop_seconds: gopSecondsOut, keyframes,
     ...info, duration_seconds: out.duration_seconds,
     dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
   };
@@ -2477,7 +2534,7 @@ const DOCTOR_FILTERS = [
   "drawtext", "volume", "sidechaincompress", "amix", "aresample",
   "xfade", "acrossfade", "fps", "anullsrc", "setpts", "asetpts",
   "format", "colorchannelmixer", "atempo", "aloop", "geq", "color",
-  "palettegen", "paletteuse",
+  "palettegen", "paletteuse", "adelay",
 ];
 const DOCTOR_ENCODERS = [
   "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4",
@@ -2510,7 +2567,7 @@ const TOOL_REQUIREMENTS = {
   silence: { filters: ["silencedetect", "trim", "atrim", "concat"], encoders: ["libx264", "aac"] },
   cropdetect: { filters: ["cropdetect"] },
   package: {},
-  mix: { filters: ["sidechaincompress", "amix", "aresample", "volume", "loudnorm"], encoders: ["aac", "libmp3lame"] },
+  mix: { filters: ["sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay"], encoders: ["aac", "libmp3lame"] },
   overlay: { filters: ["overlay", "format", "scale", "colorchannelmixer"], encoders: ["libx264"] },
   scenes: { filters: ["select"] },
   keyframes: {},
@@ -2888,7 +2945,10 @@ export async function receipt({ input, output, platform = null }) {
 // looped to the voice length. The tool also MEASURES the ducking it
 // actually achieved: it re-runs the ducked bed alone and compares its
 // mean volume in a speech window vs a silence window, so the returned
-// ducking_measured_db is observed, not assumed.
+// ducking_measured_db is observed, not assumed. --sfx (outtake's
+// mix_sfx idea) drops short sounds at exact timestamps: each one is
+// delayed with adelay and mixed in AFTER the ducking, so a sting or
+// whoosh punches through instead of being ducked with the bed.
 
 /** Mean volume (dB) of the ducked music bed alone in [start, end). */
 async function duckedBedVolume(voicePath, musicPath, voiceGainDb, musicVolume, duck, start, end) {
@@ -2910,6 +2970,7 @@ export async function mix({
   voice, music, output,
   musicVolume = 0.3, duckDb = 12, attackMs = 100, releaseMs = 400,
   voiceLufs = -16, targetLufs = -14, master = true, dryRun = false,
+  sfx = [],
 }) {
   const voicePath = await requireInput(voice, "voice file");
   const musicPath = await requireInput(music, "music file");
@@ -2927,6 +2988,29 @@ export async function mix({
   if (!musicMeta.audio) throw new MediaKitError("mix needs an audio stream in the music file", "INVALID_ARG");
   const voiceDuration = voiceMeta.duration_seconds;
   if (voiceDuration === null) throw new MediaKitError("could not read voice duration", "PROBE_FAILED");
+
+  // SFX list: [{ file, at (seconds or MM:SS), volume 0-1 }]. Each file
+  // must have audio, and the timestamp must fall inside the voice —
+  // a sting landing after the mix ends would be silently cut by
+  // amix duration=first, so refuse it loudly instead.
+  if (!Array.isArray(sfx)) throw new MediaKitError("sfx must be a list of {file, at, volume}", "INVALID_ARG");
+  if (sfx.length > 16) throw new MediaKitError(`at most 16 sfx entries, got ${sfx.length}`, "INVALID_ARG");
+  const sfxList = [];
+  for (const [i, entry] of sfx.entries()) {
+    if (!entry || typeof entry !== "object") throw new MediaKitError(`sfx[${i}] must be an object {file, at, volume}`, "INVALID_ARG");
+    const sfxPath = await requireInput(entry.file, `sfx[${i}] file`);
+    const sfxMeta = await probe(sfxPath);
+    if (!sfxMeta.audio) throw new MediaKitError(`sfx[${i}] needs an audio stream in ${entry.file}`, "INVALID_ARG");
+    const atSeconds = parseTime(entry.at ?? entry.at_seconds, `sfx[${i}] at`);
+    if (atSeconds >= voiceDuration) {
+      throw new MediaKitError(`sfx[${i}] at ${atSeconds}s is past the voice end (${voiceDuration}s) — it would be cut off`, "INVALID_ARG");
+    }
+    sfxList.push({
+      file: sfxPath,
+      at_seconds: +atSeconds.toFixed(3),
+      volume: num(entry.volume ?? 1, `sfx[${i}] volume`, { min: 0, max: 1 }),
+    });
+  }
 
   // Level the voice first (soniccraft levels each cue before mixing):
   // a plain gain, clamped so a very quiet/loud voice cannot explode.
@@ -2947,16 +3031,32 @@ export async function mix({
     : (AUDIO_FORMATS[ext] ?? VIDEO_CONTAINER_AUDIO[ext]);
   if (!audioCodec) throw new MediaKitError(`unsupported mix output format: .${ext || "(none)"}`, "INVALID_ARG");
 
-  const graph = [
+  const graphParts = [
     `[0:a]aresample=48000,volume=${voiceGainDb}dB[voice]`,
     `[1:a]aresample=48000,volume=${bedVol}[bed]`,
     `[bed][voice]sidechaincompress=threshold=0.0316:ratio=${ratio}:attack=${attack}:release=${release}[ducked]`,
     `[ducked][voice]amix=inputs=2:duration=first:normalize=0[mix]`,
-    ...(mTarget !== null ? [`[mix]loudnorm=I=${mTarget}:TP=-1.5:LRA=11[out]`] : []),
-  ].join(";");
-  const mixLabel = mTarget !== null ? "[out]" : "[mix]";
-  const args = ["-y", "-i", voicePath, "-stream_loop", "-1", "-i", musicPath,
-    "-filter_complex", graph];
+  ];
+  // SFX inputs are 2..N+1; each is delayed to its timestamp, then all
+  // are mixed with the voice+bed mix. duration=first keeps the voice
+  // length, so an SFX longer than the remaining mix is cut, not kept.
+  const sfxLabels = [];
+  sfxList.forEach((s, i) => {
+    const label = `[sfx${i}]`;
+    sfxLabels.push(label);
+    graphParts.push(`[${2 + i}:a]aresample=48000,adelay=${Math.round(s.at_seconds * 1000)}:all=1,volume=${s.volume}${label}`);
+  });
+  let finalLabel = "[mix]";
+  if (sfxLabels.length) {
+    graphParts.push(`[mix]${sfxLabels.join("")}amix=inputs=${1 + sfxLabels.length}:duration=first:normalize=0[final]`);
+    finalLabel = "[final]";
+  }
+  if (mTarget !== null) graphParts.push(`${finalLabel}loudnorm=I=${mTarget}:TP=-1.5:LRA=11[out]`);
+  const graph = graphParts.join(";");
+  const mixLabel = mTarget !== null ? "[out]" : finalLabel;
+  const args = ["-y", "-i", voicePath, "-stream_loop", "-1", "-i", musicPath];
+  for (const s of sfxList) args.push("-i", s.file);
+  args.push("-filter_complex", graph);
   if (voiceMeta.video) {
     args.push("-map", "0:v", "-map", mixLabel, "-c:v", "copy", "-c:a", audioCodec, "-shortest");
     if (["mp4", "mov", "m4v"].includes(ext)) args.push("-movflags", "+faststart");
@@ -2986,6 +3086,8 @@ export async function mix({
       mastered_to_lufs: mTarget,
       output_lufs: null,
       ducking_measured_db: null,
+      sfx: sfxList,
+      sfx_count: sfxList.length,
       duration_seconds: voiceDuration,
       has_video: Boolean(voiceMeta.video),
       commands: [`${FFMPEG} ${args.map(quote).join(" ")}`],
@@ -3045,6 +3147,8 @@ export async function mix({
     mastered_to_lufs: mTarget,
     output_lufs: outputLufs,
     ducking_measured_db: duckingMeasuredDb,
+    sfx: sfxList,
+    sfx_count: sfxList.length,
     duration_seconds: outMeta.duration_seconds,
     has_video: Boolean(voiceMeta.video),
     ...info,

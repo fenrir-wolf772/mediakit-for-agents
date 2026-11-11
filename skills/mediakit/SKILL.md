@@ -430,6 +430,20 @@ stays 1280×720 and reports `scaled_down: false`, instead of blowing up
 to 1920×1080 with no new detail. Use `--width`/`--height` only when you
 need exact pixels, and never combine them with `--preset`.
 
+### 29. Set the GOP when you convert, and drop SFX at timestamps in `mix`
+A stream-copy cut can only land on a keyframe, so a file with a 250-frame
+GOP is nearly uncuttable — set the interval at convert time: `convert
+--video-codec libx264 --gop-seconds 2` (or `--gop 60` in frames) puts a
+keyframe every 2 seconds, exactly (scene-cut keyframes are disabled for
+libx264/libx265/mpeg4), and the result reports the measured gap stats —
+verify them before you trust a snap. `--gop` needs a re-encode; with
+stream-copy it is refused. For sound design, `mix --sfx <file>@<s>`
+(repeatable, max 16, optional `[@<volume>]`) drops a short sound at an
+exact timestamp — a sting, whoosh or ding — mixed in *after* the ducking,
+so it punches through instead of being ducked with the bed. A timestamp
+past the voice end is refused rather than silently cut; the mix still
+masters to target LUFS and still reports the measured ducking.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

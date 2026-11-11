@@ -36,6 +36,19 @@ async function probeStreams(file) {
   }
 }
 
+// Independent mean-volume helper: ffmpeg volumedetect on a window
+// (not through the tool under test), so an SFX claim is measured
+// from the file on disk, not from the tool's own report.
+async function meanVolume(file, start, duration) {
+  try {
+    const { stderr } = await execFileAsync("ffmpeg", ["-hide_banner", "-ss", String(start), "-t", String(duration), "-i", file, "-af", "volumedetect", "-f", "null", "-"]);
+    const m = stderr.match(/mean_volume:\s*(-?[\d.]+)\s*dB/);
+    return m ? parseFloat(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
 const failures = [];
 function checkOk(cond, label, detail = "") {
   if (cond) console.log(`  PASS ${label}`);
@@ -281,6 +294,91 @@ const mixJson = JSON.parse(mixRes.content[0].text);
 console.log("mix call: duration", mixJson.duration_seconds, "| output LUFS", mixJson.output_lufs, "| voice gain", mixJson.voice_gain_db, "dB | ducking measured", mixJson.ducking_measured_db, "dB");
 checkOk(near(mixJson.output_lufs, -14, 0.5), "mix masters to -14 LUFS", `got ${mixJson.output_lufs}`);
 checkOk(typeof mixJson.ducking_measured_db === "number" && mixJson.ducking_measured_db > 5, "mix ducking is actually measured (>5 dB)", `got ${mixJson.ducking_measured_db}`);
+
+// mix --sfx: a beep at 3s (the voice is silent there, [2,4)) must be
+// audible in the mix, while the window just before it matches the
+// no-sfx mix (no leak, no shift).
+const mixSfxRes = await client.callTool({
+  name: "mix",
+  arguments: {
+    voice: path.join(root, "test/mix-voice.mp3"),
+    music: path.join(root, "test/mix-music.mp3"),
+    output: path.join(root, "outputs/mcp-mix-sfx.mp3"),
+    music_volume: 0.5,
+    duck_db: 12,
+    sfx: [{ file: path.join(root, "test/sfx-beep.mp3"), at_seconds: 3, volume: 1 }],
+  },
+});
+const mixSfxJson = JSON.parse(mixSfxRes.content[0].text);
+console.log("mix sfx call: sfx_count", mixSfxJson.sfx_count, "| LUFS", mixSfxJson.output_lufs, "| dur", mixSfxJson.duration_seconds);
+checkOk(mixSfxJson.sfx_count === 1 && mixSfxJson.sfx?.[0]?.at_seconds === 3, "mix sfx echoes the placed sound", JSON.stringify(mixSfxJson.sfx));
+checkOk(near(mixSfxJson.output_lufs, -14, 0.5), "mix with sfx still masters to -14 LUFS", `got ${mixSfxJson.output_lufs}`);
+const sfxWin = await meanVolume(path.join(root, "outputs/mcp-mix-sfx.mp3"), 3, 0.5);
+const noSfxWin = await meanVolume(path.join(root, "outputs/mcp-mix.mp3"), 3, 0.5);
+const sfxCtl = await meanVolume(path.join(root, "outputs/mcp-mix-sfx.mp3"), 2.2, 0.5);
+const noSfxCtl = await meanVolume(path.join(root, "outputs/mcp-mix.mp3"), 2.2, 0.5);
+console.log("mix sfx window [3,3.5): with sfx", sfxWin, "dB | without", noSfxWin, "dB | control [2.2,2.7):", sfxCtl, "vs", noSfxCtl);
+checkOk(typeof sfxWin === "number" && typeof noSfxWin === "number" && sfxWin - noSfxWin > 5, "mix sfx is actually audible (+5 dB in its window)", `with ${sfxWin} vs without ${noSfxWin}`);
+checkOk(typeof sfxCtl === "number" && Math.abs(sfxCtl - noSfxCtl) < 2, "mix sfx does not leak into the window before it", `${sfxCtl} vs ${noSfxCtl}`);
+
+const mixSfxBadRes = await client.callTool({
+  name: "mix",
+  arguments: {
+    voice: path.join(root, "test/mix-voice.mp3"),
+    music: path.join(root, "test/mix-music.mp3"),
+    output: path.join(root, "outputs/mcp-mix-sfx-bad.mp3"),
+    sfx: [{ file: path.join(root, "test/sfx-beep.mp3"), at_seconds: 99, volume: 1 }],
+  },
+});
+const mixSfxBadJson = JSON.parse(mixSfxBadRes.content[0].text);
+checkOk(mixSfxBadRes.isError === true && /past the voice end/.test(mixSfxBadJson.error ?? ""), "mix sfx past the voice end is refused", JSON.stringify(mixSfxBadJson));
+
+// convert --gop-seconds: 10s source at 30fps, GOP 2s -> keyframes at
+// 0,2,4,6,8, measured twice (the tool's own report + the keyframes
+// tool run independently on the output file).
+const convertGopRes = await client.callTool({
+  name: "convert",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    output: path.join(root, "outputs/mcp-convert-gop.mp4"),
+    video_codec: "libx264",
+    gop_seconds: 2,
+  },
+});
+const convertGopJson = JSON.parse(convertGopRes.content[0].text);
+console.log("convert gop call: gop_frames", convertGopJson.gop_frames, "| keyframes", JSON.stringify(convertGopJson.keyframes));
+checkOk(convertGopJson.gop_frames === 60 && convertGopJson.keyframes?.count === 5, "convert --gop-seconds 2 reports 60 frames / 5 keyframes", JSON.stringify(convertGopJson.keyframes));
+checkOk(convertGopJson.keyframes?.min_gap_seconds === 2 && convertGopJson.keyframes?.max_gap_seconds === 2, "convert gop gaps are exactly 2s", JSON.stringify(convertGopJson.keyframes));
+const gopKfRes = await client.callTool({
+  name: "keyframes",
+  arguments: { input: path.join(root, "outputs/mcp-convert-gop.mp4") },
+});
+const gopKfJson = JSON.parse(gopKfRes.content[0].text);
+checkOk(gopKfJson.keyframe_timestamps.join(",") === "0,2,4,6,8", "keyframes tool confirms [0,2,4,6,8] on the gop output", gopKfJson.keyframe_timestamps.join(","));
+
+const convertGopCopyRes = await client.callTool({
+  name: "convert",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    output: path.join(root, "outputs/mcp-convert-gop-copy.mp4"),
+    gop_seconds: 2,
+  },
+});
+const convertGopCopyJson = JSON.parse(convertGopCopyRes.content[0].text);
+checkOk(convertGopCopyRes.isError === true && /needs a video re-encode/.test(convertGopCopyJson.error ?? ""), "convert --gop with stream-copy is refused", JSON.stringify(convertGopCopyJson));
+
+const convertGopBothRes = await client.callTool({
+  name: "convert",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    output: path.join(root, "outputs/mcp-convert-gop-both.mp4"),
+    video_codec: "libx264",
+    gop: 60,
+    gop_seconds: 2,
+  },
+});
+const convertGopBothJson = JSON.parse(convertGopBothRes.content[0].text);
+checkOk(convertGopBothRes.isError === true && /mutually exclusive/.test(convertGopBothJson.error ?? ""), "convert --gop + --gop-seconds is refused", JSON.stringify(convertGopBothJson));
 
 const concatTransRes = await client.callTool({
   name: "concat",
