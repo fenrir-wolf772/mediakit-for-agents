@@ -2256,15 +2256,20 @@ export async function compress({ input, output, quality = "medium", maxWidth = n
     }
     let passes = 1;
     if (meta.video) {
-      // Two-pass libx264: pass 1 analyses (no audio, no output file),
-      // pass 2 encodes to the bitrate budget. The passlog lives in a
-      // temp dir that is always cleaned up afterwards.
+      // Two-pass libx264: pass 1 analyses (no output file), pass 2
+      // encodes to the bitrate budget. The passlog lives in a temp
+      // dir that is always cleaned up afterwards. Pass 1 MUST encode
+      // the audio too (to -f null): ffmpeg >= 8.1 applies `-pass 2`
+      // to the AAC encoder as well, and it fails reading
+      // `<passlogfile>-1.log` when pass 1 ran with `-an` and never
+      // created it (CI run #43062155627 on the BtbN master build).
       const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-pass-"));
       const passlog = path.join(tmpDir, "pass");
       try {
         const vf = scaleFilter ? ["-vf", scaleFilter] : [];
         const vArgs = ["-c:v", "libx264", "-b:v", `${videoKbps}k`, "-maxrate", `${videoKbps * 2}k`, "-bufsize", `${videoKbps * 4}k`, "-preset", p];
-        await run(FFMPEG, ["-y", "-i", inPath, ...vf, ...vArgs, "-pass", "1", "-passlogfile", passlog, "-an", "-f", "null", "-"]);
+        const aArgs = meta.audio ? ["-c:a", "aac", "-b:a", `${audioKbps}k`] : ["-an"];
+        await run(FFMPEG, ["-y", "-i", inPath, ...vf, ...vArgs, "-pass", "1", "-passlogfile", passlog, ...aArgs, "-f", "null", "-"]);
         const pass2 = ["-y", "-i", inPath, ...vf, ...vArgs, "-pass", "2", "-passlogfile", passlog];
         if (meta.audio) pass2.push("-c:a", "aac", "-b:a", `${audioKbps}k`);
         else pass2.push("-an");
