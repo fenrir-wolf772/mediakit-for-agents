@@ -86,7 +86,12 @@ After the last edit, run `check --platform tiktok` (or `reels`,
 `shorts`, `youtube`). It measures the real file — never trust the
 tool that produced it. `pass: false` means fix the listed issues
 (each carries a hint) and check again; never report "ready" with a
-failing check.
+failing check. Add `--content` (`content: true` over MCP) for the final
+pass: one decode pass scans for black frames, frozen frames and
+silence. Position matters — a 1s black stretch at the very start warns
+(likely a fade in), a 3s black stretch mid-file or at the end fails;
+3s of mid-file silence warns (run `silence` to remove it), 5s+ fails.
+A stream that does not exist reports `unavailable`, never zero.
 
 ### 5. Even dimensions
 H.264 (yuv420p) needs even width/height. `resize` with `keep_aspect`
@@ -284,6 +289,17 @@ that would run (with the real voice gain measured from the files) and
 writes no file — read the command before a long render, then run the
 same call without `--dry-run`. The probe and loudnorm measurement still
 run in dry-run mode, but they are read-only.
+
+### 21. Find the file before you probe it; content-check the final render
+Don't guess paths: `find clips/ --name moon` searches a folder tree
+(case-insensitive substring, skips `.git`/`node_modules`/hidden dirs)
+and returns each match with probe info (duration, dimensions, codecs)
+— pick from that list instead of typing a path from memory.
+`--extensions mp4,mov` narrows the search; `--max-results` caps the
+returned list while `total_matches` still reports the full count.
+For the final render, `check --content` (rule 4) catches what the
+spec checks cannot see: black holes, frozen video and dead air — all
+three from one decode pass, judged by where they sit in the timeline.
 
 ## Workflow: vertical captioned clip from a landscape source
 

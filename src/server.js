@@ -225,10 +225,11 @@ server.tool(
 
 server.tool(
   "check",
-  "Verify a finished file against a platform delivery spec (tiktok, reels, shorts, youtube): dimensions, codecs, fps, duration limit, audio channels and measured loudness, plus a file-size limit where the platform has one. Video bitrate is checked as a warning only (platforms publish recommendations, not gates) and the result also reports the platform's text-safe zone. Returns pass/fail per rule with fix hints. Run this before publishing.",
+  "Verify a finished file against a platform delivery spec (tiktok, reels, shorts, youtube): dimensions, codecs, fps, duration limit, audio channels and measured loudness, plus a file-size limit where the platform has one. Video bitrate is checked as a warning only (platforms publish recommendations, not gates) and the result also reports the platform's text-safe zone. With content=true, one extra decode pass scans for black frames, frozen frames and silence and folds them into the same pass/fail list with position-aware rules (a short black stretch at the very start/end is a warning — likely a fade — the same stretch mid-file fails). Returns pass/fail per rule with fix hints. Run this before publishing.",
   {
     input: pathSchema,
     platform: z.enum(["tiktok", "reels", "shorts", "youtube", "instagram-feed", "instagram-story", "linkedin"]).default("tiktok"),
+    content: z.boolean().default(false).describe("Also scan content: black/frozen frames and silence; adds content_black/content_freeze/content_silence rules"),
   },
   async (a) => safe(() => core.check(a)),
 );
@@ -306,6 +307,21 @@ server.tool(
     output: pathSchema.describe("Output subtitle file (.vtt or .srt — must differ from the input format)"),
   },
   async (a) => safe(() => core.convertCaptions(a)),
+);
+
+server.tool(
+  "find",
+  "Find media files by filename, recursively under a directory (case-insensitive substring match). Returns each match with probe info (duration, dimensions, codecs) so the agent can pick the right file without guessing paths. Skips .git, node_modules and hidden folders; does not follow symlinked directories.",
+  {
+    directory: pathSchema.describe("Directory to search under (recursive)"),
+    name: z.string().min(1).describe("Substring to match in the filename (case-insensitive)"),
+    extensions: z.string().optional().describe("Comma-separated extensions to include, e.g. 'mp4,mov' (default: common video/audio/image/caption extensions)"),
+    max_results: z.number().int().min(1).max(100).default(20).describe("Max matches to return with probe info; the result still reports total_matches"),
+  },
+  async (a) => safe(() => core.findMedia({
+    directory: a.directory, name: a.name,
+    extensions: a.extensions ?? null, maxResults: a.max_results,
+  })),
 );
 
 server.tool(

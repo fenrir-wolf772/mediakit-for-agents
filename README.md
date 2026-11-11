@@ -67,7 +67,7 @@ Then ask your agent things like:
 | `burn_captions` | Burn .srt/.ass/.vtt subtitles into the video — font size and position default to the safe zone and scale with frame height (~60px type on 1080x1920, ~500px above the bottom edge so platform UI never covers the text) | `mediakit burn-captions in.mp4 --captions subs.srt -o out.mp4` |
 | `convert_captions` | Convert a subtitle file between SRT and VTT (cue text carried verbatim; VTT cue settings are dropped and counted) | `mediakit convert-captions subs.srt -o subs.vtt` |
 | `reframe` | Reframe to a target aspect/size in one step (crop, pad, or blurred fill) — crop mode takes a named `--anchor` (left/right/top/bottom/...) to keep an edge subject in frame, and reports `crop_kept_percent` + a warning below 40% kept | `mediakit reframe in.mp4 --mode crop -o vertical.mp4` |
-| `check` | Verify a file against a platform spec (tiktok/reels/shorts/youtube/instagram-feed/instagram-story/linkedin) — video bitrate is a warning, not a gate; overall pass ignores warnings | `mediakit check out.mp4 --platform tiktok` |
+| `check` | Verify a file against a platform spec (tiktok/reels/shorts/youtube/instagram-feed/instagram-story/linkedin) — video bitrate is a warning, not a gate; overall pass ignores warnings. `--content` also scans for black/frozen frames and silence in one decode pass, with position-aware rules (short black at the very start/end warns as a likely fade; the same stretch mid-file fails) | `mediakit check out.mp4 --platform tiktok --content` |
 | `silence` | Remove silent stretches, keeping a margin around speech | `mediakit silence in.mp4 -o tight.mp4` |
 | `cropdetect` | Measure letterbox/pillarbox bars; returns the crop rect + a ready crop command | `mediakit cropdetect in.mp4` |
 | `package` | Bundle a finished file for delivery: media + spec.json receipt + checksums.sha256 (+ captions) | `mediakit package out.mp4 -o delivery.zip --platform tiktok` |
@@ -79,6 +79,7 @@ Then ask your agent things like:
 | `social` | Export one video to several platform specs in one call: reframe + trim to max duration + loudness + check each, writing `<base>-<platform>.mp4` + `manifest.json` | `mediakit social in.mp4 -o out/ --platforms tiktok,reels,shorts` |
 | `scenes` | Detect scene changes / hard cuts; returns cut timestamps + segments (probe-only) | `mediakit scenes in.mp4` |
 | `keyframes` | List keyframe (I-frame) timestamps + GOP min/max/avg interval (probe-only) — check before a stream-copy trim | `mediakit keyframes in.mp4` |
+| `find` | Find media files by name, recursively under a directory (case-insensitive substring); each match comes back with probe info (duration, dimensions, codecs) so you pick the right file without guessing paths | `mediakit find clips/ --name moon` |
 | `doctor` | Read-only preflight: ffmpeg version, filters/encoders, tool availability | `mediakit doctor` |
 | `convert` | Change container/codec (omit a codec to stream-copy) | `mediakit convert in.mov -o out.mp4 --video-codec libx264` |
 
@@ -175,7 +176,14 @@ scores ~0.4, so keep the threshold at or below 0.4. `keyframes` is
 probe-only: it lists every I-frame timestamp plus the GOP interval, so
 you know where a lossless cut can land — `trim --stream-copy --snap`
 snaps the requested start down and end up to the nearest keyframes and
-reports both the requested and the actual range. `doctor` is a read-only preflight — run it first
+reports both the requested and the actual range. `check --content`
+adds one decode pass that scans for black frames, frozen frames and
+silence and folds them into the same pass/fail list — a short black
+stretch at the very start/end is a warning (likely a fade in/out), the
+same stretch mid-file fails, and a missing stream reports "unavailable"
+instead of a fake zero. `find clips/ --name moon` searches a folder
+tree for media files by name and returns each match with its probe
+info, so you stop guessing paths. `doctor` is a read-only preflight — run it first
 on a new machine to confirm ffmpeg/ffprobe and every filter/encoder the
 tools need are actually present.
 

@@ -6,7 +6,7 @@
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, copyFile, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 
@@ -163,6 +163,80 @@ function evalFps(rate) {
   const [a, b] = String(rate).split("/").map(Number);
   if (!a || !b) return null;
   return +(a / b).toFixed(3);
+}
+
+// ---------------------------------------------------------------- find
+// Find media files by name, recursively (idea: video-creator's
+// find_video_path). Pure filesystem walk + probe per match — no
+// guessing, no shell. Skips hidden dirs, .git and node_modules so a
+// big project tree does not take forever; symlinked dirs are not
+// followed (no loop risk). Results are sorted by path so the output
+// is deterministic.
+
+const FIND_EXTENSIONS = [
+  "mp4", "mov", "mkv", "webm", "avi", "m4v",
+  "mp3", "wav", "m4a", "flac", "ogg", "opus",
+  "png", "jpg", "jpeg", "webp", "gif",
+  "srt", "vtt", "ass",
+];
+const FIND_SKIP_DIRS = new Set([".git", "node_modules", ".next"]);
+
+export async function findMedia({ directory, name, extensions = null, maxResults = 20 }) {
+  const dirPath = await requireInput(directory, "directory");
+  const dirStat = await stat(dirPath);
+  if (!dirStat.isDirectory()) throw new MediaKitError(`not a directory: ${directory}`, "INVALID_ARG");
+  if (typeof name !== "string" || !name.trim()) throw new MediaKitError("name is required (substring to match, case-insensitive)", "INVALID_ARG");
+  const max = num(maxResults, "max_results", { min: 1, max: 100, integer: true });
+  const exts = extensions === null || extensions === undefined ? FIND_EXTENSIONS
+    : String(extensions).split(",").map((e) => e.trim().toLowerCase().replace(/^\./, "")).filter(Boolean);
+  if (!exts.length) throw new MediaKitError("extensions must list at least one extension", "INVALID_ARG");
+  const needle = name.trim().toLowerCase();
+
+  const paths = [];
+  let skippedDirectories = 0;
+  async function walk(dir, isRoot) {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      skippedDirectories++;
+      return;
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (e.isSymbolicLink()) continue;
+        if (!isRoot && (e.name.startsWith(".") || FIND_SKIP_DIRS.has(e.name))) continue;
+        await walk(full, false);
+      } else if (e.isFile()) {
+        const ext = e.name.includes(".") ? e.name.split(".").pop().toLowerCase() : "";
+        if (exts.includes(ext) && e.name.toLowerCase().includes(needle)) paths.push(full);
+      }
+    }
+  }
+  await walk(dirPath, true);
+  paths.sort();
+
+  const matches = [];
+  for (const p of paths.slice(0, max)) {
+    const entry = { path: p, size_bytes: (await stat(p)).size };
+    try {
+      const m = await probe(p);
+      entry.duration_seconds = m.duration_seconds;
+      entry.dimensions = m.video ? `${m.video.width}x${m.video.height}` : null;
+      entry.video_codec = m.video?.codec ?? null;
+      entry.audio_codec = m.audio?.codec ?? null;
+    } catch {
+      entry.probe_error = "could not probe this file";
+    }
+    matches.push(entry);
+  }
+  return {
+    operation: "find", directory: dirPath, name: name.trim(), extensions: exts,
+    matches, total_matches: paths.length, returned_matches: matches.length,
+    truncated: paths.length > max,
+    ...(skippedDirectories ? { skipped_directories: skippedDirectories } : {}),
+  };
 }
 
 // ---------------------------------------------------------------- trim
@@ -1256,7 +1330,7 @@ export async function measureLoudness(input) {
   return full === null ? null : +full.i.toFixed(1);
 }
 
-export async function check({ input, platform = "tiktok" }) {
+export async function check({ input, platform = "tiktok", content = false }) {
   const inPath = await requireInput(input);
   const spec = PLATFORMS[platform];
   if (!spec) throw new MediaKitError(`unknown platform: ${platform} (supported: ${Object.keys(PLATFORMS).join(", ")})`, "INVALID_ARG");
@@ -1330,6 +1404,30 @@ export async function check({ input, platform = "tiktok" }) {
   } else {
     checks.push({ name: "audio", expected: "audio stream present", actual: "no audio stream", pass: false });
   }
+  // Content QC (opt-in): black/frozen frames + silence in one decode
+  // pass, folded into the same pass/fail list. A stream that does not
+  // exist is "unavailable" in the content detail, not a failed rule.
+  let contentResult = null;
+  if (content) {
+    contentResult = await detectContent(inPath);
+    const hints = {
+      black: "re-cut or re-render the black stretch",
+      freeze: "re-render or trim the frozen stretch",
+      silence: "run silence to remove the dead air",
+    };
+    for (const [kind, label] of [["black", "black frames"], ["freeze", "frozen frames"], ["silence", "silence"]]) {
+      const s = contentResult[kind];
+      if (s.status === "unavailable") continue;
+      const errs = s.intervals.filter((i) => i.severity === "error").length;
+      const warns = s.intervals.filter((i) => i.severity === "warn").length;
+      const actual = s.total_intervals === 0 ? "none"
+        : `${s.total_intervals} interval${s.total_intervals === 1 ? "" : "s"} (${s.total_duration_seconds}s total)`;
+      // Warn-level intervals fail the rule but not the check (same
+      // pattern as video_bitrate): they show up in `warnings`.
+      add(`content_${kind}`, `no ${label}`, actual, errs === 0 && warns === 0, hints[kind],
+        errs > 0 ? "error" : "warn");
+    }
+  }
   const failed = checks.filter((c) => !c.pass && c.severity !== "warn");
   const warnings = checks.filter((c) => !c.pass && c.severity === "warn");
   return {
@@ -1337,8 +1435,133 @@ export async function check({ input, platform = "tiktok" }) {
     pass: failed.length === 0,
     checks,
     safe_zone: spec.safeZone,
+    ...(contentResult ? { content: contentResult } : {}),
     ...(failed.length ? { issues: failed.map((c) => `${c.name}: ${c.actual} (want ${c.expected})${c.hint ? ` — ${c.hint}` : ""}`) } : {}),
     ...(warnings.length ? { warnings: warnings.map((c) => `${c.name}: ${c.actual} (want ${c.expected})${c.hint ? ` — ${c.hint}` : ""}`) } : {}),
+  };
+}
+
+// ---------------------------------------------------------------- content
+// Content QC (idea: riqvip/codex-media-mcp inspect_media + the QC-gate
+// "rules layer"): one decode pass runs blackdetect + freezedetect on
+// the video and silencedetect on the audio, then position-aware rules
+// turn raw intervals into pass/warn/fail — a short black stretch at
+// the very start/end is usually a fade in/out, the same stretch
+// mid-file is a broken render. A stream that does not exist reports
+// "unavailable", never zero intervals.
+
+const CONTENT_MAX_INTERVALS = 100;
+
+function contentSummary(intervals) {
+  return {
+    status: "complete",
+    intervals: intervals.slice(0, CONTENT_MAX_INTERVALS),
+    total_intervals: intervals.length,
+    total_duration_seconds: +intervals.reduce((s, i) => s + i.duration, 0).toFixed(3),
+    intervals_truncated: intervals.length > CONTENT_MAX_INTERVALS,
+  };
+}
+
+/** Rules layer: a raw detection -> severity + human reason. Position
+ * matters — black/freeze/silence at an edge is often intentional
+ * (fade, still intro, tail), mid-file it is a defect. */
+function classifyContent(kind, iv, duration) {
+  const atStart = iv.start <= 0.5;
+  const atEnd = duration !== null && iv.end >= duration - 0.5;
+  const where = atStart && atEnd ? "whole file" : atStart ? "at start" : atEnd ? "at end" : "mid-file";
+  const edge = where !== "mid-file" && where !== "whole file";
+  const span = `${iv.start}s–${iv.end}s (${iv.duration}s)`;
+  if (kind === "black") {
+    if (edge && iv.duration <= 2) return { severity: "warn", reason: `black ${where} ${span} — likely a fade in/out` };
+    return { severity: "error", reason: `black ${where} ${span} — broken render or missing footage` };
+  }
+  if (kind === "freeze") {
+    if (edge) return { severity: "warn", reason: `frozen frame ${where} ${span} — likely a still or fade` };
+    return { severity: "error", reason: `frozen frame ${where} ${span} — video stalled while audio keeps playing` };
+  }
+  if (iv.duration >= 5 && !edge) return { severity: "error", reason: `silence ${where} ${span} — dead air; run silence to remove it` };
+  return { severity: "warn", reason: `silence ${where} ${span} — pause or dead air; run silence to remove it` };
+}
+
+export async function detectContent(input, { blackMinDuration = 0.5, freezeMinDuration = 2, silenceThresholdDb = -40, silenceMinDuration = 0.5 } = {}) {
+  const inPath = await requireInput(input);
+  const blackD = num(blackMinDuration, "black_min_duration", { min: 0.1, max: 60 });
+  const freezeD = num(freezeMinDuration, "freeze_min_duration", { min: 0.5, max: 60 });
+  const silTh = num(silenceThresholdDb, "silence_threshold_db", { min: -90, max: 0 });
+  const silD = num(silenceMinDuration, "silence_min_duration", { min: 0.05, max: 60 });
+  const meta = await probe(inPath);
+  const duration = meta.duration_seconds;
+
+  const black = [];
+  const freeze = [];
+  const silence = [];
+  if (meta.video || meta.audio) {
+    const args = ["-hide_banner", "-nostats", "-i", inPath];
+    if (meta.video) args.push("-vf", `blackdetect=d=${blackD}:pic_th=0.98:pix_th=0.10,freezedetect=n=-60dB:d=${freezeD}`);
+    if (meta.audio) args.push("-af", `silencedetect=noise=${silTh}dB:d=${silD}`);
+    args.push("-f", "null", "-");
+    const { stderr } = await run(FFMPEG, args);
+    let openBlack = null, openFreeze = null, openSilence = null;
+    for (const line of stderr.split("\n")) {
+      let m;
+      // blackdetect logs start+end on ONE line when the interval ends
+      // ("black_start:3 black_end:6 black_duration:3") — match that
+      // first, or a bare black_start would swallow the end.
+      if ((m = line.match(/black_start:\s*([\d.]+)\s+black_end:\s*([\d.]+)\s*black_duration:\s*([\d.]+)/))) {
+        black.push({ start: +parseFloat(m[1]).toFixed(3), end: +parseFloat(m[2]).toFixed(3), duration: +parseFloat(m[3]).toFixed(3) });
+        openBlack = null;
+        continue;
+      }
+      if ((m = line.match(/black_start:\s*([\d.]+)/))) { openBlack = parseFloat(m[1]); continue; }
+      if ((m = line.match(/black_end:\s*([\d.]+)\s*black_duration:\s*([\d.]+)/))) {
+        if (openBlack !== null) {
+          black.push({ start: +openBlack.toFixed(3), end: +parseFloat(m[1]).toFixed(3), duration: +parseFloat(m[2]).toFixed(3) });
+          openBlack = null;
+        }
+        continue;
+      }
+      if ((m = line.match(/lavfi\.freezedetect\.freeze_start:\s*([\d.]+)/))) { openFreeze = parseFloat(m[1]); continue; }
+      if ((m = line.match(/lavfi\.freezedetect\.freeze_end:\s*([\d.]+)/))) {
+        if (openFreeze !== null) {
+          freeze.push({ start: +openFreeze.toFixed(3), end: +parseFloat(m[1]).toFixed(3), duration: +(parseFloat(m[1]) - openFreeze).toFixed(3) });
+          openFreeze = null;
+        }
+        continue;
+      }
+      if ((m = line.match(/silence_start:\s*([\d.]+)/))) { openSilence = parseFloat(m[1]); continue; }
+      if ((m = line.match(/silence_end:\s*([\d.]+)\s*\|\s*silence_duration:\s*([\d.]+)/))) {
+        if (openSilence !== null) {
+          silence.push({ start: +openSilence.toFixed(3), end: +parseFloat(m[1]).toFixed(3), duration: +parseFloat(m[2]).toFixed(3) });
+          openSilence = null;
+        }
+      }
+    }
+    // An interval still open at EOF runs to the end of the file.
+    if (duration !== null) {
+      const closeOpen = (list, open) => {
+        if (open !== null) list.push({ start: +open.toFixed(3), end: +duration.toFixed(3), duration: +(duration - open).toFixed(3), ends_at_scan_boundary: true });
+      };
+      closeOpen(black, openBlack);
+      closeOpen(freeze, openFreeze);
+      closeOpen(silence, openSilence);
+    }
+  }
+
+  const issues = [];
+  const warnings = [];
+  const out = { operation: "content", input: inPath, duration_seconds: duration };
+  for (const [kind, list] of [["black", black], ["freeze", freeze], ["silence", silence]]) {
+    const hasStream = kind === "silence" ? meta.audio : meta.video;
+    if (!hasStream) { out[kind] = { status: "unavailable" }; continue; }
+    const classified = list.map((iv) => ({ ...iv, ...classifyContent(kind, iv, duration) }));
+    for (const iv of classified) (iv.severity === "error" ? issues : warnings).push(`${kind}: ${iv.reason}`);
+    out[kind] = contentSummary(classified);
+  }
+  return {
+    ...out,
+    pass: issues.length === 0,
+    ...(issues.length ? { issues } : {}),
+    ...(warnings.length ? { warnings } : {}),
   };
 }
 
@@ -1517,7 +1740,7 @@ export async function silence({ input, output = null, thresholdDb = -40, minDura
 
 const DOCTOR_FILTERS = [
   "silencedetect", "loudnorm", "subtitles", "ass", "scale", "crop",
-  "cropdetect", "gblur", "trim", "atrim", "concat", "select", "tile", "pad", "overlay",
+  "cropdetect", "blackdetect", "freezedetect", "gblur", "trim", "atrim", "concat", "select", "tile", "pad", "overlay",
   "drawtext", "volume", "sidechaincompress", "amix", "aresample",
   "xfade", "acrossfade", "fps", "anullsrc", "setpts", "asetpts",
   "format", "colorchannelmixer", "atempo", "aloop", "geq", "color",
@@ -1557,6 +1780,7 @@ const TOOL_REQUIREMENTS = {
   intro: { filters: ["color", "drawtext"], encoders: ["libx264"] },
   social: { filters: ["crop", "scale", "pad", "gblur", "overlay", "loudnorm"], encoders: ["libx264"] },
   convert_captions: {},
+  find: {},
   doctor: {},
 };
 

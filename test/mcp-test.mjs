@@ -44,10 +44,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "find"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 28 tools present");
-checkOk(missing.length === 0, "tools/list has all 28 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 29 tools present");
+checkOk(missing.length === 0, "tools/list has all 29 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -145,6 +145,53 @@ const checkGoodJson = JSON.parse(checkGoodRes.content[0].text);
 console.log("check good file:", "pass", checkGoodJson.pass, "| warnings", JSON.stringify(checkGoodJson.warnings));
 checkOk(checkGoodJson.pass === true, "check passes overall when bitrate is the only issue", `got pass=${checkGoodJson.pass} issues=${JSON.stringify(checkGoodJson.issues)}`);
 checkOk(Array.isArray(checkGoodJson.warnings) && checkGoodJson.warnings.some((w) => w.startsWith("video_bitrate")), "check still warns about the low bitrate", JSON.stringify(checkGoodJson.warnings));
+
+// check --content: black/frozen/silence fixtures, one decode pass.
+async function checkContent(file, platform = "tiktok") {
+  const r = await client.callTool({ name: "check", arguments: { input: path.join(root, file), platform, content: true } });
+  return JSON.parse(r.content[0].text);
+}
+const contentBlack = await checkContent("test/content-black.mp4");
+console.log("check content black file: black", JSON.stringify(contentBlack.content.black.intervals), "| freeze", JSON.stringify(contentBlack.content.freeze.intervals));
+checkOk(near(contentBlack.content.black.intervals[0]?.start, 3, 0.05) && near(contentBlack.content.black.intervals[0]?.end, 6, 0.05), "content finds the planted black stretch 3-6s", JSON.stringify(contentBlack.content.black.intervals));
+checkOk(contentBlack.content.black.intervals[0]?.severity === "error", "black mid-file is an error, not a warning", JSON.stringify(contentBlack.content.black.intervals));
+checkOk(near(contentBlack.content.freeze.intervals[0]?.start, 3, 0.05) && near(contentBlack.content.freeze.intervals[0]?.end, 6, 0.05), "black stretch is also reported frozen (frames do not change)", JSON.stringify(contentBlack.content.freeze.intervals));
+checkOk(contentBlack.content.silence.total_intervals === 0, "content finds no silence in the continuous-tone file", JSON.stringify(contentBlack.content.silence));
+checkOk(contentBlack.checks.find((c) => c.name === "content_black")?.pass === false, "content_black rule fails the check", JSON.stringify(contentBlack.checks));
+checkOk(contentBlack.issues?.some((i) => i.startsWith("content_black")), "content_black appears in top-level issues", JSON.stringify(contentBlack.issues));
+
+const contentFreeze = await checkContent("test/content-freeze.mp4");
+console.log("check content freeze file: freeze", JSON.stringify(contentFreeze.content.freeze.intervals), "| black", JSON.stringify(contentFreeze.content.black.intervals));
+checkOk(near(contentFreeze.content.freeze.intervals[0]?.start, 4, 0.05) && near(contentFreeze.content.freeze.intervals[0]?.end, 7, 0.05), "content finds the planted freeze 4-7s", JSON.stringify(contentFreeze.content.freeze.intervals));
+checkOk(contentFreeze.content.black.total_intervals === 0, "content finds no black in the freeze fixture", JSON.stringify(contentFreeze.content.black));
+checkOk(contentFreeze.checks.find((c) => c.name === "content_freeze")?.pass === false, "content_freeze rule fails the check");
+
+const contentSilence = await checkContent("test/content-silence.mp4");
+console.log("check content silence file: silence", JSON.stringify(contentSilence.content.silence.intervals));
+checkOk(near(contentSilence.content.silence.intervals[0]?.start, 3, 0.05) && near(contentSilence.content.silence.intervals[0]?.end, 6, 0.05), "content finds the planted silence 3-6s", JSON.stringify(contentSilence.content.silence.intervals));
+checkOk(contentSilence.content.silence.intervals[0]?.severity === "warn", "3s mid-file silence warns instead of failing", JSON.stringify(contentSilence.content.silence.intervals));
+checkOk(contentSilence.content.pass === true, "content itself passes when the only finding is a warning", JSON.stringify(contentSilence.content));
+checkOk(contentSilence.warnings?.some((w) => w.startsWith("content_silence")), "content_silence appears in top-level warnings", JSON.stringify(contentSilence.warnings));
+checkOk(!contentSilence.issues?.some((i) => i.startsWith("content_silence")), "content_silence warning does not appear in issues", JSON.stringify(contentSilence.issues));
+
+const contentLead = await checkContent("test/content-lead-black.mp4");
+checkOk(contentLead.content.black.intervals[0]?.severity === "warn", "1s black at the very start warns (likely a fade in)", JSON.stringify(contentLead.content.black.intervals));
+checkOk(contentLead.warnings?.some((w) => w.startsWith("content_black")), "leading-black warning appears in top-level warnings", JSON.stringify(contentLead.warnings));
+
+const contentTrail = await checkContent("test/content-trail-black.mp4");
+checkOk(contentTrail.content.black.intervals[0]?.severity === "error", "3s black at the end fails (too long for a fade out)", JSON.stringify(contentTrail.content.black.intervals));
+
+const contentClean = await checkContent("test/source.mp4");
+checkOk(contentClean.content.black.total_intervals === 0 && contentClean.content.freeze.total_intervals === 0 && contentClean.content.silence.total_intervals === 0, "content finds nothing in the clean source file", JSON.stringify(contentClean.content));
+checkOk(contentClean.content.pass === true, "content passes on the clean file");
+
+const contentAudioOnly = await checkContent("test/silence-audio.mp3");
+checkOk(contentAudioOnly.content.black.status === "unavailable" && contentAudioOnly.content.freeze.status === "unavailable", "audio-only file reports black/freeze unavailable, not zero", JSON.stringify(contentAudioOnly.content));
+checkOk(contentAudioOnly.content.silence.total_intervals === 2, "audio-only file still scans silence (2 gaps)", JSON.stringify(contentAudioOnly.content.silence));
+
+const contentVideoOnly = await checkContent("test/content-video-only.mp4");
+checkOk(contentVideoOnly.content.silence.status === "unavailable", "video-only file reports silence unavailable, not zero", JSON.stringify(contentVideoOnly.content));
+checkOk(!contentVideoOnly.checks.some((c) => c.name === "content_silence"), "no content_silence rule when there is no audio stream", JSON.stringify(contentVideoOnly.checks));
 
 const doctorRes = await client.callTool({
   name: "doctor",
@@ -606,6 +653,59 @@ checkOk(mixDryJson.dry_run === true, "mix dry_run=true reports dry_run", JSON.st
 checkOk(Array.isArray(mixDryJson.commands) && mixDryJson.commands.length === 1 && mixDryJson.commands[0].includes("sidechaincompress") && mixDryJson.commands[0].includes("loudnorm"), "mix dry-run prints the exact ffmpeg command (sidechain + loudnorm)", JSON.stringify(mixDryJson.commands));
 checkOk(typeof mixDryJson.voice_gain_db === "number" && mixDryJson.voice_gain_db !== 0, "mix dry-run computes a real voice gain from measurement", `got ${mixDryJson.voice_gain_db}`);
 checkOk(existsSync(mixDryPath) === false, "mix dry-run writes no file", mixDryPath);
+
+// find: recursive substring search with probe info per match.
+const findContentRes = await client.callTool({
+  name: "find",
+  arguments: { directory: path.join(root, "test"), name: "content" },
+});
+const findContentJson = JSON.parse(findContentRes.content[0].text);
+console.log("find content:", findContentJson.total_matches, "matches |", findContentJson.matches.map((m) => path.basename(m.path)).join(", "));
+checkOk(findContentJson.total_matches === 6 && findContentJson.returned_matches === 6 && findContentJson.truncated === false, "find 'content' returns all 6 content fixtures", `got total=${findContentJson.total_matches}`);
+checkOk(findContentJson.matches.every((m) => m.duration_seconds === 10 && m.video_codec === "h264"), "find probes every match (10s, h264)", JSON.stringify(findContentJson.matches));
+checkOk(findContentJson.matches.find((m) => m.path.endsWith("content-video-only.mp4"))?.audio_codec === null, "find reports video-only fixture with audio_codec null", JSON.stringify(findContentJson.matches));
+
+const findNestedRes = await client.callTool({
+  name: "find",
+  arguments: { directory: path.join(root, "test"), name: "deep-clip" },
+});
+const findNestedJson = JSON.parse(findNestedRes.content[0].text);
+checkOk(findNestedJson.total_matches === 1 && findNestedJson.matches[0]?.path.endsWith("test/nested/deep-clip.mp4"), "find recurses into subdirectories", JSON.stringify(findNestedJson.matches));
+
+const findSourceRes = await client.callTool({
+  name: "find",
+  arguments: { directory: path.join(root, "test"), name: "source" },
+});
+const findSourceJson = JSON.parse(findSourceRes.content[0].text);
+checkOk(findSourceJson.total_matches === 5, "find 'source' matches 5 files (source, source2, silence-source, scenes-source, quiet-source)", `got ${findSourceJson.total_matches}`);
+
+const findMp3Res = await client.callTool({
+  name: "find",
+  arguments: { directory: path.join(root, "test"), name: "source", extensions: "mp3" },
+});
+const findMp3Json = JSON.parse(findMp3Res.content[0].text);
+checkOk(findMp3Json.total_matches === 1 && findMp3Json.matches[0]?.path.endsWith("quiet-source.mp3"), "find --extensions mp3 narrows to the one mp3", JSON.stringify(findMp3Json.matches));
+
+const findCapRes = await client.callTool({
+  name: "find",
+  arguments: { directory: path.join(root, "test"), name: "content", max_results: 2 },
+});
+const findCapJson = JSON.parse(findCapRes.content[0].text);
+checkOk(findCapJson.returned_matches === 2 && findCapJson.total_matches === 6 && findCapJson.truncated === true, "find caps returned matches but still reports the total", `got returned=${findCapJson.returned_matches} total=${findCapJson.total_matches}`);
+
+const findNoneRes = await client.callTool({
+  name: "find",
+  arguments: { directory: path.join(root, "test"), name: "zzz-no-such-file" },
+});
+const findNoneJson = JSON.parse(findNoneRes.content[0].text);
+checkOk(findNoneJson.total_matches === 0 && findNoneJson.matches.length === 0, "find with no match returns an empty list, not an error", JSON.stringify(findNoneJson));
+
+const findBadRes = await client.callTool({
+  name: "find",
+  arguments: { directory: path.join(root, "test/no-such-dir"), name: "x" },
+});
+const findBadJson = JSON.parse(findBadRes.content[0].text);
+checkOk(findBadRes.isError === true && /not found/.test(findBadJson.error ?? ""), "find errors on a missing directory", JSON.stringify(findBadJson));
 
 await client.close();
 if (failures.length) {

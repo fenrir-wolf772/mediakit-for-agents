@@ -758,3 +758,76 @@ Tony xem 5 video TikTok trending rồi lệnh làm cho ra chất lượng như t
     rồi kiểm tra FAIL làm tốn gấp đôi thời gian (~4 phút) — lần sau chỉ
     chạy 1 lần rồi grep cả hai.
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+
+---
+
+## Lượt 12 — 2026-11-11 (check --content + find, 29 tools)
+
+Environment: ffmpeg/ffprobe 8.1.2, Node v24.22.1. Fixture mới:
+`test/content-black.mp4` (10s, 640×360, testsrc [0,3) + đen [3,6) +
+testsrc [6,10), tone 440 Hz liên tục), `test/content-freeze.mp4`
+(testsrc [0,4) + đỏ tĩnh [4,7) + testsrc [7,10)),
+`test/content-silence.mp4` (testsrc 10s + tone [0,3), lặng [3,6),
+tone [6,10)), `test/content-lead-black.mp4` (đen 1s đầu + testsrc 9s),
+`test/content-trail-black.mp4` (testsrc 7s + đen 3s cuối),
+`test/content-video-only.mp4` (source.mp4 bỏ audio), `test/nested/deep-clip.mp4`
+(copy source.mp4 để test đệ quy). Tất cả tự sinh bằng lavfi, không download.
+
+### check --content (mở rộng check, không thêm tool mới)
+
+- `detectContent` (core, dùng nội bộ bởi `check`): 1 lần decode chạy
+  `blackdetect=d=0.5:pic_th=0.98:pix_th=0.10,freezedetect=n=-60dB:d=2`
+  trên video + `silencedetect=noise=-40dB:d=0.5` trên audio, `-f null -`.
+  Rules layer theo vị trí: đen/đóng băng giữa file → error; đen ở
+  mép ≤2s → warn (fade in/out); đen ở mép >2s → error; lặng giữa file
+  ≥5s → error, còn lại warn. Mỗi loại trả `status` complete/unavailable
+  (không có stream thì unavailable, không phải 0), tối đa 100 interval
+  + `total_intervals`/`total_duration_seconds`/`intervals_truncated`,
+  interval mở tới cuối file được đóng ở duration + cờ
+  `ends_at_scan_boundary`.
+- `check --content` (CLI) / `content: true` (MCP): thêm 3 rule
+  `content_black`/`content_freeze`/`content_silence` vào cùng bảng
+  pass/fail; warn-level chỉ vào `warnings` (không fail check, giống
+  video_bitrate), error-level vào `issues`; chi tiết đầy đủ trong
+  trường `content` của kết quả.
+- `find` (core+CLI+MCP, tool thứ 29): tìm file media theo tên, đệ quy
+  (substring không phân biệt hoa thường, mặc định 20 đuôi video/audio/
+  ảnh/phụ đề, `--extensions` để hẹp, `--max-results` 1–100); bỏ qua
+  `.git`/`node_modules`/thư mục ẩn, không theo symlink dir; kết quả
+  sắp xếp theo path, mỗi match kèm probe (duration, dimensions,
+  codecs); `total_matches` vẫn báo đủ dù đã cắt ở max.
+- `doctor`: thêm filter `blackdetect`, `freezedetect` (chỉ báo có mặt,
+  không bắt `check` phải có — check cơ bản chạy không cần chúng) +
+  tool `find` (29/29). README (bảng 29 tools + đoạn check/find),
+  SKILL.md (rule 4 mở rộng + rule 21 mới), VERIFY.md (lượt 12).
+- Test (ffmpeg 8.1.2):
+  - content-black: đen **[3, 6] error mid-file**, đóng băng [3, 6]
+    (đen cũng là đóng băng — đúng); content-freeze: đóng băng
+    **[4, 7]**, không đen; content-silence: lặng **[3, 6] warn**,
+    `content.pass: true`, vào `warnings` không vào `issues`.
+  - lead-black (đen 1s đầu): **warn** "likely a fade in"; trail-black
+    (đen 3s cuối): **error** (quá dài cho fade out).
+  - source.mp4 sạch: 0 interval cả 3 loại, content pass; audio-only
+    (silence-audio.mp3): black/freeze **unavailable**, lặng 2 gap
+    [2.002, 4] + [6.003, 7]; video-only: silence **unavailable**,
+    không có rule `content_silence`.
+  - find CLI: "content" → **6 matches** (đủ 6 fixture, 10s, h264);
+    "deep-clip" → **1 match** trong `test/nested/`; không khớp → 0
+    match, không lỗi; "source" → 5; `--extensions mp3` → 1
+    (quiet-source.mp3); max-results 2 → returned 2, total 6,
+    truncated true; thư mục không tồn tại → lỗi INPUT_NOT_FOUND.
+  - `npm run check` sạch; `npm test`: **135/135 PASS, exit 0**
+    (29 tools, doctor 29/29 available). Assert mới (32): content
+    (23: đen/đóng băng/lặng đúng khoảng + severity + warn-vs-error +
+    unavailable + sạch) và find (9: 6 matches + probe, đệ quy, 5
+    source, extensions, cap, rỗng, lỗi thư mục).
+  - **Bug bắt được**: blackdetect ghi start+end trên CÙNG 1 dòng
+    (`black_start:3 black_end:6 black_duration:3`) — parser cũ match
+    `black_start` trước rồi `continue` nên nuốt mất `black_end`,
+    interval bị đóng sai ở cuối file (3s–10s, 7s, ends_at_scan_boundary).
+    Fix: match dòng đủ start+end trước, rồi mới tới black_start riêng.
+    Kiểm chứng lại: đen [3, 6] đúng; trailing black vẫn log đủ end
+    (9.967s) nên fallback đóng ở duration chỉ là lưới an toàn.
+  - Sự cố hạ tầng: 1 lần service restart giữa `npm test` (lệnh bị cắt,
+    chưa ghi output) — chạy lại 1 lần, 135/135 PASS.
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).

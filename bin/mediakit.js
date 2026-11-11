@@ -193,11 +193,12 @@ const COMMANDS = {
     ],
   },
   check: {
-    usage: "mediakit check <input> [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin]",
-    desc: "Verify a file against a platform delivery spec (dimensions, codecs, duration, loudness).",
+    usage: "mediakit check <input> [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin] [--content]",
+    desc: "Verify a file against a platform delivery spec (dimensions, codecs, duration, loudness). --content also scans for black/frozen frames and silence.",
     args: [{ name: "input", required: true }],
     options: [
       ["--platform", "Delivery platform (default tiktok)"],
+      ["--content", "Also scan content: black/frozen frames and silence (one decode pass)"],
     ],
   },
   convert: {
@@ -313,6 +314,16 @@ const COMMANDS = {
     desc: "List keyframe (I-frame) timestamps + GOP intervals. Probe-only, writes no file. Check before a stream-copy trim.",
     args: [{ name: "input", required: true }],
     options: [],
+  },
+  find: {
+    usage: "mediakit find <directory> --name <text> [--extensions mp4,mov] [--max-results 20]",
+    desc: "Find media files by name, recursively. Returns each match with probe info (duration, dimensions). Probe-only, writes no file.",
+    args: [{ name: "directory", required: true }],
+    options: [
+      ["--name", "Substring to match in the filename (case-insensitive, required)"],
+      ["--extensions", "Comma-separated extensions to include (default: common video/audio/image/caption)"],
+      ["--max-results", "Max matches to return with probe info (default 20)"],
+    ],
   },
   doctor: {
     usage: "mediakit doctor",
@@ -515,6 +526,7 @@ async function main() {
       case "check":
         result = await core.check({
           input: needInput(), platform: opts.platform ?? "tiktok",
+          content: opts.content === true,
         });
         break;
       case "convert":
@@ -645,6 +657,15 @@ async function main() {
       case "keyframes":
         result = await core.listKeyframes({ input: needInput() });
         break;
+      case "find": {
+        if (opts.name === undefined) fail("missing required option: --name <text>");
+        result = await core.findMedia({
+          directory: needInput("directory"), name: opts.name,
+          extensions: opts.extensions ?? null,
+          maxResults: numOpt(opts, "max_results") ?? 20,
+        });
+        break;
+      }
       case "doctor":
         result = await core.doctor();
         break;
