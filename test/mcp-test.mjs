@@ -880,7 +880,12 @@ checkOk(typeof receiptJson.loudness_lufs === "number", "receipt measures loudnes
 checkOk(receiptJson.platform_pass === false, "receipt records the TikTok check failing on 1280x720 source", `got ${receiptJson.platform_pass}`);
 const receiptFile = JSON.parse(await readFile(path.join(root, "outputs/mcp-receipt.json"), "utf8"));
 checkOk(receiptFile.sha256 === realSha, "receipt file on disk carries the same SHA-256", `got ${receiptFile.sha256}`);
-checkOk(receiptFile.environment?.ffmpeg_version === "8.1.2", "receipt file records the ffmpeg version", JSON.stringify(receiptFile.environment));
+// The runner's ffmpeg version differs from the dev machine's (8.0.1
+// vs 8.1.2) — compare against the version measured here, not a
+// hardcoded one, or CI goes red on a version bump that changes nothing.
+const { stdout: ffVerOut } = await execFileAsync("ffmpeg", ["-version"]);
+const ffVer = (ffVerOut.match(/ffmpeg version (\S+)/) || [])[1];
+checkOk(receiptFile.environment?.ffmpeg_version === ffVer, "receipt file records the ffmpeg version", JSON.stringify(receiptFile.environment));
 checkOk(receiptFile.platform_check?.pass === false && receiptFile.probe?.duration_seconds === 10, "receipt file embeds the platform check and probe", JSON.stringify(receiptFile.platform_check));
 // No platform: no platform_check key in the file.
 const receiptPlainRes = await client.callTool({
