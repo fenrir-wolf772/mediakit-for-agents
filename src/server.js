@@ -605,5 +605,26 @@ server.tool(
   })),
 );
 
+server.tool(
+  "mux",
+  "Replace a video's audio track with an external audio file, stream-copying both (no re-encode: fast and lossless). The video's original audio is dropped, not mixed in — mix first if you want both. audio_offset_seconds shifts the new audio against the video (positive = audio starts later, negative = video starts later). shortest stops the output at the shorter stream. dry_run prints the exact ffmpeg argv and writes no file.",
+  {
+    video: pathSchema.describe("Video file (must have a video stream)"),
+    audio: pathSchema.describe("Audio file (must have an audio stream; a video file's audio track works too)"),
+    output: pathSchema.describe("Output file path"),
+    audio_offset_seconds: z.number().min(-3600).max(3600).default(0).describe("Shift the new audio in seconds: positive delays the audio, negative delays the video"),
+    shortest: z.boolean().default(false).describe("Stop at the shorter of the two streams"),
+    dry_run: z.boolean().default(false).describe("Return the ffmpeg command without writing a file"),
+  },
+  async (a) => safe(() => core.mux({
+    video: a.video,
+    audio: a.audio,
+    output: a.output,
+    audioOffsetSeconds: a.audio_offset_seconds,
+    shortest: a.shortest,
+    dryRun: a.dry_run,
+  })),
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);

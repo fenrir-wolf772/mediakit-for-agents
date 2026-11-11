@@ -361,6 +361,18 @@ to the file; `sha256sum` against it proves the media has not changed
 since it was written. `package` already embeds the same receipt
 inside its ZIP — use `receipt` when the file is delivered on its own.
 
+### 24. Swap the audio track with `mux`, don't re-encode the video
+`mux` replaces a video's audio track with an external audio file and
+stream-copies both streams — no re-encode, so it is fast and the
+picture is bit-identical. The video's original audio is dropped, not
+mixed in: run `mix` first if you want voice over the original sound.
+`--audio-offset` shifts the new audio against the video (positive =
+audio starts later, negative = video starts later; the result reports
+the offset, and the stream `start_time` on disk proves it). Use
+`--shortest` when the replacement audio is shorter than the video and
+you want the output to end with it. `--dry-run` prints the exact
+ffmpeg command and writes no file — inspect it before you render.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

@@ -911,3 +911,20 @@ tone [6,10)), `test/content-lead-black.mp4` (đen 1s đầu + testsrc 9s),
 - **Test** (ffmpeg 8.1.2, source 1280×720 10s, 243.932 B): compress target-size 1 MB → **953.813 B, target_met: true, passes 2, video 656k + audio 128k** (đúng ngân sách: (1.000.000×0,98×8/10 − 128k) = 656k); 0,5 MB → met; audio-only mp3 9s target 0,1 MB → met, 1 pass; target 0,1 MB video → exit 2 "too small — minimum is about 0.29 MB"; target-size + crf → exit 2 "mutually exclusive". Whisper: output `.mp3` yêu cầu → ghi **`.wav` thật, 320.328 B, pcm_s16le 16000 Hz mono** — ffprobe độc lập xác nhận; whisper + format mp3 → vẫn wav. `npm run check` sạch (check-docs: 32 tools khớp README); `npm test`: **206/206 PASS, exit 0** (32 tools, doctor 32/32 available). Assert mới (13): target-size 8 + whisper 5.
 - **Bẫy đo lường**: target 1 MB ra file 953 KB — LỚN HƠN source 244 KB, `reduction_percent` −291% là báo thật (source đã encode 195 kbps); assert đúng là `target_met`, không phải "nhỏ hơn source". Tương tự bẫy ở lượt 13.
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+
+---
+
+## Lượt 16 — 2026-11-11 14:58 (+07): mux tool + dry-run (33 tools)
+
+- **Học: alanveloper-epam/ffmpeg-mcp-server** (0★, 2 commit, Python, "security-hardened"). Ý áp dụng được:
+  1. Workspace sandboxing (`FFMPEG_MCP_WORKDIR`, chặn `..` + symlink escape) → backlog mới (opt-in env `MEDIAKIT_WORKDIR`; MediaKit hiện chỉ resolve absolute path + cấm đè input).
+  2. `dry_run=True` trên MỌI tool mutative → đã làm cho `mux` ngay từ đầu (`--dry-run` trả đúng argv, không ghi file); backlog: mở rộng dry-run cho các tool khác.
+  3. `generate_srt` — sinh .srt xác định từ mảng cue `{start, end, text}` → backlog mới (thuần Node, như `convert_captions`).
+  KHÔNG copy code của họ — chỉ học ý tưởng, tự implement bằng Node/ffmpeg.
+- **Làm**:
+  - `mux` (core+CLI+MCP, tool 33): thay audio của video bằng file audio ngoài, stream-copy cả hai (không re-encode, ảnh bit-identical); audio gốc của video bị thay, không mix (muốn cả hai thì `mix` trước). `--audio-offset` dịch audio mới so với video (dương = audio trễ, âm = video trễ, qua `-itsoffset` đặt trước input bị trễ — giữ nguyên map `0:v:0`/`1:a:0` cả hai chiều); `--shortest` dừng ở stream ngắn hơn; `--dry-run` trả argv ffmpeg đầy đủ, không ghi file. Offset giới hạn ±3600s (cả core lẫn zod schema MCP).
+  - `doctor`: thêm `mux: {}` (33/33 available). README (bảng 33 tools), SKILL.md (rule 24), CI smoke thêm dòng mux `--audio-offset 0.5`.
+- **Test** (ffmpeg 8.1.2, source 1280×720 10s h264+aac, mix-voice.mp3 9s tone [0,2),[4,6),[7,9)): mux cơ bản → **10s, h264 + mp3** (aac gốc bị thay), ffprobe độc lập xác nhận đúng 2 stream; offset +2 → **11.012s, audio start_time 1.974** (≈2 − 0.026 priming mp3, trong dung sai 0.1), silencedetect độc lập tìm đúng khoảng lặng đã dịch **[4.02, 6.02) và [8.01, 9.01)** (chưa dịch sẽ là [2,4)/[6,7)); offset −1 → video start_time **1.000**, duration 11s; `--shortest` với nhạc 2s → **2.012s**; dry-run → `dry_run: true`, argv có `-c copy`, **không ghi file**; lỗi đúng (mp3 làm video, ảnh PNG làm audio, offset 9999 → zod chặn ở tầng MCP, lỗi -32602).
+- **Bẫy đo lường**: assert offset 9999 ban đầu `JSON.parse` kết quả MCP — zod từ chối trước khi vào core nên trả về chuỗi lỗi, không phải JSON → crash cả test run. Fix: đọc text + regex (cùng pattern assert social platform lạ ở lượt 10). Audio start_time 1.974 ≠ 2.025: mp3 encoder delay 26ms bị trừ khi copy — đo start_time với dung sai 0.1 thay vì so bằng.
+- `npm run check` sạch (check-docs: 33 tools khớp README); `npm test`: **221/221 PASS, exit 0** (33 tools, doctor 33/33 available). Assert mới (15).
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).

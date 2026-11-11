@@ -2240,6 +2240,7 @@ const TOOL_REQUIREMENTS = {
   social: { filters: ["crop", "scale", "pad", "gblur", "overlay", "loudnorm"], encoders: ["libx264"] },
   convert_captions: {},
   find: {},
+  mux: {},
   svg_animate: { decoders: ["librsvg"], encoders: ["libx264"] },
   doctor: {},
 };
@@ -3049,5 +3050,74 @@ export async function listKeyframes({ input }) {
     first_keyframe_seconds: ts.length ? ts[0] : null,
     starts_with_keyframe: ts.length ? ts[0] === 0 : false,
     gop_seconds: gop,
+  };
+}
+
+// ---------------------------------------------------------------- mux
+// Replace a video's audio track with an external one, stream-copying
+// both (idea: Ashutos1997's mux_media). No re-encode, so it is fast
+// and lossless; the video's original audio is dropped, not mixed in
+// (mix it first if you want both). --audio-offset shifts the new
+// audio against the video: positive delays the audio, negative delays
+// the video, via -itsoffset on the delayed input. --shortest stops at
+// the shorter stream. --dry-run prints the exact ffmpeg argv and
+// writes no file (the alanveloper-epam/ffmpeg-mcp-server idea:
+// dry-run on mutative tools, so an agent can inspect before it runs).
+export async function mux({ video, audio, output, audioOffsetSeconds = 0, shortest = false, dryRun = false }) {
+  const videoPath = await requireInput(video, "video file");
+  const audioPath = await requireInput(audio, "audio file");
+  const outPath = await prepareOutput(output, [videoPath, audioPath]);
+  const offset = num(audioOffsetSeconds, "audio_offset_seconds", { min: -3600, max: 3600 });
+
+  const vMeta = await probe(videoPath);
+  if (!vMeta.video) throw new MediaKitError("mux needs a video stream in the video file", "INVALID_ARG");
+  const aMeta = await probe(audioPath);
+  if (!aMeta.audio) throw new MediaKitError("mux needs an audio stream in the audio file", "INVALID_ARG");
+
+  const args = ["-y"];
+  if (offset >= 0) {
+    args.push("-i", videoPath);
+    if (offset > 0) args.push("-itsoffset", String(offset));
+    args.push("-i", audioPath);
+  } else {
+    args.push("-itsoffset", String(-offset), "-i", videoPath, "-i", audioPath);
+  }
+  args.push("-map", "0:v:0", "-map", "1:a:0", "-c", "copy");
+  if (shortest) args.push("-shortest");
+  const ext = path.extname(outPath).slice(1).toLowerCase();
+  if (["mp4", "mov", "m4v"].includes(ext)) args.push("-movflags", "+faststart");
+  args.push(outPath);
+
+  if (dryRun) {
+    return {
+      operation: "mux",
+      dry_run: true,
+      video: videoPath,
+      audio: audioPath,
+      output: outPath,
+      audio_offset_seconds: offset,
+      shortest: Boolean(shortest),
+      mode: "stream-copy",
+      command: [FFMPEG, ...args],
+    };
+  }
+
+  await run(FFMPEG, args);
+  const outMeta = await probe(outPath);
+  const info = await fileInfo(outPath);
+  return {
+    operation: "mux",
+    video: videoPath,
+    audio: audioPath,
+    output: outPath,
+    audio_offset_seconds: offset,
+    shortest: Boolean(shortest),
+    mode: "stream-copy",
+    video_codec: outMeta.video?.codec ?? null,
+    audio_codec: outMeta.audio?.codec ?? null,
+    width: outMeta.video?.width ?? null,
+    height: outMeta.video?.height ?? null,
+    duration_seconds: outMeta.duration_seconds,
+    ...info,
   };
 }

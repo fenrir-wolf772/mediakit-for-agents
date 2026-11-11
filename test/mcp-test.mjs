@@ -26,6 +26,15 @@ async function measureLufs(file) {
   }
 }
 
+async function probeStreams(file) {
+  try {
+    const { stdout } = await execFileAsync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,codec_name,start_time,duration", "-show_entries", "format=duration", "-of", "json", file]);
+    return JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+}
+
 const failures = [];
 function checkOk(cond, label, detail = "") {
   if (cond) console.log(`  PASS ${label}`);
@@ -45,10 +54,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "find", "svg_animate", "compress", "receipt"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "find", "svg_animate", "compress", "receipt", "mux"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 32 tools present");
-checkOk(missing.length === 0, "tools/list has all 32 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 33 tools present");
+checkOk(missing.length === 0, "tools/list has all 33 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -1018,6 +1027,85 @@ const receiptPlainJson = JSON.parse(receiptPlainRes.content[0].text);
 checkOk(receiptPlainJson.platform_pass === undefined, "receipt without platform has no platform_pass", JSON.stringify(receiptPlainJson));
 const receiptPlainFile = JSON.parse(await readFile(path.join(root, "outputs/mcp-receipt-plain.json"), "utf8"));
 checkOk(!("platform_check" in receiptPlainFile), "receipt file without platform has no platform_check key", Object.keys(receiptPlainFile).join(","));
+
+// mux: replace a video's audio track, stream-copy, with offset.
+// Fixtures: source.mp4 is 10s h264+aac; mix-voice.mp3 is 9s of tone
+// bursts [0,2),[4,6),[7,9) (so its silences are [2,4),[6,7));
+const muxRes = await client.callTool({
+  name: "mux",
+  arguments: { video: path.join(root, "test/source.mp4"), audio: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-mux.mp4") },
+});
+const muxJson = JSON.parse(muxRes.content[0].text);
+console.log("mux call:", JSON.stringify(muxJson));
+checkOk(muxJson.mode === "stream-copy", "mux reports stream-copy mode", JSON.stringify(muxJson));
+checkOk(muxJson.video_codec === "h264" && muxJson.audio_codec === "mp3", "mux keeps h264 video and copies the mp3 audio (replacing the source aac)", JSON.stringify(muxJson));
+checkOk(near(muxJson.duration_seconds, 10, 0.05), "mux output duration is 10s", `got ${muxJson.duration_seconds}`);
+// Independent probe: the output really has 1 video + 1 audio stream.
+const muxProbe = await probeStreams(path.join(root, "outputs/mcp-mux.mp4"));
+checkOk(muxProbe?.streams?.length === 2 && muxProbe.streams.some((s) => s.codec_type === "video") && muxProbe.streams.some((s) => s.codec_type === "audio" && s.codec_name === "mp3"), "independent ffprobe sees h264 + mp3 in the mux output", JSON.stringify(muxProbe?.streams));
+// +2s offset: audio stream start_time moves to ~2s (mp3 priming
+// shifts it by ~26ms, so tolerance 0.1), and the tone gaps move with
+// it: silencedetect must find the gap at [4,6), not the unshifted [2,4).
+const muxOffRes = await client.callTool({
+  name: "mux",
+  arguments: { video: path.join(root, "test/source.mp4"), audio: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-mux-off2.mp4"), audio_offset_seconds: 2 },
+});
+const muxOffJson = JSON.parse(muxOffRes.content[0].text);
+checkOk(near(muxOffJson.duration_seconds, 11, 0.05), "mux +2s offset stretches duration to 11s", `got ${muxOffJson.duration_seconds}`);
+const muxOffProbe = await probeStreams(path.join(root, "outputs/mcp-mux-off2.mp4"));
+const offAudioStart = parseFloat(muxOffProbe?.streams?.find((s) => s.codec_type === "audio")?.start_time ?? NaN);
+checkOk(near(offAudioStart, 2, 0.1), "mux +2s offset: independent ffprobe audio start_time is ~2s", `got ${offAudioStart}`);
+const { stderr: sdErr } = await execFileAsync("ffmpeg", ["-v", "info", "-i", path.join(root, "outputs/mcp-mux-off2.mp4"), "-map", "0:a", "-af", "silencedetect=noise=-40dB:d=0.5", "-f", "null", "-"]);
+const sdStarts = [...sdErr.matchAll(/silence_start: ([\d.]+)/g)].map((m) => parseFloat(m[1]));
+checkOk(sdStarts.some((t) => near(t, 4, 0.1)) && sdStarts.some((t) => near(t, 8, 0.1)), "mux +2s offset: silencedetect finds the tone gaps shifted to [4,6) and [8,9)", `gaps at ${sdStarts.join(", ")}`);
+// Negative offset delays the video instead.
+const muxNegRes = await client.callTool({
+  name: "mux",
+  arguments: { video: path.join(root, "test/source.mp4"), audio: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-mux-offneg.mp4"), audio_offset_seconds: -1 },
+});
+const muxNegJson = JSON.parse(muxNegRes.content[0].text);
+checkOk(near(muxNegJson.duration_seconds, 11, 0.05), "mux -1s offset stretches duration to 11s", `got ${muxNegJson.duration_seconds}`);
+const muxNegProbe = await probeStreams(path.join(root, "outputs/mcp-mux-offneg.mp4"));
+const negVideoStart = parseFloat(muxNegProbe?.streams?.find((s) => s.codec_type === "video")?.start_time ?? NaN);
+checkOk(near(negVideoStart, 1, 0.05), "mux -1s offset: independent ffprobe video start_time is 1s", `got ${negVideoStart}`);
+// --shortest stops at the 2s audio.
+const muxShortRes = await client.callTool({
+  name: "mux",
+  arguments: { video: path.join(root, "test/source.mp4"), audio: path.join(root, "test/mix-music-short.mp3"), output: path.join(root, "outputs/mcp-mux-short.mp4"), shortest: true },
+});
+const muxShortJson = JSON.parse(muxShortRes.content[0].text);
+checkOk(near(muxShortJson.duration_seconds, 2, 0.05), "mux --shortest stops at the 2s audio", `got ${muxShortJson.duration_seconds}`);
+// dry-run writes no file.
+const muxDryPath = path.join(root, "outputs/mcp-mux-dry.mp4");
+const muxDryRes = await client.callTool({
+  name: "mux",
+  arguments: { video: path.join(root, "test/source.mp4"), audio: path.join(root, "test/mix-voice.mp3"), output: muxDryPath, dry_run: true },
+});
+const muxDryJson = JSON.parse(muxDryRes.content[0].text);
+checkOk(muxDryJson.dry_run === true && Array.isArray(muxDryJson.command) && muxDryJson.command.includes("-itsoffset") === false, "mux dry-run returns the ffmpeg command", JSON.stringify(muxDryJson).slice(0, 200));
+checkOk(!existsSync(muxDryPath), "mux dry-run writes no file", muxDryPath);
+// Errors: audio file as the video, video file as the audio, offset out of range.
+const muxBadVideoRes = await client.callTool({
+  name: "mux",
+  arguments: { video: path.join(root, "test/mix-voice.mp3"), audio: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-mux-bad.mp4") },
+});
+const muxBadVideoJson = JSON.parse(muxBadVideoRes.content[0].text);
+checkOk(muxBadVideoRes.isError === true && /video stream/.test(muxBadVideoJson.error ?? ""), "mux refuses an audio file as the video input", JSON.stringify(muxBadVideoJson));
+const muxBadAudioRes = await client.callTool({
+  name: "mux",
+  arguments: { video: path.join(root, "test/source.mp4"), audio: path.join(root, "test/logo.png"), output: path.join(root, "outputs/mcp-mux-bad2.mp4") },
+});
+const muxBadAudioJson = JSON.parse(muxBadAudioRes.content[0].text);
+checkOk(muxBadAudioRes.isError === true && /audio stream/.test(muxBadAudioJson.error ?? ""), "mux refuses an image (no audio stream) as the audio input", JSON.stringify(muxBadAudioJson));
+const muxBadOffRes = await client.callTool({
+  name: "mux",
+  arguments: { video: path.join(root, "test/source.mp4"), audio: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-mux-bad3.mp4"), audio_offset_seconds: 9999 },
+});
+// Zod rejects out-of-range input at the MCP layer, so the result is
+// an error string, not JSON — read the text (same pattern as the
+// social bad-platform assertion), don't JSON.parse it.
+const muxBadOffText = muxBadOffRes.content[0].text;
+checkOk(/3600/.test(muxBadOffText) && /audio_offset_seconds/.test(muxBadOffText), "mux refuses an offset outside ±3600s (MCP schema validation)", muxBadOffText.slice(0, 200));
 
 await client.close();
 if (failures.length) {

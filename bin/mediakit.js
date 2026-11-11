@@ -340,6 +340,17 @@ const COMMANDS = {
     args: [{ name: "input", required: true }],
     options: [],
   },
+  mux: {
+    usage: "mediakit mux <video> <audio> -o <output> [--audio-offset <s>] [--shortest] [--dry-run]",
+    desc: "Replace a video's audio track with an external audio file, stream-copying both (no re-encode). --audio-offset shifts the new audio (positive = audio later, negative = video later). --dry-run prints the ffmpeg command and writes no file.",
+    args: [{ name: "video", required: true }, { name: "audio", required: true }],
+    options: [
+      ["--audio-offset", "Shift the new audio in seconds (default 0; positive delays audio, negative delays video)"],
+      ["--shortest", "Stop at the shorter of the two streams"],
+      ["--dry-run", "Print the ffmpeg command without writing a file"],
+      ["-o, --output", "Output file (required)"],
+    ],
+  },
   find: {
     usage: "mediakit find <directory> --name <text> [--extensions mp4,mov] [--max-results 20]",
     desc: "Find media files by name, recursively. Returns each match with probe info (duration, dimensions). Probe-only, writes no file.",
@@ -714,6 +725,16 @@ async function main() {
       case "keyframes":
         result = await core.listKeyframes({ input: needInput() });
         break;
+      case "mux": {
+        if (!positional[1]) fail("missing audio file");
+        result = await core.mux({
+          video: needInput("video"), audio: positional[1], output: needOutput(opts),
+          audioOffsetSeconds: numOpt(opts, "audio_offset") ?? 0,
+          shortest: opts.shortest === true,
+          dryRun: opts.dry_run === true,
+        });
+        break;
+      }
       case "find": {
         if (opts.name === undefined) fail("missing required option: --name <text>");
         result = await core.findMedia({
