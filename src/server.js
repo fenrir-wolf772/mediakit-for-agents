@@ -499,16 +499,51 @@ server.tool(
 
 server.tool(
   "generate_srt",
-  "Build a deterministic .srt subtitle file from a cue list [{start, end, text}] — pure text, no ffmpeg. Times accept seconds or \"MM:SS\" / \"HH:MM:SS\". Cues must be in order and must not overlap (touching is fine); each text must be non-empty and may span lines with \\n. This is the input burn_captions wants.",
+  "Build a deterministic .srt subtitle file from a cue list [{start, end, text}] — pure text, no ffmpeg. Times accept seconds or \"MM:SS\" / \"HH:MM:SS\". Cues must be in order and must not overlap (touching is fine); each text must be non-empty and may span lines with \\n. This is the input burn_captions wants. Or pass words [{start, end, word}] instead of cues: they are grouped into semantic cues (max 8 words, 3.5s, 84 chars / 2 lines of 42; split on pauses >0.4s and sentence ends; a cue never ends on a stranded word like 'the'/'of') and the grouping report is returned. Pass cues or words, never both.",
   {
     cues: z.array(z.object({
       start: z.union([z.number(), z.string()]).describe("Cue start: seconds or \"MM:SS\""),
       end: z.union([z.number(), z.string()]).describe("Cue end: seconds or \"MM:SS\" (must be after start)"),
       text: z.string().min(1).describe("Cue text (may contain \\n for multiple lines)"),
-    })).min(1).max(10000).describe("Cue list, in timeline order, non-overlapping"),
+    })).min(1).max(10000).optional().describe("Cue list, in timeline order, non-overlapping. Omit when passing words."),
+    words: z.array(z.object({
+      start: z.union([z.number(), z.string()]).describe("Word start: seconds or \"MM:SS\""),
+      end: z.union([z.number(), z.string()]).describe("Word end: seconds or \"MM:SS\" (must be after start)"),
+      word: z.string().min(1).describe("One word (a single token, no spaces)"),
+    })).min(1).max(80000).optional().describe("Word timings to group into semantic cues. Omit when passing cues."),
     output: pathSchema.describe("Output .srt file path"),
   },
-  async (a) => safe(() => core.generateSrt({ cues: a.cues, output: a.output })),
+  async (a) => safe(() => core.generateSrt({ cues: a.cues ?? null, words: a.words ?? null, output: a.output })),
+);
+
+server.tool(
+  "publish_kit",
+  "Thumbnail & Publishing Kit: from a finished video + a 1280x720 16:9 thumbnail + agent-written copy, write publishing/metadata.md and publishing.json and report a pre-publish checklist. Verifies what it can (thumbnail size, exactly 5 distinct 1-100-char titles, chapter times against the measured video duration, SHA-256 of media + thumbnail) and marks what it cannot verify as human-review (mobile readability, title/cover fidelity, licences) — never a pass. Flags unsupported-promise phrasing in titles as warnings. Does not publish or upload anything.",
+  {
+    input: pathSchema.describe("Finished video file"),
+    thumbnail: pathSchema.describe("Thumbnail image, 16:9 and at least 1280px wide (e.g. 1280x720)"),
+    output_dir: pathSchema.describe("Directory to write metadata.md + publishing.json into"),
+    style: z.enum(["clean-bold", "minimal-line", "warm-story"]).optional().describe("Shorts style lock id from skills/shorts-video/styles.json, recorded in the kit (optional)"),
+    titles: z.array(z.string().min(1).max(100)).length(5).describe("Exactly 5 distinct titles (the agent writes them; the tool only checks length/distinctness and flags hype phrasing)"),
+    description: z.string().min(1).max(5000).describe("Video description (paste-ready)"),
+    tags: z.array(z.string().min(1).max(50)).min(1).max(30).describe("1-30 tags"),
+    pinned_comment: z.string().min(1).max(500).describe("One pinned comment: a genuine question for viewers"),
+    chapters: z.array(z.object({
+      time: z.union([z.number(), z.string()]).describe("Chapter time: seconds or \"MM:SS\" (must be inside the video, increasing)"),
+      label: z.string().min(1).max(80).describe("Chapter label"),
+    })).optional().describe("Optional chapters [{time, label}] — omitted when the final cut has no verified timeline"),
+  },
+  async (a) => safe(() => core.publishKit({
+    input: a.input,
+    thumbnail: a.thumbnail,
+    outputDir: a.output_dir,
+    style: a.style ?? null,
+    titles: a.titles,
+    description: a.description,
+    tags: a.tags,
+    pinnedComment: a.pinned_comment,
+    chapters: a.chapters ?? null,
+  })),
 );
 
 server.tool(

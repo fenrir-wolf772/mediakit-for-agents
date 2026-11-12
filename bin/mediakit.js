@@ -355,12 +355,24 @@ const COMMANDS = {
     ],
   },
   "generate-srt": {
-    usage: "mediakit generate-srt --cues-file <cues.json> -o <output.srt>",
-    desc: "Build a .srt from a JSON cue list [{start, end, text}] (times in seconds or MM:SS; cues must be in order, non-overlapping). Pure text, no ffmpeg.",
+    usage: "mediakit generate-srt --cues-file <cues.json> -o <output.srt>  |  mediakit generate-srt --words-file <words.json> -o <output.srt>",
+    desc: "Build a .srt from a JSON cue list [{start, end, text}] (times in seconds or MM:SS; cues must be in order, non-overlapping). Or from word timings [{start, end, word}] with --words-file: words are grouped into semantic cues (max 8 words, 3.5s, 84 chars / 2 lines of 42; split on pauses >0.4s and sentence ends; a cue never ends on a stranded word). Pure text, no ffmpeg.",
     args: [],
     options: [
-      ["--cues-file", "JSON file with the cue array (required; may also be {\"cues\": [...]})"],
+      ["--cues-file", "JSON file with the cue array (may also be {\"cues\": [...]})"],
+      ["--words-file", "JSON file with the word array (may also be {\"words\": [...]}); alternative to --cues-file"],
       ["-o, --output", "Output .srt file (required)"],
+    ],
+  },
+  "publish-kit": {
+    usage: "mediakit publish-kit <input> --thumbnail <thumb.png> --kit-file <kit.json> -o <output-dir> [--style clean-bold|minimal-line|warm-story]",
+    desc: "Thumbnail & Publishing Kit: from a finished video + 1280x720 16:9 thumbnail + copy in kit.json {titles (exactly 5), description, tags, pinned_comment, chapters?}, write metadata.md + publishing.json and report a pre-publish checklist. Verifies thumbnail size, titles and chapter times; mobile readability, fidelity and licences are marked human-review, never passed. Publishes nothing.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--thumbnail", "Thumbnail image, 16:9 and at least 1280px wide (required)"],
+      ["--kit-file", "JSON file with titles/description/tags/pinned_comment/chapters (required)"],
+      ["--style", "Shorts style lock id from skills/shorts-video/styles.json (optional, recorded in the kit)"],
+      ["-o, --output", "Output directory for metadata.md + publishing.json (required)"],
     ],
   },
   transcribe: {
@@ -858,16 +870,46 @@ async function main() {
         });
         break;
       case "generate-srt": {
-        if (!opts.cues_file) fail("missing required option: --cues-file <cues.json>");
+        if (opts.cues_file && opts.words_file) fail("generate-srt takes --cues-file or --words-file, not both");
+        if (!opts.cues_file && !opts.words_file) fail("missing required option: --cues-file <cues.json> or --words-file <words.json>");
         const { readFile } = await import("node:fs/promises");
-        let cuesJson;
+        const file = opts.cues_file ?? opts.words_file;
+        let parsed;
         try {
-          cuesJson = JSON.parse(await readFile(opts.cues_file, "utf8"));
+          parsed = JSON.parse(await readFile(file, "utf8"));
         } catch (e) {
-          fail(`could not read cues JSON ${opts.cues_file}: ${e.message}`);
+          fail(`could not read JSON ${file}: ${e.message}`);
         }
-        const cues = Array.isArray(cuesJson) ? cuesJson : cuesJson.cues;
-        result = await core.generateSrt({ cues, output: needOutput(opts) });
+        if (opts.cues_file) {
+          const cues = Array.isArray(parsed) ? parsed : parsed.cues;
+          result = await core.generateSrt({ cues, output: needOutput(opts) });
+        } else {
+          const words = Array.isArray(parsed) ? parsed : parsed.words;
+          result = await core.generateSrt({ words, output: needOutput(opts) });
+        }
+        break;
+      }
+      case "publish-kit": {
+        if (!opts.thumbnail) fail("missing required option: --thumbnail <thumb.png>");
+        if (!opts.kit_file) fail("missing required option: --kit-file <kit.json>");
+        const { readFile } = await import("node:fs/promises");
+        let kit;
+        try {
+          kit = JSON.parse(await readFile(opts.kit_file, "utf8"));
+        } catch (e) {
+          fail(`could not read kit JSON ${opts.kit_file}: ${e.message}`);
+        }
+        result = await core.publishKit({
+          input: needInput(),
+          thumbnail: opts.thumbnail,
+          outputDir: needOutput(opts),
+          style: opts.style ?? null,
+          titles: kit.titles,
+          description: kit.description,
+          tags: kit.tags,
+          pinnedComment: kit.pinned_comment ?? kit.pinnedComment,
+          chapters: kit.chapters ?? null,
+        });
         break;
       }
       case "transcribe":

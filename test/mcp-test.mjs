@@ -11,7 +11,7 @@ import { copyFile, mkdir, readFile, rm, symlink } from "node:fs/promises";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { fixForMissing } from "../src/core.js";
+import { fixForMissing, groupWords, SHORTS_STYLE_IDS } from "../src/core.js";
 
 const execFileAsync = promisify(execFile);
 // Independent loudness measurement: run ffmpeg's loudnorm analysis
@@ -97,10 +97,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 42 tools present");
-checkOk(missing.length === 0, "tools/list has all 42 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 43 tools present");
+checkOk(missing.length === 0, "tools/list has all 43 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -1828,6 +1828,117 @@ const genBadExtRes = await client.callTool({
 const genBadExtJson = JSON.parse(genBadExtRes.content[0].text);
 checkOk(genBadExtRes.isError === true && /\.srt/.test(genBadExtJson.error ?? ""), "generate_srt refuses a non-.srt output", JSON.stringify(genBadExtJson));
 
+// generate_srt words mode: semantic grouping. 11 words -> 2 cues:
+// the 8-word cap splits after "see" (cue 1 ends 2.3s), the rest form
+// cue 2. The grouping report names the split reason per cue.
+const genWordsRes = await client.callTool({
+  name: "generate_srt",
+  arguments: {
+    words: [
+      { word: "Your", start: 0, end: 0.3 }, { word: "brain", start: 0.3, end: 0.6 },
+      { word: "deletes", start: 0.6, end: 0.95 }, { word: "most", start: 0.95, end: 1.2 },
+      { word: "of", start: 1.2, end: 1.45 }, { word: "what", start: 1.45, end: 1.7 },
+      { word: "you", start: 1.7, end: 1.95 }, { word: "see", start: 1.95, end: 2.3 },
+      { word: "every", start: 2.3, end: 2.6 }, { word: "single", start: 2.6, end: 2.95 },
+      { word: "day", start: 2.95, end: 3.3 },
+    ],
+    output: path.join(root, "outputs/mcp-gen-words.srt"),
+  },
+});
+const genWordsJson = JSON.parse(genWordsRes.content[0].text);
+console.log("generate_srt words call:", JSON.stringify(genWordsJson.grouping));
+checkOk(genWordsJson.cue_count === 2 && genWordsJson.grouping?.words_in === 11 && genWordsJson.grouping?.split_reasons?.[0] === "word-limit", "generate_srt words mode groups 11 words into 2 cues (8-word cap)", JSON.stringify(genWordsJson.grouping));
+const genWordsText = await readFile(path.join(root, "outputs/mcp-gen-words.srt"), "utf8");
+checkOk(genWordsText.includes("1\n00:00:00,000 --> 00:00:02,300\nYour brain deletes most of what you see") && genWordsText.includes("2\n00:00:02,300 --> 00:00:03,300\nevery single day"), "generate_srt words file has the 2 expected cues with exact times", genWordsText.replace(/\n/g, " "));
+// groupWords directly: sentence end splits, a >0.4s pause splits, and
+// a cue never ends on a stranded word ("the" moves to the next cue).
+const gwSentence = groupWords([
+  { word: "Go", start: 0, end: 0.2 }, { word: "home.", start: 0.2, end: 0.5 },
+  { word: "Stay", start: 0.5, end: 0.8 }, { word: "safe.", start: 0.8, end: 1.1 },
+  { word: "Hello", start: 2.0, end: 2.3 }, { word: "world", start: 2.3, end: 2.6 },
+]);
+checkOk(gwSentence.cues.map((c) => c.text).join(" | ") === "Go home. | Stay safe. | Hello world", "groupWords splits on sentence end and on a 0.9s pause", JSON.stringify(gwSentence.cues.map((c) => c.text)));
+const gwStranded = groupWords(["One", "two", "three", "four", "five", "six", "seven", "the", "dog", "runs"].map((word, i) => ({ word, start: i * 0.2, end: i * 0.2 + 0.2 })));
+checkOk(gwStranded.cues.map((c) => c.text).join(" | ") === "One two three four five six seven | the dog runs", "groupWords moves a stranded 'the' to the next cue", JSON.stringify(gwStranded.cues.map((c) => c.text)));
+// Errors: cues + words together, and neither.
+const genBothRes = await client.callTool({
+  name: "generate_srt",
+  arguments: { cues: [{ start: 0, end: 2, text: "a" }], words: [{ word: "a", start: 0, end: 0.2 }], output: path.join(root, "outputs/mcp-gen-both.srt") },
+});
+const genBothJson = JSON.parse(genBothRes.content[0].text);
+checkOk(genBothRes.isError === true && /not both/.test(genBothJson.error ?? ""), "generate_srt refuses cues + words together", JSON.stringify(genBothJson));
+const genNeitherText = await callExpectThrow("generate_srt", { output: path.join(root, "outputs/mcp-gen-neither.srt") });
+checkOk(/needs cues/.test(genNeitherText ?? ""), "generate_srt refuses neither cues nor words", genNeitherText ?? "");
+
+// publish_kit: thumbnail 1280x720 from the 10s fixture + 5 titles +
+// chapters inside the measured duration -> metadata.md + publishing.json.
+// A 640x360 frame is refused (under 1280px), 4 titles are refused
+// (zod length), and a chapter past the duration is refused.
+await client.callTool({
+  name: "extract_frame",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-pub-thumb.png"), timestamp: 3 },
+});
+const pubKitRes = await client.callTool({
+  name: "publish_kit",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    thumbnail: path.join(root, "outputs/mcp-pub-thumb.png"),
+    output_dir: path.join(root, "outputs/mcp-publishing"),
+    style: "clean-bold",
+    titles: ["Your Brain Deletes Most of What You See", "Why You Forget Everything You Just Saw", "The Brain Trick Hiding in Plain Sight", "You See Less Than You Think", "What Your Brain Edits Out Every Second"],
+    description: "A 10-second explainer about inattentional blindness, built with MediaKit.",
+    tags: ["brain", "psychology", "shorts", "explainer"],
+    pinned_comment: "What is something you stared straight at and still missed?",
+    chapters: [{ time: 0, label: "The trick" }, { time: 5, label: "Why it happens" }],
+  },
+});
+const pubKitJson = JSON.parse(pubKitRes.content[0].text);
+console.log("publish_kit call:", JSON.stringify(pubKitJson.checklist));
+checkOk(pubKitJson.operation === "publish_kit" && pubKitJson.style === "clean-bold" && pubKitJson.media?.duration_seconds === 10 && pubKitJson.thumbnail?.width === 1280, "publish_kit reports 10s media + 1280x720 thumbnail + clean-bold style", JSON.stringify(pubKitJson.media));
+checkOk(pubKitJson.checklist?.filter((c) => c.status === "checked").length === 4 && pubKitJson.checklist?.filter((c) => c.status === "human-review").length === 3, "publish_kit checklist has 4 checked + 3 human-review items (never a false pass)", JSON.stringify(pubKitJson.checklist));
+const pubMd = await readFile(path.join(root, "outputs/mcp-publishing/metadata.md"), "utf8");
+checkOk(pubMd.includes("Your Brain Deletes Most of What You See") && pubMd.includes("HUMAN REVIEW") && pubMd.includes("- 00:05 Why it happens"), "publish_kit metadata.md has titles, chapters and HUMAN REVIEW items on disk", pubMd.slice(0, 200).replace(/\n/g, " "));
+const pubDoc = JSON.parse(await readFile(path.join(root, "outputs/mcp-publishing/publishing.json"), "utf8"));
+checkOk(pubDoc.media?.sha256?.length === 64 && pubDoc.titles?.length === 5 && pubDoc.style === "clean-bold", "publish_kit publishing.json records SHA-256, 5 titles and the style", JSON.stringify(pubDoc.titles));
+const pubBadTitlesText = await callExpectThrow("publish_kit", {
+  input: path.join(root, "test/source.mp4"), thumbnail: path.join(root, "outputs/mcp-pub-thumb.png"),
+  output_dir: path.join(root, "outputs/mcp-publishing-bad"), titles: ["One", "Two", "Three", "Four"],
+  description: "d", tags: ["x"], pinned_comment: "q?",
+});
+checkOk(/Array must contain exactly 5/.test(pubBadTitlesText ?? ""), "publish_kit refuses 4 titles (zod length)", pubBadTitlesText ?? "");
+await client.callTool({
+  name: "extract_frame",
+  arguments: { input: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-pub-thumb-small.png"), timestamp: 1 },
+});
+const pubSmallRes = await client.callTool({
+  name: "publish_kit",
+  arguments: {
+    input: path.join(root, "test/source.mp4"), thumbnail: path.join(root, "outputs/mcp-pub-thumb-small.png"),
+    output_dir: path.join(root, "outputs/mcp-publishing-small"),
+    titles: ["A", "B", "C", "D", "E"], description: "d", tags: ["x"], pinned_comment: "q?",
+  },
+});
+const pubSmallJson = JSON.parse(pubSmallRes.content[0].text);
+checkOk(pubSmallRes.isError === true && /at least 1280px/.test(pubSmallJson.error ?? ""), "publish_kit refuses a 640px-wide thumbnail", JSON.stringify(pubSmallJson));
+const pubBadChapterRes = await client.callTool({
+  name: "publish_kit",
+  arguments: {
+    input: path.join(root, "test/source.mp4"), thumbnail: path.join(root, "outputs/mcp-pub-thumb.png"),
+    output_dir: path.join(root, "outputs/mcp-publishing-badch"),
+    titles: ["A", "B", "C", "D", "E"], description: "d", tags: ["x"], pinned_comment: "q?",
+    chapters: [{ time: 99, label: "Too late" }],
+  },
+});
+const pubBadChapterJson = JSON.parse(pubBadChapterRes.content[0].text);
+checkOk(pubBadChapterRes.isError === true && /outside the video/.test(pubBadChapterJson.error ?? ""), "publish_kit refuses a chapter past the measured duration", JSON.stringify(pubBadChapterJson));
+
+// Style lock: skills/shorts-video/styles.json has exactly the three
+// ids the code enforces, and every locked burn_captions value is
+// inside the tool's accepted range.
+const stylesDoc = JSON.parse(await readFile(path.join(root, "skills/shorts-video/styles.json"), "utf8"));
+checkOk(JSON.stringify(stylesDoc.styles.map((s) => s.id)) === JSON.stringify(SHORTS_STYLE_IDS), "styles.json ids match SHORTS_STYLE_IDS in code", JSON.stringify(stylesDoc.styles.map((s) => s.id)));
+checkOk(stylesDoc.styles.every((s) => ["background", "outline", "shadow", "glow"].includes(s.locked.burn_captions.style) && s.locked.burn_captions.font_size >= 8 && s.locked.burn_captions.font_size <= 200 && s.locked.loudness_target_lufs === -14), "every locked style has a valid caption style, font size and -14 LUFS target", JSON.stringify(stylesDoc.styles.map((s) => s.locked.burn_captions)));
+
 // transcribe: validation errors need no engine (checked before the
 // ASR engine is probed). The no-engine path is tested through a second
 // server with both engines disabled (MEDIAKIT_ASR_PYTHON pointed at
@@ -2058,7 +2169,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 42 && infoJson.tools_available >= 41 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 42 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 43 && infoJson.tools_available >= 42 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 43 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");

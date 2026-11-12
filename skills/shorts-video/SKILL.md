@@ -11,6 +11,26 @@ commands.
   landscape video + its voiceover.
 - **Target**: 1080×1920, 9:16, 30–60s is the sweet spot.
 - **Captions**: SRT you write from the script (see below).
+- **Style**: exactly one id from `styles.json` — `clean-bold` (default),
+  `minimal-line`, or `warm-story`. See Style lock below.
+
+## Style lock
+
+Each style in `styles.json` owns its caption treatment, title card,
+grade and mix. Pick one **before** burning captions and record the id
+in the project's notes (and in `publish_kit`, which enforces the same
+three ids in code).
+
+- Never change a locked value silently: a different font size, caption
+  style, grade or music level is a style change, not a tweak.
+- Changing the style after captions are burned means re-burning
+  captions and re-verifying frames (Step 6). The old render is not
+  the new style.
+- A user request for one specific value (e.g. bigger type) is a scoped
+  override for that video only: record it, do not rewrite `styles.json`.
+- Do not import another style's look into this video, and do not fall
+  back to a different style because a tool failed — fix the tool call,
+  or say what is blocked.
 
 ## Workflow
 
@@ -29,15 +49,26 @@ resize: width 1080 (keep_aspect)
 
 Example for a 1280×720 source:
 - crop 720×1280 is impossible (source is only 720 tall) — instead crop
-  **405×720** (720 × 9/16 = 405) centered, then resize to 1080×1920.
-  Upscaling 405 → 1080 softens the image; if the source is 1080p or 4K,
-  prefer cropping from the full-resolution file.
+  **404×720** (720 × 9/16 = 405, rounded down to even — H.264 needs
+  even dimensions, so `crop` reports 404) centered, then resize to
+  1080×1920 with an explicit height (`--height 1920 --no-keep-aspect`:
+  width-only resize would give 1080×1924 from a 404-wide crop and
+  fail `check --platform tiktok`). Upscaling 404 → 1080 softens the
+  image; if the source is 1080p or 4K, prefer cropping from the
+  full-resolution file.
 - If the subject is off-center (talking head on the left), shift `x`
   toward the subject instead of centering blindly. `extract_frame` first
   and look at it.
 
-### Step 3 — Captions (SRT)
-Write the SRT from the script. Rules:
+### Step 3 — Captions (SRT, semantic)
+Prefer word timings over hand-written cues. If you have word timings
+(Whisper word timestamps, or timings you measured from the voiceover),
+pass them to `generate_srt` with `--words-file`: it groups words into
+semantic cues — max 8 words, 3.5s, 84 characters per cue; splits on
+pauses over 0.4s and on sentence ends; a cue never ends on a stranded
+word like "the" or "of". The grouping report comes back in the result,
+so you can see why each cue split. Only write cues by hand when you
+have no word timings. Either way:
 - One idea per cue, ≤ 2 lines, ≤ 42 characters per line.
 - Cue boundaries on natural pauses, not mid-word.
 - 1–3 seconds per cue for Shorts pacing; never leave a gap with no
@@ -46,16 +77,18 @@ Write the SRT from the script. Rules:
 
 ```
 1
-00:00:00,000 --> 00:00:02,000
-Your brain deletes
+00:00:00,000 --> 00:00:02,300
+Your brain deletes most of what you see
 
 2
-00:00:02,000 --> 00:00:04,500
-most of what you see.
+00:00:02,300 --> 00:00:03,300
+every single day
 ```
 
 ### Step 4 — Burn captions
-`burn_captions` with `--font-size 48` (1080-wide vertical needs big type).
+Use the locked style's `burn_captions` values from `styles.json`
+(`clean-bold`: `--style background --font-size 60 --margin-v 500`).
+Do not invent a different size or style for this video.
 Verify with `extract_frame` at a timestamp where a caption should show —
 read the frame and confirm the text is legible, not cut off at the edges,
 and not sitting under the platform's UI zone (keep captions in the middle
@@ -64,7 +97,9 @@ buttons and caption bar on phones).
 
 ### Step 5 — Audio
 - Voiceover too quiet vs music: `loudness` the voice to −14 LUFS first,
-  then mix music underneath at a lower level.
+  then mix music underneath at the locked style's level (`clean-bold`:
+  music volume 0.3, duck 12 dB; `warm-story`: 0.25, duck 12 dB;
+  `minimal-line`: no music bed).
 - If the clip has no audio track, that's fine — platforms add music.
   Don't invent an audio track the user didn't ask for.
 
@@ -73,6 +108,15 @@ buttons and caption bar on phones).
 2. `extract_frame` at 3 timestamps (start, middle, end): captions visible
    and correct, subject framed, nothing important cropped out.
 3. `thumbnail` for a quick whole-clip overview.
+4. Record the style id used, so a later re-render or a publishing kit
+   for this video names the same style.
+
+### Step 7 — Publishing kit (offer once, after approval)
+Only after the user confirms the final video is satisfactory, offer
+once to build a publishing kit with `publish_kit` — see
+`references/publishing-kit.md`. If they decline or defer, stop; do not
+repeat the offer. A sample approval or a successful render is not
+final-video approval.
 
 ## Common failures
 
@@ -89,9 +133,9 @@ buttons and caption bar on phones).
 
 ```bash
 mediakit probe input.mp4
-mediakit crop input.mp4 --width 405 --height 720 --x 437 --y 0 -o cropped.mp4
-mediakit resize cropped.mp4 --width 1080 -o vertical.mp4
-mediakit burn-captions vertical.mp4 --captions captions.srt --font-size 48 -o short.mp4
+mediakit crop input.mp4 --width 404 --height 720 --x 438 --y 0 -o cropped.mp4
+mediakit resize cropped.mp4 --width 1080 --height 1920 --no-keep-aspect -o vertical.mp4
+mediakit burn-captions vertical.mp4 --captions captions.srt --style background --font-size 60 --margin-v 500 -o short.mp4
 mediakit probe short.mp4
 mediakit extract-frame short.mp4 --timestamp 3 -o check.png
 ```

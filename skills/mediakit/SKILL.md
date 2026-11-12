@@ -382,6 +382,17 @@ overlap (touching is fine); text may span lines with `\n`. On the CLI
 the cues come from a JSON file (`--cues-file cues.json`, array or
 `{"cues": [...]}`); over MCP they are passed directly.
 
+Prefer word timings when you have them: pass `words`
+`[{start, end, word}]` (CLI: `--words-file words.json`) instead of
+cues, and `generate_srt` groups them into semantic cues — max 8
+words, 3.5s, 84 characters per cue (2 lines of 42); splits on pauses
+over 0.4s and on sentence ends; a cue never ends on a stranded word
+like "the" or "of". The result returns the grouping report
+(`words_in`, `cues_out`, `split_reasons` per cue), so you can see why
+each cue split instead of trusting a silent regroup. Pass cues or
+words, never both. This is the stickman-video-director grouping rule,
+adapted to Shorts line lengths.
+
 When `MEDIAKIT_WORKDIR` is set, every user-supplied input/output path
 must stay inside that directory — `..` traversal and symlink escapes
 are refused with `SANDBOX_ESCAPE`, and `doctor` reports the sandbox
@@ -573,13 +584,35 @@ non-H.264 video or non-AAC/MP3 audio up front — use `--reencode`
 for those sources. Serve the output directory statically; any
 player that speaks HLS plays `index.m3u8`.
 
+### 38. Finish with a publishing kit, not just a file
+After the final video is approved, `publish_kit` turns it into a
+publishing pack: from the video + a 1280×720 16:9 thumbnail + copy
+you write (exactly 5 distinct titles, description, 1–30 tags, one
+pinned comment, optional chapters), it writes `metadata.md` +
+`publishing.json` and reports a pre-publish checklist. It verifies
+what it can — thumbnail size, title count/distinctness/length,
+chapter times against the measured duration, SHA-256 of media and
+thumbnail — and marks mobile readability, title/cover fidelity and
+licences as human-review, never a pass. Hype phrasing in titles
+("guaranteed", "100% viral") is flagged as a warning, not an error:
+rewrite the title, don't argue with the flag. Offer the kit once,
+after final approval; a declined offer is not re-offered. It
+publishes and uploads nothing. For Shorts, record the locked style
+id from `skills/shorts-video/styles.json` (`--style clean-bold` and
+friends); an unknown id is refused. Full rules live in
+`skills/shorts-video/references/publishing-kit.md`.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.
 2. `cropdetect` — if it reports black bars, `crop` to the suggested rectangle first.
 3. `reframe --mode crop` to 1080×1920 (or `--mode blur` for the blurred-fill look).
-4. Write an SRT from the script/voiceover with `generate_srt`.
-5. `burn_captions` with a large font size.
+4. Write an SRT from the script/voiceover with `generate_srt` — word
+   timings when you have them (semantic grouping), hand-written cues
+   only when you don't.
+5. `burn_captions` with the locked style's values from
+   `skills/shorts-video/styles.json` (`clean-bold`: background, 60px,
+   margin 500).
 6. `loudness` to −14 LUFS.
 7. `check --platform tiktok` — all rules must pass.
 8. `extract_frame` at a mid timestamp to verify the captions actually render.

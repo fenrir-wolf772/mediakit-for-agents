@@ -1546,6 +1546,135 @@ export async function convertCaptions({ input, output }) {
 
 const MAX_SRT_CUES = 10_000;
 
+// ---------------------------------------------------------------- semantic captions
+// groupWords: stickman-video-director's semantic caption grouping,
+// adapted to MediaKit's Shorts rules (2 lines x 42 chars per line).
+// Words are [{start, end, word}] in timeline order (seconds or
+// "MM:SS"); cues are grouped by meaning, not by a fixed word count:
+//   - flush on a pause > 0.4s between words, or on sentence end [.?!]
+//   - flush BEFORE a word that would push the cue past 8 words, 3.5s,
+//     or 84 characters (2 lines of 42)
+//   - a cue never ends on a stranded function word (the/a/of/to/...):
+//     that word moves to the next cue instead
+// Pure function (no I/O) so tests can call it directly. Deterministic:
+// same words in -> same cues out, byte-identical SRT via formatSrtBody.
+// Limits: abbreviations ending in "." (e.g. "U.S.") also flush —
+// join them into one word ("U.S.") before calling if that matters.
+const SEMANTIC_MAX_WORDS = 8;
+const SEMANTIC_MAX_CUE_SECONDS = 3.5;
+const SEMANTIC_MAX_CUE_CHARS = 84;
+const SEMANTIC_MAX_LINE_CHARS = 42;
+const SEMANTIC_PAUSE_SECONDS = 0.4;
+const STRANDED_WORDS = new Set([
+  "a", "an", "the", "of", "to", "in", "on", "at", "and", "but", "or",
+  "with", "for", "from", "by", "as", "into", "over", "under",
+]);
+
+function wrapCaptionLines(text) {
+  const words = text.split(" ");
+  const lines = [];
+  let line = "";
+  for (const w of words) {
+    if (!line) line = w;
+    else if (line.length + 1 + w.length <= SEMANTIC_MAX_LINE_CHARS) line += ` ${w}`;
+    else { lines.push(line); line = w; }
+  }
+  if (line) lines.push(line);
+  return lines.join("\n");
+}
+
+export function groupWords(words) {
+  if (!Array.isArray(words) || words.length === 0) {
+    throw new MediaKitError("groupWords needs a non-empty words array", "INVALID_ARG");
+  }
+  if (words.length > MAX_SRT_CUES * 8) {
+    throw new MediaKitError(`groupWords accepts at most ${MAX_SRT_CUES * 8} words, got ${words.length}`, "INVALID_ARG");
+  }
+  const normalized = words.map((w, i) => {
+    const n = i + 1;
+    if (!w || typeof w !== "object" || Array.isArray(w)) {
+      throw new MediaKitError(`word ${n} must be an object {start, end, word}`, "INVALID_ARG");
+    }
+    const start = parseTime(w.start, `word ${n} start`);
+    const end = parseTime(w.end, `word ${n} end`);
+    if (!(end > start)) {
+      throw new MediaKitError(`word ${n}: end (${w.end}) must be after start (${w.start})`, "INVALID_ARG");
+    }
+    if (typeof w.word !== "string" || !w.word.trim() || /\s/.test(w.word.trim())) {
+      throw new MediaKitError(`word ${n}: word must be a single non-empty token, got: ${JSON.stringify(w.word)}`, "INVALID_ARG");
+    }
+    return { startMs: Math.round(start * 1000), endMs: Math.round(end * 1000), word: w.word.trim() };
+  });
+  for (let i = 1; i < normalized.length; i++) {
+    if (normalized[i].startMs < normalized[i - 1].endMs) {
+      throw new MediaKitError(
+        `word ${i + 1} starts at ${(normalized[i].startMs / 1000).toFixed(3)}s, before word ${i} ends at ${(normalized[i - 1].endMs / 1000).toFixed(3)}s — words must be in order and must not overlap`,
+        "INVALID_ARG",
+      );
+    }
+  }
+  // Cues as word lists first, so the stranded-word repair below can
+  // move a whole word (with its timings) between cues.
+  const raw = [];
+  let cur = [];
+  const flush = (r) => {
+    if (cur.length) raw.push({ words: cur, reason: r });
+    cur = [];
+  };
+  for (const w of normalized) {
+    if (cur.length) {
+      const prev = cur[cur.length - 1];
+      const gapS = (w.startMs - prev.endMs) / 1000;
+      const joined = [...cur.map((x) => x.word), w.word].join(" ");
+      const durS = (w.endMs - cur[0].startMs) / 1000;
+      if (gapS > SEMANTIC_PAUSE_SECONDS) flush("pause");
+      else if (cur.length >= SEMANTIC_MAX_WORDS) flush("word-limit");
+      else if (joined.length > SEMANTIC_MAX_CUE_CHARS) flush("char-limit");
+      else if (durS > SEMANTIC_MAX_CUE_SECONDS) flush("duration-limit");
+      else if (/[.!?]$/.test(prev.word)) flush("sentence-end");
+    }
+    cur.push(w);
+  }
+  flush("end");
+  // Stranded-word repair: a cue ending on the/a/of/to/... hands that
+  // word to the next cue (with its real timings). One pass, left to
+  // right; a cue of a single stranded word is left alone.
+  for (let i = 0; i < raw.length - 1; i++) {
+    const cue = raw[i];
+    if (cue.words.length <= 1) continue;
+    const last = cue.words[cue.words.length - 1];
+    if (!STRANDED_WORDS.has(last.word.toLowerCase().replace(/[.,!?;:]+$/, ""))) continue;
+    cue.words.pop();
+    raw[i + 1].words.unshift(last);
+  }
+  const cues = raw.map((c) => {
+    const text = c.words.map((w) => w.word).join(" ").replace(/\s+([,.!?;:])/g, "$1");
+    return {
+      startMs: c.words[0].startMs,
+      endMs: c.words[c.words.length - 1].endMs,
+      text: wrapCaptionLines(text),
+      split_reason: c.reason,
+    };
+  });
+  const warnings = [];
+  for (const c of cues) {
+    for (const line of c.text.split("\n")) {
+      if (line.length > SEMANTIC_MAX_LINE_CHARS) {
+        warnings.push(`cue "${c.text.split("\n")[0]}…" has a ${line.length}-char line (one word longer than ${SEMANTIC_MAX_LINE_CHARS} chars cannot wrap)`);
+        break;
+      }
+    }
+  }
+  return {
+    cues,
+    words_in: normalized.length,
+    cues_out: cues.length,
+    max_words_in_cue: Math.max(...cues.map((c) => c.text.replace(/\n/g, " ").split(" ").length)),
+    longest_cue_chars: Math.max(...cues.map((c) => c.text.replace(/\n/g, " ").length)),
+    warnings,
+  };
+}
+
 // One SRT body builder for generate_srt and transcribe, so both tools
 // emit byte-identical cue formatting (index, HH:MM:SS,mmm, blank line).
 function formatSrtBody(normalized) {
@@ -1554,14 +1683,35 @@ function formatSrtBody(normalized) {
     .join("\n\n") + (normalized.length ? "\n" : "");
 }
 
-export async function generateSrt({ cues, output }) {
+export async function generateSrt({ cues = null, words = null, output }) {
+  if (cues && words) {
+    throw new MediaKitError("generate_srt takes cues or words, not both — cues are finished cue timings, words are word timings to group semantically", "INVALID_ARG");
+  }
+  if (!cues && !words) {
+    throw new MediaKitError("generate_srt needs cues [{start, end, text}] or words [{start, end, word}]", "INVALID_ARG");
+  }
+  let grouping = null;
+  let normalized;
+  if (words) {
+    const grouped = groupWords(words);
+    grouping = {
+      mode: "words",
+      words_in: grouped.words_in,
+      cues_out: grouped.cues_out,
+      max_words_in_cue: grouped.max_words_in_cue,
+      longest_cue_chars: grouped.longest_cue_chars,
+      split_reasons: grouped.cues.map((c) => c.split_reason),
+      warnings: grouped.warnings,
+    };
+    normalized = grouped.cues.map((c) => ({ startMs: c.startMs, endMs: c.endMs, text: c.text }));
+  } else {
   if (!Array.isArray(cues) || cues.length === 0) {
     throw new MediaKitError("generate_srt needs a non-empty cues array", "INVALID_ARG");
   }
   if (cues.length > MAX_SRT_CUES) {
     throw new MediaKitError(`generate_srt accepts at most ${MAX_SRT_CUES} cues, got ${cues.length}`, "INVALID_ARG");
   }
-  const normalized = cues.map((c, i) => {
+  normalized = cues.map((c, i) => {
     const n = i + 1;
     if (!c || typeof c !== "object" || Array.isArray(c)) {
       throw new MediaKitError(`cue ${n} must be an object {start, end, text}`, "INVALID_ARG");
@@ -1580,6 +1730,7 @@ export async function generateSrt({ cues, output }) {
     }
     return { startMs: Math.round(start * 1000), endMs: Math.round(end * 1000), text };
   });
+  }
   for (let i = 1; i < normalized.length; i++) {
     if (normalized[i].startMs < normalized[i - 1].endMs) {
       throw new MediaKitError(
@@ -1601,9 +1752,184 @@ export async function generateSrt({ cues, output }) {
     cue_count: normalized.length,
     first_start_seconds: +(normalized[0].startMs / 1000).toFixed(3),
     last_end_seconds: +(normalized[normalized.length - 1].endMs / 1000).toFixed(3),
+    ...(grouping ? { grouping } : {}),
     ...info,
   };
 }
+
+// ---------------------------------------------------------------- publish_kit
+// Thumbnail & Publishing Kit (stickman-video-director's finishing step,
+// as a tool instead of prose): from a finished video + a 1280x720
+// 16:9 thumbnail + agent-written copy, write publishing/metadata.md
+// and publishing.json, and report a pre-publish checklist. What the
+// tool CAN verify it checks (thumbnail size, 5 distinct titles,
+// chapter times against the measured duration, SHA-256); what it
+// CANNOT verify it marks human-review instead of passing — mobile
+// readability, title/cover fidelity and licences are never certified
+// by this tool. Titles are the agent's words, not the tool's: the
+// tool only flags unsupported-promise phrasing as a warning.
+export const SHORTS_STYLE_IDS = ["clean-bold", "minimal-line", "warm-story"];
+
+const PUBLISH_KIT_HYPE = [
+  /guaranteed/i,
+  /100%\s*viral/i,
+  /get rich/i,
+  /make \$[\d,]+/i,
+  /overnight (millionaire|success)/i,
+  /click here/i,
+];
+
+function formatChapterTime(seconds) {
+  const total = Math.round(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const p = (n) => String(n).padStart(2, "0");
+  return h > 0 ? `${p(h)}:${p(m)}:${p(s)}` : `${p(m)}:${p(s)}`;
+}
+
+export async function publishKit({ input, thumbnail, outputDir, style = null, titles, description, tags, pinnedComment, chapters = null }) {
+  const inPath = await requireInput(input);
+  const thumbPath = await requireInput(thumbnail, "thumbnail");
+  const outDir = await prepareOutputDir(outputDir);
+  if (style !== null && style !== undefined && !SHORTS_STYLE_IDS.includes(style)) {
+    throw new MediaKitError(`publish_kit style must be one of ${SHORTS_STYLE_IDS.join(", ")}, got: ${style}`, "INVALID_ARG");
+  }
+  if (!Array.isArray(titles) || titles.length !== 5) {
+    throw new MediaKitError(`publish_kit needs exactly 5 titles, got ${Array.isArray(titles) ? titles.length : "not an array"}`, "INVALID_ARG");
+  }
+  const cleanTitles = titles.map((t, i) => {
+    if (typeof t !== "string" || !t.trim()) throw new MediaKitError(`title ${i + 1} must be a non-empty string`, "INVALID_ARG");
+    const s = t.trim();
+    if (s.length > 100) throw new MediaKitError(`title ${i + 1} is ${s.length} characters (max 100)`, "INVALID_ARG");
+    return s;
+  });
+  if (new Set(cleanTitles.map((t) => t.toLowerCase())).size !== 5) {
+    throw new MediaKitError("publish_kit titles must be 5 distinct titles", "INVALID_ARG");
+  }
+  if (typeof description !== "string" || !description.trim() || description.trim().length > 5000) {
+    throw new MediaKitError("publish_kit description must be 1-5000 characters", "INVALID_ARG");
+  }
+  if (!Array.isArray(tags) || tags.length < 1 || tags.length > 30) {
+    throw new MediaKitError(`publish_kit needs 1-30 tags, got ${Array.isArray(tags) ? tags.length : "not an array"}`, "INVALID_ARG");
+  }
+  const cleanTags = tags.map((t, i) => {
+    if (typeof t !== "string" || !t.trim() || t.trim().length > 50) throw new MediaKitError(`tag ${i + 1} must be 1-50 characters`, "INVALID_ARG");
+    return t.trim();
+  });
+  if (typeof pinnedComment !== "string" || !pinnedComment.trim() || pinnedComment.trim().length > 500) {
+    throw new MediaKitError("publish_kit pinned_comment must be 1-500 characters", "INVALID_ARG");
+  }
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("publish_kit input must be a video file", "INVALID_ARG");
+  if (!Number.isFinite(meta.duration_seconds)) throw new MediaKitError("publish_kit could not measure the video duration", "INVALID_ARG");
+  const duration = meta.duration_seconds;
+  const thumbMeta = await probe(thumbPath);
+  if (!thumbMeta.video) throw new MediaKitError("publish_kit thumbnail must be an image file", "INVALID_ARG");
+  const tw = thumbMeta.video.width;
+  const th = thumbMeta.video.height;
+  if (Math.abs(tw / th - 16 / 9) > 0.01 || tw < 1280) {
+    throw new MediaKitError(`publish_kit thumbnail must be 16:9 and at least 1280px wide, got ${tw}x${th}`, "INVALID_ARG");
+  }
+  let cleanChapters = null;
+  if (chapters !== null && chapters !== undefined) {
+    if (!Array.isArray(chapters)) throw new MediaKitError("publish_kit chapters must be an array [{time, label}]", "INVALID_ARG");
+    cleanChapters = chapters.map((c, i) => {
+      if (!c || typeof c !== "object") throw new MediaKitError(`chapter ${i + 1} must be an object {time, label}`, "INVALID_ARG");
+      const t = parseTime(c.time, `chapter ${i + 1} time`);
+      if (!(t >= 0 && t < duration)) throw new MediaKitError(`chapter ${i + 1} time ${c.time} is outside the video (0..${duration}s)`, "INVALID_ARG");
+      if (typeof c.label !== "string" || !c.label.trim() || c.label.trim().length > 80) {
+        throw new MediaKitError(`chapter ${i + 1} label must be 1-80 characters`, "INVALID_ARG");
+      }
+      return { time_seconds: +t.toFixed(3), time: formatChapterTime(t), label: c.label.trim() };
+    });
+    for (let i = 1; i < cleanChapters.length; i++) {
+      if (cleanChapters[i].time_seconds <= cleanChapters[i - 1].time_seconds) {
+        throw new MediaKitError("publish_kit chapters must be in increasing time order", "INVALID_ARG");
+      }
+    }
+  }
+  const warnings = [];
+  cleanTitles.forEach((t, i) => {
+    for (const re of PUBLISH_KIT_HYPE) {
+      if (re.test(t)) warnings.push(`title ${i + 1} looks like an unsupported promise (matches /${re.source}/): "${t}" — verify the claim is actually in the video before publishing`);
+    }
+  });
+  const mediaSha = createHash("sha256").update(await readFile(inPath)).digest("hex");
+  const thumbSha = createHash("sha256").update(await readFile(thumbPath)).digest("hex");
+  const checklist = [
+    { item: `thumbnail is ${tw}x${th} (16:9, >=1280px wide)`, status: "checked" },
+    { item: "5 distinct titles, each 1-100 characters", status: "checked" },
+    { item: cleanChapters ? `chapters (${cleanChapters.length}) verified against measured duration ${duration}s` : "no chapters requested", status: cleanChapters ? "checked" : "not-applicable" },
+    { item: `media SHA-256 recorded (${mediaSha.slice(0, 12)}…)`, status: "checked" },
+    { item: "mobile readability / safe zones of the thumbnail", status: "human-review" },
+    { item: "script / title / cover fidelity — the thumbnail shows something actually in the video", status: "human-review" },
+    { item: "music / SFX / image licences for everything in the video", status: "human-review" },
+  ];
+  const checkMark = (s) => (s === "checked" ? "[x]" : s === "not-applicable" ? "[-]" : "[ ]");
+  const md = [
+    `# Publishing kit — ${path.basename(inPath)}`,
+    "",
+    `- Media: ${path.basename(inPath)} (${meta.video.width}x${meta.video.height}, ${duration}s, SHA-256 ${mediaSha.slice(0, 12)}…)`,
+    `- Thumbnail: ${path.basename(thumbPath)} (${tw}x${th}, SHA-256 ${thumbSha.slice(0, 12)}…)`,
+    `- Style: ${style ?? "none — no style lock applied"}`,
+    "",
+    "## Titles (pick one)",
+    "",
+    ...cleanTitles.map((t, i) => `${i + 1}. ${t}`),
+    "",
+    "## Description",
+    "",
+    description.trim(),
+    "",
+    "## Tags",
+    "",
+    cleanTags.join(", "),
+    "",
+    "## Pinned comment",
+    "",
+    pinnedComment.trim(),
+    "",
+    ...(cleanChapters ? ["## Chapters", "", ...cleanChapters.map((c) => `- ${c.time} ${c.label}`), ""] : []),
+    "## Pre-publish checklist",
+    "",
+    ...checklist.map((c) => `- ${checkMark(c.status)} ${c.item}${c.status === "human-review" ? " — HUMAN REVIEW, not verified by this tool" : ""}`),
+    "",
+  ].join("\n");
+  const metadataPath = path.join(outDir, "metadata.md");
+  const jsonPath = path.join(outDir, "publishing.json");
+  await writeFile(metadataPath, md, "utf8");
+  const doc = {
+    tool: "mediakit-for-agents",
+    mediakit_version: MEDIAKIT_VERSION,
+    created_at: new Date().toISOString(),
+    style: style ?? null,
+    media: { file: path.basename(inPath), path: inPath, width: meta.video.width, height: meta.video.height, duration_seconds: duration, sha256: mediaSha },
+    thumbnail: { file: path.basename(thumbPath), path: thumbPath, width: tw, height: th, sha256: thumbSha },
+    titles: cleanTitles,
+    description: description.trim(),
+    tags: cleanTags,
+    pinned_comment: pinnedComment.trim(),
+    chapters: cleanChapters,
+    checklist,
+    warnings,
+  };
+  await writeFile(jsonPath, JSON.stringify(doc, null, 2) + "\n", "utf8");
+  return {
+    operation: "publish_kit",
+    output_dir: outDir,
+    metadata: metadataPath,
+    publishing_json: jsonPath,
+    style: style ?? null,
+    media: { width: meta.video.width, height: meta.video.height, duration_seconds: duration, sha256: mediaSha },
+    thumbnail: { width: tw, height: th, sha256: thumbSha },
+    titles: cleanTitles,
+    checklist,
+    warnings,
+  };
+}
+
+// ---------------------------------------------------------------- transcribe
 
 // ---------------------------------------------------------------- transcribe
 // Speech-to-text with a LOCAL engine — faster-whisper (default) or
@@ -3536,6 +3862,7 @@ const TOOL_REQUIREMENTS = {
   silence: { filters: ["silencedetect", "trim", "atrim", "concat"], encoders: ["libx264", "aac"] },
   cropdetect: { filters: ["cropdetect"] },
   package: {},
+  publish_kit: {},
   mix: { filters: ["sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay"], encoders: ["aac", "libmp3lame"] },
   overlay: { filters: ["overlay", "format", "scale", "colorchannelmixer"], encoders: ["libx264"] },
   scenes: { filters: ["select"] },
