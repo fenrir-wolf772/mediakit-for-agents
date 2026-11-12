@@ -1181,3 +1181,28 @@ tone [6,10)), `test/content-lead-black.mp4` (đen 1s đầu + testsrc 9s),
   - **Bẫy đo lường**: (1) lần đầu `node --check` bắt `batch` CLI chỉ nhận `-o` mà usage ghi `--output-dir` — case batch giờ chấp nhận cả hai; (2) edit README prose bằng muse.edit với old_text nhầm thành text mới đã revert đoạn vừa thêm — kiểm tra bằng grep rồi viết lại, từ sau edit nào cũng đọc lại file ngay.
 - Còn lại: chưa stage 0.2.0 (đợi Tony duyệt 0.1.0); backlog tiếp: Verified-Trap Guard ledger, operation envelope, MCP logging progress, contract machine-readable + CI fail khi drift, MCP advertise core 12 mặc định, `dry-run` cho các tool khác, thư viện style đặt tên cho titlecard/intro, Demo GIF mới cho README.
 - Push: commit "Add batch tool: one operation over a folder with content-hash cache (39 tools total)" → GitHub main. **CI run #43180895694 success** — xanh ngay lượt này (gồm 2 dòng smoke mới: batch loudness + cache hit).
+
+## Lượt 29 — 2026-11-12 16:58 (+07): interpolate + denoise tools (41 tools)
+- **Học: hyepartners-gmail/vibevideo-mcp** (217★, monorepo: React frontend + Node MCP backend + Python ffmpeg backend + Ollama agent; ~25 MCP module JS chỉ sinh command string, không execute/verify). Ý áp dụng được:
+  1. `stabilize` — vidstabdetect/vidstabtransform 2-pass, preset low/medium/high → ĐÃ THỬ, KHÔNG SHIP (xem "Bẫy đo lường" dưới).
+  2. `interpolate` — minterpolate fps upscale, mode dup/blend/mci → đã làm tool `interpolate` mới.
+  3. `denoise` — hqdn3d/nlmeans, strength 0–1 → đã làm tool `denoise` mới.
+  4. `segment` HLS (`-c copy -hls_time N -f hls`) → backlog mới (nhỏ, hữu ích cho preview/distribution).
+  5. Filter catalog JSON (`ffmpegFilters.json`) — củng cố backlog contract machine-readable.
+  KHÔNG copy code của họ — chỉ học ý tưởng, tự implement bằng Node/ffmpeg. Khác biệt cốt lõi: vibevideo chỉ sinh chuỗi lệnh cho agent/ UI chạy tay; MediaKit execute + đo thật trên đĩa (fps đếm frame, PSNR độc lập, noise energy đo trước/sau).
+- **Làm**:
+  - `interpolate` (core+CLI+MCP, tool 40): `--fps` bắt buộc (1–240, phải lớn hơn fps nguồn, không thì từ chối kèm gợi ý `fit --max-fps`), `--mode mci|blend|dup` (mặc định blend), `--crf 23`; audio copy khi có. Trả `fps_before`/`fps_after`, `frames_before`/`frames_after` đếm bằng ffprobe `-count_frames`, duration, dimensions, size_bytes.
+  - `denoise` (core+CLI+MCP, tool 41): `--filter hqdn3d|nlmeans` (mặc định hqdn3d), `--strength 0–1` (mặc định 0.5). Trả `filter`, `filter_value`, `noise_before`/`noise_after` (năng lượng nhiễu tần số cao: mean |frame − gblur(frame)|, kênh Y, 30 frame đầu), duration, dimensions, size_bytes.
+  - **Sửa bug `size_bytes`**: `fileInfo()` trả `{size_bytes, size_human}` nhưng `grade`/`reverse` (từ lượt 24/25) và 2 tool mới đều ghi `size_bytes: info.size` → `undefined`, JSON.stringify lặng lẽ nuốt mất key. Fix cả 4 chỗ thành `info.size_bytes`; thêm assert `size_bytes > 0` cho grade/reverse/interpolate/denoise.
+  - Fixture mới `test/noisy.mp4` (5s loop ảnh có nhiễu Gaussian sigma-10, 1400×800, 905 KB) + `test/noisy-clean.mp4` (cùng ảnh không nhiễu, 95 KB) — cùng encode crf 12 để PSNR so sánh công bằng.
+  - `doctor`: thêm filter minterpolate/hqdn3d/nlmeans + tool `interpolate`/`denoise` (41/41). README (2 dòng bảng + đoạn prose), SKILL.md (rule 36), CI smoke thêm 2 dòng.
+- **Test** (ffmpeg 8.1.2):
+  - Đo trước khi code: interpolate blend 10s 30→60fps **6.6s, 597 frames**; mci **91s, 597 frames** (chậm ~14x — blend làm mặc định, mci chỉ cho clip ngắn); denoise hqdn3d=15 trên fixture: PSNR-Y vs clean **32.98 → 38.63 dB**, noise energy **5.49 → 3.41**.
+  - `npm run check` sạch (check-docs: 41 tools khớp README); `npm test` **408/408 PASS, exit 0** (389 + 19 mới: interpolate 8 + denoise 7 + doctor 2 + size_bytes grade/reverse 2). Assert mới (19).
+- **Bẫy đo lường**:
+  1. `stabilize` KHÔNG SHIP — vidstab chạy 2-pass đúng, output đúng dims/duration, nhưng trên mọi fixture tổng hợp (testsrc tĩnh + crop sin, ảnh tròn + crop sin, ảnh grain + crop sin chậm/nhanh) jitter/PSNR đều KHÔNG cải thiện (vd: jitter 5.15 → 5.21, PSNR 20.28 → 20.08 dB; per-frame PSNR chỉ 22% frame >25 dB). Nguyên nhân: block matching của vidstab trên nội dung tổng hợp (vùng phẳng lớn + cạnh sắc / grain trắng không có feature ổn định) cho vector nhiễu; smoothing còn nuốt luôn rung chậm (chu kỳ 94 frame qua cửa sổ 21 frame giữ lại 92% rung như "chuyển động có chủ đích"). Cần footage rung tay thật mới verify được — ghi vào backlog, không ship tool chưa đo được hiệu quả. Bài học: "chạy được" ≠ "làm được việc"; tool nào không đo được hiệu quả thì không ship.
+  2. Thang strength của vibevideo (0–1 → hqdn3d 0–10) quá yếu với nhiễu thật: sigma-20 trên nền phẳng chỉ +0.24 dB PSNR ở hqdn3d=8, hqdn3d=15 mới +2.9 dB trên sigma-10. MediaKit map 0–1 → hqdn3d 0–30.
+  3. nlmeans 5s 720p không xong trong 120s — chỉ test trên clip 1s 320×180, document rõ là chậm.
+  4. `fileInfo()` trả `size_bytes`, không có `.size` — 4 tool ghi `info.size` lặng lẽ mất key (JSON.stringify nuốt `undefined`). Bắt được khi soi JSON CLI của tool mới. Từ nay assert `size_bytes` là number trong test của mọi tool trả size.
+  5. Test batch không hermetic: cache từ lượt chạy trước làm lần batch loudness đầu tiên trả `cached` thay vì `ok` → 4 assert FAIL oan + 1 assert `videos://workspace/info` hardcode 39 tools. Fix: rm output dir batch trước khi test + sửa 39 → 41.
+- Còn lại: chưa stage 0.2.0 (đợi Tony duyệt 0.1.0); backlog tiếp: `stabilize` (cần footage rung thật để verify), `segment` HLS (ý từ vibevideo), Verified-Trap Guard ledger, operation envelope, MCP logging progress, contract machine-readable + CI fail khi drift, MCP advertise core 12 mặc định, `dry-run` cho các tool khác, thư viện style đặt tên cho titlecard/intro, Demo GIF mới cho README.

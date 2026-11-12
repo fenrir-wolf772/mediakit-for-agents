@@ -542,6 +542,21 @@ you can (files under it are never treated as inputs), and use
 `--dry-run` first when the glob is new, so you see the planned outputs
 before anything encodes.
 
+### 36. Smooth motion and clean noise are measured effects, not flags
+`interpolate` only raises the frame rate — 30fps to 60fps with
+`minterpolate`. `blend` (the default) is fast and cross-fades
+neighbours; `mci` is true motion compensation and looks best, but runs
+about 9x realtime on CPU, so use it on short clips or accept the wait.
+A target at or below the source fps is refused (lowering fps is `fit
+--max-fps`). `denoise` takes a 0–1 strength: `hqdn3d` (fast default)
+maps it to 0–30 — 0.5 is 15, the level that gained +2.9 dB PSNR on
+sigma-10 noise in testing — while `nlmeans` maps it to `s` 0–10 and is
+far slower (minutes for a few seconds of 720p); pick `nlmeans` only
+for short clips or fine detail worth the wait. Both tools report a
+measured effect on the output file (frame counts for `interpolate`,
+high-frequency noise energy before/after for `denoise`) — read those
+numbers, don't assume the filter worked.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

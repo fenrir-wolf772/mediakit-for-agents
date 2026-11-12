@@ -324,6 +324,44 @@ server.tool(
 );
 
 server.tool(
+  "interpolate",
+  "Raise a clip's frame rate with motion interpolation (minterpolate): 30fps to 60fps for smoother playback or slow motion. Modes: blend (fast default, cross-fades neighbours), mci (true motion-compensated frames, best quality but much slower — about 9x realtime on CPU), dup (repeats frames). Only raises the frame rate; use fit --max-fps to lower it. The result counts frames on the output file, so the fps is measured, not assumed.",
+  {
+    input: pathSchema,
+    output: pathSchema,
+    fps: z.number().min(1).max(240).describe("Target frame rate, must be above the source fps"),
+    mode: z.enum(["mci", "blend", "dup"]).default("blend").describe("Interpolation mode (default blend)"),
+    crf: z.number().int().min(0).max(51).default(23),
+  },
+  async (a) => safe(() => core.interpolate({
+    input: a.input,
+    output: a.output,
+    fps: a.fps,
+    mode: a.mode,
+    crf: a.crf,
+  })),
+);
+
+server.tool(
+  "denoise",
+  "Reduce sensor noise on a video: hqdn3d (fast default) or nlmeans (better on fine detail, much slower — minutes for a few seconds of 720p). strength 0-1 maps to hqdn3d 0-30 (0.5 is 15, the strength that gained +2.9 dB PSNR on sigma-10 noise in testing) or nlmeans s 0-10. The result measures high-frequency noise energy before and after (mean |frame minus blurred frame|), so the reduction is measured, not assumed.",
+  {
+    input: pathSchema,
+    output: pathSchema,
+    filter: z.enum(["hqdn3d", "nlmeans"]).default("hqdn3d").describe("Denoise filter (default hqdn3d)"),
+    strength: z.number().min(0).max(1).default(0.5).describe("Noise-reduction strength 0-1 (default 0.5)"),
+    crf: z.number().int().min(0).max(51).default(23),
+  },
+  async (a) => safe(() => core.denoise({
+    input: a.input,
+    output: a.output,
+    filter: a.filter,
+    strength: a.strength,
+    crf: a.crf,
+  })),
+);
+
+server.tool(
   "convert",
   "Change container or codec. Omit video_codec/audio_codec to stream-copy that stream. crf 23 is a good default for H.264. gop (frames) or gop_seconds sets an exact keyframe interval on re-encode (scene-cut keyframes disabled for libx264/libx265/mpeg4); the result measures the keyframes on the output file. A GOP is required for keyframe-snapped stream-copy cuts.",
   {

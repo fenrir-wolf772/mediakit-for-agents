@@ -2838,7 +2838,7 @@ export async function grade({ input, output, preset = null, filter = null, crf =
     color_before: before, color_after: after,
     dimensions: outMeta.video ? `${outMeta.video.width}x${outMeta.video.height}` : null,
     duration_seconds: outMeta.duration_seconds,
-    size_bytes: info.size,
+    size_bytes: info.size_bytes,
   };
 }
 
@@ -2884,7 +2884,122 @@ export async function reverseClip({ input, output, audio = true, crf = 23 }) {
     audio_codec: reverseAudio ? audioCodec : (meta.audio ? "copy" : null),
     duration_seconds: out.duration_seconds,
     dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
-    size_bytes: info.size,
+    size_bytes: info.size_bytes,
+  };
+}
+
+// ---------------------------------------------------------------- interpolate
+// Motion-interpolate a clip up to a higher frame rate
+// (hyepartners-gmail/vibevideo-mcp's MotionInterpolator idea —
+// minterpolate, modes dup/blend/mci). Only ever raises the frame
+// rate: lowering it is fit --max-fps. mci is true motion-compensated
+// interpolation and the slowest by far (measured 2026-11-12: 10s
+// 720p 30→60fps took 91s mci vs 6.6s blend on this CPU); blend
+// cross-fades neighbours and is the fast default, dup just repeats
+// frames. The result counts frames on the output file (ffprobe
+// -count_frames), so the fps is measured, not assumed — and the
+// test asserts the frame count, not just r_frame_rate.
+async function countVideoFrames(file) {
+  const { stdout } = await run(FFPROBE, ["-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", file]);
+  const n = parseInt(stdout.trim(), 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+const INTERPOLATE_MODES = ["mci", "blend", "dup"];
+
+export async function interpolate({ input, output, fps, mode = "blend", crf = 23 }) {
+  const inPath = await requireInput(input);
+  const outPath = await prepareOutput(output, [inPath]);
+  const c = num(crf, "crf", { min: 0, max: 51, integer: true });
+  const targetFps = num(fps, "fps", { min: 1, max: 240 });
+  if (!INTERPOLATE_MODES.includes(mode)) {
+    throw new MediaKitError(`unknown interpolate mode: ${mode} (supported: ${INTERPOLATE_MODES.join(", ")})`, "INVALID_ARG");
+  }
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("interpolate needs a video input", "INVALID_ARG");
+  const srcFps = meta.video.fps;
+  if (srcFps && targetFps <= srcFps) {
+    throw new MediaKitError(`interpolate raises the frame rate: target ${targetFps}fps is not above source ${srcFps}fps (use fit --max-fps to lower it)`, "INVALID_ARG");
+  }
+  const framesBefore = await countVideoFrames(inPath);
+  const args = ["-y", "-i", inPath, "-vf", `minterpolate=fps=${targetFps}:mi_mode=${mode}`, "-c:v", "libx264", "-crf", String(c), "-preset", "medium"];
+  if (meta.audio) args.push("-c:a", "copy");
+  args.push(outPath);
+  await run(FFMPEG, args);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  const framesAfter = await countVideoFrames(outPath);
+  return {
+    operation: "interpolate", input: inPath, output: outPath,
+    mode, fps_before: srcFps, fps_after: out.video ? out.video.fps : null,
+    frames_before: framesBefore, frames_after: framesAfter,
+    duration_seconds: out.duration_seconds,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+    size_bytes: info.size_bytes,
+  };
+}
+
+// ---------------------------------------------------------------- denoise
+// Reduce sensor noise (hyepartners-gmail/vibevideo-mcp's NoiseReducer
+// idea — hqdn3d / nlmeans with a 0–1 strength). Vibevideo maps
+// strength 0–1 to hqdn3d 0–10, but that scale is too weak for real
+// noise: measured 2026-11-12, sigma-20 white noise on a flat
+// gradient gained only +0.24 dB PSNR at hqdn3d=8, while hqdn3d=15
+// gained +2.9 dB on sigma-10 noise (28.1→31.0 dB). So strength maps
+// to hqdn3d 0–30 (0.5 → 15) and to nlmeans s 0–10. nlmeans is far
+// slower (a 5s 720p clip did not finish in 120s on this CPU) —
+// hqdn3d is the default. The result measures high-frequency noise
+// energy before/after (mean |frame − gblur(frame)|, Y channel): on
+// the test fixture it falls 5.49 → 3.43, and the test suite asserts
+// PSNR vs the clean reference independently.
+async function measureHfNoise(file, frames = 30) {
+  try {
+    const { stderr } = await run(FFMPEG, [
+      "-hide_banner", "-nostats", "-i", file,
+      "-vf", "split=2[a][b],[a]gblur=sigma=2[bl],[b][bl]blend=all_mode=difference,signalstats,metadata=print:key=lavfi.signalstats.YAVG",
+      "-frames:v", String(frames), "-f", "null", "-",
+    ]);
+    const vals = [...stderr.matchAll(/lavfi\.signalstats\.YAVG=([0-9.]+)/g)].map((m) => +m[1]);
+    if (!vals.length) return null;
+    return +(vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(2);
+  } catch {
+    return null;
+  }
+}
+
+const DENOISE_FILTERS = ["hqdn3d", "nlmeans"];
+
+export async function denoise({ input, output, filter = "hqdn3d", strength = 0.5, crf = 23 }) {
+  const inPath = await requireInput(input);
+  const outPath = await prepareOutput(output, [inPath]);
+  const c = num(crf, "crf", { min: 0, max: 51, integer: true });
+  const s = num(strength, "strength", { min: 0, max: 1 });
+  if (!DENOISE_FILTERS.includes(filter)) {
+    throw new MediaKitError(`unknown denoise filter: ${filter} (supported: ${DENOISE_FILTERS.join(", ")})`, "INVALID_ARG");
+  }
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("denoise needs a video input", "INVALID_ARG");
+  // hqdn3d takes 4 strengths (luma/chroma spatial + temporal);
+  // nlmeans takes s. Both scale from the single 0–1 strength.
+  const value = filter === "hqdn3d" ? +(s * 30).toFixed(2) : +(s * 10).toFixed(2);
+  const vf = filter === "hqdn3d"
+    ? `hqdn3d=${value}:${value}:${value}:${value}`
+    : `nlmeans=s=${value}`;
+  const noiseBefore = await measureHfNoise(inPath);
+  const args = ["-y", "-i", inPath, "-vf", vf, "-c:v", "libx264", "-crf", String(c), "-preset", "medium"];
+  if (meta.audio) args.push("-c:a", "copy");
+  args.push(outPath);
+  await run(FFMPEG, args);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  const noiseAfter = await measureHfNoise(outPath);
+  return {
+    operation: "denoise", input: inPath, output: outPath,
+    filter, strength: s, filter_value: value,
+    noise_before: noiseBefore, noise_after: noiseAfter,
+    duration_seconds: out.duration_seconds,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+    size_bytes: info.size_bytes,
   };
 }
 
@@ -3275,6 +3390,7 @@ const DOCTOR_FILTERS = [
   "palettegen", "paletteuse", "adelay", "pan",
   "astats", "ametadata", "eq", "hue", "colorbalance",
   "reverse", "areverse",
+  "minterpolate", "hqdn3d", "nlmeans",
 ];
 const DOCTOR_ENCODERS = [
   "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4",
@@ -3303,6 +3419,8 @@ const TOOL_REQUIREMENTS = {
   check: { filters: ["loudnorm", "blackdetect", "freezedetect", "silencedetect", "astats", "ametadata"] },
   grade: { filters: ["eq", "hue", "colorbalance"], encoders: ["libx264"] },
   reverse: { filters: ["reverse", "areverse"], encoders: ["libx264", "aac"] },
+  interpolate: { filters: ["minterpolate"], encoders: ["libx264"] },
+  denoise: { filters: ["hqdn3d", "nlmeans"], encoders: ["libx264"] },
   convert: { encoders: ["libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4"] },
   compress: { filters: ["scale"], encoders: ["libx264", "aac"] },
   receipt: { filters: ["loudnorm"] },

@@ -49,6 +49,19 @@ async function meanVolume(file, start, duration) {
   }
 }
 
+// Independent luma PSNR helper: ffmpeg's psnr filter between a clean
+// reference and a file (not through the tool under test). Returns the
+// Y-channel PSNR in dB, or null on failure.
+async function psnrY(ref, file) {
+  try {
+    const { stderr } = await execFileAsync("ffmpeg", ["-hide_banner", "-i", ref, "-i", file, "-filter_complex", "psnr", "-f", "null", "-"]);
+    const m = stderr.match(/PSNR y:([0-9.]+)/);
+    return m ? parseFloat(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
 const failures = [];
 function checkOk(cond, label, detail = "") {
   if (cond) console.log(`  PASS ${label}`);
@@ -84,10 +97,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 39 tools present");
-checkOk(missing.length === 0, "tools/list has all 39 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 41 tools present");
+checkOk(missing.length === 0, "tools/list has all 41 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -280,6 +293,7 @@ const gradeWarmRes = await client.callTool({
 const gradeWarm = JSON.parse(gradeWarmRes.content[0].text);
 console.log("grade warm:", JSON.stringify(gradeWarm.color_before), "->", JSON.stringify(gradeWarm.color_after), "|", gradeWarm.dimensions, gradeWarm.duration_seconds);
 checkOk(gradeWarm.preset === "warm" && gradeWarm.filter?.includes("colorbalance"), "grade warm reports the preset and its filter chain", JSON.stringify(gradeWarm));
+checkOk(typeof gradeWarm.size_bytes === "number" && gradeWarm.size_bytes > 0, "grade reports size_bytes measured on disk (fileInfo regression: info.size was undefined)", `size_bytes=${gradeWarm.size_bytes}`);
 checkOk(gradeWarm.dimensions === "1280x720" && near(gradeWarm.duration_seconds, 10, 0.05), "grade keeps dimensions and duration", `${gradeWarm.dimensions} ${gradeWarm.duration_seconds}s`);
 checkOk(typeof gradeWarm.color_before?.r === "number" && typeof gradeWarm.color_after?.r === "number", "grade measures channel means before and after", JSON.stringify(gradeWarm));
 checkOk((gradeWarm.color_after.r - gradeWarm.color_after.b) - (gradeWarm.color_before.r - gradeWarm.color_before.b) > 10, "warm pushes red over blue by >10 (R-B grows)", `${JSON.stringify(gradeWarm.color_before)} -> ${JSON.stringify(gradeWarm.color_after)}`);
@@ -325,6 +339,7 @@ const reverseRes = await client.callTool({
 const reverseJson = JSON.parse(reverseRes.content[0].text);
 console.log("reverse call:", JSON.stringify(reverseJson));
 checkOk(reverseJson.video_reversed === true && reverseJson.audio_reversed === true, "reverse reports video + audio reversed", JSON.stringify(reverseJson));
+checkOk(typeof reverseJson.size_bytes === "number" && reverseJson.size_bytes > 0, "reverse reports size_bytes measured on disk (fileInfo regression: info.size was undefined)", `size_bytes=${reverseJson.size_bytes}`);
 checkOk(reverseJson.dimensions === "640x360" && near(reverseJson.duration_seconds, 10.05, 0.1), "reverse keeps dimensions and duration", `${reverseJson.dimensions} ${reverseJson.duration_seconds}s`);
 const revFirstR = await planeMean(path.join(root, "outputs/mcp-reverse.mp4"), "640:360:0:0", "r", 1);
 const revFirstB = await planeMean(path.join(root, "outputs/mcp-reverse.mp4"), "640:360:0:0", "b", 1);
@@ -362,6 +377,73 @@ checkOk(reverseVideoOnlyJson.video_reversed === true && reverseVideoOnlyJson.aud
 const reverseNoop = await callExpectThrow("reverse", { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-reverse-noop.mp3"), audio: false });
 checkOk(/reverses nothing/.test(reverseNoop), "reverse audio-only + audio=false is refused (nothing to reverse)", reverseNoop.slice(0, 200));
 
+// interpolate: 30fps -> 60fps with blend (fast mode). The frame count
+// is asserted on the output file, not just r_frame_rate.
+const interpRes = await client.callTool({
+  name: "interpolate",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-interp.mp4"), fps: 60, mode: "blend" },
+});
+const interpJson = JSON.parse(interpRes.content[0].text);
+console.log("interpolate call:", JSON.stringify(interpJson));
+checkOk(interpJson.fps_before === 30 && interpJson.fps_after === 60, "interpolate 30fps -> 60fps", JSON.stringify(interpJson));
+checkOk(interpJson.frames_before === 300 && interpJson.frames_after >= 590 && interpJson.frames_after <= 600, "interpolate counts ~600 frames on the output (was 300)", `frames ${interpJson.frames_before} -> ${interpJson.frames_after}`);
+checkOk(near(interpJson.duration_seconds, 10, 0.15) && typeof interpJson.size_bytes === "number" && interpJson.size_bytes > 0, "interpolate keeps ~10s duration and reports size_bytes", `${interpJson.duration_seconds}s ${interpJson.size_bytes} B`);
+// Independent fps check: ffprobe on the output file, not the tool's report.
+const { stdout: interpProbeOut } = await execFileAsync("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", path.join(root, "outputs/mcp-interp.mp4")]);
+checkOk(interpProbeOut.trim() === "60/1", "ffprobe independently reads 60fps on the interpolated file", interpProbeOut.trim());
+const interpLow = await callExpectThrow("interpolate", { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-interp-low.mp4"), fps: 15 });
+checkOk(/not above source/.test(interpLow), "interpolate refuses a target fps below the source (use fit --max-fps)", interpLow.slice(0, 200));
+const interpAudio = await callExpectThrow("interpolate", { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-interp-audio.mp4"), fps: 60 });
+checkOk(/needs a video/.test(interpAudio), "interpolate refuses an audio-only input", interpAudio.slice(0, 200));
+// mci on a short clip (the full 10s takes ~90s on this CPU): trim 2s
+// first, then interpolate — true motion compensation, not just blend.
+const interpTrimRes = await client.callTool({
+  name: "trim",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-interp-2s.mp4"), start: 0, end: 2 },
+});
+const interpTrimJson = JSON.parse(interpTrimRes.content[0].text);
+checkOk(near(interpTrimJson.duration_seconds, 2, 0.1), "trim makes the 2s clip for the mci test", JSON.stringify(interpTrimJson));
+const interpMciRes = await client.callTool({
+  name: "interpolate",
+  arguments: { input: path.join(root, "outputs/mcp-interp-2s.mp4"), output: path.join(root, "outputs/mcp-interp-mci.mp4"), fps: 60, mode: "mci" },
+});
+const interpMciJson = JSON.parse(interpMciRes.content[0].text);
+checkOk(interpMciJson.fps_after === 60 && interpMciJson.frames_after >= 115 && interpMciJson.frames_after <= 121, "interpolate mci gives ~120 frames for a 2s 60fps clip", `frames ${interpMciJson.frames_after}`);
+
+// denoise: the fixture test/noisy.mp4 is a 5s loop of a photo with
+// sigma-10 Gaussian noise; test/noisy-clean.mp4 is the same loop
+// without noise, so PSNR against it is an independent measurement.
+const denoiseRes = await client.callTool({
+  name: "denoise",
+  arguments: { input: path.join(root, "test/noisy.mp4"), output: path.join(root, "outputs/mcp-denoise.mp4"), strength: 0.5 },
+});
+const denoiseJson = JSON.parse(denoiseRes.content[0].text);
+console.log("denoise call:", JSON.stringify(denoiseJson));
+checkOk(denoiseJson.filter === "hqdn3d" && denoiseJson.filter_value === 15, "denoise strength 0.5 maps to hqdn3d=15", JSON.stringify(denoiseJson));
+checkOk(typeof denoiseJson.noise_before === "number" && typeof denoiseJson.noise_after === "number" && denoiseJson.noise_after < denoiseJson.noise_before, "denoise lowers the measured high-frequency noise energy", `noise ${denoiseJson.noise_before} -> ${denoiseJson.noise_after}`);
+checkOk(near(denoiseJson.duration_seconds, 5, 0.1) && denoiseJson.dimensions === "1400x800" && denoiseJson.size_bytes > 0, "denoise keeps duration/dimensions and reports size_bytes", `${denoiseJson.duration_seconds}s ${denoiseJson.dimensions} ${denoiseJson.size_bytes} B`);
+// Independent PSNR vs the clean reference: the denoised file must be
+// clearly closer to clean than the noisy input (measured 32.98 ->
+// 38.63 dB Y on the fixtures; assert a >=2 dB gain to allow for
+// encoder variance).
+const psnrNoisy = await psnrY(path.join(root, "test/noisy-clean.mp4"), path.join(root, "test/noisy.mp4"));
+const psnrDenoised = await psnrY(path.join(root, "test/noisy-clean.mp4"), path.join(root, "outputs/mcp-denoise.mp4"));
+console.log("denoise PSNR-Y vs clean: noisy", psnrNoisy, "-> denoised", psnrDenoised);
+checkOk(psnrNoisy !== null && psnrDenoised !== null && psnrDenoised >= psnrNoisy + 2, "denoise raises PSNR-Y vs the clean reference by >=2 dB", `noisy ${psnrNoisy} dB, denoised ${psnrDenoised} dB`);
+const denoiseAudio = await callExpectThrow("denoise", { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-denoise-audio.mp4") });
+checkOk(/needs a video/.test(denoiseAudio), "denoise refuses an audio-only input", denoiseAudio.slice(0, 200));
+const denoiseBadFilter = await callExpectThrow("denoise", { input: path.join(root, "test/noisy.mp4"), output: path.join(root, "outputs/mcp-denoise-bad.mp4"), filter: "bilateral" });
+checkOk(/filter/.test(denoiseBadFilter), "denoise refuses an unknown filter (MCP enum validation)", denoiseBadFilter.slice(0, 200));
+// nlmeans on a tiny clip (the full 720p 5s clip takes >120s): verify
+// the second filter path actually runs and returns measurements.
+await execFileAsync("ffmpeg", ["-y", "-v", "error", "-i", path.join(root, "test/noisy.mp4"), "-vf", "scale=320:180", "-t", "1", "-c:v", "libx264", "-crf", "23", path.join(root, "outputs/mcp-denoise-tiny.mp4")]);
+const denoiseNlRes = await client.callTool({
+  name: "denoise",
+  arguments: { input: path.join(root, "outputs/mcp-denoise-tiny.mp4"), output: path.join(root, "outputs/mcp-denoise-nl.mp4"), filter: "nlmeans", strength: 0.5 },
+});
+const denoiseNlJson = JSON.parse(denoiseNlRes.content[0].text);
+checkOk(denoiseNlJson.filter === "nlmeans" && denoiseNlJson.filter_value === 5 && near(denoiseNlJson.duration_seconds, 1, 0.1), "denoise nlmeans runs on a tiny clip (strength 0.5 -> s=5)", JSON.stringify(denoiseNlJson));
+
 const doctorRes = await client.callTool({
   name: "doctor",
   arguments: {},
@@ -389,6 +471,8 @@ checkOk(doctorJson.tools.export_gif?.available === true, "doctor: export_gif is 
 checkOk(doctorJson.tools.grade?.available === true, "doctor: grade is available (eq/hue/colorbalance present)");
 checkOk(doctorJson.tools.check?.available === true, "doctor: check is available (astats/ametadata present for the peaks scan)");
 checkOk(doctorJson.tools.reverse?.available === true, "doctor: reverse is available (reverse/areverse filters present)");
+checkOk(doctorJson.tools.interpolate?.available === true, "doctor: interpolate is available (minterpolate filter present)");
+checkOk(doctorJson.tools.denoise?.available === true, "doctor: denoise is available (hqdn3d/nlmeans filters present)");
 checkOk(typeof doctorJson.gpu?.available === "boolean" && Array.isArray(doctorJson.gpu?.encoders) && "working_encoder" in (doctorJson.gpu ?? {}), "doctor: gpu section reports available + listed encoders + working encoder", JSON.stringify(doctorJson.gpu));
 checkOk(doctorJson.gpu.available === (doctorJson.gpu.working_encoder !== null), "doctor: gpu available is true exactly when a probe encode worked", JSON.stringify(doctorJson.gpu));
 console.log("doctor gpu:", JSON.stringify(doctorJson.gpu));
@@ -1925,7 +2009,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 39 && infoJson.tools_available >= 38 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 39 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 41 && infoJson.tools_available >= 40 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 41 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -1962,6 +2046,13 @@ await mkdir(path.join(root, "outputs/mcp-batch-in/sub"), { recursive: true });
 await copyFile(path.join(root, "test/source.mp4"), path.join(root, "outputs/mcp-batch-in/source.mp4"));
 await copyFile(path.join(root, "test/source2.mp4"), path.join(root, "outputs/mcp-batch-in/source2.mp4"));
 await copyFile(path.join(root, "test/nested/deep-clip.mp4"), path.join(root, "outputs/mcp-batch-in/sub/deep-clip.mp4"));
+// Hermetic batch runs: a previous test run leaves a content-hash
+// cache in the output dir, so the "first" loudness run would come
+// back cached instead of ok. Clear the output dirs the batch tests
+// assert on; the cache-hit test below re-creates its own cache.
+await rm(path.join(root, "outputs/mcp-batch-out"), { recursive: true, force: true });
+await rm(path.join(root, "outputs/mcp-batch-audio"), { recursive: true, force: true });
+await rm(path.join(root, "outputs/mcp-batch-stop-out"), { recursive: true, force: true });
 const batchDryRes = await client.callTool({
   name: "batch",
   arguments: { operation: "loudness", pattern: "**/*.mp4", input_dir: path.join(root, "outputs/mcp-batch-in"), output_dir: path.join(root, "outputs/mcp-batch-dry"), args: { target_lufs: -16 }, dry_run: true },
