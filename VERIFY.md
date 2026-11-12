@@ -1215,9 +1215,9 @@ tone [6,10)), `test/content-lead-black.mp4` (đen 1s đầu + testsrc 9s),
 - **Test** (ffmpeg 8.1.2):
   - Đo trước khi code: copy `--segment-time 2` trên source.mp4 (GOP 8.333s) → playlist 2 segment **8.333 + 1.667s**, TARGETDURATION 8; reencode + force_key_frames → **5 × 2.000s** đúng lưới.
   - `npm run check` sạch (check-docs: 42 tools khớp README); `npm test` **422/422 PASS, exit 0** (408 + 14 mới: segment copy 6 + reencode 2 + vp9 2 + lỗi 3 + doctor 1). Assert mới (14).
-- **Bẫy đo lường** (thêm):
-  3. Test `videos://workspace/info` hardcode `tools_total === 41` — lần chạy đầu fail đúng 1 assert này; sửa 41 → 42 (cả log `tools/list` và `tools_available >= 41`). Bài học: số tool hardcode trong test là drift trap — mỗi lần thêm tool phải grep số cũ.
 - **Bẫy đo lường**:
   1. Bản đầu dùng `meta.video.codec_name` — probe() trả `codec`, không phải `codec_name` → `undefined`, copy mode từ chối cả file H.264 hợp lệ. Fix: dùng `meta.video.codec`/`meta.audio.codec`; bài học: đọc shape probe() trước khi dùng field mới.
   2. Copy mode với `--segment-time 2` trên fixture GOP thưa KHÔNG ra 5 segment — đó là hành vi HLS đúng (segment chỉ cắt ở keyframe), không phải bug. Test assert đúng 2 segment [8.333, 1.667]; đường reencode mới assert lưới 2s đều.
+  3. Test `videos://workspace/info` hardcode `tools_total === 41` — lần chạy đầu fail đúng 1 assert này; sửa 41 → 42 (cả log `tools/list` và `tools_available >= 41`). Bài học: số tool hardcode trong test là drift trap — mỗi lần thêm tool phải grep số cũ.
+- Push: commit 6b3169b "Add segment tool: HLS VOD playlist + .ts segments (42 tools total)" → GitHub main (xác nhận origin/main = 6b3169b). **CI run #43216225351 success** — xanh ngay lượt này (gồm 2 dòng smoke mới: segment copy 2 + reencode 5).
 - Còn lại: chưa stage 0.2.0 (đợi Tony duyệt 0.1.0); backlog tiếp: `stabilize` (cần footage rung thật để verify), Verified-Trap Guard ledger, operation envelope, MCP logging progress, contract machine-readable + CI fail khi drift, MCP advertise core 12 mặc định, `dry-run` cho các tool khác, thư viện style đặt tên cho titlecard/intro, Demo GIF mới cho README.
