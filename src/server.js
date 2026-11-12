@@ -312,6 +312,12 @@ server.tool(
     preset: z.enum(["warm", "cool", "cinematic", "noir", "vintage"]).optional().describe("Named grade preset (default warm when neither preset nor filter is given; mutually exclusive with filter)"),
     filter: z.string().optional().describe("One custom video filter chain, e.g. 'eq=saturation=0.5' (mutually exclusive with preset)"),
     crf: z.number().int().min(0).max(51).default(23),
+    cdl: z.object({
+      slope: z.array(z.number().min(0).max(4)).length(3).optional().describe("ASC CDL slope per channel [r, g, b] (0-4, default 1,1,1)"),
+      offset: z.array(z.number().min(-1).max(1)).length(3).optional().describe("ASC CDL offset per channel [r, g, b] (-1 to 1, default 0,0,0)"),
+      power: z.array(z.number().min(0.1).max(4)).length(3).optional().describe("ASC CDL power (gamma) per channel [r, g, b] (0.1-4, default 1,1,1)"),
+      saturation: z.number().min(0).max(4).optional().describe("ASC CDL saturation (0-4, 0 = grayscale, 1 = unchanged, default 1)"),
+    }).optional().describe("ASC CDL grade (mutually exclusive with preset and filter); applied per channel with a LUT, saturation on top"),
   },
   async (a) => safe(() => core.grade({
     input: a.input,
@@ -319,6 +325,7 @@ server.tool(
     preset: a.preset ?? null,
     filter: a.filter ?? null,
     crf: a.crf,
+    cdl: a.cdl ?? null,
   })),
 );
 
@@ -571,6 +578,7 @@ server.tool(
     model: z.enum(["tiny", "tiny.en", "base", "base.en", "small", "small.en", "medium", "medium.en", "large-v1", "large-v2", "large-v3", "large-v3-turbo", "distil-small.en", "distil-medium.en", "distil-large-v2", "distil-large-v3"]).optional().describe("Whisper model (default tiny, or MEDIAKIT_ASR_MODEL): tiny is fast and fine for clear speech; base/small are more accurate; large-v3-turbo is the accurate/slow end"),
     language: z.string().default("auto").describe("\"auto\" (detect) or an ISO 639-1 code, e.g. en, vi"),
     engine: z.enum(["auto", "faster-whisper", "whisper"]).default("auto").describe("ASR engine: auto prefers faster-whisper, then whisper.cpp; \"whisper\" forces the whisper.cpp CLI"),
+    chunk_seconds: z.number().int().min(5).max(1800).optional().describe("Split long audio into N-second chunks (5-1800, 2s overlap, segments re-offset onto the full timeline) so hour-long recordings transcribe without one giant ASR run; a file shorter than one chunk runs as a single chunk"),
   },
   async (a) => safe(() => core.transcribe({
     input: a.input,
@@ -578,6 +586,7 @@ server.tool(
     model: a.model,
     language: a.language,
     engine: a.engine,
+    chunk_seconds: a.chunk_seconds ?? null,
   })),
 );
 

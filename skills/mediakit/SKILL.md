@@ -471,7 +471,14 @@ with no engine the call fails with install lines instead of guessing.
 `doctor` reports the engine state, but a missing engine never fails
 `doctor` — everything else still works. Silence transcribes to 0
 segments and an empty .srt: that is a correct result, not a failure,
-so don't re-run it hoping for words.
+so don't re-run it hoping for words. For long recordings add
+`--chunk-seconds 300` (5–1800s): the audio is split into chunks with a
+2s overlap and the segments are re-offset onto the full timeline, so an
+hour-long file transcribes without one giant ASR run — a file shorter
+than one chunk runs as a single chunk. A phrase straddling a boundary
+may repeat (the overlap is heard twice, kept once per owned window),
+so chunked text is not word-exact against an unchunked run; use it for
+long files, not for a 30-second clip.
 
 ### 31. Trim clips inside concat — never trust the demuxer's inpoint
 To join only part of each clip, write the input as `path@start-end`
@@ -496,7 +503,14 @@ saturation down, slight teal), `noir` (black and white), `vintage`
 (mutually exclusive with `--preset`). The result reports the mean R/G/B
 of the middle frame before and after: read those numbers, don't assume
 the look landed — a preset that barely moves the frame mean is a broken
-preset, not a subtle one. `check --content` now also scans audio peaks
+preset, not a subtle one. When the look is numeric (a colourist's CDL,
+a matched grade), use `--cdl-slope` / `--cdl-offset` / `--cdl-power`
+`r,g,b` + `--cdl-saturation N` instead of guessing a filter chain:
+slope 0–4, offset −1–1, power 0.1–4, saturation 0–4 (0 = grayscale),
+mutually exclusive with `--preset`/`--filter`. It runs through a
+per-channel LUT (near realtime); `geq` does the same math at 7.7x
+realtime, so it is not used. Verify on the before/after means — slope
+1.5 on red moves a flat-gray frame's R mean 128→~192. `check --content` now also scans audio peaks
 in 0.1s windows above `--peak-threshold` (default −1 dBFS): a window at
 or above 0 dBFS fails as digital clipping, anything above the threshold
 warns — lower the level (or re-record the clipped stretch) instead of

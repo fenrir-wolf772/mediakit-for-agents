@@ -236,12 +236,16 @@ const COMMANDS = {
     ],
   },
   grade: {
-    usage: "mediakit grade <input> -o <output> [--preset warm|cool|cinematic|noir|vintage] [--filter <vf-chain>] [--crf 23]",
-    desc: "Color-grade a video with a named preset or one custom filter chain. Reports the mean R/G/B before and after, measured on the middle frame.",
+    usage: "mediakit grade <input> -o <output> [--preset warm|cool|cinematic|noir|vintage] [--filter <vf-chain>] [--cdl-slope 1.2,1,0.8 --cdl-offset 0,0,0 --cdl-power 1,1,1 --cdl-saturation 1] [--crf 23]",
+    desc: "Color-grade a video with a named preset, one custom filter chain, or an ASC CDL (--cdl-slope/--cdl-offset/--cdl-power as r,g,b triples + --cdl-saturation; any one of them selects CDL mode, mutually exclusive with --preset/--filter). Reports the mean R/G/B before and after, measured on the middle frame.",
     args: [{ name: "input", required: true }],
     options: [
       ["--preset", "warm (default) | cool | cinematic | noir | vintage — fixed filter chains"],
       ["--filter", "One custom video filter chain, e.g. 'eq=saturation=0.5' (mutually exclusive with --preset)"],
+      ["--cdl-slope", "ASC CDL slope as r,g,b (0-4, e.g. 1.2,1,0.8); any --cdl-* option selects CDL mode"],
+      ["--cdl-offset", "ASC CDL offset as r,g,b (-1 to 1, e.g. 0.02,0,0)"],
+      ["--cdl-power", "ASC CDL power (gamma) as r,g,b (0.1-4, e.g. 1,1,1.1)"],
+      ["--cdl-saturation", "ASC CDL saturation (0-4, 0 = grayscale, 1 = unchanged)"],
       ["--crf", "Quality 0-51, lower is better (default 23)"],
       ["-o, --output", "Output file (required)"],
     ],
@@ -388,13 +392,14 @@ const COMMANDS = {
     ],
   },
   transcribe: {
-    usage: "mediakit transcribe <input> -o <output.srt> [--model tiny] [--language auto|en|vi|...] [--engine auto|faster-whisper|whisper]",
-    desc: "Transcribe speech to a .srt with a LOCAL engine (no cloud, audio never uploaded): faster-whisper by default, whisper.cpp with --engine whisper. Needs an engine installed (see doctor); without one the call fails with install lines. Env: MEDIAKIT_ASR_PYTHON picks the python with faster-whisper, MEDIAKIT_ASR_MODEL the default model; MEDIAKIT_WHISPER_CPP_BIN / MEDIAKIT_WHISPER_MODEL point at a whisper.cpp binary + ggml model.",
+    usage: "mediakit transcribe <input> -o <output.srt> [--model tiny] [--language auto|en|vi|...] [--engine auto|faster-whisper|whisper] [--chunk-seconds 300]",
+    desc: "Transcribe speech to a .srt with a LOCAL engine (no cloud, audio never uploaded): faster-whisper by default, whisper.cpp with --engine whisper. Needs an engine installed (see doctor); without one the call fails with install lines. Env: MEDIAKIT_ASR_PYTHON picks the python with faster-whisper, MEDIAKIT_ASR_MODEL the default model; MEDIAKIT_WHISPER_CPP_BIN / MEDIAKIT_WHISPER_MODEL point at a whisper.cpp binary + ggml model. --chunk-seconds splits long files into chunks (5–1800s, 2s overlap, segments re-offset onto the full timeline) so hour-long recordings transcribe without one giant ASR run; a file shorter than one chunk runs as a single chunk.",
     args: [{ name: "input", required: true }],
     options: [
       ["--model", "Whisper model: tiny (default, fast), base, small, medium, large-v3, large-v3-turbo, ..."],
       ["--language", "Language: auto (default, detect) or ISO 639-1 code, e.g. en, vi"],
       ["--engine", "ASR engine: auto (default, faster-whisper then whisper.cpp), faster-whisper, or whisper (whisper.cpp CLI)"],
+      ["--chunk-seconds", "Split the audio into N-second chunks (5–1800, default: whole file in one run)"],
       ["-o, --output", "Output .srt file (required)"],
     ],
   },
@@ -617,6 +622,18 @@ function parseArgs(argv) {
 
 const numOpt = (opts, key) => (opts[key] === undefined ? undefined : Number(opts[key]));
 
+// Parse a --cdl-slope/--cdl-offset/--cdl-power triple "r,g,b" into
+// [r, g, b]; the core validates the ranges. Returns undefined when the
+// option was not given.
+const tripleOpt = (opts, key) => {
+  if (opts[key] === undefined) return undefined;
+  const parts = String(opts[key]).split(",").map((s) => s.trim());
+  if (parts.length !== 3) fail(`--${key.replace(/_/g, "-")} must be three numbers "r,g,b", got "${opts[key]}"`);
+  const nums = parts.map((p) => Number(p));
+  if (nums.some((n) => !Number.isFinite(n))) fail(`--${key.replace(/_/g, "-")} must be three numbers "r,g,b", got "${opts[key]}"`);
+  return nums;
+};
+
 // Parse --sfx specs: <file>@<seconds|MM:SS>[@<volume 0-1>]. Split from
 // the right, so a file path may itself contain "@". Volume defaults
 // to 1; the time is left as a string for core.parseTime (MM:SS works).
@@ -811,14 +828,23 @@ async function main() {
           gopSeconds: numOpt(opts, "gop_seconds") ?? null,
         });
         break;
-      case "grade":
+      case "grade": {
+        const cdlSlope = tripleOpt(opts, "cdl_slope");
+        const cdlOffset = tripleOpt(opts, "cdl_offset");
+        const cdlPower = tripleOpt(opts, "cdl_power");
+        const cdlSaturation = numOpt(opts, "cdl_saturation");
+        const cdl = (cdlSlope !== undefined || cdlOffset !== undefined || cdlPower !== undefined || cdlSaturation !== undefined)
+          ? { slope: cdlSlope, offset: cdlOffset, power: cdlPower, saturation: cdlSaturation }
+          : null;
         result = await core.grade({
           input: needInput(), output: needOutput(opts),
           preset: opts.preset ?? null,
           filter: opts.filter ?? null,
           crf: numOpt(opts, "crf") ?? 23,
+          cdl,
         });
         break;
+      }
       case "reverse":
         result = await core.reverseClip({
           input: needInput(), output: needOutput(opts),
@@ -948,6 +974,7 @@ async function main() {
           model: opts.model ?? null,
           language: opts.language ?? "auto",
           engine: opts.engine ?? "auto",
+          chunk_seconds: numOpt(opts, "chunk_seconds") ?? null,
         });
         break;
       case "mix": {

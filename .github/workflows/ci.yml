@@ -78,6 +78,8 @@ jobs:
           node bin/mediakit.js extract-audio test/stereo-lr.mp3 --channel 0 -o outputs/ci-ch0.mp3
           ffprobe -v error -show_entries stream=channels -of csv=p=0 outputs/ci-ch0.mp3 | grep '^1$'
           node bin/mediakit.js grade test/source.mp4 --preset noir -o outputs/ci-grade.mp4
+          node bin/mediakit.js grade test/flat-gray.mp4 --cdl-slope 1.5,1,0.7 -o outputs/ci-grade-cdl.mp4 | grep '"preset": null'
+          node bin/mediakit.js transcribe test/speech-jfk.flac -o outputs/ci-transcribe-chunk.srt --chunk-seconds 2 2>&1 | grep -q 'chunk_seconds'
           node bin/mediakit.js reverse test/scenes-source.mp4 -o outputs/ci-reverse.mp4
           ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-reverse.mp4 | grep '^10'
           node bin/mediakit.js check test/loud-peak.wav --content --platform tiktok | grep '"name": "content_peaks"'

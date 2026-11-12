@@ -321,6 +321,29 @@ const gradeCustom = JSON.parse(gradeCustomRes.content[0].text);
 checkOk(gradeCustom.preset === null && gradeCustom.filter === "eq=saturation=0", "custom filter is reported verbatim, preset null", JSON.stringify(gradeCustom));
 checkOk(Math.abs(gradeCustom.color_after.r - gradeCustom.color_after.g) < 3 && Math.abs(gradeCustom.color_after.g - gradeCustom.color_after.b) < 3, "custom eq=saturation=0 also grayscales", JSON.stringify(gradeCustom.color_after));
 
+// grade --cdl: ASC CDL on a flat gray fixture — each channel must move
+// by its own slope (R 128*1.5≈192, G unchanged, B 128*0.7≈89),
+// measured on the tool's own before/after means.
+const gradeCdlRes = await client.callTool({
+  name: "grade",
+  arguments: { input: path.join(root, "test/flat-gray.mp4"), output: path.join(root, "outputs/mcp-grade-cdl.mp4"), cdl: { slope: [1.5, 1, 0.7] } },
+});
+const gradeCdl = JSON.parse(gradeCdlRes.content[0].text);
+console.log("grade cdl:", JSON.stringify(gradeCdl.color_before), "->", JSON.stringify(gradeCdl.color_after));
+checkOk(gradeCdl.preset === null && gradeCdl.cdl?.slope?.[0] === 1.5 && gradeCdl.filter?.includes("lutrgb"), "grade --cdl reports preset null, the CDL values and a lutrgb chain", JSON.stringify(gradeCdl).slice(0, 300));
+checkOk(near(gradeCdl.color_after.r, 192, 8) && near(gradeCdl.color_after.g, 128, 5) && near(gradeCdl.color_after.b, 89, 8), "grade --cdl slope moves R 128->~192 and B 128->~89 on a flat gray frame", JSON.stringify(gradeCdl.color_after));
+checkOk(near(gradeCdl.color_before.r, 128, 5) && gradeCdl.dimensions === "320x180" && near(gradeCdl.duration_seconds, 2, 0.05), "grade --cdl keeps dimensions and duration", `${gradeCdl.dimensions} ${gradeCdl.duration_seconds}s`);
+const gradeCdlSatRes = await client.callTool({
+  name: "grade",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-grade-cdl-sat.mp4"), cdl: { saturation: 0 } },
+});
+const gradeCdlSat = JSON.parse(gradeCdlSatRes.content[0].text);
+checkOk(Math.abs(gradeCdlSat.color_after.r - gradeCdlSat.color_after.g) < 3 && Math.abs(gradeCdlSat.color_after.g - gradeCdlSat.color_after.b) < 3, "grade --cdl saturation 0 grayscales", JSON.stringify(gradeCdlSat.color_after));
+const gradeCdlBoth = await callExpectThrow("grade", { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-grade-cdl-both.mp4"), preset: "warm", cdl: { slope: [1.2, 1, 1] } });
+checkOk(/mutually exclusive/.test(gradeCdlBoth), "grade refuses preset + cdl together", gradeCdlBoth.slice(0, 200));
+const gradeCdlBad = await callExpectThrow("grade", { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-grade-cdl-bad.mp4"), cdl: { slope: [1.2, 1] } });
+checkOk(/cdl\.slope/.test(gradeCdlBad), "grade refuses a 2-value cdl slope", gradeCdlBad.slice(0, 200));
+
 const gradeBadPreset = await callExpectThrow("grade", { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-grade-bad.mp4"), preset: "neon" });
 checkOk(/preset|Invalid enum/i.test(gradeBadPreset), "grade rejects an unknown preset", gradeBadPreset.slice(0, 200));
 const gradeBoth = await callExpectThrow("grade", { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-grade-both.mp4"), preset: "warm", filter: "eq=saturation=0" });
@@ -517,7 +540,7 @@ if (process.env.MEDIAKIT_TEST_ASR === "1") {
 checkOk(doctorJson.tools.fit?.available === true, "doctor: fit is available");
 checkOk(doctorJson.tools.generate_srt?.available === true, "doctor: generate_srt is available (pure Node, no ffmpeg filter needed)");
 checkOk(doctorJson.tools.export_gif?.available === true, "doctor: export_gif is available (palettegen/paletteuse present)");
-checkOk(doctorJson.tools.grade?.available === true, "doctor: grade is available (eq/hue/colorbalance present)");
+checkOk(doctorJson.tools.grade?.available === true, "doctor: grade is available (eq/hue/colorbalance/lutrgb present)");
 checkOk(doctorJson.tools.check?.available === true, "doctor: check is available (astats/ametadata present for the peaks scan)");
 checkOk(doctorJson.tools.reverse?.available === true, "doctor: reverse is available (reverse/areverse filters present)");
 checkOk(doctorJson.tools.interpolate?.available === true, "doctor: interpolate is available (minterpolate filter present)");
@@ -2079,6 +2102,20 @@ checkOk(/^1\n00:00:00,000 --> 00:00:10,500\n/.test(trStubSrt) && /ask not what y
 const trStubDoctorRes = await stubClient.callTool({ name: "doctor", arguments: {} });
 const trStubDoctorJson = JSON.parse(trStubDoctorRes.content[0].text);
 checkOk(trStubDoctorJson.tools.transcribe?.available === true && trStubDoctorJson.tools.transcribe?.engine === "whisper.cpp" && trStubDoctorJson.tools.transcribe?.binary === stubBin, "doctor reports the whisper.cpp stub engine as available", JSON.stringify(trStubDoctorJson.tools.transcribe));
+
+// transcribe --chunk-seconds through the same stub client: the stub
+// returns one [0, 10.5] segment for every chunk wav, so the merge
+// machinery is what the asserts pin down — 3 chunks over 11s at 5s
+// each, segments re-offset to start at 0/5/10 and clamped to their
+// chunk ends. (Real audio is covered by the gated whisper.cpp block.)
+const trChunkRes = await stubClient.callTool({
+  name: "transcribe",
+  arguments: { input: path.join(root, "test/speech-jfk.flac"), output: path.join(root, "outputs/mcp-jfk-chunk-stub.srt"), model: "tiny", language: "en", engine: "whisper", chunk_seconds: 5 },
+});
+const trChunkJson = JSON.parse(trChunkRes.content[0].text);
+checkOk(trChunkRes.isError !== true && trChunkJson.chunks === 3 && trChunkJson.chunk_seconds === 5 && trChunkJson.chunk_overlap_seconds === 2, "transcribe --chunk-seconds 5 splits 11s into 3 chunks with 2s overlap", JSON.stringify(trChunkJson).slice(0, 300));
+checkOk(trChunkJson.segment_count === 3 && near(trChunkJson.segments?.[0]?.start, 0, 0.01) && near(trChunkJson.segments?.[1]?.start, 5, 0.01) && near(trChunkJson.segments?.[2]?.start, 10, 0.01), "chunked segments are re-offset to start at 0/5/10", JSON.stringify(trChunkJson.segments));
+checkOk(near(trChunkJson.segments?.[0]?.end, 7, 0.01) && near(trChunkJson.segments?.[1]?.end, 11, 0.01) && near(trChunkJson.segments?.[2]?.end, 11, 0.01), "chunked segments are clamped to their chunk ends", JSON.stringify(trChunkJson.segments));
 await stubClient.close();
 
 // No engine at all (both disabled): doctor must report engine
@@ -2103,6 +2140,18 @@ const trNoBin = await runCli(["transcribe", path.join(root, "test/speech-jfk.fla
 checkOk(trNoBin.code !== 0 && /whisper\.cpp/.test(trNoBin.out) && /ASR_NOT_INSTALLED/.test(trNoBin.out), "transcribe --engine whisper with a missing binary refuses with the whisper.cpp install hint", trNoBin.out.slice(0, 200));
 const trNoModel = await runCli(["transcribe", path.join(root, "test/speech-jfk.flac"), "-o", path.join(root, "outputs/mcp-whisper-nomodel.srt"), "--engine", "whisper"], { MEDIAKIT_WHISPER_CPP_BIN: stubBin, MEDIAKIT_WHISPER_MODEL: "/nonexistent/ggml-tiny.bin" });
 checkOk(trNoModel.code !== 0 && /model file not found/.test(trNoModel.out) && /ASR_NOT_INSTALLED/.test(trNoModel.out), "transcribe --engine whisper with a missing model refuses with the model download hint", trNoModel.out.slice(0, 200));
+
+// transcribe --chunk-seconds validation needs no engine (checked
+// before the engine is probed), so the CLI asserts run ungated.
+const trBadChunk = await runCli(["transcribe", path.join(root, "test/speech-jfk.flac"), "-o", path.join(root, "outputs/mcp-jfk-badchunk.srt"), "--chunk-seconds", "2"]);
+checkOk(trBadChunk.code !== 0 && /chunk_seconds/.test(trBadChunk.out), "transcribe refuses --chunk-seconds below 5", trBadChunk.out.slice(0, 200));
+const trBigChunk = await runCli(["transcribe", path.join(root, "test/speech-jfk.flac"), "-o", path.join(root, "outputs/mcp-jfk-bigchunk.srt"), "--chunk-seconds", "2000"]);
+checkOk(trBigChunk.code !== 0 && /chunk_seconds/.test(trBigChunk.out), "transcribe refuses --chunk-seconds above 1800", trBigChunk.out.slice(0, 200));
+
+// grade --cdl triple parsing through the CLI: a 2-value triple is
+// refused before any encode starts.
+const gradeBadTriple = await runCli(["grade", path.join(root, "test/source.mp4"), "-o", path.join(root, "outputs/mcp-grade-badtriple.mp4"), "--cdl-slope", "1.5,1"]);
+checkOk(gradeBadTriple.code !== 0 && /cdl-slope/.test(gradeBadTriple.out), "grade refuses a 2-value --cdl-slope triple", gradeBadTriple.out.slice(0, 200));
 
 // transcribe end-to-end needs a real engine + the tiny model (~75 MB
 // from Hugging Face on first use): too heavy for CI, so this block
@@ -2167,6 +2216,19 @@ if (process.env.MEDIAKIT_TEST_WHISPER_CPP === "1") {
   });
   const wToneJson = JSON.parse(wToneRes.content[0].text);
   checkOk(wToneRes.isError !== true && wToneJson.segment_count === 0 && wToneJson.text === "" && wToneJson.size_bytes === 0, "transcribe --engine whisper of a tone (no speech) yields 0 segments and an empty .srt", JSON.stringify(wToneJson).slice(0, 200));
+  // Chunked with the real engine: 11s at 5s a chunk -> 3 chunks,
+  // segments re-offset onto the full timeline, the JFK line intact
+  // (a phrase at a boundary may repeat — the overlap is heard twice
+  // and kept once per owned window, it is not word-exact).
+  const wChunkRes = await client.callTool({
+    name: "transcribe",
+    arguments: { input: path.join(root, "test/speech-jfk.flac"), output: path.join(root, "outputs/mcp-jfk-whisper-chunk.srt"), model: "tiny", language: "en", engine: "whisper", chunk_seconds: 5 },
+  });
+  const wChunkJson = JSON.parse(wChunkRes.content[0].text);
+  console.log("transcribe whisper.cpp JFK chunked:", JSON.stringify(wChunkJson.segments));
+  checkOk(wChunkRes.isError !== true && wChunkJson.chunks === 3 && wChunkJson.segment_count >= 1, "transcribe --engine whisper --chunk-seconds 5 runs 3 chunks", JSON.stringify(wChunkJson).slice(0, 200));
+  checkOk(/fellow Americans/.test(wChunkJson.text ?? "") && /ask what you can do for your country/.test(wChunkJson.text ?? ""), "chunked transcribe keeps the JFK line", wChunkJson.text ?? "");
+  checkOk(wChunkJson.segments.every((s, i, a) => i === 0 || s.start >= a[i - 1].start) && wChunkJson.segments.every((s) => s.start >= 0 && s.end <= 11.5), "chunked segments are sorted and inside the file", JSON.stringify(wChunkJson.segments));
 }
 
 // Sandbox (MEDIAKIT_WORKDIR), tested through the CLI so the env var

@@ -2121,7 +2121,56 @@ export async function detectTranscribe(model = "tiny") {
   };
 }
 
-export async function transcribe({ input, output, model = "tiny", language = "auto", engine = "auto" }) {
+// Chunks overlap by 2s so a word straddling a boundary is heard whole
+// by at least one chunk; the ownership rule below (a segment belongs
+// to the chunk whose owned window its start falls in) keeps the merge
+// from duplicating the overlapped speech.
+const TRANSCRIBE_CHUNK_OVERLAP_SECONDS = 2;
+
+// One ASR run over one WAV file, either engine. Returns raw segments
+// in seconds ({start, end, text}), the detected language and its
+// probability — the caller offsets and merges them. Separated out so
+// the chunked path can call it once per chunk with the same code.
+async function runAsrOnWav(selected, wavPath, mdl, lang, tmpDir, tag) {
+  if (selected.engine === "whisper.cpp") {
+    const outBase = path.join(tmpDir, `whisper-${tag}`);
+    await runCapture(selected.binary, ["-m", selected.model, "-f", wavPath, "-l", lang, "-ojf", "-of", outBase, "-np"], { timeoutMs: 1_800_000 });
+    let raw;
+    try {
+      raw = await readFile(`${outBase}.json`, "utf8");
+    } catch {
+      throw new MediaKitError("transcribe: whisper.cpp finished but wrote no JSON output", "ASR_FAILED");
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new MediaKitError(`transcribe: whisper.cpp returned unparseable JSON: ${raw.slice(0, 200)}`, "ASR_FAILED");
+    }
+    const segs = Array.isArray(parsed.transcription) ? parsed.transcription : [];
+    return {
+      segments: segs.map((s) => ({ start: (s.offsets?.from ?? 0) / 1000, end: (s.offsets?.to ?? 0) / 1000, text: s.text ?? "" })),
+      language: parsed.result?.language ?? null,
+      language_probability: null,
+    };
+  }
+  const helper = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "asr_faster_whisper.py");
+  const args = [helper, "--wav", wavPath, "--model", mdl];
+  if (lang !== "auto") args.push("--language", lang);
+  const { stdout } = await runCapture(selected.python, args, { timeoutMs: 1_800_000 });
+  try {
+    const asr = JSON.parse(stdout);
+    return {
+      segments: Array.isArray(asr.segments) ? asr.segments : [],
+      language: asr.language ?? null,
+      language_probability: asr.language_probability ?? null,
+    };
+  } catch {
+    throw new MediaKitError(`transcribe: the ASR helper returned unparseable output: ${String(stdout).slice(0, 200)}`, "ASR_FAILED");
+  }
+}
+
+export async function transcribe({ input, output, model = "tiny", language = "auto", engine = "auto", chunk_seconds = null }) {
   const inPath = await requireInput(input);
   const engRaw = String(engine ?? "auto").toLowerCase();
   const eng = engRaw === "whisper.cpp" ? "whisper" : engRaw;
@@ -2136,6 +2185,9 @@ export async function transcribe({ input, output, model = "tiny", language = "au
   if (lang !== "auto" && !/^[a-z]{2,3}$/.test(lang)) {
     throw new MediaKitError(`language must be "auto" or an ISO 639-1 code (e.g. en, vi), got "${language}"`, "INVALID_ARG");
   }
+  const cs = chunk_seconds === null || chunk_seconds === undefined
+    ? null
+    : num(chunk_seconds, "chunk_seconds", { min: 5, max: 1800, integer: true });
   const outPath = await prepareOutput(output, [inPath]);
   if (path.extname(outPath).toLowerCase() !== ".srt") {
     throw new MediaKitError(`transcribe output must end in .srt, got ${path.extname(outPath) || "(no extension)"}`, "INVALID_ARG");
@@ -2166,41 +2218,49 @@ export async function transcribe({ input, output, model = "tiny", language = "au
   try {
     const wav = path.join(tmpDir, "asr.wav");
     await run(FFMPEG, ["-y", "-i", inPath, "-vn", "-c:a", "pcm_s16le", "-ar", "16000", "-ac", "1", wav]);
-    let asr;
-    if (selected.engine === "whisper.cpp") {
-      const outBase = path.join(tmpDir, "whisper-out");
-      await runCapture(selected.binary, ["-m", selected.model, "-f", wav, "-l", lang, "-ojf", "-of", outBase, "-np"], { timeoutMs: 1_800_000 });
-      let raw;
-      try {
-        raw = await readFile(`${outBase}.json`, "utf8");
-      } catch {
-        throw new MediaKitError("transcribe: whisper.cpp finished but wrote no JSON output", "ASR_FAILED");
-      }
-      let parsed;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        throw new MediaKitError(`transcribe: whisper.cpp returned unparseable JSON: ${raw.slice(0, 200)}`, "ASR_FAILED");
-      }
-      const segs = Array.isArray(parsed.transcription) ? parsed.transcription : [];
-      asr = {
-        segments: segs.map((s) => ({ start: (s.offsets?.from ?? 0) / 1000, end: (s.offsets?.to ?? 0) / 1000, text: s.text ?? "" })),
-        language: parsed.result?.language ?? null,
-        language_probability: null,
-        duration_seconds: meta.duration_seconds ?? null,
-      };
+    const duration = meta.duration_seconds ?? null;
+    // Chunked mode: split the WAV into chunk_seconds pieces (+2s
+    // overlap), transcribe each, offset the segments back onto the
+    // full timeline. A file shorter than one chunk runs as a single
+    // chunk — same result as the unchunked path, but the report says
+    // chunks: 1 so the caller can see chunking was requested.
+    const chunked = cs !== null && duration !== null && duration > cs;
+    const chunkCount = chunked ? Math.ceil(duration / cs) : 1;
+    const overlap = chunked ? TRANSCRIBE_CHUNK_OVERLAP_SECONDS : 0;
+    let rawSegments = [];
+    let language = null;
+    let languageProbability = null;
+    if (!chunked) {
+      const asr = await runAsrOnWav(selected, wav, mdl, lang, tmpDir, "full");
+      rawSegments = asr.segments;
+      language = asr.language;
+      languageProbability = asr.language_probability;
     } else {
-      const helper = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "asr_faster_whisper.py");
-      const args = [helper, "--wav", wav, "--model", mdl];
-      if (lang !== "auto") args.push("--language", lang);
-      const { stdout } = await runCapture(selected.python, args, { timeoutMs: 1_800_000 });
-      try {
-        asr = JSON.parse(stdout);
-      } catch {
-        throw new MediaKitError(`transcribe: the ASR helper returned unparseable output: ${String(stdout).slice(0, 200)}`, "ASR_FAILED");
+      for (let i = 0; i < chunkCount; i++) {
+        const start = i * cs;
+        const end = Math.min(start + cs + overlap, duration);
+        const chunkWav = path.join(tmpDir, `chunk-${i}.wav`);
+        await run(FFMPEG, ["-y", "-ss", String(start), "-t", String(+(end - start).toFixed(3)), "-i", wav, "-c:a", "pcm_s16le", "-ar", "16000", "-ac", "1", chunkWav]);
+        const asr = await runAsrOnWav(selected, chunkWav, mdl, lang, tmpDir, `chunk-${i}`);
+        // Ownership: a segment belongs to the chunk whose owned
+        // window [chunk start, next chunk start) its start falls in,
+        // so the 2s overlap is transcribed twice but kept once. The
+        // last chunk owns everything to the end of the file.
+        const ownedEnd = i === chunkCount - 1 ? Infinity : (i + 1) * cs;
+        for (const s of asr.segments) {
+          const st = s.start + start;
+          const en = Math.min(s.end + start, end);
+          if (st >= ownedEnd) continue;
+          if (!(en > st)) continue;
+          rawSegments.push({ start: st, end: en, text: s.text });
+        }
+        if (language === null && asr.language) {
+          language = asr.language;
+          languageProbability = asr.language_probability;
+        }
       }
     }
-    const segments = (asr.segments ?? [])
+    const segments = (rawSegments ?? [])
       .map((s) => ({
         start: num(s.start, "segment start", { min: 0 }),
         end: num(s.end, "segment end", { min: 0 }),
@@ -2217,9 +2277,12 @@ export async function transcribe({ input, output, model = "tiny", language = "au
       output: outPath,
       engine: selected.engine,
       model: mdl,
-      language: asr.language ?? null,
-      language_probability: asr.language_probability ?? null,
-      duration_seconds: asr.duration_seconds ?? meta.duration_seconds ?? null,
+      language: language ?? null,
+      language_probability: languageProbability ?? null,
+      duration_seconds: duration,
+      chunk_seconds: cs,
+      chunks: chunkCount,
+      chunk_overlap_seconds: overlap,
       segment_count: segments.length,
       segments: segments.map((s) => ({ start: +s.start.toFixed(3), end: +s.end.toFixed(3), text: s.text })),
       text: segments.map((s) => s.text).join(" "),
@@ -3385,18 +3448,64 @@ async function frameChannelMeans(file, timeSeconds) {
   return out;
 }
 
-export async function grade({ input, output, preset = null, filter = null, crf = 23 }) {
+// ASC CDL (slope/offset/power per channel + saturation), applied
+// with lutrgb — a per-channel point operation, so lutrgb builds a
+// 256-entry LUT once per channel instead of evaluating per pixel
+// (geq does the same math but took 77s for a 10s 720p clip; lutrgb
+// does it in ~6s). Saturation rides on eq afterwards. lutrgb needs
+// commas inside its expressions escaped (\,) — the helper does that,
+// the ":" channel separators stay bare.
+function cdlTriple(v, name, min, max) {
+  if (!Array.isArray(v) || v.length !== 3) {
+    throw new MediaKitError(`${name} must be [r, g, b] (3 numbers), got ${JSON.stringify(v)}`, "INVALID_ARG");
+  }
+  return v.map((x, i) => num(x, `${name}[${i}]`, { min, max }));
+}
+
+function normalizeCdl(cdl) {
+  if (cdl === null || cdl === undefined) return null;
+  if (typeof cdl !== "object" || Array.isArray(cdl)) {
+    throw new MediaKitError(`grade --cdl must be an object {slope, offset, power, saturation}, got ${JSON.stringify(cdl)}`, "INVALID_ARG");
+  }
+  return {
+    slope: cdlTriple(cdl.slope ?? [1, 1, 1], "cdl.slope", 0, 4),
+    offset: cdlTriple(cdl.offset ?? [0, 0, 0], "cdl.offset", -1, 1),
+    power: cdlTriple(cdl.power ?? [1, 1, 1], "cdl.power", 0.1, 4),
+    saturation: num(cdl.saturation ?? 1, "cdl.saturation", { min: 0, max: 4 }),
+  };
+}
+
+function cdlFilterChain(c) {
+  const exprs = ["r", "g", "b"].map((_, i) => {
+    const raw = `clip(pow(max(val*${c.slope[i]}+${c.offset[i]}*255,0)/255,${c.power[i]})*255,0,255)`;
+    return raw.replaceAll(",", "\\,");
+  });
+  let chain = `lutrgb=r='${exprs[0]}':g='${exprs[1]}':b='${exprs[2]}'`;
+  if (c.saturation !== 1) chain += `,eq=saturation=${c.saturation}`;
+  return chain;
+}
+
+export async function grade({ input, output, preset = null, filter = null, crf = 23, cdl = null }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const c = num(crf, "crf", { min: 0, max: 51, integer: true });
+  const cdlNorm = normalizeCdl(cdl);
+  if (cdlNorm) {
+    if (filter !== null && filter !== undefined && filter !== "") {
+      throw new MediaKitError("grade --cdl and --filter are mutually exclusive (one way to pick the look)", "INVALID_ARG");
+    }
+    if (preset !== null && preset !== undefined) {
+      throw new MediaKitError("grade --cdl and --preset are mutually exclusive (one way to pick the look)", "INVALID_ARG");
+    }
+  }
   if (filter !== null && filter !== undefined && filter !== "") {
     if (preset !== null && preset !== undefined) {
       throw new MediaKitError("grade --preset and --filter are mutually exclusive (one way to pick the look)", "INVALID_ARG");
     }
     if (typeof filter !== "string") throw new MediaKitError("grade --filter must be a filter chain string", "INVALID_ARG");
   }
-  const name = filter ? null : (preset ?? "warm");
-  const chain = filter || GRADE_PRESETS[name];
+  const name = cdlNorm ? null : (filter ? null : (preset ?? "warm"));
+  const chain = cdlNorm ? cdlFilterChain(cdlNorm) : (filter || GRADE_PRESETS[name]);
   if (!chain) throw new MediaKitError(`unknown grade preset: ${name} (supported: ${Object.keys(GRADE_PRESETS).join(", ")})`, "INVALID_ARG");
   const meta = await probe(inPath);
   if (!meta.video) throw new MediaKitError("grade needs a video input", "INVALID_ARG");
@@ -3409,7 +3518,7 @@ export async function grade({ input, output, preset = null, filter = null, crf =
   const outMeta = await probe(outPath);
   return {
     operation: "grade", input: inPath, output: outPath,
-    preset: name, filter: chain, crf: c,
+    preset: name, filter: chain, crf: c, cdl: cdlNorm,
     color_before: before, color_after: after,
     dimensions: outMeta.video ? `${outMeta.video.width}x${outMeta.video.height}` : null,
     duration_seconds: outMeta.duration_seconds,
@@ -4071,7 +4180,7 @@ const DOCTOR_FILTERS = [
   "xfade", "acrossfade", "fps", "anullsrc", "setpts", "asetpts",
   "format", "colorchannelmixer", "atempo", "aloop", "geq", "color",
   "palettegen", "paletteuse", "adelay", "pan",
-  "astats", "ametadata", "eq", "hue", "colorbalance",
+  "astats", "ametadata", "eq", "hue", "colorbalance", "lutrgb",
   "reverse", "areverse",
   "minterpolate", "hqdn3d", "nlmeans",
 ];
@@ -4101,7 +4210,7 @@ const TOOL_REQUIREMENTS = {
   burn_captions: { filters: ["subtitles", "ass"] },
   reframe: { filters: ["crop", "scale", "pad", "gblur", "overlay"], encoders: ["libx264"] },
   check: { filters: ["loudnorm", "blackdetect", "freezedetect", "silencedetect", "astats", "ametadata"] },
-  grade: { filters: ["eq", "hue", "colorbalance"], encoders: ["libx264"] },
+  grade: { filters: ["eq", "hue", "colorbalance", "lutrgb"], encoders: ["libx264"] },
   reverse: { filters: ["reverse", "areverse"], encoders: ["libx264", "aac"] },
   interpolate: { filters: ["minterpolate"], encoders: ["libx264"] },
   denoise: { filters: ["hqdn3d", "nlmeans"], encoders: ["libx264"] },
@@ -5172,8 +5281,8 @@ export const BATCH_OPERATIONS = {
     run: (input, output, a) => reverseClip({ input, output, audio: a.audio ?? true, crf: a.crf ?? 23 }),
   },
   grade: {
-    args: ["preset", "filter", "crf"],
-    run: (input, output, a) => grade({ input, output, preset: a.preset ?? null, filter: a.filter ?? null, crf: a.crf ?? 23 }),
+    args: ["preset", "filter", "crf", "cdl"],
+    run: (input, output, a) => grade({ input, output, preset: a.preset ?? null, filter: a.filter ?? null, crf: a.crf ?? 23, cdl: a.cdl ?? null }),
   },
   fit: {
     args: ["duration", "method", "max_fps"],
