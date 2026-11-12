@@ -84,13 +84,14 @@ const COMMANDS = {
     ],
   },
   thumbnail: {
-    usage: "mediakit thumbnail <input> -o <output.png|jpg> [--frames <n>] [--columns <n>] [--width <px>]",
-    desc: "Build a contact sheet of N evenly spaced frames.",
+    usage: "mediakit thumbnail <input> -o <output.png|jpg> [--frames <n>] [--columns <n>] [--width <px>] [--no-timestamps]",
+    desc: "Build a contact sheet of N evenly spaced frames. Each tile is labelled with its own timestamp in seconds by default — look at it before cutting or publishing.",
     args: [{ name: "input", required: true }],
     options: [
       ["--frames", "Number of frames (default 6)"],
       ["--columns", "Grid columns (default 3)"],
       ["--width", "Width of each tile in pixels (default 320)"],
+      ["--no-timestamps", "Do not label tiles with timestamps"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -221,6 +222,15 @@ const COMMANDS = {
       ["--start", "Scan only from this time, seconds or MM:SS (needs --content)"],
       ["--end", "Scan only up to this time, seconds or MM:SS (needs --content)"],
       ["--peak-threshold", "Audio peak threshold in dBFS for the peaks rule (default -1; >= 0 dBFS is clipping; needs --content)"],
+    ],
+  },
+  "qa-report": {
+    usage: "mediakit qa-report <input> [--target tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin|any] [--expected-duration <s|MM:SS>]",
+    desc: "One-call delivery gate for a finished file: even dimensions, pixel format, frame rate, aspect and length for the target, measured loudness and true peak, black/frozen frames, dead air, pacing from real scene cuts, and an optional expected duration. Probe-only — writes no file. Verdict pass/warn/fail plus a per-check list.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--target", "Delivery target (default any — skips aspect ratio and platform length)"],
+      ["--expected-duration", "Expected duration, seconds or MM:SS (fail when measured duration is more than 0.5s off)"],
     ],
   },
   grade: {
@@ -697,6 +707,7 @@ async function main() {
           frames: numOpt(opts, "frames") ?? 6,
           columns: numOpt(opts, "columns") ?? 3,
           width: numOpt(opts, "width") ?? 320,
+          timestamps: opts.timestamps ?? true,
         });
         break;
       case "loudness":
@@ -755,6 +766,12 @@ async function main() {
           y: numOpt(opts, "y") ?? null,
           anchor: opts.anchor ?? null,
           blur: numOpt(opts, "blur") ?? 20,
+        });
+        break;
+      case "qa-report":
+        result = await core.qaReport({
+          input: needInput(), target: opts.target ?? "any",
+          expectedDuration: opts.expected_duration ?? null,
         });
         break;
       case "check": {

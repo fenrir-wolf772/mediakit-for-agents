@@ -97,10 +97,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 43 tools present");
-checkOk(missing.length === 0, "tools/list has all 43 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 44 tools present");
+checkOk(missing.length === 0, "tools/list has all 44 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -2169,7 +2169,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 43 && infoJson.tools_available >= 42 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 43 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 44 && infoJson.tools_available >= 43 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 44 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -2275,6 +2275,136 @@ const batchAudioRes = await client.callTool({
 const batchAudioJson = JSON.parse(batchAudioRes.content[0].text);
 checkOk(batchAudioJson.succeeded === 2 && batchAudioJson.results.every((r) => r.output.endsWith("-extract_audio.mp3")), "batch extract_audio writes .mp3 outputs for video inputs", JSON.stringify(batchAudioJson.results.map((r) => r.output)));
 checkOk(existsSync(path.join(root, "outputs/mcp-batch-audio/source-extract_audio.mp3")), "batch extract_audio output file exists on disk", "source-extract_audio.mp3 missing");
+
+// qa_report + thumbnail timestamps (lượt 31; idea: github774/claude-video-studio
+// contact_sheet + qa_report — run the gate, plus a contact sheet, on
+// every deliverable before calling it done).
+const qaOf = (j, name) => j.checks.find((c) => c.check === name);
+
+// thumbnail timestamps: on by default. The sheet is 960x360 (6 tiles
+// of 320px, 3 columns) and reports the nominal tile times. The labels
+// are proven on pixels, not assumed: the tile-1 label region differs
+// from the no-timestamp sheet (PSNR 10.8 measured on the fixture) and
+// holds near-white text (YMAX 235 vs 175 without labels).
+const thumbTsRes = await client.callTool({
+  name: "thumbnail",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-thumb-ts.png") },
+});
+const thumbTsJson = JSON.parse(thumbTsRes.content[0].text);
+console.log("thumbnail timestamps call:", thumbTsJson.dimensions, "|", JSON.stringify(thumbTsJson.timestamps_seconds));
+checkOk(thumbTsJson.dimensions === "960x360" && thumbTsJson.timestamps === true && JSON.stringify(thumbTsJson.timestamps_seconds) === JSON.stringify([0, 1.667, 3.333, 5, 6.667, 8.333]), "thumbnail defaults to timestamps: 960x360 sheet with tile times 0..8.333s", JSON.stringify(thumbTsJson.timestamps_seconds));
+const thumbNoTsRes = await client.callTool({
+  name: "thumbnail",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-thumb-nots.png"), timestamps: false },
+});
+const thumbNoTsJson = JSON.parse(thumbNoTsRes.content[0].text);
+checkOk(thumbNoTsJson.timestamps === false && !("timestamps_seconds" in thumbNoTsJson) && thumbNoTsJson.dimensions === "960x360", "thumbnail timestamps=false: clean sheet, no tile times reported", JSON.stringify(thumbNoTsJson));
+// PSNR between the same crop of two stills (Infinity when identical).
+async function cropPsnr(a, b, crop) {
+  try {
+    const { stderr } = await execFileAsync("ffmpeg", ["-i", a, "-i", b, "-filter_complex", `[0:v]crop=${crop}[a];[1:v]crop=${crop}[b];[a][b]psnr`, "-f", "null", "-"]);
+    const m = stderr.match(/average:\s*(inf|[0-9.]+)/);
+    if (!m) return null;
+    return m[1] === "inf" ? Infinity : parseFloat(m[1]);
+  } catch {
+    return null;
+  }
+}
+async function regionYmax(file, crop) {
+  try {
+    const { stderr } = await execFileAsync("ffmpeg", ["-i", file, "-vf", `crop=${crop},signalstats,metadata=print:key=lavfi.signalstats.YMAX`, "-frames:v", "1", "-f", "null", "-"]);
+    const m = stderr.match(/lavfi\.signalstats\.YMAX=([0-9.]+)/);
+    return m ? parseFloat(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
+const labelPsnr = await cropPsnr(path.join(root, "outputs/mcp-thumb-ts.png"), path.join(root, "outputs/mcp-thumb-nots.png"), "160:48:0:0");
+checkOk(labelPsnr !== null && labelPsnr < 30, "thumbnail timestamps paint labels: tile-1 label region differs from the clean sheet", `PSNR ${labelPsnr}`);
+const labelYmax = await regionYmax(path.join(root, "outputs/mcp-thumb-ts.png"), "160:48:0:0");
+const cleanYmax = await regionYmax(path.join(root, "outputs/mcp-thumb-nots.png"), "160:48:0:0");
+checkOk(labelYmax !== null && labelYmax >= 230 && cleanYmax !== null && cleanYmax < 200, "thumbnail label region holds white text (YMAX 235) vs content-only (175)", `ts ${labelYmax} / clean ${cleanYmax}`);
+
+// qa_report on the raw 10s fixture, target any: loudness -21.8 LUFS
+// fails the -16..-12 band, pacing warns (1 shot of 10s), content is
+// clean, true peak passes.
+const qaRawRes = await client.callTool({
+  name: "qa_report",
+  arguments: { input: path.join(root, "test/source.mp4"), target: "any" },
+});
+const qaRawJson = JSON.parse(qaRawRes.content[0].text);
+console.log("qa_report raw/any:", qaRawJson.verdict, "|", qaRawJson.checks.map((c) => `${c.check}:${c.status}`).join(" "));
+checkOk(qaRawJson.verdict === "fail" && qaOf(qaRawJson, "loudness")?.status === "fail" && qaOf(qaRawJson, "pacing")?.status === "warn" && qaOf(qaRawJson, "black_frames")?.status === "pass" && qaOf(qaRawJson, "frozen_frames")?.status === "pass" && qaOf(qaRawJson, "dead_air")?.status === "pass", "qa_report raw source: fail on loudness, warn on pacing, content clean", JSON.stringify(qaRawJson.checks));
+checkOk(near(qaRawJson.file.loudness_lufs, -21.8, 0.2) && qaRawJson.file.dimensions === "1280x720" && qaRawJson.file.pixel_format === "yuv420p", "qa_report file summary: LUFS -21.8, 1280x720, yuv420p", JSON.stringify(qaRawJson.file));
+// Expected duration + platform target: 5s expected on a 10s file
+// fails; tiktok on the 1280x720 source fails dimensions + aspect.
+const qaExpRes = await client.callTool({
+  name: "qa_report",
+  arguments: { input: path.join(root, "test/source.mp4"), target: "any", expected_duration: 5 },
+});
+const qaExpJson = JSON.parse(qaExpRes.content[0].text);
+checkOk(qaExpJson.verdict === "fail" && qaOf(qaExpJson, "expected_duration")?.status === "fail", "qa_report expected_duration 5s fails on a 10s file", JSON.stringify(qaOf(qaExpJson, "expected_duration")));
+const qaTikRes = await client.callTool({
+  name: "qa_report",
+  arguments: { input: path.join(root, "test/source.mp4"), target: "tiktok" },
+});
+const qaTikJson = JSON.parse(qaTikRes.content[0].text);
+checkOk(qaTikJson.verdict === "fail" && qaOf(qaTikJson, "aspect_ratio")?.status === "fail" && qaOf(qaTikJson, "platform_length")?.status === "pass", "qa_report tiktok on 1280x720: aspect fails, length passes", JSON.stringify(qaTikJson.checks.map((c) => `${c.check}:${c.status}`)));
+// Audio-only clipping file: no video + true peak over 0 dBFS -> fail.
+const qaPeakRes = await client.callTool({
+  name: "qa_report",
+  arguments: { input: path.join(root, "test/loud-peak.wav"), target: "any" },
+});
+const qaPeakJson = JSON.parse(qaPeakRes.content[0].text);
+checkOk(qaPeakJson.verdict === "fail" && qaOf(qaPeakJson, "has_video")?.status === "fail" && qaOf(qaPeakJson, "true_peak")?.status === "fail" && qaPeakJson.file.true_peak_db > 0, "qa_report loud-peak.wav: fail, no video, true peak over 0 dBTP (clipping)", JSON.stringify(qaPeakJson.file));
+// Black mid-file fixture: black warns, frozen fails (black frames
+// are frozen too), pacing passes on the 1-cut scenes fixture even
+// though its solid colours warn as frozen.
+const qaBlackRes = await client.callTool({
+  name: "qa_report",
+  arguments: { input: path.join(root, "test/content-black.mp4"), target: "any" },
+});
+const qaBlackJson = JSON.parse(qaBlackRes.content[0].text);
+checkOk(qaOf(qaBlackJson, "black_frames")?.status === "warn" && qaOf(qaBlackJson, "frozen_frames")?.status === "fail", "qa_report content-black: black warns, frozen fails", JSON.stringify(qaBlackJson.checks.map((c) => `${c.check}:${c.status}`)));
+const qaScenesRes = await client.callTool({
+  name: "qa_report",
+  arguments: { input: path.join(root, "test/scenes-source.mp4"), target: "any" },
+});
+const qaScenesJson = JSON.parse(qaScenesRes.content[0].text);
+checkOk(qaOf(qaScenesJson, "pacing")?.status === "pass", "qa_report scenes-source: pacing passes (1 cut, avg shot ~5s)", JSON.stringify(qaOf(qaScenesJson, "pacing")));
+const qaBadTarget = await callExpectThrow("qa_report", { input: path.join(root, "test/source.mp4"), target: "nosuch" });
+checkOk(/Invalid enum value/.test(qaBadTarget) && /nosuch/.test(qaBadTarget), "qa_report rejects an unknown target (MCP enum validation)", qaBadTarget.slice(0, 160));
+// Full pass: red 5s + testsrc 3s + blue 5s — the two hard cuts (at 5s
+// and 8s, measured by scenes) give 3 shots averaging 4.3s — then
+// loudness to -14, then the gate must be all pass. (source + source2
+// do NOT work here: source2 is a downscale of the same testsrc, so
+// its joins score below the scene threshold and pacing warns.)
+const qaConcatRes = await client.callTool({
+  name: "concat",
+  arguments: {
+    inputs: [
+      { file: path.join(root, "test/scenes-source.mp4"), start: 0, end: 5 },
+      { file: path.join(root, "test/source.mp4"), start: 0, end: 3 },
+      { file: path.join(root, "test/scenes-source.mp4"), start: 5, end: 10 },
+    ],
+    output: path.join(root, "outputs/mcp-qa-concat.mp4"),
+  },
+});
+const qaConcatJson = JSON.parse(qaConcatRes.content[0].text);
+checkOk(near(qaConcatJson.duration_seconds, 13, 0.1), "qa_report pass-case: 3-shot concat is 13s", `got ${qaConcatJson.duration_seconds}s`);
+const qaLoudRes = await client.callTool({
+  name: "loudness",
+  arguments: { input: path.join(root, "outputs/mcp-qa-concat.mp4"), output: path.join(root, "outputs/mcp-qa-loud.mp4"), target_lufs: -14 },
+});
+const qaLoudJson = JSON.parse(qaLoudRes.content[0].text);
+checkOk(near(qaLoudJson.duration_seconds, 13, 0.1), "qa_report pass-case: loudness keeps 13s", `got ${qaLoudJson.duration_seconds}s`);
+const qaPassRes = await client.callTool({
+  name: "qa_report",
+  arguments: { input: path.join(root, "outputs/mcp-qa-loud.mp4"), target: "any", expected_duration: 13 },
+});
+const qaPassJson = JSON.parse(qaPassRes.content[0].text);
+console.log("qa_report pass-case:", qaPassJson.verdict, "|", qaPassJson.checks.map((c) => `${c.check}:${c.status}`).join(" "));
+checkOk(qaPassJson.verdict === "pass" && qaPassJson.checks.every((c) => c.status === "pass"), "qa_report pass-case: 3-shot -14 LUFS clip passes every check", JSON.stringify(qaPassJson.checks));
 
 await client.close();
 if (failures.length) {

@@ -149,13 +149,14 @@ server.tool(
 
 server.tool(
   "thumbnail",
-  "Build a contact sheet: N evenly spaced frames tiled into a grid image.",
+  "Build a contact sheet: N evenly spaced frames tiled into a grid image. Each tile is labelled with its own timestamp in seconds (timestamps=true by default), so the sheet shows WHEN each frame is, not just what it shows — look at it before cutting or publishing.",
   {
     input: pathSchema,
     output: pathSchema,
     frames: z.number().int().min(1).max(64).default(6),
     columns: z.number().int().min(1).max(8).default(3),
     width: z.number().int().min(80).max(1280).default(320).describe("Width of each tile in pixels"),
+    timestamps: z.boolean().default(true).describe("Label each tile with its timestamp in seconds (drawtext %{pts}); set false for a clean sheet"),
   },
   async (a) => safe(() => core.thumbnail(a)),
 );
@@ -284,6 +285,21 @@ server.tool(
     contentStart: a.content_start ?? null,
     contentEnd: a.content_end ?? null,
     peakThresholdDb: a.peak_threshold_db,
+  })),
+);
+
+server.tool(
+  "qa_report",
+  "One-call delivery gate for a finished file: even dimensions, yuv420p pixel format, frame rate, aspect ratio and length for the target (tiktok, reels, shorts, youtube, instagram-feed, instagram-story, linkedin, or any for a platform-free file), measured loudness in -16..-12 LUFS and true peak, black/frozen frames and dead air (silence over 2s), pacing (average shot length from real scene cuts), and an optional expected duration. Probe-only — writes no file. Returns one verdict (pass/warn/fail) plus a per-check list with details; run this, plus thumbnail, on every deliverable before calling it done.",
+  {
+    input: pathSchema,
+    target: z.enum(["tiktok", "reels", "shorts", "youtube", "instagram-feed", "instagram-story", "linkedin", "any"]).default("any").describe("Delivery target; 'any' skips aspect ratio and platform length"),
+    expected_duration: z.number().min(0).optional().describe("Expected duration in seconds (fail when the measured duration is more than 0.5s off)"),
+  },
+  async (a) => safe(() => core.qaReport({
+    input: a.input,
+    target: a.target,
+    expectedDuration: a.expected_duration ?? null,
   })),
 );
 

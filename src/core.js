@@ -788,21 +788,40 @@ export async function extractFrame({ input, output, timestamp = 0 }) {
 
 // ---------------------------------------------------------------- thumbnail
 
-export async function thumbnail({ input, output, frames = 6, columns = 3, width = 320 }) {
+export async function thumbnail({ input, output, frames = 6, columns = 3, width = 320, timestamps = true }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const n = num(frames, "frames", { min: 1, max: 64, integer: true });
   const cols = num(columns, "columns", { min: 1, max: 8, integer: true });
   const w = num(width, "width", { min: 80, max: 1280, integer: true });
+  const showTs = timestamps !== false;
   const meta = await probe(inPath);
   if (!meta.video) throw new MediaKitError("thumbnail needs a video input", "INVALID_ARG");
   const rows = Math.ceil(n / cols);
+  const step = Math.max(1, Math.floor((meta.duration_seconds * (meta.video.fps || 30)) / n));
   // select N evenly spaced frames, scale, tile into a contact sheet.
-  const vf = `select='not(mod(n\\,${Math.max(1, Math.floor((meta.duration_seconds * (meta.video.fps || 30)) / n))}))',scale=${w}:-2,tile=${cols}x${rows}`;
+  // Timestamps (default on): drawtext %{pts} labels each tile with the
+  // frame's own timestamp in seconds, so an agent can SEE when each
+  // frame is, not just what it shows (claude-video-studio's
+  // contact_sheet idea). Measured on ffmpeg 8.1.2: %{pts} expands to
+  // "5.000000" but %{pts:hms} renders literally, so plain %{pts} is
+  // used — and it has no colon, so there is no filter-escaping trap.
+  let vf = `select='not(mod(n\\,${step}))',scale=${w}:-2`;
+  if (showTs) {
+    const fs = Math.max(12, Math.round(w / 16));
+    vf += `,drawtext=fontfile=${TITLECARD_FONT}:text='%{pts}':x=8:y=8:fontsize=${fs}:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=4`;
+  }
+  vf += `,tile=${cols}x${rows}`;
   await run(FFMPEG, ["-y", "-i", inPath, "-vf", vf, "-frames:v", "1", "-q:v", "2", outPath]);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
-  return { operation: "thumbnail", input: inPath, output: outPath, frames: n, columns: cols, rows, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null };
+  const fps = meta.video.fps || 30;
+  return {
+    operation: "thumbnail", input: inPath, output: outPath, frames: n, columns: cols, rows,
+    timestamps: showTs,
+    ...(showTs ? { timestamps_seconds: Array.from({ length: n }, (_, i) => +(i * step / fps).toFixed(3)) } : {}),
+    ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+  };
 }
 
 // ---------------------------------------------------------------- frames
@@ -2891,6 +2910,135 @@ export async function check({ input, platform = "tiktok", content = false, conte
   };
 }
 
+// ---------------------------------------------------------------- qa_report
+// One-call delivery gate (claude-video-studio's qa_report + video-qa
+// skill idea: run the gate, plus a contact sheet, on every deliverable
+// before calling it done). Composes pieces MediaKit already measures —
+// probe, loudnorm, detectContent, detectScenes — and adds the checks
+// `check` does not have: even dimensions, yuv420p pixel format,
+// pacing (average shot length from real scene cuts), an expected
+// duration, and an "any" target for files that are not platform-bound.
+// Probe-only: no file is written. Verdict is fail if any check fails,
+// warn if any warns, else pass. The per-check list is the report —
+// an agent fixes the failing items and re-runs this, it does not need
+// to re-run five tools to know what is left.
+
+const QA_TARGETS = {
+  any: { label: "Any delivery", aspect: null, maxDuration: null, lufs: [-16, -12], maxTp: -0.3 },
+};
+
+export async function qaReport({ input, target = "any", expectedDuration = null }) {
+  const inPath = await requireInput(input);
+  const t = String(target || "any").toLowerCase();
+  const spec = t === "any" ? QA_TARGETS.any : PLATFORMS[t];
+  if (!spec) throw new MediaKitError(`unknown target: ${target} (supported: any, ${Object.keys(PLATFORMS).join(", ")})`, "INVALID_ARG");
+  const expDur = expectedDuration === null || expectedDuration === undefined ? null : parseTime(expectedDuration, "expected_duration");
+  const meta = await probe(inPath);
+  const checks = [];
+  const add = (name, status, detail) => checks.push({ check: name, status, detail });
+  const aspect = t === "any" ? null : spec.width / spec.height;
+  const maxTp = t === "any" ? QA_TARGETS.any.maxTp : -0.5;
+  const lufsBand = t === "any" ? QA_TARGETS.any.lufs : spec.lufs;
+
+  if (!meta.video) {
+    add("has_video", "fail", "no video stream");
+  } else {
+    const v = meta.video;
+    add("has_video", "pass", `${v.width}x${v.height} ${v.codec}`);
+    add("even_dimensions", v.width % 2 === 0 && v.height % 2 === 0 ? "pass" : "fail",
+      `${v.width}x${v.height} (odd dimensions break most encoders)`);
+    add("pixel_format", ["yuv420p", "yuvj420p"].includes(v.pixel_format) ? "pass" : "warn",
+      `${v.pixel_format ?? "?"} (yuv420p plays everywhere)`);
+    if (v.fps !== null) {
+      add("frame_rate", v.fps >= 23 && v.fps <= 61 ? "pass" : "warn", `${v.fps} fps`);
+    }
+    if (aspect !== null) {
+      const ratio = v.width / v.height;
+      add("aspect_ratio", Math.abs(ratio - aspect) < 0.02 ? "pass" : "fail",
+        `${ratio.toFixed(3)} vs target ${aspect.toFixed(3)}`);
+    }
+  }
+  if (!meta.audio) {
+    add("has_audio", "warn", "silent file — no audio stream");
+  } else {
+    add("has_audio", "pass", `${meta.audio.codec}, ${meta.audio.channels ?? "?"} channel(s)`);
+  }
+  if (meta.duration_seconds !== null) {
+    if (spec.maxDuration !== null) {
+      add("platform_length", meta.duration_seconds <= spec.maxDuration ? "pass" : "fail",
+        `${meta.duration_seconds}s (max ${spec.maxDuration}s for ${spec.label})`);
+    }
+    if (expDur !== null) {
+      add("expected_duration", Math.abs(meta.duration_seconds - expDur) <= 0.5 ? "pass" : "fail",
+        `${meta.duration_seconds}s vs expected ${expDur}s`);
+    }
+  }
+  let loudness = null;
+  let truePeak = null;
+  if (meta.audio) {
+    const full = await measureLoudnessFull(inPath);
+    if (full === null) {
+      add("loudness", "fail", "could not measure");
+      add("true_peak", "fail", "could not measure");
+    } else {
+      loudness = full.i;
+      truePeak = full.tp;
+      add("loudness", loudness >= lufsBand[0] && loudness <= lufsBand[1] ? "pass" : "fail",
+        `${loudness} LUFS (target ${lufsBand[0]}..${lufsBand[1]})`);
+      add("true_peak", truePeak <= maxTp ? "pass" : "fail",
+        `${truePeak} dBTP (max ${maxTp})`);
+    }
+  }
+  // Content QC: black mid-file warns, frozen frames fail, dead air
+  // (silence over 2s) warns — same position-aware rules as check
+  // --content, via detectContent. Peaks are not repeated here: the
+  // true-peak check above already covers clipping.
+  if (meta.video || meta.audio) {
+    const content = await detectContent(inPath);
+    if (content.black.status === "complete") {
+      const mid = content.black.intervals.filter((i) => i.severity === "error");
+      add("black_frames", mid.length === 0 ? "pass" : "warn",
+        mid.length === 0 ? "none mid-video" : `mid-video black at ${mid.map((i) => `${i.start}–${i.end}s`).join(", ")}`);
+    }
+    if (content.freeze.status === "complete") {
+      const errs = content.freeze.intervals.filter((i) => i.severity === "error");
+      add("frozen_frames", errs.length === 0 ? "pass" : "fail",
+        errs.length === 0 ? "none" : `frozen at ${errs.map((i) => `${i.start}–${i.end}s`).join(", ")}`);
+    }
+    if (content.silence.status === "complete") {
+      const dead = content.silence.intervals.filter((i) => i.duration > 2);
+      add("dead_air", dead.length === 0 ? "pass" : "warn",
+        dead.length === 0 ? "none over 2s" : `silences over 2s at ${dead.map((i) => `${i.start}–${i.end}s`).join(", ")}`);
+    }
+  }
+  // Pacing: average shot length from real scene cuts. Over 6s reads
+  // slow for social — a warn, not a fail (long-form is allowed to
+  // breathe, and "any" has no platform pacing rule either).
+  if (meta.video && meta.duration_seconds !== null) {
+    const scenes = await detectScenes({ input: inPath });
+    const shots = scenes.segments.length;
+    const avg = shots > 0 ? meta.duration_seconds / shots : meta.duration_seconds;
+    add("pacing", avg <= 6 ? "pass" : "warn",
+      `average shot ${avg.toFixed(1)}s over ${shots} shot(s)${avg > 6 ? " (over 6s reads slow for social)" : ""}`);
+  }
+  const verdict = checks.some((c) => c.status === "fail") ? "fail"
+    : checks.some((c) => c.status === "warn") ? "warn" : "pass";
+  return {
+    operation: "qa_report", input: inPath, target: t, verdict, checks,
+    file: {
+      duration_seconds: meta.duration_seconds,
+      dimensions: meta.video ? `${meta.video.width}x${meta.video.height}` : null,
+      fps: meta.video?.fps ?? null,
+      video_codec: meta.video?.codec ?? null,
+      audio_codec: meta.audio?.codec ?? null,
+      pixel_format: meta.video?.pixel_format ?? null,
+      size_bytes: meta.size_bytes,
+      loudness_lufs: loudness,
+      true_peak_db: truePeak,
+    },
+  };
+}
+
 // ---------------------------------------------------------------- content
 // Content QC (idea: riqvip/codex-media-mcp inspect_media + the QC-gate
 // "rules layer"): one decode pass runs blackdetect + freezedetect on
@@ -3843,8 +3991,9 @@ const TOOL_REQUIREMENTS = {
   resize: { filters: ["scale"] },
   extract_audio: { encoders: ["libmp3lame", "aac", "pcm_s16le", "libvorbis", "libopus", "flac"] },
   extract_frame: {},
-  thumbnail: { filters: ["select", "scale", "tile"] },
+  thumbnail: { filters: ["select", "scale", "tile", "drawtext"] },
   loudness: { filters: ["loudnorm"] },
+  qa_report: { filters: ["loudnorm", "blackdetect", "freezedetect", "silencedetect", "astats", "ametadata", "select"] },
   concat: { filters: ["concat", "xfade", "acrossfade", "fps", "scale", "pad"] },
   frames: { filters: ["fps", "scale"] },
   export_gif: { filters: ["palettegen", "paletteuse", "fps", "scale"] },

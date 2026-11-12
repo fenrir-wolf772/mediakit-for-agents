@@ -602,6 +602,23 @@ id from `skills/shorts-video/styles.json` (`--style clean-bold` and
 friends); an unknown id is refused. Full rules live in
 `skills/shorts-video/references/publishing-kit.md`.
 
+### 39. Gate every deliverable with qa_report + thumbnail
+Before calling any finished file done, run `qa_report` on it and
+look at a `thumbnail` contact sheet. `qa_report` is one call that
+re-checks everything that matters — even dimensions, yuv420p,
+frame rate, aspect + length for the target, measured loudness in
+−16..−12 LUFS and true peak, black/frozen frames, dead air, pacing
+(average shot length from real scene cuts), and an optional
+`--expected-duration` — and returns one verdict (pass/warn/fail)
+plus a per-check list. Fix the failing items and re-run it; don't
+re-run five tools to find out what is left. `check` is still the
+tool for platform-spec detail (bitrate warnings, safe zones,
+`--content` time ranges); `qa_report` is the last gate. The
+thumbnail sheet labels each tile with its own timestamp in seconds
+(`%{pts}` — measured: `%{pts:hms}` renders literally on ffmpeg
+8.1.2, so plain seconds are used), so read the times off the sheet
+when you decide where to cut.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.
@@ -614,8 +631,8 @@ friends); an unknown id is refused. Full rules live in
    `skills/shorts-video/styles.json` (`clean-bold`: background, 60px,
    margin 500).
 6. `loudness` to −14 LUFS.
-7. `check --platform tiktok` — all rules must pass.
-8. `extract_frame` at a mid timestamp to verify the captions actually render.
+7. `qa_report --target tiktok` (plus `--expected-duration` when the length is fixed) — the delivery gate: all checks must pass. `check --platform tiktok` is for platform-spec detail when the gate fails.
+8. `thumbnail` — look at the timestamped contact sheet to confirm the cut, captions and framing before publishing; `extract_frame` at a mid timestamp to verify the captions actually render.
 9. `overlay` the channel logo (`--position top-right --opacity 0.8`) when the clip is branded — verify with another `extract_frame` at the logo corner.
 10. `package` the finished file with `--platform tiktok` and the captions — the delivery ZIP. When the file goes out on its own (no ZIP), write a `receipt` instead — same provenance, standalone JSON.
 
