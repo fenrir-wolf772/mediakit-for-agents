@@ -84,10 +84,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 37 tools present");
-checkOk(missing.length === 0, "tools/list has all 37 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 38 tools present");
+checkOk(missing.length === 0, "tools/list has all 38 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -313,6 +313,55 @@ checkOk(/mutually exclusive/.test(gradeBoth), "grade refuses preset + filter tog
 const gradeAudioOnly = await callExpectThrow("grade", { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-grade-audio.mp4"), preset: "warm" });
 checkOk(/needs a video input/.test(gradeAudioOnly), "grade refuses an audio-only input", gradeAudioOnly.slice(0, 200));
 
+// reverse: video + audio backwards, verified on pixels and on the
+// silence gaps. scenes-source is red [0,5) then blue [5,10); the
+// reversed clip must be blue first, red last. mix-voice has tone
+// [0,2),[4,6),[7,9) and silence [2,4),[6,7); reversed audio (9s)
+// must have silence [2,3) and [5,7) instead.
+const reverseRes = await client.callTool({
+  name: "reverse",
+  arguments: { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-reverse.mp4") },
+});
+const reverseJson = JSON.parse(reverseRes.content[0].text);
+console.log("reverse call:", JSON.stringify(reverseJson));
+checkOk(reverseJson.video_reversed === true && reverseJson.audio_reversed === true, "reverse reports video + audio reversed", JSON.stringify(reverseJson));
+checkOk(reverseJson.dimensions === "640x360" && near(reverseJson.duration_seconds, 10.05, 0.1), "reverse keeps dimensions and duration", `${reverseJson.dimensions} ${reverseJson.duration_seconds}s`);
+const revFirstR = await planeMean(path.join(root, "outputs/mcp-reverse.mp4"), "640:360:0:0", "r", 1);
+const revFirstB = await planeMean(path.join(root, "outputs/mcp-reverse.mp4"), "640:360:0:0", "b", 1);
+const revLastR = await planeMean(path.join(root, "outputs/mcp-reverse.mp4"), "640:360:0:0", "r", 9);
+const revLastB = await planeMean(path.join(root, "outputs/mcp-reverse.mp4"), "640:360:0:0", "b", 9);
+console.log("reverse pixels: t=1 R/B =", revFirstR, revFirstB, "| t=9 R/B =", revLastR, revLastB);
+checkOk(revFirstB > 200 && revFirstR < 10, "reversed video starts blue (was red)", `t=1 R=${revFirstR} B=${revFirstB}`);
+checkOk(revLastR > 200 && revLastB < 10, "reversed video ends red (was blue)", `t=9 R=${revLastR} B=${revLastB}`);
+const reverseAudioRes = await client.callTool({
+  name: "reverse",
+  arguments: { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-reverse-audio.mp3") },
+});
+const reverseAudioJson = JSON.parse(reverseAudioRes.content[0].text);
+checkOk(reverseAudioJson.video_reversed === false && reverseAudioJson.audio_reversed === true && near(reverseAudioJson.duration_seconds, 9, 0.1), "reverse on audio-only input reverses audio only", JSON.stringify(reverseAudioJson));
+const { stderr: revSdErr } = await execFileAsync("ffmpeg", ["-v", "info", "-i", path.join(root, "outputs/mcp-reverse-audio.mp3"), "-af", "silencedetect=noise=-40dB:d=0.5", "-f", "null", "-"]);
+const revSdStarts = [...revSdErr.matchAll(/silence_start: ([\d.]+)/g)].map((m) => parseFloat(m[1]));
+console.log("reverse audio silence starts:", revSdStarts.join(", "));
+checkOk(revSdStarts.some((t) => near(t, 2, 0.15)) && revSdStarts.some((t) => near(t, 5, 0.15)), "reversed audio silence gaps moved to [2,3) and [5,7)", `starts at ${revSdStarts.join(", ")}`);
+const reverseNoAudioRes = await client.callTool({
+  name: "reverse",
+  arguments: { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-reverse-noaudio.mp4"), audio: false },
+});
+const reverseNoAudioJson = JSON.parse(reverseNoAudioRes.content[0].text);
+checkOk(reverseNoAudioJson.video_reversed === true && reverseNoAudioJson.audio_reversed === false && reverseNoAudioJson.audio_codec === "copy", "reverse audio=false reverses the video but copies the audio forward", JSON.stringify(reverseNoAudioJson));
+const noAudioFirstB = await planeMean(path.join(root, "outputs/mcp-reverse-noaudio.mp4"), "640:360:0:0", "b", 1);
+checkOk(noAudioFirstB > 200, "audio=false still reverses the video (starts blue)", `t=1 B=${noAudioFirstB}`);
+const noAudioMean = await meanVolume(path.join(root, "outputs/mcp-reverse-noaudio.mp4"), 0, 9);
+checkOk(near(noAudioMean, -21.1, 1.5), "audio=false keeps the original audio level (continuous tone, not re-encoded)", `mean ${noAudioMean} dB`);
+const reverseVideoOnlyRes = await client.callTool({
+  name: "reverse",
+  arguments: { input: path.join(root, "test/content-video-only.mp4"), output: path.join(root, "outputs/mcp-reverse-video-only.mp4") },
+});
+const reverseVideoOnlyJson = JSON.parse(reverseVideoOnlyRes.content[0].text);
+checkOk(reverseVideoOnlyJson.video_reversed === true && reverseVideoOnlyJson.audio_reversed === false && near(reverseVideoOnlyJson.duration_seconds, 10, 0.1), "reverse on video-only input reverses video, no audio to reverse", JSON.stringify(reverseVideoOnlyJson));
+const reverseNoop = await callExpectThrow("reverse", { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-reverse-noop.mp3"), audio: false });
+checkOk(/reverses nothing/.test(reverseNoop), "reverse audio-only + audio=false is refused (nothing to reverse)", reverseNoop.slice(0, 200));
+
 const doctorRes = await client.callTool({
   name: "doctor",
   arguments: {},
@@ -335,6 +384,10 @@ checkOk(doctorJson.tools.generate_srt?.available === true, "doctor: generate_srt
 checkOk(doctorJson.tools.export_gif?.available === true, "doctor: export_gif is available (palettegen/paletteuse present)");
 checkOk(doctorJson.tools.grade?.available === true, "doctor: grade is available (eq/hue/colorbalance present)");
 checkOk(doctorJson.tools.check?.available === true, "doctor: check is available (astats/ametadata present for the peaks scan)");
+checkOk(doctorJson.tools.reverse?.available === true, "doctor: reverse is available (reverse/areverse filters present)");
+checkOk(typeof doctorJson.gpu?.available === "boolean" && Array.isArray(doctorJson.gpu?.encoders) && "working_encoder" in (doctorJson.gpu ?? {}), "doctor: gpu section reports available + listed encoders + working encoder", JSON.stringify(doctorJson.gpu));
+checkOk(doctorJson.gpu.available === (doctorJson.gpu.working_encoder !== null), "doctor: gpu available is true exactly when a probe encode worked", JSON.stringify(doctorJson.gpu));
+console.log("doctor gpu:", JSON.stringify(doctorJson.gpu));
 // transcribe is the exception: it carries a fix hint whenever its
 // optional engine is missing, even on a healthy ffmpeg install.
 checkOk(Object.entries(doctorJson.tools).filter(([n]) => n !== "transcribe").every(([, t]) => !("fix" in t)), "doctor: no fix hint on ffmpeg tools when all are available", JSON.stringify(doctorJson.tools));
@@ -848,12 +901,13 @@ async function bandPsnr(fileA, fileB, t, y, h) {
 // plane "r"/"g"/"b" via extractplanes, "a" via alphaextract.
 // Returns null on any failure so a broken measurement FAILs the
 // assertion instead of crashing the whole run.
-async function planeMean(file, crop, plane) {
+async function planeMean(file, crop, plane, time = null) {
   try {
     const vf = plane === "a"
       ? `format=rgba,crop=${crop},alphaextract,signalstats,metadata=print:key=lavfi.signalstats.YAVG`
       : `format=rgba,crop=${crop},extractplanes=${plane},signalstats,metadata=print:key=lavfi.signalstats.YAVG`;
-    const { stderr } = await execFileAsync("ffmpeg", ["-i", file, "-vf", vf, "-f", "null", "-"]);
+    const args = time === null ? ["-i", file] : ["-ss", String(time), "-i", file];
+    const { stderr } = await execFileAsync("ffmpeg", [...args, "-vf", vf, "-frames:v", "1", "-f", "null", "-"]);
     const m = stderr.match(/lavfi\.signalstats\.YAVG=([0-9.]+)/);
     return m ? parseFloat(m[1]) : null;
   } catch {

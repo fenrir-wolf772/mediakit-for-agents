@@ -490,6 +490,20 @@ range; intervals are still reported on the file's own timeline, and an
 interval that ends at the scan boundary is flagged as such — it is only
 known to last that long.
 
+### 33. Reverse is a real effect, not a trick — and the GPU list is not a promise
+`reverse in.mp4 -o backwards.mp4` plays the clip backwards: video frames
+reversed, audio reversed too by default (`--no-audio` keeps the audio
+playing forward under reversed video). It also works on audio-only
+input (reverses the audio alone) — handy for a rewind sting or reversed
+audio in sound design. The `reverse` filter buffers every frame, so keep
+it to short clips; an hour-long file will eat memory. `doctor` now also
+reports a `gpu` section: hardware encoders present in the ffmpeg build
+(nvenc / vaapi / qsv / videotoolbox / amf) plus which one, if any, passed
+a tiny probe encode. A build that merely *lists* `h264_nvenc` without a
+working device reports `gpu.available: false` — listed is not usable, so
+never pick a hardware encoder from the list alone; pick it from
+`working_encoder`, or stay on libx264.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

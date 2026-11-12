@@ -72,6 +72,7 @@ Then ask your agent things like:
 | `reframe` | Reframe to a target aspect/size in one step (crop, pad, or blurred fill) — crop mode takes a named `--anchor` (left/right/top/bottom/...) to keep an edge subject in frame, and reports `crop_kept_percent` + a warning below 40% kept | `mediakit reframe in.mp4 --mode crop -o vertical.mp4` |
 | `check` | Verify a file against a platform spec (tiktok/reels/shorts/youtube/instagram-feed/instagram-story/linkedin) — video bitrate is a warning, not a gate; overall pass ignores warnings. `--content` also scans for black/frozen frames, silence and audio peaks in one decode pass, with position-aware rules (short black at the very start/end warns as a likely fade; the same stretch mid-file fails) — a peak ≥ 0 dBFS fails as clipping, a peak above `--peak-threshold` (default −1 dBFS) warns; `--start`/`--end` scan only that time range, on the file's own timeline | `mediakit check out.mp4 --platform tiktok --content` |
 | `grade` | Color-grade a video with a named preset — `warm` (red up, blue down), `cool` (the opposite), `cinematic` (contrast up, saturation down, slight teal), `noir` (black and white), `vintage` (faded, desaturated) — or one custom filter chain with `--filter`; reports the mean R/G/B before and after, measured on the middle frame | `mediakit grade in.mp4 --preset warm -o out.mp4` |
+| `reverse` | Play a clip backwards: video frames reversed, audio reversed too by default (`--no-audio` keeps the audio playing forward); works on audio-only input as well. The `reverse` filter buffers every frame, so very long inputs cost memory | `mediakit reverse in.mp4 -o backwards.mp4` |
 | `silence` | Remove silent stretches, keeping a margin around speech | `mediakit silence in.mp4 -o tight.mp4` |
 | `cropdetect` | Measure letterbox/pillarbox bars; returns the crop rect + a ready crop command | `mediakit cropdetect in.mp4` |
 | `package` | Bundle a finished file for delivery: media + spec.json receipt + checksums.sha256 (+ captions) | `mediakit package out.mp4 -o delivery.zip --platform tiktok` |
@@ -87,7 +88,7 @@ Then ask your agent things like:
 | `keyframes` | List keyframe (I-frame) timestamps + GOP min/max/avg interval (probe-only) — check before a stream-copy trim | `mediakit keyframes in.mp4` |
 | `find` | Find media files by name, recursively under a directory (case-insensitive substring); each match comes back with probe info (duration, dimensions, codecs) so you pick the right file without guessing paths | `mediakit find clips/ --name moon` |
 | `svg_animate` | Animate an SVG into a video, code-driven (no browser): keyframed translate/scale/rotate/opacity on elements by id, rendered frame by frame via librsvg — slide-ins, fades, bounces, spinning shapes | `mediakit svg-animate in.svg --anim anim.json -o out.mp4 --duration 4` |
-| `doctor` | Read-only preflight: ffmpeg version, filters/encoders, tool availability, and the `MEDIAKIT_WORKDIR` sandbox state when set. An unavailable tool also reports a one-sentence `fix` telling you how to repair the ffmpeg install | `mediakit doctor` |
+| `doctor` | Read-only preflight: ffmpeg version, filters/encoders, tool availability, the `MEDIAKIT_WORKDIR` sandbox state when set, and a `gpu` section — hardware encoders present in the build plus which one (if any) actually passed a tiny probe encode, so "listed" is never mistaken for "usable". An unavailable tool also reports a one-sentence `fix` telling you how to repair the ffmpeg install | `mediakit doctor` |
 | `convert` | Change container/codec (omit a codec to stream-copy). `--gop <frames>` / `--gop-seconds <s>` sets an exact keyframe interval on re-encode (scene-cut keyframes disabled for libx264/libx265/mpeg4) — the spacing is measured on the output file | `mediakit convert in.mov -o out.mp4 --video-codec libx264 --gop-seconds 2` |
 | `compress` | Shrink a file with one named quality preset — low (CRF 32), medium (CRF 26), high (CRF 20) — each with its own x264 preset and audio bitrate; optional `--max-width` scales down first. `--target-size <MB>` encodes to an exact size instead (two-pass ABR, e.g. 10 for a Discord upload) and reports `target_met` measured on disk. Reports the size before/after and the reduction actually measured on disk | `mediakit compress in.mp4 -o small.mp4 --quality low` |
 | `export_gif` | Export a clip (or segment) as an animated GIF with a two-pass palette (palettegen + paletteuse from the actual frames). Fits under `--max-size-mb` (default 10 MB, the GitHub README limit; Slack auto-plays only under ~2 MB) by stepping down fps, then width, then palette colours; reports `size_budget_met` measured on disk, with a warning when the budget cannot be met | `mediakit export-gif in.mp4 -o demo.gif --max-size-mb 2` |
@@ -214,14 +215,23 @@ chain with `--filter` (mutually exclusive with `--preset`); the result
 reports the mean R/G/B of the middle frame before and after, so the
 look is verified on pixels. Note for `colorbalance`: set all three
 ranges (shadows/midtones/highlights) — the shadow-only form barely
-moves the frame mean. `find clips/ --name moon` searches a folder
+moves the frame mean. `reverse` plays a clip backwards (video frames
+via the `reverse` filter, audio via `areverse`, on by default;
+`--no-audio` keeps the audio forward) — a rewind effect, or reversed
+audio for a sound-design trick; on audio-only input it reverses the
+audio alone. `find clips/ --name moon` searches a folder
 tree for media files by name and returns each match with its probe
 info, so you stop guessing paths. `doctor` is a read-only preflight — run it first
 on a new machine to confirm ffmpeg/ffprobe and every filter/encoder the
 tools need are actually present; a tool that reports `available: false`
 also carries a one-sentence `fix` with the install command that repairs
 the ffmpeg build (apt/brew/static build), so a missing capability is a
-fixable machine problem, not a dead end.
+fixable machine problem, not a dead end. `doctor` also probes the GPU:
+hardware encoders are only listed as `available` when a tiny test
+encode with one actually succeeded — a build that merely lists nvenc /
+vaapi / qsv without a working device reports them under `gpu.encoders`
+but `gpu.available: false`, so no tool ever assumes a hardware encoder
+it cannot use.
 
 See [`skills/shorts-video/SKILL.md`](skills/shorts-video/SKILL.md) for the
 full script → captioned vertical-video workflow.

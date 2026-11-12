@@ -307,6 +307,23 @@ server.tool(
 );
 
 server.tool(
+  "reverse",
+  "Play a clip backwards: video frames reversed with the `reverse` filter, audio reversed with `areverse` (on by default; set audio false to keep the audio playing forward under reversed video). Re-encodes video (libx264, crf 23 default). The `reverse` filter buffers every frame, so very long inputs cost memory. The result reports whether video/audio were actually reversed, plus duration measured on disk.",
+  {
+    input: pathSchema,
+    output: pathSchema,
+    audio: z.boolean().default(true).describe("Reverse the audio too (default true); false copies the audio forward under the reversed video"),
+    crf: z.number().int().min(0).max(51).default(23),
+  },
+  async (a) => safe(() => core.reverseClip({
+    input: a.input,
+    output: a.output,
+    audio: a.audio,
+    crf: a.crf,
+  })),
+);
+
+server.tool(
   "convert",
   "Change container or codec. Omit video_codec/audio_codec to stream-copy that stream. crf 23 is a good default for H.264. gop (frames) or gop_seconds sets an exact keyframe interval on re-encode (scene-cut keyframes disabled for libx264/libx265/mpeg4); the result measures the keyframes on the output file. A GOP is required for keyframe-snapped stream-copy cuts.",
   {

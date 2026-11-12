@@ -234,6 +234,16 @@ const COMMANDS = {
       ["-o, --output", "Output file (required)"],
     ],
   },
+  reverse: {
+    usage: "mediakit reverse <input> -o <output> [--no-audio] [--crf 23]",
+    desc: "Play a clip backwards: video frames reversed, audio reversed too by default. Reports whether each stream was actually reversed. Works on audio-only input as well.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--no-audio", "Keep the audio playing forward under the reversed video (reverses nothing on audio-only input)"],
+      ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["-o, --output", "Output file (required)"],
+    ],
+  },
   convert: {
     usage: "mediakit convert <input> -o <output> [--video-codec <c>] [--audio-codec <c>] [--crf <n>] [--preset <p>] [--gop <frames>] [--gop-seconds <s>]",
     desc: "Change container or codec. Omit a codec to stream-copy that stream. --gop / --gop-seconds sets an exact keyframe interval on re-encode (measured on the output file).",
@@ -711,6 +721,13 @@ async function main() {
           input: needInput(), output: needOutput(opts),
           preset: opts.preset ?? null,
           filter: opts.filter ?? null,
+          crf: numOpt(opts, "crf") ?? 23,
+        });
+        break;
+      case "reverse":
+        result = await core.reverseClip({
+          input: needInput(), output: needOutput(opts),
+          audio: opts.audio !== false,
           crf: numOpt(opts, "crf") ?? 23,
         });
         break;

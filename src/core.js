@@ -2596,6 +2596,52 @@ export async function grade({ input, output, preset = null, filter = null, crf =
   };
 }
 
+// ---------------------------------------------------------------- reverse
+// Play a clip backwards (conneroisu/vfx-mcp's reverse idea): video
+// frames via the `reverse` filter, audio via `areverse` (on by
+// default; audio=false keeps the audio playing forward under
+// reversed video — a valid creative choice). The `reverse` filter
+// buffers every frame, so a long input costs memory; a 10s clip is
+// trivial, an hour-long file is not what this tool is for. The
+// result reports whether each stream was actually reversed, and the
+// test suite verifies the swap on pixels (red/blue halves trade
+// places) and on audio (the silence gaps trade places too).
+export async function reverseClip({ input, output, audio = true, crf = 23 }) {
+  const inPath = await requireInput(input);
+  const outPath = await prepareOutput(output, [inPath]);
+  const c = num(crf, "crf", { min: 0, max: 51, integer: true });
+  const meta = await probe(inPath);
+  if (!meta.video && !meta.audio) throw new MediaKitError("reverse needs a video or audio input", "INVALID_ARG");
+  const reverseAudio = audio !== false && !!meta.audio;
+  if (!meta.video && !reverseAudio) {
+    throw new MediaKitError("reverse with --no-audio on an audio-only input reverses nothing (there is no video to reverse)", "INVALID_ARG");
+  }
+  // The audio codec follows the output extension (like loudness/fit):
+  // .mp3 gets libmp3lame, .mp4 gets aac — hardcoding aac wrote AAC
+  // into an .mp3 container, an invalid file ffmpeg itself could not
+  // open again (caught by the test suite 2026-11-12).
+  const ext = path.extname(outPath).slice(1).toLowerCase();
+  const audioCodec = AUDIO_FORMATS[ext] ?? VIDEO_CONTAINER_AUDIO[ext] ?? "aac";
+  const args = ["-y", "-i", inPath];
+  if (meta.video) args.push("-vf", "reverse", "-c:v", "libx264", "-crf", String(c), "-preset", "medium");
+  if (meta.audio) {
+    if (reverseAudio) args.push("-af", "areverse", "-c:a", audioCodec);
+    else args.push("-c:a", "copy");
+  }
+  args.push(outPath);
+  await run(FFMPEG, args);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  return {
+    operation: "reverse", input: inPath, output: outPath,
+    video_reversed: !!meta.video, audio_reversed: reverseAudio,
+    audio_codec: reverseAudio ? audioCodec : (meta.audio ? "copy" : null),
+    duration_seconds: out.duration_seconds,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+    size_bytes: info.size,
+  };
+}
+
 // ---------------------------------------------------------------- convert
 
 const VIDEO_CODECS = { libx264: "mp4", libx265: "mp4", vp9: "webm", av1: "mp4", mpeg4: "mp4", copy: null };
@@ -2982,6 +3028,7 @@ const DOCTOR_FILTERS = [
   "format", "colorchannelmixer", "atempo", "aloop", "geq", "color",
   "palettegen", "paletteuse", "adelay", "pan",
   "astats", "ametadata", "eq", "hue", "colorbalance",
+  "reverse", "areverse",
 ];
 const DOCTOR_ENCODERS = [
   "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4",
@@ -3009,6 +3056,7 @@ const TOOL_REQUIREMENTS = {
   reframe: { filters: ["crop", "scale", "pad", "gblur", "overlay"], encoders: ["libx264"] },
   check: { filters: ["loudnorm", "blackdetect", "freezedetect", "silencedetect", "astats", "ametadata"] },
   grade: { filters: ["eq", "hue", "colorbalance"], encoders: ["libx264"] },
+  reverse: { filters: ["reverse", "areverse"], encoders: ["libx264", "aac"] },
   convert: { encoders: ["libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4"] },
   compress: { filters: ["scale"], encoders: ["libx264", "aac"] },
   receipt: { filters: ["loudnorm"] },
@@ -3050,6 +3098,41 @@ export function fixForMissing(missing) {
   return `missing ${missing.join(", ")} — install a full ffmpeg build with those capabilities (Debian/Ubuntu: sudo apt install ffmpeg; macOS: brew install ffmpeg; static build with librsvg: BtbN GPL build from github.com/BtbN/FFmpeg-Builds — the johnvansickle.com static build has no librsvg decoder, so svg_animate will not work on it). A minimal ffmpeg build ships without some filters/encoders.`;
 }
 
+// Hardware encoders worth probing, best first (ffmpeg-render-pro's
+// detect_gpu idea). Presence in `ffmpeg -encoders` only means the
+// build was compiled with them — a machine with no GPU still lists
+// nvenc/vaapi/qsv, so doctor actually tries a tiny encode before
+// calling one available. Listed is not usable; a failed probe encode
+// is the truth. A missing GPU never fails doctor (CPU-only machines
+// are fine) — this is informational, so agents can pick a hardware
+// encoder when one really works.
+const GPU_ENCODERS = [
+  "h264_nvenc", "hevc_nvenc", "av1_nvenc",
+  "h264_qsv", "hevc_qsv", "av1_qsv",
+  "h264_vaapi", "hevc_vaapi", "vp9_vaapi", "av1_vaapi",
+  "h264_videotoolbox", "hevc_videotoolbox",
+  "h264_amf", "hevc_amf", "av1_amf",
+];
+
+async function detectGpu(encodersOut) {
+  const has = (name) => new RegExp(`\\b${name}\\b`).test(encodersOut);
+  const present = GPU_ENCODERS.filter(has);
+  let working = null;
+  for (const enc of present) {
+    try {
+      // 0.2s of 64x64 testsrc straight to null: 2 frames, and a hard
+      // 10s cap per encoder so a hanging driver init cannot stall
+      // doctor. On a GPU-less machine every attempt fails in well
+      // under a second (measured 2026-11-12: nvenc/qsv/vaapi all
+      // fail in <1s total).
+      await run(FFMPEG, ["-hide_banner", "-nostats", "-f", "lavfi", "-i", "testsrc=duration=0.2:size=64x64:rate=10", "-c:v", enc, "-frames:v", "2", "-f", "null", "-"], { timeoutMs: 10_000 });
+      working = enc;
+      break;
+    } catch { /* not usable on this machine — try the next one */ }
+  }
+  return { available: working !== null, encoders: present, working_encoder: working };
+}
+
 export async function doctor() {
   const { stdout: ffmpegVer } = await run(FFMPEG, ["-version"]);
   const { stdout: ffprobeVer } = await run(FFPROBE, ["-version"]);
@@ -3062,6 +3145,7 @@ export async function doctor() {
   const filters = Object.fromEntries(DOCTOR_FILTERS.map((f) => [f, has(filtersOut, f)]));
   const encoders = Object.fromEntries(DOCTOR_ENCODERS.map((e) => [e, has(encodersOut, e)]));
   const decoders = Object.fromEntries(DOCTOR_DECODERS.map((d) => [d, has(decodersOut, d)]));
+  const gpu = await detectGpu(encodersOut);
   const tools = {};
   let allOk = Boolean(ffmpegVersion && ffprobeVersion);
   for (const [name, req] of Object.entries(TOOL_REQUIREMENTS)) {
@@ -3097,6 +3181,7 @@ export async function doctor() {
     node_version: process.version,
     platform: `${process.platform}-${process.arch}`,
     sandbox,
+    gpu,
     filters,
     encoders,
     decoders,

@@ -1093,3 +1093,28 @@ tone [6,10)), `test/content-lead-black.mp4` (đen 1s đầu + testsrc 9s),
   1. `colorbalance` chỉ set rs=/bs= (shadows) thì frame mean gần như không nhúc nhích (warm R +2.9) — phải set cả 3 dải shadows/midtones/highlights mới đo được (R +14.8, B −13.9). Đã đo trước rồi mới chốt preset.
   2. Zod schema `peak_threshold_db` ban đầu max 0 → test đối chứng âm threshold 5 bị −32602 crash cả run (giống bẫy lượt 11/22: MCP enum throw, không phải isError result); fix: max 12 — float audio peak được trên 0 dBFS, ngưỡng trên 0 là hợp lệ.
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+- Push: commit d680743 → GitHub main (origin/main = d680743). **CI run #43127357861 success** — xanh ngay lượt này.
+
+## Lượt 25 — 2026-11-12 08:58 (+07): reverse tool + doctor GPU detection (38 tools)
+- **Học: conneroisu/vfx-mcp** (9★, Python/FastMCP + ffmpeg-python, 10 tools). Ý áp dụng được:
+  1. Reverse playback (video + audio ngược) → đã làm tool `reverse` mới.
+  2. MCP Resources (`videos://list`, `videos://{filename}/metadata`, `videos://workspace/info`) → backlog mới (MediaKit hiện chỉ có tools + `find`; resources là một lớp capability mới, cần thiết kế workspace root).
+  3. Progress reporting cho operation dài (`utils/progress.py`) → củng cố backlog MCP logging progress (chưa làm).
+  4. `apply_filter` (một filter string tùy ý) → đã có qua `grade --filter`.
+  5. `generate_thumbnail` mặc định timestamp = giữa video → `thumbnail`/`extract_frame` đã có.
+  KHÔNG copy code của họ — chỉ học ý tưởng, tự implement bằng Node/ffmpeg.
+- **Làm**:
+  - `reverse` (core+CLI+MCP, tool 38): video qua filter `reverse`, audio qua `areverse` (mặc định bật; `--no-audio` / `audio: false` giữ audio chạy xuôi, copy stream); re-encode video libx264 crf 23; audio codec theo đuôi output (`.mp3` → libmp3lame, `.mp4` → aac — cùng map với `loudness`/`fit`); trả `video_reversed`, `audio_reversed`, `audio_codec`, duration/dimensions/size. Audio-only → chỉ đảo audio; video-only → chỉ đảo video; audio-only + `--no-audio` bị từ chối ("reverses nothing"). `doctor` thêm filter reverse/areverse + tool `reverse`.
+  - `doctor` GPU detection (ý từ beeswaxpat/ffmpeg-render-pro, backlog lượt 24): trả `gpu: {available, encoders, working_encoder}` — `encoders` là HW encoder có trong build (nvenc/qsv/vaapi/videotoolbox/amf, 15 tên), `working_encoder` là encoder đầu tiên (ưu tiên nvenc > qsv > vaapi > videotoolbox > amf) pass một probe encode thật (0.2s testsrc 64×64 → null, cap 10s/encoder). Listed ≠ usable: máy không GPU vẫn list 10 encoder nhưng `available: false`. GPU thiếu KHÔNG làm `ok=false` (CPU-only là bình thường).
+  - README (dòng bảng reverse + sửa dòng doctor + 2 đoạn prose), SKILL.md (rule 33), CI smoke thêm 2 dòng (reverse + ffprobe duration `^10`).
+- **Test** (ffmpeg 8.1.2):
+  - Đo trước khi code: reverse scenes-source (đỏ [0,5) + xanh [5,10)) → t=1 xanh B 254, t=9 đỏ R 253 (đảo đúng); mix-voice đảo audio → silence [2,4),[6,7) thành [2,3),[5,7) (đúng phép đối xứng 9s). Probe GPU: nvenc/qsv/vaapi đều fail trong <1s tổng (không treo).
+  - Reverse video+audio: **640×360, 10.054s**, t=1 R 0/B 254, t=9 R 253/B 0; audio-only → video false/audio true, silence đảo đúng [2,3)+[5,7); `--no-audio` trên video → video đảo (t=1 B 254), audio copy, mean volume −21.1 dB giữ nguyên; video-only → video true/audio false, 10s; audio-only + `--no-audio` → từ chối đúng.
+  - Doctor: `gpu.available false`, `encoders` 10 cái (nvenc×3, qsv×3, vaapi×4), `working_encoder null`, `ok` vẫn true; assert `available === (working_encoder !== null)`.
+  - `npm run check` sạch (check-docs: 38 tools khớp README); `npm test`: **351/351 PASS, exit 0** (38 tools, doctor 37 ffmpeg tools available + transcribe unavailable kèm hint — ASR optional). Assert mới (14): reverse 11 + doctor gpu 3 (2 gpu + 1 reverse-available).
+- **Bẫy đo lường**:
+  1. Bản đầu hardcode `-c:a aac` cho mọi output → reverse mix-voice.mp3 ra file .mp3 chứa AAC, ffmpeg không mở lại được ("Failed to find two consecutive MPEG audio frames") làm crash cả test run. Fix: codec audio theo đuôi output như `loudness`/`fit` đã làm. Bài học: mọi tool ghi audio phải chọn codec theo container, không hardcode.
+  2. Test `audio=false` viết nhầm trên file audio-only (mix-voice.mp3) — tool từ chối đúng theo guardrail ("reverses nothing"), test FAIL oan. Fix: case `--no-audio` phải dùng input có video (scenes-source.mp4) — guardrail và test phải viết cùng một ngữ nghĩa.
+  3. `muse.edit` với `old_text` trùng 3 chỗ (`// ---- convert`) chèn nhầm `reverseClip` vào sau burn_captions thay vì sau grade — đã dời lại đúng vị trí bằng 2 edit neo vào text duy nhất. Bài học: header comment lặp lại trong file thì neo edit vào hàm kề bên, không neo vào header.
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+- Push: commit (chưa push lúc ghi) → GitHub main. CI run: (ghi sau khi push).
