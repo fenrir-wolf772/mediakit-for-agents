@@ -1606,19 +1606,25 @@ export async function generateSrt({ cues, output }) {
 }
 
 // ---------------------------------------------------------------- transcribe
-// Speech-to-text with a LOCAL engine — faster-whisper, on this machine,
-// audio never uploaded (the ffmpeg-skill pattern: optional local ASR,
-// refuse with install lines rather than guessing). Pipeline: probe for
-// an audio stream, extract 16 kHz mono WAV to a temp dir with ffmpeg,
-// run scripts/asr_faster_whisper.py (stdlib wave + numpy, so PyAV's
-// version never matters), write the segments as .srt with the same
-// formatter generate_srt uses. Silence transcribes to 0 segments and
-// an empty .srt — that is a correct result, not a failure.
-// Env: MEDIAKIT_ASR_PYTHON (default "python3") picks the python that
-// has faster-whisper; MEDIAKIT_ASR_MODEL (default "tiny") picks the
-// default model. Model weights (~75 MB for tiny) download from
-// Hugging Face on first use. whisper.cpp support is a follow-up — the
-// engine parameter only accepts auto/faster-whisper for now.
+// Speech-to-text with a LOCAL engine — faster-whisper (default) or
+// whisper.cpp (--engine whisper), on this machine, audio never
+// uploaded (the ffmpeg-skill pattern: optional local ASR, refuse with
+// install lines rather than guessing). Pipeline: probe for an audio
+// stream, extract 16 kHz mono WAV to a temp dir with ffmpeg, run the
+// engine, write the segments as .srt with the same formatter
+// generate_srt uses. Silence transcribes to 0 segments and an empty
+// .srt — that is a correct result, not a failure.
+// faster-whisper path: scripts/asr_faster_whisper.py (stdlib wave +
+// numpy, so PyAV's version never matters). Env: MEDIAKIT_ASR_PYTHON
+// (default "python3") picks the python that has faster-whisper;
+// MEDIAKIT_ASR_MODEL (default "tiny") picks the default model. Model
+// weights (~75 MB for tiny) download from Hugging Face on first use.
+// whisper.cpp path: the whisper-cli binary (release b5454 or newer)
+// with -ojf JSON output; segments come from transcription[].offsets
+// (milliseconds) and the language from result.language. Env:
+// MEDIAKIT_WHISPER_CPP_BIN (default ~/.local/share/mediakit/
+// whisper.cpp/whisper-cli, else whisper-cli/main on PATH);
+// MEDIAKIT_WHISPER_MODEL (default <same dir>/ggml-<model>.bin).
 
 const ASR_MODELS = [
   "tiny", "tiny.en", "base", "base.en", "small", "small.en",
@@ -1627,9 +1633,28 @@ const ASR_MODELS = [
   "distil-large-v2", "distil-large-v3",
 ];
 const ASR_INSTALL_HINT = "no speech engine found — transcribe needs faster-whisper on this machine (local only, audio is never uploaded): python3 -m venv ~/.local/venv/mediakit-asr && ~/.local/venv/mediakit-asr/bin/pip install faster-whisper, then set MEDIAKIT_ASR_PYTHON to that venv's python (or point it at a python that already has faster-whisper). Model weights (~75 MB for tiny) download from Hugging Face on first use.";
+const WHISPER_CPP_INSTALL_HINT = "no whisper.cpp binary found — transcribe --engine whisper needs the whisper.cpp CLI on this machine (local only, audio is never uploaded): download whisper-bin-ubuntu-x64.tar.gz from https://github.com/ggerganov/whisper.cpp/releases (tag b5454 or newer) and a ggml model from https://huggingface.co/ggerganov/whisper.cpp (e.g. ggml-tiny.bin, ~75 MB), then set MEDIAKIT_WHISPER_CPP_BIN to the whisper-cli binary and MEDIAKIT_WHISPER_MODEL to the model file.";
+const WHISPER_CPP_MODEL_HINT = "whisper.cpp model file not found — download it from https://huggingface.co/ggerganov/whisper.cpp (e.g. ggml-tiny.bin, ~75 MB) and set MEDIAKIT_WHISPER_MODEL to its path";
 
 function asrPython() {
   return process.env.MEDIAKIT_ASR_PYTHON || "python3";
+}
+
+function whisperCppDir() {
+  return path.join(os.homedir(), ".local", "share", "mediakit", "whisper.cpp");
+}
+
+async function fileExists(p) {
+  try { await access(p); return true; } catch { return false; }
+}
+
+async function whichBin(name) {
+  try {
+    const { stdout } = await runCapture("which", [name], { timeoutMs: 10_000 });
+    return String(stdout).trim().split("\n")[0] || null;
+  } catch {
+    return null;
+  }
 }
 
 export async function detectAsrEngine() {
@@ -1642,11 +1667,56 @@ export async function detectAsrEngine() {
   }
 }
 
+// whisper.cpp: binary first, then the model file for the requested
+// model name (ggml-<model>.bin). A missing binary and a missing model
+// are different failures with different fixes, so they are reported
+// separately (missing: ["binary"] vs ["model"]).
+export async function detectWhisperCpp(model = "tiny") {
+  // An explicit MEDIAKIT_WHISPER_CPP_BIN is a choice, not a hint:
+  // if it does not exist, fail loudly instead of silently falling
+  // back to another binary (a stale env var must never quietly pick
+  // a different engine build).
+  const envBin = process.env.MEDIAKIT_WHISPER_CPP_BIN;
+  let binary = null;
+  if (envBin?.trim()) {
+    if (await fileExists(envBin.trim())) binary = envBin.trim();
+    else return { engine: "whisper.cpp", binary: null, model: null, available: false, missing: ["binary"] };
+  } else {
+    const candidates = [path.join(whisperCppDir(), "whisper-cli")];
+    for (const name of ["whisper-cli", "main"]) {
+      const found = await whichBin(name);
+      if (found) candidates.push(found);
+    }
+    for (const c of candidates) if (await fileExists(c)) { binary = c; break; }
+    if (!binary) return { engine: "whisper.cpp", binary: null, model: null, available: false, missing: ["binary"] };
+  }
+  const envModel = process.env.MEDIAKIT_WHISPER_MODEL;
+  const modelPath = envModel?.trim() ? envModel.trim() : path.join(whisperCppDir(), `ggml-${model}.bin`);
+  if (!(await fileExists(modelPath))) return { engine: "whisper.cpp", binary, model: modelPath, available: false, missing: ["model"] };
+  return { engine: "whisper.cpp", binary, model: modelPath, available: true };
+}
+
+// Combined probe for doctor() and engine=auto: faster-whisper first
+// (pip install is enough, no binary to fetch), then whisper.cpp.
+// Neither available -> engine "none" and a fix carrying both
+// install lines, so the caller can pick whichever is easier.
+export async function detectTranscribe(model = "tiny") {
+  const fw = await detectAsrEngine();
+  if (fw.available) return { ...fw, available: true };
+  const cpp = await detectWhisperCpp(model);
+  if (cpp.available) return { ...cpp, available: true };
+  return {
+    engine: "none", available: false, python: fw.python,
+    fix: `${ASR_INSTALL_HINT} Alternatively: ${WHISPER_CPP_INSTALL_HINT}`,
+  };
+}
+
 export async function transcribe({ input, output, model = "tiny", language = "auto", engine = "auto" }) {
   const inPath = await requireInput(input);
-  const eng = String(engine ?? "auto").toLowerCase();
-  if (!["auto", "faster-whisper"].includes(eng)) {
-    throw new MediaKitError(`transcribe engine "${engine}" is not supported yet — only "faster-whisper" (whisper.cpp support is a follow-up); the engine runs locally, audio is never uploaded`, "INVALID_ARG");
+  const engRaw = String(engine ?? "auto").toLowerCase();
+  const eng = engRaw === "whisper.cpp" ? "whisper" : engRaw;
+  if (!["auto", "faster-whisper", "whisper"].includes(eng)) {
+    throw new MediaKitError(`transcribe engine "${engine}" is not supported — use "auto", "faster-whisper" or "whisper" (whisper.cpp); the engine runs locally, audio is never uploaded`, "INVALID_ARG");
   }
   const mdl = String(model ?? process.env.MEDIAKIT_ASR_MODEL ?? "tiny").toLowerCase();
   if (!ASR_MODELS.includes(mdl)) {
@@ -1662,23 +1732,63 @@ export async function transcribe({ input, output, model = "tiny", language = "au
   }
   const meta = await probe(inPath);
   if (!meta.audio) throw new MediaKitError("transcribe needs an input with an audio stream", "INVALID_ARG");
-  const detected = await detectAsrEngine();
-  if (!detected.available) {
-    throw new MediaKitError(`transcribe: ${ASR_INSTALL_HINT}`, "ASR_NOT_INSTALLED");
+  // Resolve the engine before extracting audio: auto prefers
+  // faster-whisper, then whisper.cpp; an explicit engine must exist
+  // (binary AND model for whisper.cpp).
+  let selected;
+  if (eng === "faster-whisper") {
+    const fw = await detectAsrEngine();
+    if (!fw.available) throw new MediaKitError(`transcribe: ${ASR_INSTALL_HINT}`, "ASR_NOT_INSTALLED");
+    selected = fw;
+  } else if (eng === "whisper") {
+    const cpp = await detectWhisperCpp(mdl);
+    if (!cpp.available) {
+      if (cpp.missing?.includes("binary")) throw new MediaKitError(`transcribe: ${WHISPER_CPP_INSTALL_HINT}`, "ASR_NOT_INSTALLED");
+      throw new MediaKitError(`transcribe: ${WHISPER_CPP_MODEL_HINT} (looked for ${cpp.model})`, "ASR_NOT_INSTALLED");
+    }
+    selected = cpp;
+  } else {
+    const both = await detectTranscribe(mdl);
+    if (!both.available) throw new MediaKitError(`transcribe: ${both.fix}`, "ASR_NOT_INSTALLED");
+    selected = both;
   }
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-asr-"));
   try {
     const wav = path.join(tmpDir, "asr.wav");
     await run(FFMPEG, ["-y", "-i", inPath, "-vn", "-c:a", "pcm_s16le", "-ar", "16000", "-ac", "1", wav]);
-    const helper = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "asr_faster_whisper.py");
-    const args = [helper, "--wav", wav, "--model", mdl];
-    if (lang !== "auto") args.push("--language", lang);
-    const { stdout } = await runCapture(detected.python, args, { timeoutMs: 1_800_000 });
     let asr;
-    try {
-      asr = JSON.parse(stdout);
-    } catch {
-      throw new MediaKitError(`transcribe: the ASR helper returned unparseable output: ${String(stdout).slice(0, 200)}`, "ASR_FAILED");
+    if (selected.engine === "whisper.cpp") {
+      const outBase = path.join(tmpDir, "whisper-out");
+      await runCapture(selected.binary, ["-m", selected.model, "-f", wav, "-l", lang, "-ojf", "-of", outBase, "-np"], { timeoutMs: 1_800_000 });
+      let raw;
+      try {
+        raw = await readFile(`${outBase}.json`, "utf8");
+      } catch {
+        throw new MediaKitError("transcribe: whisper.cpp finished but wrote no JSON output", "ASR_FAILED");
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        throw new MediaKitError(`transcribe: whisper.cpp returned unparseable JSON: ${raw.slice(0, 200)}`, "ASR_FAILED");
+      }
+      const segs = Array.isArray(parsed.transcription) ? parsed.transcription : [];
+      asr = {
+        segments: segs.map((s) => ({ start: (s.offsets?.from ?? 0) / 1000, end: (s.offsets?.to ?? 0) / 1000, text: s.text ?? "" })),
+        language: parsed.result?.language ?? null,
+        language_probability: null,
+        duration_seconds: meta.duration_seconds ?? null,
+      };
+    } else {
+      const helper = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "asr_faster_whisper.py");
+      const args = [helper, "--wav", wav, "--model", mdl];
+      if (lang !== "auto") args.push("--language", lang);
+      const { stdout } = await runCapture(selected.python, args, { timeoutMs: 1_800_000 });
+      try {
+        asr = JSON.parse(stdout);
+      } catch {
+        throw new MediaKitError(`transcribe: the ASR helper returned unparseable output: ${String(stdout).slice(0, 200)}`, "ASR_FAILED");
+      }
     }
     const segments = (asr.segments ?? [])
       .map((s) => ({
@@ -1695,7 +1805,7 @@ export async function transcribe({ input, output, model = "tiny", language = "au
       operation: "transcribe",
       input: inPath,
       output: outPath,
-      engine: detected.engine,
+      engine: selected.engine,
       model: mdl,
       language: asr.language ?? null,
       language_probability: asr.language_probability ?? null,
@@ -3306,10 +3416,11 @@ export async function doctor() {
   // transcribe is optional (ffmpeg-skill's ASR rule: a speech engine is
   // never required): report the engine state, but a missing engine
   // must not fail ok — everything else still works without it.
-  const asr = await detectAsrEngine();
+  // detectTranscribe() prefers faster-whisper, then whisper.cpp.
+  const asr = await detectTranscribe();
   tools.transcribe = asr.available
-    ? { available: true, engine: asr.engine, python: asr.python }
-    : { available: false, engine: asr.engine, python: asr.python, fix: ASR_INSTALL_HINT };
+    ? { available: true, engine: asr.engine, ...(asr.python ? { python: asr.python } : {}), ...(asr.binary ? { binary: asr.binary, model: asr.model } : {}) }
+    : { available: false, engine: asr.engine, ...(asr.python ? { python: asr.python } : {}), fix: asr.fix };
   return {
     operation: "doctor",
     ffmpeg_version: ffmpegVersion,

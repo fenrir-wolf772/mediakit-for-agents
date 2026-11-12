@@ -452,13 +452,13 @@ server.tool(
 
 server.tool(
   "transcribe",
-  "Transcribe speech to subtitles with a LOCAL faster-whisper engine (no cloud, audio never uploaded). Writes a .srt and returns the segments with timestamps, detected language and full text — the direct input for burn_captions. The engine is optional: if faster-whisper is not installed on this machine the call fails with install lines (set MEDIAKIT_ASR_PYTHON to a python that has it). Silence transcribes to 0 segments and an empty .srt.",
+  "Transcribe speech to subtitles with a LOCAL engine (no cloud, audio never uploaded) — faster-whisper by default, or whisper.cpp with engine=\"whisper\". Writes a .srt and returns the segments with timestamps, detected language and full text — the direct input for burn_captions. The engine is optional: if no engine is installed the call fails with install lines (set MEDIAKIT_ASR_PYTHON to a python that has faster-whisper, or MEDIAKIT_WHISPER_CPP_BIN / MEDIAKIT_WHISPER_MODEL to a whisper.cpp binary + ggml model). Silence transcribes to 0 segments and an empty .srt.",
   {
     input: pathSchema.describe("Audio or video file with a speech track"),
     output: pathSchema.describe("Output .srt file path"),
     model: z.enum(["tiny", "tiny.en", "base", "base.en", "small", "small.en", "medium", "medium.en", "large-v1", "large-v2", "large-v3", "large-v3-turbo", "distil-small.en", "distil-medium.en", "distil-large-v2", "distil-large-v3"]).optional().describe("Whisper model (default tiny, or MEDIAKIT_ASR_MODEL): tiny is fast and fine for clear speech; base/small are more accurate; large-v3-turbo is the accurate/slow end"),
     language: z.string().default("auto").describe("\"auto\" (detect) or an ISO 639-1 code, e.g. en, vi"),
-    engine: z.enum(["auto", "faster-whisper"]).default("auto").describe("ASR engine (only faster-whisper for now; whisper.cpp is a follow-up)"),
+    engine: z.enum(["auto", "faster-whisper", "whisper"]).default("auto").describe("ASR engine: auto prefers faster-whisper, then whisper.cpp; \"whisper\" forces the whisper.cpp CLI"),
   },
   async (a) => safe(() => core.transcribe({
     input: a.input,

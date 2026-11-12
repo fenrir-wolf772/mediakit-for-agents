@@ -65,6 +65,7 @@ jobs:
           node bin/mediakit.js mux test/source.mp4 test/mix-voice.mp3 -o outputs/ci-mux.mp4 --audio-offset 0.5
           node bin/mediakit.js generate-srt --cues-file test/cues.json -o outputs/ci-gen.srt
           node bin/mediakit.js transcribe test/speech-jfk.flac -o outputs/ci-transcribe.srt 2>&1 | grep -q 'faster-whisper'
+          node bin/mediakit.js transcribe test/speech-jfk.flac -o outputs/ci-transcribe-whisper.srt --engine whisper 2>&1 | grep -q 'whisper.cpp'
           node bin/mediakit.js export-gif test/source.mp4 --start 2 --end 4 -o outputs/ci-demo.gif --max-size-mb 2
           node bin/mediakit.js fit test/source.mp4 --duration 5 --max-fps 15 -o outputs/ci-fit15.mp4
           node bin/mediakit.js resize test/source.mp4 --preset 360p -o outputs/ci-resize360.mp4

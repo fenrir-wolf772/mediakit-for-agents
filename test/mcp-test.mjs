@@ -373,11 +373,15 @@ checkOk(doctorJson.ok === true, "doctor ok=true", JSON.stringify(doctorJson.tool
 // tool must be available, and transcribe reports its own engine state.
 const { transcribe: doctorAsr, ...otherTools } = doctorJson.tools;
 checkOk(Object.values(otherTools).every((t) => t.available), "doctor: all ffmpeg tools available");
-checkOk(doctorAsr && typeof doctorAsr.available === "boolean" && doctorAsr.engine === "faster-whisper", "doctor: transcribe reports an engine status");
+checkOk(doctorAsr && typeof doctorAsr.available === "boolean" && ["faster-whisper", "whisper.cpp", "none"].includes(doctorAsr.engine), "doctor: transcribe reports an engine status", JSON.stringify(doctorAsr));
 if (process.env.MEDIAKIT_TEST_ASR === "1") {
   checkOk(doctorAsr.available === true && doctorAsr.python === process.env.MEDIAKIT_ASR_PYTHON, "doctor: transcribe available with faster-whisper when the engine is installed", JSON.stringify(doctorAsr));
+} else if (doctorAsr.available === false) {
+  checkOk(/faster-whisper/.test(doctorAsr.fix ?? "") && /MEDIAKIT_ASR_PYTHON/.test(doctorAsr.fix ?? ""), "doctor: transcribe unavailable without an engine, with install hint", JSON.stringify(doctorAsr));
 } else {
-  checkOk(doctorAsr.available === false && /faster-whisper/.test(doctorAsr.fix ?? "") && /MEDIAKIT_ASR_PYTHON/.test(doctorAsr.fix ?? ""), "doctor: transcribe unavailable without an engine, with install hint", JSON.stringify(doctorAsr));
+  // A machine with an engine installed (e.g. whisper.cpp in the
+  // default dir) reports available — that is also a correct result.
+  checkOk(["faster-whisper", "whisper.cpp"].includes(doctorAsr.engine), "doctor: transcribe available with an installed engine", JSON.stringify(doctorAsr));
 }
 checkOk(doctorJson.tools.fit?.available === true, "doctor: fit is available");
 checkOk(doctorJson.tools.generate_srt?.available === true, "doctor: generate_srt is available (pure Node, no ffmpeg filter needed)");
@@ -1693,8 +1697,9 @@ checkOk(genBadExtRes.isError === true && /\.srt/.test(genBadExtJson.error ?? "")
 
 // transcribe: validation errors need no engine (checked before the
 // ASR engine is probed). The no-engine path is tested through a second
-// server with MEDIAKIT_ASR_PYTHON pointed at a python that cannot
-// exist, so the result is deterministic on any machine.
+// server with both engines disabled (MEDIAKIT_ASR_PYTHON pointed at
+// a python that cannot exist, MEDIAKIT_WHISPER_CPP_BIN at a binary
+// that cannot exist), so the result is deterministic on any machine.
 const trBadModelErr = await callExpectThrow("transcribe", { input: path.join(root, "test/speech-jfk.flac"), output: path.join(root, "outputs/mcp-jfk-badmodel.srt"), model: "huge" });
 checkOk(/huge/.test(trBadModelErr ?? ""), "transcribe refuses an unknown model (zod enum)", trBadModelErr ?? "");
 const trBadExtRes = await client.callTool({
@@ -1703,13 +1708,17 @@ const trBadExtRes = await client.callTool({
 });
 const trBadExtJson = JSON.parse(trBadExtRes.content[0].text);
 checkOk(trBadExtRes.isError === true && /\.srt/.test(trBadExtJson.error ?? ""), "transcribe refuses a non-.srt output", JSON.stringify(trBadExtJson));
-const trBadEngineErr = await callExpectThrow("transcribe", { input: path.join(root, "test/speech-jfk.flac"), output: path.join(root, "outputs/mcp-jfk.srt"), engine: "whisper" });
-checkOk(/whisper/.test(trBadEngineErr ?? ""), "transcribe refuses the not-yet-implemented whisper.cpp engine (zod enum)", trBadEngineErr ?? "");
+const trBadEngineErr = await callExpectThrow("transcribe", { input: path.join(root, "test/speech-jfk.flac"), output: path.join(root, "outputs/mcp-jfk.srt"), engine: "bogus" });
+checkOk(/bogus/.test(trBadEngineErr ?? ""), "transcribe refuses an unknown engine (zod enum)", trBadEngineErr ?? "");
 const noAsrTransport = new StdioClientTransport({
   command: process.execPath,
   args: [path.join(root, "src/server.js")],
   stderr: "ignore",
-  env: { ...process.env, MEDIAKIT_ASR_PYTHON: "/nonexistent/python3" },
+  // Both engines disabled: the python cannot exist AND the whisper.cpp
+  // binary is explicitly pointed at a nonexistent path (an explicit
+  // MEDIAKIT_WHISPER_CPP_BIN never falls back to the default install,
+  // so this server deterministically has no engine on any machine).
+  env: { ...process.env, MEDIAKIT_ASR_PYTHON: "/nonexistent/python3", MEDIAKIT_WHISPER_CPP_BIN: "/nonexistent/whisper-cli" },
 });
 const noAsrClient = new Client({ name: "mediakit-test-noasr", version: "0.1.0" }, { capabilities: {} });
 await noAsrClient.connect(noAsrTransport);
@@ -1720,6 +1729,57 @@ const trNoEngRes = await noAsrClient.callTool({
 const trNoEngJson = JSON.parse(trNoEngRes.content[0].text);
 checkOk(trNoEngRes.isError === true && trNoEngJson.code === "ASR_NOT_INSTALLED" && /faster-whisper/.test(trNoEngJson.error ?? "") && /MEDIAKIT_ASR_PYTHON/.test(trNoEngJson.error ?? ""), "transcribe without an engine refuses with install lines", JSON.stringify(trNoEngJson).slice(0, 200));
 await noAsrClient.close();
+
+// transcribe --engine whisper through a stub whisper-cli (the canned
+// JFK JSON): exercises binary discovery, JSON parsing and .srt
+// writing without a real binary or model. The real engine is covered
+// by the MEDIAKIT_TEST_WHISPER_CPP gated block below.
+const stubBin = path.join(root, "test/whisper-cli-stub.sh");
+const stubModel = path.join(root, "test/whisper-stub-model.bin");
+const stubTransport = new StdioClientTransport({
+  command: process.execPath,
+  args: [path.join(root, "src/server.js")],
+  stderr: "ignore",
+  env: { ...process.env, MEDIAKIT_ASR_PYTHON: "/nonexistent/python3", MEDIAKIT_WHISPER_CPP_BIN: stubBin, MEDIAKIT_WHISPER_MODEL: stubModel },
+});
+const stubClient = new Client({ name: "mediakit-test-whisper-stub", version: "0.1.0" }, { capabilities: {} });
+await stubClient.connect(stubTransport);
+const trStubRes = await stubClient.callTool({
+  name: "transcribe",
+  arguments: { input: path.join(root, "test/speech-jfk.flac"), output: path.join(root, "outputs/mcp-jfk-whisper-stub.srt"), model: "tiny", language: "en", engine: "whisper" },
+});
+const trStubJson = JSON.parse(trStubRes.content[0].text);
+checkOk(trStubRes.isError !== true && trStubJson.engine === "whisper.cpp" && trStubJson.segment_count === 1, "transcribe --engine whisper (stub) succeeds and reports the whisper.cpp engine", JSON.stringify(trStubJson).slice(0, 200));
+checkOk(/fellow Americans/.test(trStubJson.text ?? "") && trStubJson.language === "en" && near(trStubJson.segments?.[0]?.end, 10.5, 0.05), "transcribe --engine whisper (stub) returns the JFK segment [0, 10.5] in English", JSON.stringify(trStubJson.segments?.[0]));
+const trStubSrt = await readFile(path.join(root, "outputs/mcp-jfk-whisper-stub.srt"), "utf8");
+checkOk(/^1\n00:00:00,000 --> 00:00:10,500\n/.test(trStubSrt) && /ask not what your country/.test(trStubSrt), "transcribe --engine whisper (stub) writes a valid .srt", trStubSrt.slice(0, 120).replace(/\n/g, " "));
+const trStubDoctorRes = await stubClient.callTool({ name: "doctor", arguments: {} });
+const trStubDoctorJson = JSON.parse(trStubDoctorRes.content[0].text);
+checkOk(trStubDoctorJson.tools.transcribe?.available === true && trStubDoctorJson.tools.transcribe?.engine === "whisper.cpp" && trStubDoctorJson.tools.transcribe?.binary === stubBin, "doctor reports the whisper.cpp stub engine as available", JSON.stringify(trStubDoctorJson.tools.transcribe));
+await stubClient.close();
+
+// No engine at all (both disabled): doctor must report engine
+// "none" with a fix carrying BOTH install lines.
+const noEngTransport = new StdioClientTransport({
+  command: process.execPath,
+  args: [path.join(root, "src/server.js")],
+  stderr: "ignore",
+  env: { ...process.env, MEDIAKIT_ASR_PYTHON: "/nonexistent/python3", MEDIAKIT_WHISPER_CPP_BIN: "/nonexistent/whisper-cli" },
+});
+const noEngClient = new Client({ name: "mediakit-test-noengine", version: "0.1.0" }, { capabilities: {} });
+await noEngClient.connect(noEngTransport);
+const noEngDoctorRes = await noEngClient.callTool({ name: "doctor", arguments: {} });
+const noEngDoctorJson = JSON.parse(noEngDoctorRes.content[0].text);
+checkOk(noEngDoctorJson.tools.transcribe?.available === false && noEngDoctorJson.tools.transcribe?.engine === "none" && /faster-whisper/.test(noEngDoctorJson.tools.transcribe?.fix ?? "") && /whisper\.cpp/.test(noEngDoctorJson.tools.transcribe?.fix ?? ""), "doctor with no engine reports none + both install hints", JSON.stringify(noEngDoctorJson.tools.transcribe));
+await noEngClient.close();
+
+// whisper.cpp error paths through the CLI (runCli is hoisted from
+// the sandbox block below): a missing binary and a missing model
+// are different failures with different fixes.
+const trNoBin = await runCli(["transcribe", path.join(root, "test/speech-jfk.flac"), "-o", path.join(root, "outputs/mcp-whisper-nobin.srt"), "--engine", "whisper"], { MEDIAKIT_WHISPER_CPP_BIN: "/nonexistent/whisper-cli" });
+checkOk(trNoBin.code !== 0 && /whisper\.cpp/.test(trNoBin.out) && /ASR_NOT_INSTALLED/.test(trNoBin.out), "transcribe --engine whisper with a missing binary refuses with the whisper.cpp install hint", trNoBin.out.slice(0, 200));
+const trNoModel = await runCli(["transcribe", path.join(root, "test/speech-jfk.flac"), "-o", path.join(root, "outputs/mcp-whisper-nomodel.srt"), "--engine", "whisper"], { MEDIAKIT_WHISPER_CPP_BIN: stubBin, MEDIAKIT_WHISPER_MODEL: "/nonexistent/ggml-tiny.bin" });
+checkOk(trNoModel.code !== 0 && /model file not found/.test(trNoModel.out) && /ASR_NOT_INSTALLED/.test(trNoModel.out), "transcribe --engine whisper with a missing model refuses with the model download hint", trNoModel.out.slice(0, 200));
 
 // transcribe end-to-end needs a real engine + the tiny model (~75 MB
 // from Hugging Face on first use): too heavy for CI, so this block
@@ -1759,6 +1819,31 @@ if (process.env.MEDIAKIT_TEST_ASR === "1") {
   });
   const trBurnJson = JSON.parse(trBurnRes.content[0].text);
   checkOk(trBurnRes.isError !== true && near(trBurnJson.duration_seconds, 10, 0.05), "transcribe -> burn_captions chain renders a 10s captioned video", JSON.stringify(trBurnJson).slice(0, 200));
+}
+
+// transcribe --engine whisper end-to-end with the REAL whisper.cpp
+// binary + model: only runs with MEDIAKIT_TEST_WHISPER_CPP=1 and
+// MEDIAKIT_WHISPER_CPP_BIN / MEDIAKIT_WHISPER_MODEL set (the server
+// child inherits process.env, so they must be set before the suite
+// starts). Too heavy for CI; the stub block above covers the path.
+if (process.env.MEDIAKIT_TEST_WHISPER_CPP === "1") {
+  const wRes = await client.callTool({
+    name: "transcribe",
+    arguments: { input: path.join(root, "test/speech-jfk.flac"), output: path.join(root, "outputs/mcp-jfk-whisper.srt"), model: "tiny", language: "auto", engine: "whisper" },
+  });
+  const wJson = JSON.parse(wRes.content[0].text);
+  console.log("transcribe whisper.cpp JFK:", JSON.stringify(wJson.segments), "| lang", wJson.language);
+  checkOk(wRes.isError !== true && wJson.engine === "whisper.cpp", "transcribe --engine whisper (real binary) succeeds and reports whisper.cpp", JSON.stringify(wJson).slice(0, 200));
+  checkOk(wJson.language === "en" && wJson.segment_count >= 1, "transcribe --engine whisper detects English with >= 1 segment", `lang=${wJson.language} segments=${wJson.segment_count}`);
+  checkOk(/fellow Americans/.test(wJson.text ?? ""), "transcribe --engine whisper JFK contains 'fellow Americans'", wJson.text ?? "");
+  checkOk(near(wJson.segments?.[0]?.end, 10.5, 0.5), "transcribe --engine whisper JFK first segment ends near 10.5s", JSON.stringify(wJson.segments?.[0]));
+  // A tone has no speech under the real engine too: 0 segments.
+  const wToneRes = await client.callTool({
+    name: "transcribe",
+    arguments: { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-tone-whisper.srt"), engine: "whisper" },
+  });
+  const wToneJson = JSON.parse(wToneRes.content[0].text);
+  checkOk(wToneRes.isError !== true && wToneJson.segment_count === 0 && wToneJson.text === "" && wToneJson.size_bytes === 0, "transcribe --engine whisper of a tone (no speech) yields 0 segments and an empty .srt", JSON.stringify(wToneJson).slice(0, 200));
 }
 
 // Sandbox (MEDIAKIT_WORKDIR), tested through the CLI so the env var

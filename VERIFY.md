@@ -1139,3 +1139,27 @@ tone [6,10)), `test/content-lead-black.mp4` (đen 1s đầu + testsrc 9s),
 - npm: HIỆU CHÍNH trong lượt này (MEMORY.md cập nhật 12/11): **0.1.0 ĐÃ LIVE từ 9/11** (registry latest = 0.1.0) — helper npm_api.py "stage" thực ra publish thẳng dist-tag latest, không có bước Approve nào; việc nhắc Tony bật 2FA/bấm Approve trước đây là hiểu sai, bỏ. 0.2.0 (38 tool + resources) chờ Tony quyết publish hay xem 0.1.0 trước — cron KHÔNG stage/publish gì thêm.
 - Version giữ 0.1.0.
 - Push: commit 426158c "Add MCP Resources videos://list, metadata, workspace/info (38 tools)" → GitHub main (origin/main = 426158c). **CI run #43154815878 success** — xanh ngay lượt này.
+
+## Lượt 27 — 2026-11-12 12:58 (+07): transcribe --engine whisper (whisper.cpp, 38 tools, không thêm tool)
+- Học: AmolDerickSoans/ffmpeg-mcp (14★, Python/FastMCP, 7 tools). Ý áp dụng được:
+  1. `batch_process` — chạy 1 operation lên nhiều file khớp glob, trả kết quả từng file → backlog mới (tool `batch`, chưa làm lượt này).
+  2. `list_media_files` — đã có tốt hơn (`find` + resources `videos://list` đệ quy + probe).
+  3. Quality presets low/medium/high/veryhigh — đã có (`compress` low/medium/high).
+  4. Anti-pattern KHÔNG học theo: enum sai thì lặng lẽ fallback default (position/quality lạ → bottomright/medium) — MediaKit từ chối tường minh; `trim` dùng `-ss` sau `-i` với `-c copy` (không keyframe-safe) — MediaKit đã có `--snap`.
+  KHÔNG copy code của họ — chỉ học ý tưởng, tự implement bằng Node/whisper.cpp CLI.
+- Làm:
+  - `transcribe --engine whisper` (core+CLI+MCP, không thêm tool — backlog lượt 22): whisper.cpp CLI làm engine thứ hai, ngang hàng faster-whisper. `detectWhisperCpp(model)`: binary từ `MEDIAKIT_WHISPER_CPP_BIN` → `~/.local/share/mediakit/whisper.cpp/whisper-cli` → `whisper-cli`/`main` trên PATH; model từ `MEDIAKIT_WHISPER_MODEL` → `<cùng dir>/ggml-<model>.bin`. `detectTranscribe()`: auto ưu tiên faster-whisper rồi whisper.cpp; không engine nào → `engine: "none"`, fix mang cả 2 dòng cài đặt. Chạy `whisper-cli -m <model> -f <wav16k> -l <lang> -ojf -of <base> -np`, đọc `<base>.json`: segments từ `transcription[].offsets` (ms), language từ `result.language`; cùng đường normalize + `formatSrtBody` với faster-whisper nên .srt ra giống hệt. `doctor`: transcribe báo `{available, engine, python|binary+model, fix}`; thiếu engine KHÔNG làm `ok=false`.
+  - Binary + model đã cài local (không commit vào repo): `~/.local/share/mediakit/whisper.cpp/` — whisper-cli b5454 (release GitHub) + ggml-tiny.bin 77.691.713 B, sha256 be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21.
+  - Fixture test mới: `test/whisper-cli-stub.sh` (stub thay whisper-cli, ghi canned JSON JFK) + `test/whisper-stub-model.bin` (file rỗng, chỉ để qua kiểm tra tồn tại).
+  - README (dòng bảng transcribe), SKILL.md (rule 30), CI smoke thêm dòng transcribe --engine whisper (đường lỗi, grep `whisper.cpp`).
+- Test (ffmpeg 8.1.2; whisper.cpp b5454 + ggml-tiny):
+  - Đo trước khi code: whisper-cli thật trên JFK → **1 segment [0, 10.5], text đúng từng chữ, language "en"**, ~4s; binary chạy không cần `LD_LIBRARY_PATH` (rpath `$ORIGIN`).
+  - CLI: `--engine whisper` JFK → **engine "whisper.cpp", 1 segment, .srt 141 B**; `auto` (FW vắng) → whisper.cpp; tone → **0 segment + .srt 0 B**; model thiếu / binary thiếu → **exit 2, ASR_NOT_INSTALLED** kèm hint riêng.
+  - `npm run check` sạch (check-docs: 38 tools khớp README); `npm test` thường: **371/371 PASS, exit 0** (364 + 7 mới: stub e2e 3 + stub doctor 1 + no-engine doctor 1 + CLI đường lỗi 2). Gated `MEDIAKIT_TEST_ASR=1`: **379/379 PASS**. Gated `MEDIAKIT_TEST_WHISPER_CPP=1`: **376/376 PASS** (JFK thật qua MCP: engine whisper.cpp, lang en, text "fellow Americans", segment end ~10.5s; tone → 0 segment).
+  - Assert mới (12): stub e2e 3 + stub doctor 1 + no-engine doctor 1 + CLI lỗi 2 + gated whisper thật 5.
+- Bẫy đo lường:
+  1. Test no-engine cũ chỉ tắt faster-whisper (`MEDIAKIT_ASR_PYTHON=/nonexistent`) — trên máy đã cài whisper.cpp thì `auto` fallback sang whisper.cpp và call thành công, test FAIL 1 assertion. Fix: server no-engine phải tắt CẢ hai engine (thêm `MEDIAKIT_WHISPER_CPP_BIN=/nonexistent/whisper-cli`); cùng lý do, assert doctor "unavailable" cũ phải chấp nhận máy đã có engine (available=true là kết quả đúng, không phải fail).
+  2. Bản đầu `detectWhisperCpp` coi `MEDIAKIT_WHISPER_CPP_BIN` như gợi ý rồi fallback về binary mặc định — set env thành đường dẫn không tồn tại vẫn chạy ngon bằng binary khác. Fix: env tường minh thì chỉ dùng nó, không tồn tại là lỗi binary thiếu (fail loudly, không fallback lặng lẽ). Bắt được bằng smoke CLI trước khi viết test.
+  3. `time` không có trong shell cron (`/bin/bash: time: command not found`) làm đứt chuỗi smoke đầu — chạy lại không dùng `time`.
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt).
+- Push: (ghi sau khi push + CI)

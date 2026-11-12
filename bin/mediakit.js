@@ -329,13 +329,13 @@ const COMMANDS = {
     ],
   },
   transcribe: {
-    usage: "mediakit transcribe <input> -o <output.srt> [--model tiny] [--language auto|en|vi|...] [--engine auto|faster-whisper]",
-    desc: "Transcribe speech to a .srt with a LOCAL faster-whisper engine (no cloud, audio never uploaded). Needs faster-whisper installed (see doctor); without it the call fails with install lines. Env: MEDIAKIT_ASR_PYTHON picks the python, MEDIAKIT_ASR_MODEL the default model.",
+    usage: "mediakit transcribe <input> -o <output.srt> [--model tiny] [--language auto|en|vi|...] [--engine auto|faster-whisper|whisper]",
+    desc: "Transcribe speech to a .srt with a LOCAL engine (no cloud, audio never uploaded): faster-whisper by default, whisper.cpp with --engine whisper. Needs an engine installed (see doctor); without one the call fails with install lines. Env: MEDIAKIT_ASR_PYTHON picks the python with faster-whisper, MEDIAKIT_ASR_MODEL the default model; MEDIAKIT_WHISPER_CPP_BIN / MEDIAKIT_WHISPER_MODEL point at a whisper.cpp binary + ggml model.",
     args: [{ name: "input", required: true }],
     options: [
       ["--model", "Whisper model: tiny (default, fast), base, small, medium, large-v3, large-v3-turbo, ..."],
       ["--language", "Language: auto (default, detect) or ISO 639-1 code, e.g. en, vi"],
-      ["--engine", "ASR engine: auto (default) or faster-whisper"],
+      ["--engine", "ASR engine: auto (default, faster-whisper then whisper.cpp), faster-whisper, or whisper (whisper.cpp CLI)"],
       ["-o, --output", "Output .srt file (required)"],
     ],
   },
