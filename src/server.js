@@ -3,7 +3,7 @@
  * mediakit-for-agents — MCP server (stdio transport).
  * Exposes the ffmpeg core as tools for Claude Code / Cursor / Codex.
  */
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import * as core from "./core.js";
@@ -771,6 +771,40 @@ server.tool(
     shortest: a.shortest,
     dryRun: a.dry_run,
   })),
+);
+
+// ---------------------------------------------------------------- MCP resources
+// Workspace-scoped reads (idea: conneroisu/vfx-mcp's videos:// URIs):
+// a client can list the workspace's media, read one file's probe, and
+// read workspace info — without guessing paths and without a tool
+// call. All three are confined to the workspace root (MEDIAKIT_WORKDIR
+// or the process cwd); `..` and symlink escapes are refused in core.
+// The metadata template uses {+filename} (reserved expansion) so
+// nested paths such as test/nested/deep-clip.mp4 match — a plain
+// {filename} only matches one path segment.
+function resourceResult(uri, obj) {
+  return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(obj, null, 2) }] };
+}
+
+server.resource(
+  "workspace-media-list",
+  "videos://list",
+  { description: "List every media file in the workspace (recursive, sorted, capped at 200) with size and extension — read this before guessing a path.", mimeType: "application/json" },
+  async (uri) => resourceResult(uri, await core.listWorkspaceFiles()),
+);
+
+server.resource(
+  "workspace-file-metadata",
+  new ResourceTemplate("videos://{+filename}/metadata", { list: undefined }),
+  { description: "Probe one workspace media file by relative path (e.g. test/source.mp4, nested paths allowed): duration, dimensions, codecs, streams.", mimeType: "application/json" },
+  async (uri, { filename }) => resourceResult(uri, await core.workspaceMetadata(filename)),
+);
+
+server.resource(
+  "workspace-info",
+  "videos://workspace/info",
+  { description: "Workspace root, ffmpeg/ffprobe versions, tool availability, media file count, GPU state.", mimeType: "application/json" },
+  async (uri) => resourceResult(uri, await core.workspaceInfo()),
 );
 
 const transport = new StdioServerTransport();

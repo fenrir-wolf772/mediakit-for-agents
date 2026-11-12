@@ -1805,6 +1805,69 @@ checkOk(sbDoctorOff.code === 0 && sbDoctorOffJson?.sandbox?.enabled === false, "
 const sbBadWd = await runCli(["probe", path.join(sandboxDir, "source.mp4")], { MEDIAKIT_WORKDIR: path.join(root, "outputs/no-such-workdir") });
 checkOk(sbBadWd.code !== 0 && /MEDIAKIT_WORKDIR does not exist/.test(sbBadWd.out), "sandbox: a missing MEDIAKIT_WORKDIR fails loudly instead of silently disabling the sandbox", sbBadWd.out.slice(0, 200));
 
+// MCP Resources (videos://...): list, per-file metadata, workspace
+// info — plus a second, workdir-scoped server for the confinement
+// checks. The repo root holds 200+ media files (outputs/ included),
+// so videos://list may be truncated at the 200 cap here; the workdir
+// server (root test/) is small enough to assert membership in.
+console.log("resources");
+async function readResourceExpectError(aClient, uri) {
+  try {
+    const res = await aClient.readResource({ uri });
+    return res.contents?.[0]?.text ?? "";
+  } catch (e) {
+    return e.message ?? String(e);
+  }
+}
+const resList = await client.listResources();
+const resUris = (resList.resources ?? []).map((r) => r.uri);
+checkOk(resUris.includes("videos://list") && resUris.includes("videos://workspace/info"), "resources/list advertises videos://list and videos://workspace/info", JSON.stringify(resUris));
+// Templates live under a separate method (resources/templates/list),
+// not in resources/list — the SDK only enumerates template instances
+// there when a list callback exists.
+const resTemplates = await client.listResourceTemplates();
+const templateUris = (resTemplates.resourceTemplates ?? []).map((t) => t.uriTemplate);
+checkOk(templateUris.includes("videos://{+filename}/metadata"), "resources/templates/list advertises the videos://{+filename}/metadata template", JSON.stringify(templateUris));
+const listRes = await client.readResource({ uri: "videos://list" });
+const listJson = JSON.parse(listRes.contents[0].text);
+checkOk(listJson.root === root && listJson.sandbox_enabled === false && listJson.count === Math.min(200, listJson.total_files) && listJson.truncated === (listJson.total_files > 200) && listJson.total_files > 0, "videos://list is rooted at the repo with a consistent count/truncation", `root=${listJson.root} count=${listJson.count} total=${listJson.total_files} truncated=${listJson.truncated}`);
+checkOk(listJson.files.every((f) => typeof f.path === "string" && typeof f.size_bytes === "number" && f.size_bytes >= 0 && typeof f.extension === "string") && listJson.files.map((f) => f.path).join("\n") === [...listJson.files.map((f) => f.path)].sort().join("\n"), "videos://list entries carry path/size/extension and are sorted", `first=${listJson.files[0]?.path}`);
+const metaRes = await client.readResource({ uri: "videos://test/source.mp4/metadata" });
+const metaJson = JSON.parse(metaRes.contents[0].text);
+checkOk(metaJson.relative_path === "test/source.mp4" && near(metaJson.duration_seconds, 10, 0.05) && metaJson.video?.width === 1280 && metaJson.video?.height === 720, "videos://test/source.mp4/metadata probes 1280x720 / 10s", JSON.stringify(metaJson).slice(0, 200));
+const metaNested = await client.readResource({ uri: "videos://test/nested/deep-clip.mp4/metadata" });
+const metaNestedJson = JSON.parse(metaNested.contents[0].text);
+checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
+const infoRes = await client.readResource({ uri: "videos://workspace/info" });
+const infoJson = JSON.parse(infoRes.contents[0].text);
+checkOk(infoJson.root === root && infoJson.tools_total === 38 && infoJson.tools_available >= 37 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 38 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
+checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
+const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
+checkOk(/not a media file/.test(notMediaText), "videos://package.json/metadata is refused (not a media file)", notMediaText.slice(0, 200));
+const missingText = await readResourceExpectError(client, "videos://no-such-clip.mp4/metadata");
+checkOk(/not found/.test(missingText), "videos://no-such-clip.mp4/metadata reports not found", missingText.slice(0, 200));
+
+// Workdir-scoped server: root is test/, so the list is small and
+// source.mp4 is a member; `..` out of test/ is refused.
+const wdTransport = new StdioClientTransport({
+  command: process.execPath,
+  args: [path.join(root, "src/server.js")],
+  stderr: "ignore",
+  env: { ...process.env, MEDIAKIT_WORKDIR: path.join(root, "test") },
+});
+const wdClient = new Client({ name: "mediakit-test-wd", version: "0.1.0" }, { capabilities: {} });
+await wdClient.connect(wdTransport);
+const wdList = await wdClient.readResource({ uri: "videos://list" });
+const wdJson = JSON.parse(wdList.contents[0].text);
+checkOk(wdJson.root === path.join(root, "test") && wdJson.sandbox_enabled === true && wdJson.truncated === false && wdJson.files.some((f) => f.path === "source.mp4"), "workdir-scoped videos://list is rooted at test/ with the sandbox on", JSON.stringify(wdJson).slice(0, 200));
+const wdMeta = await wdClient.readResource({ uri: "videos://source.mp4/metadata" });
+const wdMetaJson = JSON.parse(wdMeta.contents[0].text);
+checkOk(wdMetaJson.relative_path === "source.mp4" && near(wdMetaJson.duration_seconds, 10, 0.05), "workdir-scoped metadata reads source.mp4 by bare name", JSON.stringify(wdMetaJson).slice(0, 160));
+const wdEsc = await readResourceExpectError(wdClient, "videos://../package.json/metadata");
+checkOk(/escapes the workspace root/.test(wdEsc), "workdir-scoped metadata refuses '..' out of test/", wdEsc.slice(0, 200));
+await wdClient.close();
+
 await client.close();
 if (failures.length) {
   console.error(`\nMCP test FAILED: ${failures.length} assertion(s): ${failures.join("; ")}`);

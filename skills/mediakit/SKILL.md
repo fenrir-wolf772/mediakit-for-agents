@@ -504,6 +504,20 @@ working device reports `gpu.available: false` — listed is not usable, so
 never pick a hardware encoder from the list alone; pick it from
 `working_encoder`, or stay on libx264.
 
+### 34. Resources are the map, tools are the hands — and the map never leaves the workspace
+Before guessing a path, read `videos://list` (every media file under
+the workspace root, sorted, capped at 200), then `videos://{file}/metadata`
+for the probe of the one you picked — nested paths work
+(`videos://test/nested/deep-clip.mp4/metadata`) because the template
+uses `{+filename}` reserved expansion; a plain `{filename}` only
+matches one path segment, so nested files would 404. `videos://workspace/info`
+gives the root, versions, tool availability and media count in one
+read. The root is `MEDIAKIT_WORKDIR` when set, otherwise the process
+cwd — and resources are confined to it unconditionally: `..`, absolute
+paths and symlink escapes are refused even with the sandbox off. A
+resource URI is how a client *looks*; it is never a way to reach
+outside the workspace.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

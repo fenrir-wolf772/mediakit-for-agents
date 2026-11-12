@@ -96,6 +96,22 @@ Then ask your agent things like:
 Every tool returns a concise JSON result: output path, size, and the
 verified duration/dimensions of what it produced.
 
+## MCP Resources (`videos://...`)
+
+Besides tools, the server exposes three workspace-scoped resources so
+a client can look around before calling a tool — no guessing paths:
+
+| Resource | What it returns |
+|---|---|
+| `videos://list` | Every media file under the workspace root (recursive, sorted, capped at 200) with relative path, size and extension |
+| `videos://{filename}/metadata` | `probe` output for one file by relative path, e.g. `videos://test/source.mp4/metadata` — nested paths work (`test/nested/deep-clip.mp4`) |
+| `videos://workspace/info` | Workspace root, ffmpeg/ffprobe versions, tool availability, media file count, GPU state |
+
+The root is `MEDIAKIT_WORKDIR` when set, otherwise the process working
+directory. Resources are always confined to that root: `..`, absolute
+paths and symlinks pointing outside are refused — even with the sandbox
+off. A resource can never address a file outside the workspace.
+
 ## Demo: 16:9 clip → vertical captioned Short
 
 <p align="center"><img src="demo.gif" alt="MediaKit turning a 16:9 clip into a vertical 1080×1920 Short with burned-in captions" width="270"></p>

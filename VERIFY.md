@@ -1117,4 +1117,25 @@ tone [6,10)), `test/content-lead-black.mp4` (đen 1s đầu + testsrc 9s),
   2. Test `audio=false` viết nhầm trên file audio-only (mix-voice.mp3) — tool từ chối đúng theo guardrail ("reverses nothing"), test FAIL oan. Fix: case `--no-audio` phải dùng input có video (scenes-source.mp4) — guardrail và test phải viết cùng một ngữ nghĩa.
   3. `muse.edit` với `old_text` trùng 3 chỗ (`// ---- convert`) chèn nhầm `reverseClip` vào sau burn_captions thay vì sau grade — đã dời lại đúng vị trí bằng 2 edit neo vào text duy nhất. Bài học: header comment lặp lại trong file thì neo edit vào hàm kề bên, không neo vào header.
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+- Push: commit 5ab7c30 → GitHub main (origin/main = 5ab7c30). **CI run #43140942032 success** — xanh ngay lượt này (gồm 2 dòng smoke mới: reverse + ffprobe duration).
+
+## Lượt 26 — 2026-11-12 10:58 (+07): MCP Resources videos:// (38 tools, không thêm tool)
+- Học: vinayakbhati/ffmpeg-mcp-server (HTTP MCP server, 1 tool `ffmpeg.execute` + validation + timeout). Ý áp dụng được:
+  1. Execution timeout cho ffmpeg — MediaKit đã có sẵn (`run`/`runCapture` timeout 300s mặc định), không cần thêm.
+  2. Generic `ffmpeg.execute` (chạy lệnh ffmpeg thô) — KHÔNG áp dụng: MediaKit cố ý chỉ có tool typed, không cho agent chạy lệnh tự do (bảo mật + verify được).
+  3. REST discovery endpoints (`GET /mcp/tools`) — củng cố hướng resources: client nhìn thấy workspace trước khi gọi tool.
+  KHÔNG copy code của họ — chỉ học ý tưởng, tự implement bằng Node/MCP SDK.
+- Làm:
+  - MCP Resources (backlog lượt 25, ý từ conneroisu/vfx-mcp) — lớp capability mới, không thêm tool (38 tools giữ nguyên):
+    - `videos://list` (core `listWorkspaceFiles`): mọi media file dưới root, đệ quy, sorted, cap 200, kèm path tương đối (posix) + size + extension; không probe nên nhanh. Root = MEDIAKIT_WORKDIR khi set, không thì cwd.
+    - `videos://{+filename}/metadata` (core `workspaceMetadata`): probe 1 file theo path tương đối. Template dùng `{+filename}` (reserved expansion, SDK match `(.+)`) nên path lồng nhau (`test/nested/deep-clip.mp4`) đọc được — `{filename}` thường chỉ match 1 segment (`[^/,]+`).
+    - `videos://workspace/info` (core `workspaceInfo`): root, sandbox, ffmpeg/ffprobe/node version, tools_total/available, media_files, gpu (dùng lại `doctor()` + list walk).
+    - Giam cầm: resources LUÔN giam trong root — `..`, absolute path, symlink trỏ ra ngoài đều bị từ chối (`RESOURCE_ESCAPE`) kể cả khi sandbox tắt; chỉ file đúng đuôi media (FIND_EXTENSIONS) mới có metadata.
+  - README (mục "MCP Resources" mới), SKILL.md (rule 34), test 13 assert mới (list/templates/metadata/info + 3 lỗi + 3 assert server workdir-scoped thứ hai).
+- Test (ffmpeg 8.1.2): smoke trước khi viết test — list root repo 213 file (cap 200, truncated true), metadata nested `test/nested/deep-clip.mp4` 10s 1280×720, info 37/38 tools (transcribe unavailable vì ASR engine không có trong env — đúng luật optional), 3 lỗi đều throw McpError đúng message. `npm run check` sạch (check-docs: 38 tools khớp README); `npm test` **364/364 PASS, exit 0** (351 + 13 mới). Assert mới (13).
+- Bẫy đo lường:
+  1. SDK tách 2 method: `resources/list` chỉ trả static resources (+ instance khi template có list callback); template nằm ở `resources/templates/list` (`client.listResourceTemplates()`). Test đầu tìm template trong `listResources()` nên FAIL oan — fix bằng đúng method.
+  2. Assert `size_bytes > 0` sai: `outputs/mcp-tone.srt` + `cli-tone.srt` là 0 byte — đúng vì transcribe tone không lời ra .srt rỗng. Fix: `>= 0`.
+- npm: HIỆU CHÍNH trong lượt này (MEMORY.md cập nhật 12/11): **0.1.0 ĐÃ LIVE từ 9/11** (registry latest = 0.1.0) — helper npm_api.py "stage" thực ra publish thẳng dist-tag latest, không có bước Approve nào; việc nhắc Tony bật 2FA/bấm Approve trước đây là hiểu sai, bỏ. 0.2.0 (38 tool + resources) chờ Tony quyết publish hay xem 0.1.0 trước — cron KHÔNG stage/publish gì thêm.
+- Version giữ 0.1.0.
 - Push: commit (chưa push lúc ghi) → GitHub main. CI run: (ghi sau khi push).

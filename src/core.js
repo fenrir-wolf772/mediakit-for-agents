@@ -335,6 +335,142 @@ export async function findMedia({ directory, name, extensions = null, maxResults
   };
 }
 
+// ---------------------------------------------------------------- workspace resources
+// MCP Resources (idea: conneroisu/vfx-mcp's videos:// URIs). The
+// workspace root is MEDIAKIT_WORKDIR when set, otherwise the process
+// working directory — the same root the sandbox uses when it is on.
+// Unlike tools, which accept any path (sandbox permitting), resources
+// are ALWAYS confined to the root: a resource URI can never address a
+// file outside the workspace, even with the sandbox off. That is the
+// point of a workspace-scoped resource.
+const WORKSPACE_MAX_FILES = 200;
+
+/** Workspace root + whether it comes from the MEDIAKIT_WORKDIR sandbox. */
+export async function workspaceRoot() {
+  const root = await workdirRoot();
+  if (root) return { root, sandbox_enabled: true };
+  return { root: path.resolve(process.cwd()), sandbox_enabled: false };
+}
+
+async function walkWorkspaceFiles(dir, isRoot, out) {
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      if (e.isSymbolicLink()) continue;
+      if (!isRoot && (e.name.startsWith(".") || FIND_SKIP_DIRS.has(e.name))) continue;
+      await walkWorkspaceFiles(full, false, out);
+    } else if (e.isFile()) {
+      const ext = e.name.includes(".") ? e.name.split(".").pop().toLowerCase() : "";
+      if (FIND_EXTENSIONS.includes(ext)) out.push(full);
+    }
+  }
+}
+
+/** `videos://list`: every media file under the root, sorted, capped — no probe, so it stays fast. */
+export async function listWorkspaceFiles({ maxFiles = WORKSPACE_MAX_FILES } = {}) {
+  const { root, sandbox_enabled } = await workspaceRoot();
+  const paths = [];
+  await walkWorkspaceFiles(root, true, paths);
+  paths.sort();
+  const truncated = paths.length > maxFiles;
+  const files = [];
+  for (const p of paths.slice(0, maxFiles)) {
+    files.push({
+      path: path.relative(root, p).split(path.sep).join("/"),
+      size_bytes: (await stat(p)).size,
+      extension: p.split(".").pop().toLowerCase(),
+    });
+  }
+  return {
+    resource: "videos://list",
+    root,
+    sandbox_enabled,
+    files,
+    count: files.length,
+    total_files: paths.length,
+    truncated,
+    max_files: maxFiles,
+  };
+}
+
+/** `videos://workspace/info`: root, versions, tool availability, media count, GPU state. */
+export async function workspaceInfo() {
+  const { root, sandbox_enabled } = await workspaceRoot();
+  const [doc, listing] = await Promise.all([doctor(), listWorkspaceFiles()]);
+  const tools = Object.values(doc.tools ?? {});
+  return {
+    resource: "videos://workspace/info",
+    root,
+    sandbox_enabled,
+    ffmpeg_version: doc.ffmpeg_version,
+    ffprobe_version: doc.ffprobe_version,
+    node_version: doc.node_version,
+    platform: doc.platform,
+    tools_total: tools.length,
+    tools_available: tools.filter((t) => t.available).length,
+    media_files: listing.total_files,
+    media_files_truncated: listing.truncated,
+    gpu: doc.gpu ?? null,
+  };
+}
+
+// Resolve a resource-relative path inside the workspace root. Always
+// confined: lexical `..` / absolute paths are refused, and a symlink
+// inside the root pointing outside is refused too (same
+// nearest-ancestor realpath walk as the sandbox, but against the
+// workspace root even when MEDIAKIT_WORKDIR is unset).
+async function resolveInsideWorkspace(relPath) {
+  if (typeof relPath !== "string" || !relPath.trim()) {
+    throw new MediaKitError("filename is required (path relative to the workspace root)", "INVALID_ARG");
+  }
+  const rel = relPath.trim();
+  if (rel.includes("\0") || path.isAbsolute(rel) || rel.split("/").some((s) => s === "..")) {
+    throw new MediaKitError(`filename escapes the workspace root: ${relPath}`, "RESOURCE_ESCAPE");
+  }
+  const { root } = await workspaceRoot();
+  const abs = path.resolve(root, rel);
+  if (!isInsideDir(root, abs)) {
+    throw new MediaKitError(`filename escapes the workspace root: ${relPath}`, "RESOURCE_ESCAPE");
+  }
+  let cur = abs;
+  for (;;) {
+    try {
+      const real = await realpath(cur);
+      if (!isInsideDir(root, real)) {
+        throw new MediaKitError(`filename escapes the workspace root via symlink: ${relPath} -> ${real}`, "RESOURCE_ESCAPE");
+      }
+      return abs;
+    } catch (err) {
+      if (err instanceof MediaKitError) throw err;
+      const parent = path.dirname(cur);
+      if (parent === cur) return abs;
+      cur = parent;
+    }
+  }
+}
+
+/** `videos://{filename}/metadata`: probe one workspace media file by relative path. */
+export async function workspaceMetadata(relPath) {
+  const abs = await resolveInsideWorkspace(relPath);
+  const ext = abs.includes(".") ? abs.split(".").pop().toLowerCase() : "";
+  if (!FIND_EXTENSIONS.includes(ext)) {
+    throw new MediaKitError(`not a media file known to this workspace (extension .${ext || "?"}): ${relPath}`, "INVALID_ARG");
+  }
+  const info = await probe(abs);
+  const { root } = await workspaceRoot();
+  return {
+    resource: `videos://${relPath.trim()}/metadata`,
+    relative_path: path.relative(root, abs).split(path.sep).join("/"),
+    ...info,
+  };
+}
+
 // ---------------------------------------------------------------- trim
 
 export async function trim({ input, output, start = 0, duration = null, end = null, streamCopy = false, snapToKeyframe = false }) {
