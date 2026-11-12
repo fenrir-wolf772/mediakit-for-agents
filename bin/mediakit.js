@@ -212,12 +212,26 @@ const COMMANDS = {
     ],
   },
   check: {
-    usage: "mediakit check <input> [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin] [--content]",
-    desc: "Verify a file against a platform delivery spec (dimensions, codecs, duration, loudness). --content also scans for black/frozen frames and silence.",
+    usage: "mediakit check <input> [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin] [--content] [--start <s|MM:SS>] [--end <s|MM:SS>] [--peak-threshold <dB>]",
+    desc: "Verify a file against a platform delivery spec (dimensions, codecs, duration, loudness). --content also scans for black/frozen frames, silence and audio peaks; --start/--end scan only that time range.",
     args: [{ name: "input", required: true }],
     options: [
       ["--platform", "Delivery platform (default tiktok)"],
-      ["--content", "Also scan content: black/frozen frames and silence (one decode pass)"],
+      ["--content", "Also scan content: black/frozen frames, silence and audio peaks (one decode pass)"],
+      ["--start", "Scan only from this time, seconds or MM:SS (needs --content)"],
+      ["--end", "Scan only up to this time, seconds or MM:SS (needs --content)"],
+      ["--peak-threshold", "Audio peak threshold in dBFS for the peaks rule (default -1; >= 0 dBFS is clipping; needs --content)"],
+    ],
+  },
+  grade: {
+    usage: "mediakit grade <input> -o <output> [--preset warm|cool|cinematic|noir|vintage] [--filter <vf-chain>] [--crf 23]",
+    desc: "Color-grade a video with a named preset or one custom filter chain. Reports the mean R/G/B before and after, measured on the middle frame.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--preset", "warm (default) | cool | cinematic | noir | vintage — fixed filter chains"],
+      ["--filter", "One custom video filter chain, e.g. 'eq=saturation=0.5' (mutually exclusive with --preset)"],
+      ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["-o, --output", "Output file (required)"],
     ],
   },
   convert: {
@@ -668,12 +682,19 @@ async function main() {
           blur: numOpt(opts, "blur") ?? 20,
         });
         break;
-      case "check":
+      case "check": {
+        const wantContent = opts.content === true;
+        const hasRange = opts.start !== undefined || opts.end !== undefined || opts.peak_threshold !== undefined;
+        if (hasRange && !wantContent) fail("--start/--end/--peak-threshold need --content (they only affect the content scan)");
         result = await core.check({
           input: needInput(), platform: opts.platform ?? "tiktok",
-          content: opts.content === true,
+          content: wantContent,
+          contentStart: opts.start ?? null,
+          contentEnd: opts.end ?? null,
+          peakThresholdDb: numOpt(opts, "peak_threshold") ?? -1,
         });
         break;
+      }
       case "convert":
         result = await core.convert({
           input: needInput(), output: needOutput(opts),
@@ -683,6 +704,14 @@ async function main() {
           preset: opts.preset ?? "medium",
           gop: numOpt(opts, "gop") ?? null,
           gopSeconds: numOpt(opts, "gop_seconds") ?? null,
+        });
+        break;
+      case "grade":
+        result = await core.grade({
+          input: needInput(), output: needOutput(opts),
+          preset: opts.preset ?? null,
+          filter: opts.filter ?? null,
+          crf: numOpt(opts, "crf") ?? 23,
         });
         break;
       case "silence": {

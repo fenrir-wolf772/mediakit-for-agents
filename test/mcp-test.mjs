@@ -84,10 +84,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 36 tools present");
-checkOk(missing.length === 0, "tools/list has all 36 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 37 tools present");
+checkOk(missing.length === 0, "tools/list has all 37 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -187,8 +187,8 @@ checkOk(checkGoodJson.pass === true, "check passes overall when bitrate is the o
 checkOk(Array.isArray(checkGoodJson.warnings) && checkGoodJson.warnings.some((w) => w.startsWith("video_bitrate")), "check still warns about the low bitrate", JSON.stringify(checkGoodJson.warnings));
 
 // check --content: black/frozen/silence fixtures, one decode pass.
-async function checkContent(file, platform = "tiktok") {
-  const r = await client.callTool({ name: "check", arguments: { input: path.join(root, file), platform, content: true } });
+async function checkContent(file, platform = "tiktok", extra = {}) {
+  const r = await client.callTool({ name: "check", arguments: { input: path.join(root, file), platform, content: true, ...extra } });
   return JSON.parse(r.content[0].text);
 }
 const contentBlack = await checkContent("test/content-black.mp4");
@@ -233,6 +233,86 @@ const contentVideoOnly = await checkContent("test/content-video-only.mp4");
 checkOk(contentVideoOnly.content.silence.status === "unavailable", "video-only file reports silence unavailable, not zero", JSON.stringify(contentVideoOnly.content));
 checkOk(!contentVideoOnly.checks.some((c) => c.name === "content_silence"), "no content_silence rule when there is no audio stream", JSON.stringify(contentVideoOnly.checks));
 
+// check --content: audio peaks (0.1s windows above -1 dBFS; the
+// loud-peak fixture is quiet except a 1s burst at [1,2) that clips).
+const contentLoudPeak = await checkContent("test/loud-peak.wav");
+console.log("check content peaks loud file:", JSON.stringify(contentLoudPeak.content.peaks.intervals), "| max", contentLoudPeak.content.peaks.max_peak_db);
+checkOk(contentLoudPeak.content.peaks.status === "complete", "peaks scan completes on an audio file", JSON.stringify(contentLoudPeak.content.peaks));
+checkOk(contentLoudPeak.content.peaks.total_intervals === 1, "peaks finds exactly 1 hot interval in the burst file", JSON.stringify(contentLoudPeak.content.peaks.intervals));
+checkOk(near(contentLoudPeak.content.peaks.intervals[0]?.start, 1, 0.05) && near(contentLoudPeak.content.peaks.intervals[0]?.end, 2, 0.05), "peaks interval covers the planted burst 1-2s", JSON.stringify(contentLoudPeak.content.peaks.intervals));
+checkOk(near(contentLoudPeak.content.peaks.intervals[0]?.peak_db, 3.52, 0.3), "peaks reports the burst at +3.5 dBFS (digital clipping)", JSON.stringify(contentLoudPeak.content.peaks.intervals));
+checkOk(contentLoudPeak.content.peaks.intervals[0]?.severity === "error", "a peak >= 0 dBFS is an error (clipping), not a warning", JSON.stringify(contentLoudPeak.content.peaks.intervals));
+checkOk(near(contentLoudPeak.content.peaks.max_peak_db, 3.52, 0.3), "peaks max_peak_db matches the burst", JSON.stringify(contentLoudPeak.content.peaks));
+checkOk(contentLoudPeak.content.pass === false, "content fails when audio clips", JSON.stringify(contentLoudPeak.content));
+checkOk(contentLoudPeak.checks.find((c) => c.name === "content_peaks")?.pass === false, "content_peaks rule fails the check", JSON.stringify(contentLoudPeak.checks));
+checkOk(contentLoudPeak.issues?.some((i) => i.startsWith("content_peaks")), "content_peaks appears in top-level issues", JSON.stringify(contentLoudPeak.issues));
+
+const contentQuietPeak = await checkContent("test/quiet-peak.wav");
+checkOk(contentQuietPeak.content.peaks.total_intervals === 0, "peaks finds nothing in the quiet file", JSON.stringify(contentQuietPeak.content.peaks));
+checkOk(near(contentQuietPeak.content.peaks.max_peak_db, -18.06, 0.5), "peaks max on the quiet file is the sine level (-18 dBFS)", JSON.stringify(contentQuietPeak.content.peaks));
+checkOk(contentQuietPeak.content.pass === true, "content passes on the quiet file");
+
+const contentPeaksHighThreshold = await checkContent("test/loud-peak.wav", "tiktok", { peak_threshold_db: 5 });
+checkOk(contentPeaksHighThreshold.content.peaks.total_intervals === 0, "a threshold above the burst peak (5 dBFS) reports nothing", JSON.stringify(contentPeaksHighThreshold.content.peaks));
+
+// check --content: time range — the black stretch [3,6] is only
+// found when the scanned range covers it; intervals stay on the
+// file's own timeline.
+const contentRangeBefore = await checkContent("test/content-black.mp4", "tiktok", { content_start: 0, content_end: 2 });
+checkOk(contentRangeBefore.content.black.total_intervals === 0, "scanning 0-2s finds no black (the stretch starts at 3s)", JSON.stringify(contentRangeBefore.content.black));
+checkOk(contentRangeBefore.content.time_range?.start_seconds === 0 && contentRangeBefore.content.time_range?.end_seconds === 2, "content reports the scanned time_range", JSON.stringify(contentRangeBefore.content.time_range));
+const contentRangeCover = await checkContent("test/content-black.mp4", "tiktok", { content_start: 2, content_end: 8 });
+checkOk(near(contentRangeCover.content.black.intervals[0]?.start, 3, 0.05) && near(contentRangeCover.content.black.intervals[0]?.end, 6, 0.05), "scanning 2-8s still finds the black stretch at 3-6s on the file timeline", JSON.stringify(contentRangeCover.content.black.intervals));
+checkOk(contentRangeCover.content.black.intervals[0]?.severity === "error", "the stretch is still an error inside the scanned range", JSON.stringify(contentRangeCover.content.black.intervals));
+const contentRangeBad = await callExpectThrow("check", { input: path.join(root, "test/content-black.mp4"), platform: "tiktok", content: true, content_start: 8, content_end: 2 });
+checkOk(/after start/.test(contentRangeBad), "content end <= start is refused", contentRangeBad.slice(0, 200));
+const contentRangeCli = await runCli(["check", path.join(root, "test/content-black.mp4"), "--content", "--start", "2"], {});
+checkOk(contentRangeCli.code === 0, "CLI check --content --start works", contentRangeCli.out.slice(0, 200));
+const contentRangeNoContent = await runCli(["check", path.join(root, "test/content-black.mp4"), "--start", "2"], {});
+checkOk(contentRangeNoContent.code !== 0 && /need --content/.test(contentRangeNoContent.out), "CLI --start without --content is refused", contentRangeNoContent.out.slice(0, 200));
+
+// grade: named presets + custom filter, verified on pixels.
+// Source mid-frame is near-neutral (R 122, G 128, B 127).
+const gradeWarmRes = await client.callTool({
+  name: "grade",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-grade-warm.mp4"), preset: "warm" },
+});
+const gradeWarm = JSON.parse(gradeWarmRes.content[0].text);
+console.log("grade warm:", JSON.stringify(gradeWarm.color_before), "->", JSON.stringify(gradeWarm.color_after), "|", gradeWarm.dimensions, gradeWarm.duration_seconds);
+checkOk(gradeWarm.preset === "warm" && gradeWarm.filter?.includes("colorbalance"), "grade warm reports the preset and its filter chain", JSON.stringify(gradeWarm));
+checkOk(gradeWarm.dimensions === "1280x720" && near(gradeWarm.duration_seconds, 10, 0.05), "grade keeps dimensions and duration", `${gradeWarm.dimensions} ${gradeWarm.duration_seconds}s`);
+checkOk(typeof gradeWarm.color_before?.r === "number" && typeof gradeWarm.color_after?.r === "number", "grade measures channel means before and after", JSON.stringify(gradeWarm));
+checkOk((gradeWarm.color_after.r - gradeWarm.color_after.b) - (gradeWarm.color_before.r - gradeWarm.color_before.b) > 10, "warm pushes red over blue by >10 (R-B grows)", `${JSON.stringify(gradeWarm.color_before)} -> ${JSON.stringify(gradeWarm.color_after)}`);
+// Independent pixel check (same planeMean helper as the titlecard
+// tests, frame 0 of each file): warm must move R-B the same way.
+const warmInR = await planeMean(path.join(root, "test/source.mp4"), "1280:720:0:0", "r");
+const warmInB = await planeMean(path.join(root, "test/source.mp4"), "1280:720:0:0", "b");
+const warmOutR = await planeMean(path.join(root, "outputs/mcp-grade-warm.mp4"), "1280:720:0:0", "r");
+const warmOutB = await planeMean(path.join(root, "outputs/mcp-grade-warm.mp4"), "1280:720:0:0", "b");
+checkOk(warmInR !== null && warmOutR !== null && (warmOutR - warmOutB) - (warmInR - warmInB) > 5, "independent pixel check: warm raises R-B on the output file", `in ${warmInR}/${warmInB} out ${warmOutR}/${warmOutB}`);
+
+const gradeNoirRes = await client.callTool({
+  name: "grade",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-grade-noir.mp4"), preset: "noir" },
+});
+const gradeNoir = JSON.parse(gradeNoirRes.content[0].text);
+checkOk(Math.abs(gradeNoir.color_after.r - gradeNoir.color_after.g) < 3 && Math.abs(gradeNoir.color_after.g - gradeNoir.color_after.b) < 3, "noir equalizes R=G=B (black and white)", JSON.stringify(gradeNoir.color_after));
+
+const gradeCustomRes = await client.callTool({
+  name: "grade",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-grade-custom.mp4"), filter: "eq=saturation=0" },
+});
+const gradeCustom = JSON.parse(gradeCustomRes.content[0].text);
+checkOk(gradeCustom.preset === null && gradeCustom.filter === "eq=saturation=0", "custom filter is reported verbatim, preset null", JSON.stringify(gradeCustom));
+checkOk(Math.abs(gradeCustom.color_after.r - gradeCustom.color_after.g) < 3 && Math.abs(gradeCustom.color_after.g - gradeCustom.color_after.b) < 3, "custom eq=saturation=0 also grayscales", JSON.stringify(gradeCustom.color_after));
+
+const gradeBadPreset = await callExpectThrow("grade", { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-grade-bad.mp4"), preset: "neon" });
+checkOk(/preset|Invalid enum/i.test(gradeBadPreset), "grade rejects an unknown preset", gradeBadPreset.slice(0, 200));
+const gradeBoth = await callExpectThrow("grade", { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-grade-both.mp4"), preset: "warm", filter: "eq=saturation=0" });
+checkOk(/mutually exclusive/.test(gradeBoth), "grade refuses preset + filter together", gradeBoth.slice(0, 200));
+const gradeAudioOnly = await callExpectThrow("grade", { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-grade-audio.mp4"), preset: "warm" });
+checkOk(/needs a video input/.test(gradeAudioOnly), "grade refuses an audio-only input", gradeAudioOnly.slice(0, 200));
+
 const doctorRes = await client.callTool({
   name: "doctor",
   arguments: {},
@@ -253,6 +333,8 @@ if (process.env.MEDIAKIT_TEST_ASR === "1") {
 checkOk(doctorJson.tools.fit?.available === true, "doctor: fit is available");
 checkOk(doctorJson.tools.generate_srt?.available === true, "doctor: generate_srt is available (pure Node, no ffmpeg filter needed)");
 checkOk(doctorJson.tools.export_gif?.available === true, "doctor: export_gif is available (palettegen/paletteuse present)");
+checkOk(doctorJson.tools.grade?.available === true, "doctor: grade is available (eq/hue/colorbalance present)");
+checkOk(doctorJson.tools.check?.available === true, "doctor: check is available (astats/ametadata present for the peaks scan)");
 // transcribe is the exception: it carries a fix hint whenever its
 // optional engine is missing, even on a healthy ffmpeg install.
 checkOk(Object.entries(doctorJson.tools).filter(([n]) => n !== "transcribe").every(([, t]) => !("fix" in t)), "doctor: no fix hint on ffmpeg tools when all are available", JSON.stringify(doctorJson.tools));

@@ -76,5 +76,8 @@ jobs:
           ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-concat-trim.mp4 | grep '^6'
           node bin/mediakit.js extract-audio test/stereo-lr.mp3 --channel 0 -o outputs/ci-ch0.mp3
           ffprobe -v error -show_entries stream=channels -of csv=p=0 outputs/ci-ch0.mp3 | grep '^1$'
+          node bin/mediakit.js grade test/source.mp4 --preset noir -o outputs/ci-grade.mp4
+          node bin/mediakit.js check test/loud-peak.wav --content --platform tiktok | grep '"name": "content_peaks"'
+          node bin/mediakit.js check test/content-black.mp4 --content --start 2 --end 8 | grep '"start_seconds": 2'
       - name: MCP test
         run: npm test

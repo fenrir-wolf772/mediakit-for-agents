@@ -268,13 +268,42 @@ server.tool(
 
 server.tool(
   "check",
-  "Verify a finished file against a platform delivery spec (tiktok, reels, shorts, youtube): dimensions, codecs, fps, duration limit, audio channels and measured loudness, plus a file-size limit where the platform has one. Video bitrate is checked as a warning only (platforms publish recommendations, not gates) and the result also reports the platform's text-safe zone. With content=true, one extra decode pass scans for black frames, frozen frames and silence and folds them into the same pass/fail list with position-aware rules (a short black stretch at the very start/end is a warning — likely a fade — the same stretch mid-file fails). Returns pass/fail per rule with fix hints. Run this before publishing.",
+  "Verify a finished file against a platform delivery spec (tiktok, reels, shorts, youtube): dimensions, codecs, fps, duration limit, audio channels and measured loudness, plus a file-size limit where the platform has one. Video bitrate is checked as a warning only (platforms publish recommendations, not gates) and the result also reports the platform's text-safe zone. With content=true, one extra decode pass scans for black frames, frozen frames, silence and audio peaks (0.1s windows above peak_threshold_db, default -1 dBFS; >= 0 dBFS is clipping) and folds them into the same pass/fail list with position-aware rules (a short black stretch at the very start/end is a warning — likely a fade — the same stretch mid-file fails). content_start/content_end (seconds) scan only that time range, reported on the file's own timeline. Returns pass/fail per rule with fix hints. Run this before publishing.",
   {
     input: pathSchema,
     platform: z.enum(["tiktok", "reels", "shorts", "youtube", "instagram-feed", "instagram-story", "linkedin"]).default("tiktok"),
-    content: z.boolean().default(false).describe("Also scan content: black/frozen frames and silence; adds content_black/content_freeze/content_silence rules"),
+    content: z.boolean().default(false).describe("Also scan content: black/frozen frames, silence and audio peaks; adds content_black/content_freeze/content_silence/content_peaks rules"),
+    content_start: z.number().min(0).optional().describe("Scan only from this time (seconds); needs content=true"),
+    content_end: z.number().min(0).optional().describe("Scan only up to this time (seconds); needs content=true"),
+    peak_threshold_db: z.number().min(-60).max(12).default(-1).describe("Audio peak threshold in dBFS for the content_peaks rule (windows above it are reported; >= 0 dBFS is clipping; float audio can peak above 0)"),
   },
-  async (a) => safe(() => core.check(a)),
+  async (a) => safe(() => core.check({
+    input: a.input,
+    platform: a.platform,
+    content: a.content,
+    contentStart: a.content_start ?? null,
+    contentEnd: a.content_end ?? null,
+    peakThresholdDb: a.peak_threshold_db,
+  })),
+);
+
+server.tool(
+  "grade",
+  "Color-grade a video with a named preset (warm, cool, cinematic, noir, vintage) or one custom video filter chain (--filter). Re-encodes video (libx264, crf 23 default), copies audio through untouched. The result reports the filter actually applied and the mean R/G/B of the middle frame before and after, measured on disk — so the grade is verified on pixels, not assumed from the filter string. Presets are fixed chains: warm pushes red and pulls blue, cool does the opposite, noir is black-and-white, vintage is faded and desaturated.",
+  {
+    input: pathSchema,
+    output: pathSchema,
+    preset: z.enum(["warm", "cool", "cinematic", "noir", "vintage"]).optional().describe("Named grade preset (default warm when neither preset nor filter is given; mutually exclusive with filter)"),
+    filter: z.string().optional().describe("One custom video filter chain, e.g. 'eq=saturation=0.5' (mutually exclusive with preset)"),
+    crf: z.number().int().min(0).max(51).default(23),
+  },
+  async (a) => safe(() => core.grade({
+    input: a.input,
+    output: a.output,
+    preset: a.preset ?? null,
+    filter: a.filter ?? null,
+    crf: a.crf,
+  })),
 );
 
 server.tool(

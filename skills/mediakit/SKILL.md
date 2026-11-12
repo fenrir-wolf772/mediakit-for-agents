@@ -473,6 +473,23 @@ use `extract_audio --channel <n>` (0-based) — it returns that channel as
 mono through `pan`; the index is validated against the probed channel
 count, so `--channel 2` on a stereo file is refused instead of guessing.
 
+### 32. Grade by name, and let `check --content` catch clipping
+`grade in.mp4 --preset warm -o out.mp4` applies a fixed look — `warm`
+(red up, blue down), `cool` (the opposite), `cinematic` (contrast up,
+saturation down, slight teal), `noir` (black and white), `vintage`
+(faded, desaturated) — or one custom filter chain with `--filter`
+(mutually exclusive with `--preset`). The result reports the mean R/G/B
+of the middle frame before and after: read those numbers, don't assume
+the look landed — a preset that barely moves the frame mean is a broken
+preset, not a subtle one. `check --content` now also scans audio peaks
+in 0.1s windows above `--peak-threshold` (default −1 dBFS): a window at
+or above 0 dBFS fails as digital clipping, anything above the threshold
+warns — lower the level (or re-record the clipped stretch) instead of
+shipping it. On a long file, `--start`/`--end` scan only the suspect
+range; intervals are still reported on the file's own timeline, and an
+interval that ends at the scan boundary is flagged as such — it is only
+known to last that long.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

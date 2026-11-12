@@ -6,7 +6,7 @@ thumbnails, frame grabs, audio extraction, concat with transitions,
 conversion, silence removal, black-bar measurement, delivery packaging,
 provenance receipts, file compression with named quality presets,
 voice/music mixing with sidechain ducking, logo overlays, scene-cut
-detection, and an environment preflight — so an
+detection, color grading, and an environment preflight — so an
 agent can actually *work* with video and audio instead of guessing.
 
 > Coding agents are blind and deaf to media. They can read a 10,000-line
@@ -70,7 +70,8 @@ Then ask your agent things like:
 | `generate_srt` | Build a deterministic .srt from a cue list [{start, end, text}] — pure text, no ffmpeg; times in seconds or MM:SS; cues must be in order and must not overlap | `mediakit generate-srt --cues-file cues.json -o subs.srt` |
 | `transcribe` | Transcribe speech to a .srt with a LOCAL faster-whisper engine (no cloud, audio never uploaded); writes the .srt and returns the segments with timestamps, detected language and full text — the direct input for `burn_captions`. The engine is optional: without faster-whisper installed the call fails with install lines (`MEDIAKIT_ASR_PYTHON` picks the python that has it, `MEDIAKIT_ASR_MODEL` the default model, tiny). Silence transcribes to 0 segments and an empty .srt | `mediakit transcribe speech.mp3 -o subs.srt --model tiny` |
 | `reframe` | Reframe to a target aspect/size in one step (crop, pad, or blurred fill) — crop mode takes a named `--anchor` (left/right/top/bottom/...) to keep an edge subject in frame, and reports `crop_kept_percent` + a warning below 40% kept | `mediakit reframe in.mp4 --mode crop -o vertical.mp4` |
-| `check` | Verify a file against a platform spec (tiktok/reels/shorts/youtube/instagram-feed/instagram-story/linkedin) — video bitrate is a warning, not a gate; overall pass ignores warnings. `--content` also scans for black/frozen frames and silence in one decode pass, with position-aware rules (short black at the very start/end warns as a likely fade; the same stretch mid-file fails) | `mediakit check out.mp4 --platform tiktok --content` |
+| `check` | Verify a file against a platform spec (tiktok/reels/shorts/youtube/instagram-feed/instagram-story/linkedin) — video bitrate is a warning, not a gate; overall pass ignores warnings. `--content` also scans for black/frozen frames, silence and audio peaks in one decode pass, with position-aware rules (short black at the very start/end warns as a likely fade; the same stretch mid-file fails) — a peak ≥ 0 dBFS fails as clipping, a peak above `--peak-threshold` (default −1 dBFS) warns; `--start`/`--end` scan only that time range, on the file's own timeline | `mediakit check out.mp4 --platform tiktok --content` |
+| `grade` | Color-grade a video with a named preset — `warm` (red up, blue down), `cool` (the opposite), `cinematic` (contrast up, saturation down, slight teal), `noir` (black and white), `vintage` (faded, desaturated) — or one custom filter chain with `--filter`; reports the mean R/G/B before and after, measured on the middle frame | `mediakit grade in.mp4 --preset warm -o out.mp4` |
 | `silence` | Remove silent stretches, keeping a margin around speech | `mediakit silence in.mp4 -o tight.mp4` |
 | `cropdetect` | Measure letterbox/pillarbox bars; returns the crop rect + a ready crop command | `mediakit cropdetect in.mp4` |
 | `package` | Bundle a finished file for delivery: media + spec.json receipt + checksums.sha256 (+ captions) | `mediakit package out.mp4 -o delivery.zip --platform tiktok` |
@@ -198,11 +199,22 @@ probe-only: it lists every I-frame timestamp plus the GOP interval, so
 you know where a lossless cut can land — `trim --stream-copy --snap`
 snaps the requested start down and end up to the nearest keyframes and
 reports both the requested and the actual range. `check --content`
-adds one decode pass that scans for black frames, frozen frames and
-silence and folds them into the same pass/fail list — a short black
+adds one decode pass that scans for black frames, frozen frames,
+silence and audio peaks and folds them into the same pass/fail list — a short black
 stretch at the very start/end is a warning (likely a fade in/out), the
 same stretch mid-file fails, and a missing stream reports "unavailable"
-instead of a fake zero. `find clips/ --name moon` searches a folder
+instead of a fake zero. Audio peaks are measured in 0.1s windows above
+`--peak-threshold` (default −1 dBFS): a window at or above 0 dBFS fails
+as digital clipping, anything above the threshold warns. `--start` /
+`--end` (seconds or `MM:SS`) scan only that time range — useful on a
+long file — and every interval is still reported on the file's own
+timeline. `grade` applies a colour look in one call: five named presets
+(`warm`, `cool`, `cinematic`, `noir`, `vintage`) or one custom filter
+chain with `--filter` (mutually exclusive with `--preset`); the result
+reports the mean R/G/B of the middle frame before and after, so the
+look is verified on pixels. Note for `colorbalance`: set all three
+ranges (shadows/midtones/highlights) — the shadow-only form barely
+moves the frame mean. `find clips/ --name moon` searches a folder
 tree for media files by name and returns each match with its probe
 info, so you stop guessing paths. `doctor` is a read-only preflight — run it first
 on a new machine to confirm ffmpeg/ffprobe and every filter/encoder the

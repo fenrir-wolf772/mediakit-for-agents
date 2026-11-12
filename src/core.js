@@ -2207,7 +2207,7 @@ export async function measureLoudness(input) {
   return full === null ? null : +full.i.toFixed(1);
 }
 
-export async function check({ input, platform = "tiktok", content = false }) {
+export async function check({ input, platform = "tiktok", content = false, contentStart = null, contentEnd = null, peakThresholdDb = -1 }) {
   const inPath = await requireInput(input);
   const spec = PLATFORMS[platform];
   if (!spec) throw new MediaKitError(`unknown platform: ${platform} (supported: ${Object.keys(PLATFORMS).join(", ")})`, "INVALID_ARG");
@@ -2286,13 +2286,14 @@ export async function check({ input, platform = "tiktok", content = false }) {
   // exist is "unavailable" in the content detail, not a failed rule.
   let contentResult = null;
   if (content) {
-    contentResult = await detectContent(inPath);
+    contentResult = await detectContent(inPath, { start: contentStart, end: contentEnd, peakThresholdDb });
     const hints = {
       black: "re-cut or re-render the black stretch",
       freeze: "re-render or trim the frozen stretch",
       silence: "run silence to remove the dead air",
+      peaks: "lower the level (loudness to -14 LUFS) or re-record the clipped stretch",
     };
-    for (const [kind, label] of [["black", "black frames"], ["freeze", "frozen frames"], ["silence", "silence"]]) {
+    for (const [kind, label] of [["black", "black frames"], ["freeze", "frozen frames"], ["silence", "silence"], ["peaks", "audio peaks"]]) {
       const s = contentResult[kind];
       if (s.status === "unavailable") continue;
       const errs = s.intervals.filter((i) => i.severity === "error").length;
@@ -2341,13 +2342,20 @@ function contentSummary(intervals) {
 
 /** Rules layer: a raw detection -> severity + human reason. Position
  * matters — black/freeze/silence at an edge is often intentional
- * (fade, still intro, tail), mid-file it is a defect. */
-function classifyContent(kind, iv, duration) {
-  const atStart = iv.start <= 0.5;
-  const atEnd = duration !== null && iv.end >= duration - 0.5;
+ * (fade, still intro, tail), mid-file it is a defect. When a time
+ * range was scanned, the edges are the scan's edges, not the file's:
+ * an interval that ends at the scan boundary is only known to last
+ * that long, so it warns instead of failing. */
+function classifyContent(kind, iv, duration, rangeStart = 0, rangeEnd = null) {
+  const atStart = iv.start <= rangeStart + 0.5;
+  const atEnd = rangeEnd !== null ? iv.end >= rangeEnd - 0.5 : (duration !== null && iv.end >= duration - 0.5);
   const where = atStart && atEnd ? "whole file" : atStart ? "at start" : atEnd ? "at end" : "mid-file";
   const edge = where !== "mid-file" && where !== "whole file";
   const span = `${iv.start}s–${iv.end}s (${iv.duration}s)`;
+  if (kind === "peaks") {
+    if (iv.peak_db >= 0) return { severity: "error", reason: `audio peak ${iv.peak_db} dBFS ${span} — digital clipping, lower the level or re-record` };
+    return { severity: "warn", reason: `audio peak ${iv.peak_db} dBFS ${span} — near clipping, above the ${iv.threshold_db} dBFS threshold` };
+  }
   if (kind === "black") {
     if (edge && iv.duration <= 2) return { severity: "warn", reason: `black ${where} ${span} — likely a fade in/out` };
     return { severity: "error", reason: `black ${where} ${span} — broken render or missing footage` };
@@ -2360,20 +2368,34 @@ function classifyContent(kind, iv, duration) {
   return { severity: "warn", reason: `silence ${where} ${span} — pause or dead air; run silence to remove it` };
 }
 
-export async function detectContent(input, { blackMinDuration = 0.5, freezeMinDuration = 2, silenceThresholdDb = -40, silenceMinDuration = 0.5 } = {}) {
+export async function detectContent(input, { blackMinDuration = 0.5, freezeMinDuration = 2, silenceThresholdDb = -40, silenceMinDuration = 0.5, start = null, end = null, peakThresholdDb = -1 } = {}) {
   const inPath = await requireInput(input);
   const blackD = num(blackMinDuration, "black_min_duration", { min: 0.1, max: 60 });
   const freezeD = num(freezeMinDuration, "freeze_min_duration", { min: 0.5, max: 60 });
   const silTh = num(silenceThresholdDb, "silence_threshold_db", { min: -90, max: 0 });
   const silD = num(silenceMinDuration, "silence_min_duration", { min: 0.05, max: 60 });
+  const peakTh = num(peakThresholdDb, "peak_threshold_db", { min: -60, max: 12 });
+  // Time range: scan only [start, end) — times accept seconds or
+  // MM:SS. The decode is input-seeked (-ss before -i) so a long file
+  // scans a short segment fast; every interval is reported on the
+  // file's own timeline (offset by start).
+  const startS = start === null || start === undefined ? 0 : parseTime(start, "start");
+  const endS = end === null || end === undefined ? null : parseTime(end, "end");
+  if (endS !== null && endS <= startS) throw new MediaKitError(`content end must be after start (got start ${startS}s, end ${endS}s)`, "INVALID_ARG");
   const meta = await probe(inPath);
   const duration = meta.duration_seconds;
+  if (duration !== null && startS >= duration) throw new MediaKitError(`content start ${startS}s is past the end of the file (${duration}s)`, "INVALID_ARG");
+  const scanEnd = endS === null ? duration : (duration === null ? endS : Math.min(endS, duration));
+  const scanDur = scanEnd === null ? null : +(scanEnd - startS).toFixed(3);
 
   const black = [];
   const freeze = [];
   const silence = [];
   if (meta.video || meta.audio) {
-    const args = ["-hide_banner", "-nostats", "-i", inPath];
+    const args = ["-hide_banner", "-nostats"];
+    if (startS > 0) args.push("-ss", String(startS));
+    args.push("-i", inPath);
+    if (scanDur !== null) args.push("-t", String(scanDur));
     if (meta.video) args.push("-vf", `blackdetect=d=${blackD}:pic_th=0.98:pix_th=0.10,freezedetect=n=-60dB:d=${freezeD}`);
     if (meta.audio) args.push("-af", `silencedetect=noise=${silTh}dB:d=${silD}`);
     args.push("-f", "null", "-");
@@ -2385,38 +2407,41 @@ export async function detectContent(input, { blackMinDuration = 0.5, freezeMinDu
       // ("black_start:3 black_end:6 black_duration:3") — match that
       // first, or a bare black_start would swallow the end.
       if ((m = line.match(/black_start:\s*([\d.]+)\s+black_end:\s*([\d.]+)\s*black_duration:\s*([\d.]+)/))) {
-        black.push({ start: +parseFloat(m[1]).toFixed(3), end: +parseFloat(m[2]).toFixed(3), duration: +parseFloat(m[3]).toFixed(3) });
+        black.push({ start: +(parseFloat(m[1]) + startS).toFixed(3), end: +(parseFloat(m[2]) + startS).toFixed(3), duration: +parseFloat(m[3]).toFixed(3) });
         openBlack = null;
         continue;
       }
-      if ((m = line.match(/black_start:\s*([\d.]+)/))) { openBlack = parseFloat(m[1]); continue; }
+      if ((m = line.match(/black_start:\s*([\d.]+)/))) { openBlack = parseFloat(m[1]) + startS; continue; }
       if ((m = line.match(/black_end:\s*([\d.]+)\s*black_duration:\s*([\d.]+)/))) {
         if (openBlack !== null) {
-          black.push({ start: +openBlack.toFixed(3), end: +parseFloat(m[1]).toFixed(3), duration: +parseFloat(m[2]).toFixed(3) });
+          black.push({ start: +openBlack.toFixed(3), end: +(parseFloat(m[1]) + startS).toFixed(3), duration: +parseFloat(m[2]).toFixed(3) });
           openBlack = null;
         }
         continue;
       }
-      if ((m = line.match(/lavfi\.freezedetect\.freeze_start:\s*([\d.]+)/))) { openFreeze = parseFloat(m[1]); continue; }
+      if ((m = line.match(/lavfi\.freezedetect\.freeze_start:\s*([\d.]+)/))) { openFreeze = parseFloat(m[1]) + startS; continue; }
       if ((m = line.match(/lavfi\.freezedetect\.freeze_end:\s*([\d.]+)/))) {
         if (openFreeze !== null) {
-          freeze.push({ start: +openFreeze.toFixed(3), end: +parseFloat(m[1]).toFixed(3), duration: +(parseFloat(m[1]) - openFreeze).toFixed(3) });
+          freeze.push({ start: +openFreeze.toFixed(3), end: +(parseFloat(m[1]) + startS).toFixed(3), duration: +(parseFloat(m[1]) + startS - openFreeze).toFixed(3) });
           openFreeze = null;
         }
         continue;
       }
-      if ((m = line.match(/silence_start:\s*([\d.]+)/))) { openSilence = parseFloat(m[1]); continue; }
+      if ((m = line.match(/silence_start:\s*([\d.]+)/))) { openSilence = parseFloat(m[1]) + startS; continue; }
       if ((m = line.match(/silence_end:\s*([\d.]+)\s*\|\s*silence_duration:\s*([\d.]+)/))) {
         if (openSilence !== null) {
-          silence.push({ start: +openSilence.toFixed(3), end: +parseFloat(m[1]).toFixed(3), duration: +parseFloat(m[2]).toFixed(3) });
+          silence.push({ start: +openSilence.toFixed(3), end: +(parseFloat(m[1]) + startS).toFixed(3), duration: +parseFloat(m[2]).toFixed(3) });
           openSilence = null;
         }
       }
     }
-    // An interval still open at EOF runs to the end of the file.
-    if (duration !== null) {
+    // An interval still open at the end of the scan runs to the end
+    // of the scanned range (file end, or the --end the caller asked
+    // for) — flagged, so a rule can tell "known to last this long"
+    // from "ended here".
+    if (scanEnd !== null) {
       const closeOpen = (list, open) => {
-        if (open !== null) list.push({ start: +open.toFixed(3), end: +duration.toFixed(3), duration: +(duration - open).toFixed(3), ends_at_scan_boundary: true });
+        if (open !== null) list.push({ start: +open.toFixed(3), end: +scanEnd.toFixed(3), duration: +(scanEnd - open).toFixed(3), ends_at_scan_boundary: true });
       };
       closeOpen(black, openBlack);
       closeOpen(freeze, openFreeze);
@@ -2424,21 +2449,150 @@ export async function detectContent(input, { blackMinDuration = 0.5, freezeMinDu
     }
   }
 
+  // Audio peaks (idea: riqvip/codex-media-mcp audio_peaks — peak
+  // -1 dBFS, 0.1s window): one more decode pass, per-frame astats,
+  // grouped into 0.1s windows. A window above the threshold is a
+  // near-clipping stretch; >= 0 dBFS is digital clipping. A missing
+  // audio stream reports "unavailable", never zero peaks.
+  const PEAK_WINDOW = 0.1;
+  let peakIntervals = [];
+  let maxPeak = null;
+  if (meta.audio) {
+    const pArgs = ["-hide_banner", "-nostats"];
+    if (startS > 0) pArgs.push("-ss", String(startS));
+    pArgs.push("-i", inPath);
+    if (scanDur !== null) pArgs.push("-t", String(scanDur));
+    pArgs.push("-af", "astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.Peak_level", "-f", "null", "-");
+    const { stderr: pErr } = await run(FFMPEG, pArgs);
+    const windows = new Map(); // window start (s) -> max peak (dBFS)
+    let curT = null;
+    for (const line of pErr.split("\n")) {
+      let m;
+      if ((m = line.match(/pts_time:\s*([\d.]+)/))) { curT = parseFloat(m[1]); continue; }
+      if ((m = line.match(/lavfi\.astats\.Overall\.Peak_level=(-?inf|[-\d.]+)/))) {
+        if (curT === null) continue;
+        const peak = m[1] === "-inf" ? -Infinity : parseFloat(m[1]);
+        if (!Number.isFinite(peak)) continue; // silent frame: no peak
+        const tAbs = curT + startS;
+        if (maxPeak === null || peak > maxPeak) maxPeak = peak;
+        const w = +(Math.floor(tAbs / PEAK_WINDOW) * PEAK_WINDOW).toFixed(3);
+        const prev = windows.get(w);
+        if (prev === undefined || peak > prev) windows.set(w, peak);
+      }
+    }
+    const hot = [...windows.entries()].filter(([, p]) => p > peakTh).sort((a, b) => a[0] - b[0]);
+    for (const [w, p] of hot) {
+      const last = peakIntervals[peakIntervals.length - 1];
+      if (last && w <= last.end + 0.001) {
+        // Adjacent hot window: extend the interval (last.end is the
+        // previous window's end, so adjacency is exact).
+        last.end = +(w + PEAK_WINDOW).toFixed(3);
+        if (p > last.peak_db) last.peak_db = +p.toFixed(2);
+      } else {
+        peakIntervals.push({ start: w, end: +(w + PEAK_WINDOW).toFixed(3), peak_db: +p.toFixed(2), threshold_db: peakTh });
+      }
+    }
+    for (const iv of peakIntervals) {
+      if (scanEnd !== null && iv.end > scanEnd) { iv.end = +scanEnd.toFixed(3); iv.ends_at_scan_boundary = true; }
+      iv.duration = +(iv.end - iv.start).toFixed(3);
+    }
+  }
+
   const issues = [];
   const warnings = [];
-  const out = { operation: "content", input: inPath, duration_seconds: duration };
-  for (const [kind, list] of [["black", black], ["freeze", freeze], ["silence", silence]]) {
-    const hasStream = kind === "silence" ? meta.audio : meta.video;
+  const out = {
+    operation: "content", input: inPath, duration_seconds: duration,
+    ...(startS > 0 || endS !== null ? { time_range: { start_seconds: startS, end_seconds: scanEnd } } : {}),
+  };
+  for (const [kind, list] of [["black", black], ["freeze", freeze], ["silence", silence], ["peaks", peakIntervals]]) {
+    const hasStream = kind === "silence" || kind === "peaks" ? meta.audio : meta.video;
     if (!hasStream) { out[kind] = { status: "unavailable" }; continue; }
-    const classified = list.map((iv) => ({ ...iv, ...classifyContent(kind, iv, duration) }));
+    const classified = list.map((iv) => ({ ...iv, ...classifyContent(kind, iv, duration, startS, scanEnd) }));
     for (const iv of classified) (iv.severity === "error" ? issues : warnings).push(`${kind}: ${iv.reason}`);
-    out[kind] = contentSummary(classified);
+    out[kind] = kind === "peaks"
+      ? { ...contentSummary(classified), threshold_db: peakTh, window_seconds: PEAK_WINDOW, max_peak_db: maxPeak === null ? null : +maxPeak.toFixed(2) }
+      : contentSummary(classified);
   }
   return {
     ...out,
     pass: issues.length === 0,
     ...(issues.length ? { issues } : {}),
     ...(warnings.length ? { warnings } : {}),
+  };
+}
+
+// ---------------------------------------------------------------- grade
+// Color grade (idea: beeswaxpat/ffmpeg-render-pro color_grade —
+// presets or a custom -vf chain). Named presets are fixed filter
+// chains, so the same preset always grades the same way; --filter is
+// the power-user escape hatch for one arbitrary video filter chain.
+// The result measures the mean R/G/B of the middle frame before and
+// after, so the grade is verified on pixels, not assumed from the
+// filter string. Audio is copied through untouched.
+
+export const GRADE_PRESETS = {
+  // colorbalance needs all three ranges (shadows/midtones/highlights)
+  // set — the rs=/bs= shadow-only form barely moves the frame mean
+  // (measured 2026-11-12: warm R +2.9 with shadows only, +14.8 with
+  // all three ranges on the same testsrc frame).
+  warm: "eq=saturation=1.15:contrast=1.02,colorbalance=rs=0.15:rm=0.15:rh=0.15:gs=0.03:gm=0.03:gh=0.03:bs=-0.15:bm=-0.15:bh=-0.15",
+  cool: "eq=saturation=1.10:contrast=1.02,colorbalance=rs=-0.15:rm=-0.15:rh=-0.15:bs=0.15:bm=0.15:bh=0.15",
+  cinematic: "eq=contrast=1.10:saturation=0.85,colorbalance=rs=-0.05:rm=-0.05:rh=-0.05:gs=0.02:gm=0.02:gh=0.02:bs=0.08:bm=0.08:bh=0.08",
+  noir: "hue=s=0,eq=contrast=1.18:brightness=-0.02",
+  vintage: "eq=contrast=0.95:saturation=0.70:brightness=0.03,colorbalance=rs=0.10:rm=0.10:rh=0.10:gs=0.02:gm=0.02:gh=0.02:bs=-0.08:bm=-0.08:bh=-0.08",
+};
+
+/** Mean R/G/B of one frame (extractplanes + signalstats, the same
+ * measurement the test suite uses independently). Null per channel
+ * when the measurement fails — the grade still stands, the numbers
+ * just do not claim to prove it. */
+async function frameChannelMeans(file, timeSeconds) {
+  const out = {};
+  for (const plane of ["r", "g", "b"]) {
+    try {
+      const { stderr } = await run(FFMPEG, [
+        "-hide_banner", "-nostats", "-ss", String(timeSeconds), "-i", file,
+        "-vf", `format=rgba,extractplanes=${plane},signalstats,metadata=print:key=lavfi.signalstats.YAVG`,
+        "-frames:v", "1", "-f", "null", "-",
+      ]);
+      const m = stderr.match(/lavfi\.signalstats\.YAVG=([0-9.]+)/);
+      out[plane] = m ? +parseFloat(m[1]).toFixed(1) : null;
+    } catch {
+      out[plane] = null;
+    }
+  }
+  return out;
+}
+
+export async function grade({ input, output, preset = null, filter = null, crf = 23 }) {
+  const inPath = await requireInput(input);
+  const outPath = await prepareOutput(output, [inPath]);
+  const c = num(crf, "crf", { min: 0, max: 51, integer: true });
+  if (filter !== null && filter !== undefined && filter !== "") {
+    if (preset !== null && preset !== undefined) {
+      throw new MediaKitError("grade --preset and --filter are mutually exclusive (one way to pick the look)", "INVALID_ARG");
+    }
+    if (typeof filter !== "string") throw new MediaKitError("grade --filter must be a filter chain string", "INVALID_ARG");
+  }
+  const name = filter ? null : (preset ?? "warm");
+  const chain = filter || GRADE_PRESETS[name];
+  if (!chain) throw new MediaKitError(`unknown grade preset: ${name} (supported: ${Object.keys(GRADE_PRESETS).join(", ")})`, "INVALID_ARG");
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("grade needs a video input", "INVALID_ARG");
+  const mid = meta.duration_seconds !== null ? +(meta.duration_seconds / 2).toFixed(3) : 0;
+  const before = await frameChannelMeans(inPath, mid);
+  const args = ["-y", "-i", inPath, "-vf", chain, "-c:v", "libx264", "-crf", String(c), "-preset", "medium", "-c:a", "copy", outPath];
+  await run(FFMPEG, args);
+  const info = await fileInfo(outPath);
+  const after = await frameChannelMeans(outPath, mid);
+  const outMeta = await probe(outPath);
+  return {
+    operation: "grade", input: inPath, output: outPath,
+    preset: name, filter: chain, crf: c,
+    color_before: before, color_after: after,
+    dimensions: outMeta.video ? `${outMeta.video.width}x${outMeta.video.height}` : null,
+    duration_seconds: outMeta.duration_seconds,
+    size_bytes: info.size,
   };
 }
 
@@ -2827,6 +2981,7 @@ const DOCTOR_FILTERS = [
   "xfade", "acrossfade", "fps", "anullsrc", "setpts", "asetpts",
   "format", "colorchannelmixer", "atempo", "aloop", "geq", "color",
   "palettegen", "paletteuse", "adelay", "pan",
+  "astats", "ametadata", "eq", "hue", "colorbalance",
 ];
 const DOCTOR_ENCODERS = [
   "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4",
@@ -2852,7 +3007,8 @@ const TOOL_REQUIREMENTS = {
   export_gif: { filters: ["palettegen", "paletteuse", "fps", "scale"] },
   burn_captions: { filters: ["subtitles", "ass"] },
   reframe: { filters: ["crop", "scale", "pad", "gblur", "overlay"], encoders: ["libx264"] },
-  check: { filters: ["loudnorm"] },
+  check: { filters: ["loudnorm", "blackdetect", "freezedetect", "silencedetect", "astats", "ametadata"] },
+  grade: { filters: ["eq", "hue", "colorbalance"], encoders: ["libx264"] },
   convert: { encoders: ["libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4"] },
   compress: { filters: ["scale"], encoders: ["libx264", "aac"] },
   receipt: { filters: ["loudnorm"] },

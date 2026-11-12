@@ -1067,3 +1067,29 @@ tone [6,10)), `test/content-lead-black.mp4` (đen 1s đầu + testsrc 9s),
   - `npm run check` sạch (check-docs: 36 tools khớp README); `npm test`: **304/304 PASS, exit 0** (36 tools, doctor 36/36 available). Assert mới (15): concat trim 9 + channel 6.
 - **Bẫy đo lường**: PSNR band testsrc @0.5s vs @2.5s chỉ 23.8, không < 20 như đoán ban đầu (phần lớn khung testsrc là tĩnh — chỉ vùng chuyển động đổi); ngưỡng assert sai phải là < 30 (đúng 67.2 vs sai 23.8, cách xa nhau). Đã đo trước rồi mới chốt ngưỡng.
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
+
+## Lượt 24 — 2026-11-12 06:58 (+07): grade tool + check --content audio peaks & time_range (37 tools)
+- **Học: beeswaxpat/ffmpeg-render-pro** (Node, render video từ code song song + MCP server + Claude Code skill; parallel workers, stream-copy join, GPU detect, color_grade presets, merge_audio, checkpoints). Ý áp dụng được:
+  1. `color_grade` presets (noir/warm/cool/cinematic/vintage) hoặc custom `-vf` chain → đã làm tool `grade` mới.
+  2. `detect_gpu` (probe NVENC/VA-API/QSV/…) → chưa làm (máy Milo CPU-only; `doctor` đã liệt kê encoder; follow-up nhỏ).
+  3. `merge_audio` (gắn nhạc không re-encode video) → đã có `mux`.
+  4. `structuredContent` + outputSchema trên mọi tool → củng cố backlog contract machine-readable (chưa làm, lớn).
+  5. Progress notifications mỗi 2s + cancel qua AbortSignal → củng cố backlog MCP logging progress (chưa làm).
+  6. Parallel render / checkpoints / worker threads → KHÔNG áp dụng (MediaKit single-shot đồng bộ).
+  KHÔNG copy code của họ — chỉ học ý tưởng, tự implement bằng Node/ffmpeg.
+- **Làm**:
+  - `grade` (core+CLI+MCP, tool 37): preset warm/cool/cinematic/noir/vintage (chuỗi filter cố định) hoặc `--filter` một chain tùy ý (mutually exclusive với preset); re-encode libx264 crf 23, audio copy; trả `preset`, `filter` đã áp dụng, `color_before`/`color_after` (mean R/G/B frame giữa, đo bằng extractplanes+signalstats — cùng cách test đo độc lập) + dimensions/duration/size. `doctor` thêm filter eq/hue/colorbalance + tool `grade`.
+  - `check --content`: `audio_peaks` — decode riêng chạy `astats=metadata=1:reset=1` + `ametadata=print`, gom frame thành cửa sổ 0.1s, cửa sổ trên `--peak-threshold` (mặc định −1 dBFS) gộp thành interval; peak ≥ 0 dBFS → error (clipping), trên ngưỡng → warn; trả `peaks` {threshold_db, window_seconds, max_peak_db, intervals} + rule `content_peaks` (ý từ riqvip/codex-media-mcp, backlog lượt 12).
+  - `check --content` theo `time_range` — `--start`/`--end` (giây hoặc MM:SS, CLI + MCP `content_start`/`content_end`): input-seek `-ss` trước `-i` + `-t`, mọi interval báo trên timeline gốc của file, rules layer dùng biên của đoạn scan, interval chạm biên scan gắn `ends_at_scan_boundary`; trả `time_range` {start_seconds, end_seconds}. `--start`/`--end`/`--peak-threshold` không kèm `--content` bị từ chối (CLI).
+  - Fixture mới `test/loud-peak.wav` (4s float WAV: sine yên −18 dBFS, burst [1,2) ×12 → peak +3.52 dBFS) + `test/quiet-peak.wav` (sine 4s, peak −18.06 dBFS).
+  - README (dòng bảng grade + sửa dòng check + đoạn prose), SKILL.md (rule 32), CI smoke thêm 3 dòng (grade noir + check peaks + check time_range).
+- **Test** (ffmpeg 8.1.2):
+  - Đo trước khi code: astats per-frame in đúng format (`frame:N pts_time:T` + `Peak_level=X`); burst đo **+3.52 dBFS**, quiet **−18.06 dBFS**.
+  - Peaks: loud → **1 interval [1,2], peak 3.52 dBFS, severity error, max 3.52, content.pass false, rule content_peaks fail + có trong issues**; quiet → 0 interval, max −18.06, pass true; threshold 5 dBFS → 0 interval (đối chứng âm).
+  - Time_range: scan 0–2s → black 0 interval; scan 2–8s → black **[3,6] error** trên timeline gốc + `time_range` {2, 8}; end<=start → lỗi "after start"; CLI `--start` không `--content` → từ chối.
+  - Grade: warm R−B **−5.4 → +23.3** (R 122→136.8, B 127.4→113.5), pixel-check độc lập frame 0 cùng chiều; noir **R=G=B=120.6**; custom `eq=saturation=0` grayscale + preset null; preset lạ / preset+filter / audio-only đều bị từ chối đúng.
+  - `npm run check` sạch (check-docs: 37 tools khớp README); `npm test`: **337/337 PASS, exit 0** (37 tools, doctor 36 ffmpeg tools available + transcribe unavailable kèm hint — ASR optional). Assert mới (33): peaks 13 + time_range 7 + grade 11 + doctor 2.
+- **Bẫy đo lường**:
+  1. `colorbalance` chỉ set rs=/bs= (shadows) thì frame mean gần như không nhúc nhích (warm R +2.9) — phải set cả 3 dải shadows/midtones/highlights mới đo được (R +14.8, B −13.9). Đã đo trước rồi mới chốt preset.
+  2. Zod schema `peak_threshold_db` ban đầu max 0 → test đối chứng âm threshold 5 bị −32602 crash cả run (giống bẫy lượt 11/22: MCP enum throw, không phải isError result); fix: max 12 — float audio peak được trên 0 dBFS, ngưỡng trên 0 là hợp lệ.
+- Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt 0.1.0).
