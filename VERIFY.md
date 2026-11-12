@@ -1162,4 +1162,4 @@ tone [6,10)), `test/content-lead-black.mp4` (đen 1s đầu + testsrc 9s),
   2. Bản đầu `detectWhisperCpp` coi `MEDIAKIT_WHISPER_CPP_BIN` như gợi ý rồi fallback về binary mặc định — set env thành đường dẫn không tồn tại vẫn chạy ngon bằng binary khác. Fix: env tường minh thì chỉ dùng nó, không tồn tại là lỗi binary thiếu (fail loudly, không fallback lặng lẽ). Bắt được bằng smoke CLI trước khi viết test.
   3. `time` không có trong shell cron (`/bin/bash: time: command not found`) làm đứt chuỗi smoke đầu — chạy lại không dùng `time`.
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt).
-- Push: (ghi sau khi push + CI)
+- Push: commit 1695586 "Add transcribe --engine whisper (whisper.cpp second ASR engine, 38 tools)" → GitHub main (origin/main = 1695586). **CI run #43168084257 success, 4m11s** — xanh ngay lượt này (gồm dòng smoke mới transcribe --engine whisper).
