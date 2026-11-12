@@ -1280,5 +1280,5 @@ tone [6,10)), `test/content-lead-black.mp4` (đen 1s đầu + testsrc 9s),
   2. `ffmpeg -v error ... loudnorm print_format=json | grep input_i` ra rỗng — JSON loudnorm không in khi `-v error`; đo lại không có `-v error` mới thấy −14.04. (Lỗi giống bẫy pipe loudnorm lượt 7.)
   3. Test đặt tên biến `manifestJson` trùng block social (đã có từ lượt 10) — `node --check` bắt SyntaxError ngay; đổi thành `manRunJson` (sed đổi cả 2 chỗ, phải trả block social về tên cũ — 2 `const` top-level trùng tên cũng là SyntaxError).
   4. Test hardcode `tools_total === 44` lại fail 1 assert — sửa 44 → 45 (lần thứ 4 gặp; grep số tool cũ mỗi lần thêm tool).
-- Push: commit <SHA> "Add manifest tool: whole pipeline from one JSON file (45 tools total)" → GitHub main. **CI run #<RUN> <status>** — kiểm tra lượt sau.
+- Push: commit ee6ea7d "Add manifest tool: whole pipeline from one JSON file (45 tools total)" → GitHub main. **CI run #43258194885 success** — kiểm tra lượt sau.
 - Còn lại: chưa stage/publish npm (đợi Tony duyệt từng lần — npm vẫn 0.1.0); backlog tiếp: `stabilize` (cần footage rung thật), Verified-Trap Guard ledger, operation envelope, MCP logging progress, contract machine-readable + CI fail khi drift, MCP advertise core 12 mặc định, `dry-run` cho các tool khác, thư viện style đặt tên cho titlecard/intro, Demo GIF mới cho README.
