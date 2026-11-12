@@ -82,5 +82,7 @@ jobs:
           ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-reverse.mp4 | grep '^10'
           node bin/mediakit.js check test/loud-peak.wav --content --platform tiktok | grep '"name": "content_peaks"'
           node bin/mediakit.js check test/content-black.mp4 --content --start 2 --end 8 | grep '"start_seconds": 2'
+          node bin/mediakit.js batch loudness --pattern 'source*.mp4' --input-dir test -o outputs/ci-batch --args-json '{"target_lufs": -16}' --jobs 2 | grep '"succeeded": 2'
+          node bin/mediakit.js batch loudness --pattern 'source*.mp4' --input-dir test -o outputs/ci-batch --args-json '{"target_lufs": -16}' | grep '"cached": 2'
       - name: MCP test
         run: npm test

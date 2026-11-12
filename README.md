@@ -73,6 +73,7 @@ Then ask your agent things like:
 | `check` | Verify a file against a platform spec (tiktok/reels/shorts/youtube/instagram-feed/instagram-story/linkedin) — video bitrate is a warning, not a gate; overall pass ignores warnings. `--content` also scans for black/frozen frames, silence and audio peaks in one decode pass, with position-aware rules (short black at the very start/end warns as a likely fade; the same stretch mid-file fails) — a peak ≥ 0 dBFS fails as clipping, a peak above `--peak-threshold` (default −1 dBFS) warns; `--start`/`--end` scan only that time range, on the file's own timeline | `mediakit check out.mp4 --platform tiktok --content` |
 | `grade` | Color-grade a video with a named preset — `warm` (red up, blue down), `cool` (the opposite), `cinematic` (contrast up, saturation down, slight teal), `noir` (black and white), `vintage` (faded, desaturated) — or one custom filter chain with `--filter`; reports the mean R/G/B before and after, measured on the middle frame | `mediakit grade in.mp4 --preset warm -o out.mp4` |
 | `reverse` | Play a clip backwards: video frames reversed, audio reversed too by default (`--no-audio` keeps the audio playing forward); works on audio-only input as well. The `reverse` filter buffers every frame, so very long inputs cost memory | `mediakit reverse in.mp4 -o backwards.mp4` |
+| `batch` | Apply one operation to every file matching a glob under a folder — `loudness`, `resize`, `reframe`, `compress`, `convert`, `extract_audio`, `reverse`, `grade`, `fit`, `trim` or `silence`, same args for all. Outputs are `<stem>-<operation>.<ext>` under the output dir, mirroring the input tree; `batch-manifest.json` records one row per file (`ok`/`error`/`cached`/`skipped`, in input order). Unchanged files are skipped via a content-hash cache (verified against the cached output's size + sha256); `--jobs N` runs files in parallel under one shared `--timeout`; `--dry-run` lists the planned outputs and writes nothing | `mediakit batch loudness --pattern '**/*.mp4' --input-dir clips/ -o out/ --args-json '{"target_lufs": -14}'` |
 | `silence` | Remove silent stretches, keeping a margin around speech | `mediakit silence in.mp4 -o tight.mp4` |
 | `cropdetect` | Measure letterbox/pillarbox bars; returns the crop rect + a ready crop command | `mediakit cropdetect in.mp4` |
 | `package` | Bundle a finished file for delivery: media + spec.json receipt + checksums.sha256 (+ captions) | `mediakit package out.mp4 -o delivery.zip --platform tiktok` |
@@ -234,8 +235,19 @@ ranges (shadows/midtones/highlights) — the shadow-only form barely
 moves the frame mean. `reverse` plays a clip backwards (video frames
 via the `reverse` filter, audio via `areverse`, on by default;
 `--no-audio` keeps the audio forward) — a rewind effect, or reversed
+`--no-audio` keeps the audio forward) — a rewind effect, or reversed
 audio for a sound-design trick; on audio-only input it reverses the
-audio alone. `find clips/ --name moon` searches a folder
+audio alone. `batch` runs one operation over a whole folder: give it a
+glob (`**/*.mp4`, or a bare `*.mp4` for every match at any depth) and the
+same args for every file, and it returns one row per file in input order
+— `ok` with the operation's own measured result, `error` with the
+message, `cached` when the content-hash cache already holds that exact
+input + operation + args (the cached output is only trusted if it still
+exists with the recorded size and sha256), or `skipped` when the run
+stopped or the shared timeout expired before the file started. A second
+identical run re-encodes nothing. Point the output dir outside the input
+tree when you can; files under it are never treated as inputs.
+`find clips/ --name moon` searches a folder
 tree for media files by name and returns each match with its probe
 info, so you stop guessing paths. `doctor` is a read-only preflight — run it first
 on a new machine to confirm ffmpeg/ffprobe and every filter/encoder the

@@ -1163,3 +1163,21 @@ tone [6,10)), `test/content-lead-black.mp4` (đen 1s đầu + testsrc 9s),
   3. `time` không có trong shell cron (`/bin/bash: time: command not found`) làm đứt chuỗi smoke đầu — chạy lại không dùng `time`.
 - Version giữ 0.1.0 (chưa stage 0.2.0 — đợi Tony duyệt).
 - Push: commit 1695586 "Add transcribe --engine whisper (whisper.cpp second ASR engine, 38 tools)" → GitHub main (origin/main = 1695586). **CI run #43168084257 success, 4m11s** — xanh ngay lượt này (gồm dòng smoke mới transcribe --engine whisper).
+
+## Lượt 28 — 2026-11-12 14:58 (+07): batch tool — one operation over a folder (39 tools)
+- **Học: kajisho5/ffmpeg-skill `batch.py`** (5.123★, đã đọc README + release notes, không copy code). Ý áp dụng được:
+  1. Áp 1 step recipe/project lên cả folder, cache theo content-hash (SHA-1 keyed, not-for-security) → đã làm cache sha256 input + operation + args + suffix, verify lại bằng size + sha256 của output.
+  2. `--jobs N` chạy song song, cap `min(N, cpu_count, 8)`, chia sẻ 1 `--timeout` chung thay vì mỗi file một timeout → đã làm worker pool + deadline chung.
+  3. Bảng kết quả giữ đúng thứ tự input; mỗi row mang failing step's `error`; sau Ctrl-C vẫn có row cho mọi input → đã làm results theo thứ tự input + status ok/error/cached/skipped cho mọi file.
+  4. Mỗi result nêu encoder thực sự chạy → đã làm: row `ok` mang nguyên kết quả đo thật của tool con (LUFS, dimensions, codec...).
+  5. `--watch` → KHÔNG làm (cần daemon, ngoài scope single-shot đồng bộ của MediaKit).
+  KHÔNG copy code của họ — chỉ học ý tưởng, tự implement bằng Node/ffmpeg.
+- **Làm**:
+  - `batch` (core+CLI+MCP, tool 39): 1 operation (loudness/resize/reframe/compress/convert/extract_audio/reverse/grade/fit/trim/silence) lên mọi file khớp glob dưới 1 thư mục, cùng args cho mọi file. Output `<stem>-<operation>.<ext>` dưới output dir, mirror cây thư mục input; `batch-manifest.json` ghi mọi row. Glob: `**/*.mp4` mọi độ sâu, `sub/*.mp4` một thư mục, bare `*.mp4` khớp basename mọi độ sâu; bỏ qua thư mục ẩn/.git/node_modules/.next; file dưới output dir không bao giờ bị coi là input (kể cả khi output dir nằm trong input tree). Arg lạ bị từ chối nêu tên (không fallback lặng lẽ — bài học lượt 7/27). `--jobs 1–8`, `--timeout` chung (mặc định 1800s), `--max-files` (mặc định 200), `--stop-on-error`, `--dry-run` (liệt kê planned output, không ghi file nào), `--suffix` (mặc định `-<operation>`; suffix rỗng + cùng thư mục bị từ chối trước khi chạy). Guard: arg sai fail giống nhau trên mọi file → sau 3 lỗi INVALID_ARG đầu tiên ở chế độ tuần tự thì abort, không đốt hết folder.
+  - `doctor`: thêm `batch: {}` (39/39). README (dòng bảng + đoạn prose), SKILL.md (rule 35), CI smoke thêm 2 dòng (batch loudness + cache hit).
+- **Test** (ffmpeg 8.1.2):
+  - Đo trước khi code: CLI loudness 3 file (2 top + 1 nested) jobs 2 → **3 ok, LUFS −16.0 đo độc lập, cây thư mục mirror đúng**; chạy lại → **cached 3, mtime không đổi, elapsed 0s**; timeout 1s với 6 file → **1 ok + 5 skipped** kèm message timeout; extract_audio dry-run → output `.mp3` từ input `.mp4`.
+  - `npm run check` sạch (check-docs: 39 tools khớp README); `npm test` **389/389 PASS, exit 0** (371 + 18 mới: dry-run 2 + loudness 5 + manifest 1 + cache 2 + arg lạ 1 + arg sai 2 + op lạ 1 + no-match 1 + stop_on_error 2 + extract_audio 2). Assert mới (18).
+  - **Bẫy đo lường**: (1) lần đầu `node --check` bắt `batch` CLI chỉ nhận `-o` mà usage ghi `--output-dir` — case batch giờ chấp nhận cả hai; (2) edit README prose bằng muse.edit với old_text nhầm thành text mới đã revert đoạn vừa thêm — kiểm tra bằng grep rồi viết lại, từ sau edit nào cũng đọc lại file ngay.
+- Còn lại: chưa stage 0.2.0 (đợi Tony duyệt 0.1.0); backlog tiếp: Verified-Trap Guard ledger, operation envelope, MCP logging progress, contract machine-readable + CI fail khi drift, MCP advertise core 12 mặc định, `dry-run` cho các tool khác, thư viện style đặt tên cho titlecard/intro, Demo GIF mới cho README.
+- Push: commit "Add batch tool: one operation over a folder with content-hash cache (39 tools total)" → GitHub main. **CI run #PENDING** — kiểm tra lượt sau.

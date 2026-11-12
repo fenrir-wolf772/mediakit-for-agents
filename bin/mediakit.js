@@ -438,6 +438,24 @@ const COMMANDS = {
       ["-o, --output", "Output file (required)"],
     ],
   },
+  batch: {
+    usage: "mediakit batch <operation> --pattern <glob> --input-dir <dir> -o <output-dir> [--args-json '{\"target_lufs\": -14}'] [--jobs 1] [--suffix -loudness] [--no-cache] [--stop-on-error] [--timeout 1800] [--max-files 200] [--dry-run]",
+    desc: "Apply one operation (loudness|resize|reframe|compress|convert|extract-audio|reverse|grade|fit|trim|silence) to every file matching a glob under a folder, with the same args for all. Outputs are <stem>-<operation>.<ext> under the output dir, mirroring the input tree; a batch-manifest.json records every file's result. Unchanged files are skipped via a content-hash cache; --dry-run lists the planned outputs and writes nothing.",
+    args: [{ name: "operation", required: true }],
+    options: [
+      ["--pattern", "Glob under --input-dir: **/*.mp4 (any depth), sub/*.mp4 (one folder), or bare *.mp4 (basename at any depth) (required)"],
+      ["--input-dir", "Folder to search under, recursively (required)"],
+      ["--args-json", "Operation arguments as JSON, same for every file (e.g. '{\"target_lufs\": -14}' for loudness, '{\"preset\": \"720p\"}' for resize)"],
+      ["--jobs", "Files processed at once, 1-8 (default 1 = sequential; capped at min(jobs, cpu count, 8))"],
+      ["--suffix", "Output filename suffix (default -<operation>)"],
+      ["--no-cache", "Do not use the content-hash cache — re-encode every matched file"],
+      ["--stop-on-error", "Stop starting new files after the first failure (the rest are reported skipped)"],
+      ["--timeout", "Shared time budget for the whole batch in seconds (default 1800)"],
+      ["--max-files", "Cap on matched files (default 200; extra matches reported via truncated)"],
+      ["--dry-run", "List matched files + planned outputs without running anything"],
+      ["-o, --output", "Output directory (required, created if needed)"],
+    ],
+  },
   doctor: {
     usage: "mediakit doctor",
     desc: "Read-only preflight: ffmpeg/ffprobe versions, available filters/encoders, and which tools that enables.",
@@ -924,6 +942,38 @@ async function main() {
           width: numOpt(opts, "width") ?? null,
           height: numOpt(opts, "height") ?? null,
           background: opts.background ?? "FFFFFF",
+        });
+        break;
+      }
+      case "batch": {
+        if (!positional[0]) fail("missing operation: loudness|resize|reframe|compress|convert|extract-audio|reverse|grade|fit|trim|silence");
+        if (!opts.pattern) fail("missing required option: --pattern <glob>");
+        if (!opts.input_dir) fail("missing required option: --input-dir <dir>");
+        const opName = positional[0].replace(/-/g, "_");
+        let batchArgs = {};
+        if (opts.args_json !== undefined) {
+          try {
+            batchArgs = JSON.parse(String(opts.args_json));
+          } catch (e) {
+            fail(`bad --args-json: ${e.message}`);
+          }
+          if (batchArgs === null || typeof batchArgs !== "object" || Array.isArray(batchArgs)) {
+            fail("--args-json must be a JSON object");
+          }
+        }
+        result = await core.batch({
+          operation: opName,
+          pattern: opts.pattern,
+          inputDir: opts.input_dir,
+          outputDir: opts.output ?? opts.output_dir ?? fail("missing required option: -o <output-dir>"),
+          args: batchArgs,
+          jobs: numOpt(opts, "jobs") ?? 1,
+          outputSuffix: opts.suffix ?? null,
+          cache: opts.cache !== false,
+          stopOnError: opts.stop_on_error === true,
+          timeoutSeconds: numOpt(opts, "timeout") ?? 1800,
+          maxFiles: numOpt(opts, "max_files") ?? 200,
+          dryRun: opts.dry_run === true,
         });
         break;
       }

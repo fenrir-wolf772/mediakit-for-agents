@@ -773,6 +773,39 @@ server.tool(
   })),
 );
 
+server.tool(
+  "batch",
+  "Apply ONE operation to many files matching a glob under a folder, in one call: loudness, resize, reframe, compress, convert, extract_audio, reverse, grade, fit, trim or silence — the same args for every file. Outputs are named <stem>-<operation>.<ext> under the output directory, mirroring the input tree. Returns one row per file (input order) with status ok/error/cached/skipped plus counts, so a failure in one file never hides the rest. Unchanged files are skipped via a content-hash cache (.mediakit-batch-cache.json in the output dir, verified against the output's size + sha256); jobs runs up to 8 files at once under one shared timeout_seconds budget; dry_run lists the planned outputs and writes nothing.",
+  {
+    operation: z.enum(["loudness", "resize", "reframe", "compress", "convert", "extract_audio", "reverse", "grade", "fit", "trim", "silence"]).describe("The operation to apply to every matched file"),
+    pattern: z.string().min(1).describe("Glob matched against paths under input_dir: **/*.mp4 for every mp4 at any depth, sub/*.mp4 for one folder, or a bare *.mp4 (matches the basename at any depth)"),
+    input_dir: pathSchema.describe("Folder to search under (recursive; hidden dirs, .git, node_modules and .next are skipped)"),
+    output_dir: pathSchema.describe("Directory to write outputs + batch-manifest.json into (created if needed; files under it are never treated as inputs)"),
+    args: z.record(z.unknown()).default({}).describe("Operation arguments, same for every file (snake_case, e.g. {target_lufs: -14} for loudness, {preset: '720p'} for resize, {duration: 30, method: 'trim'} for fit). Unknown keys are refused, never silently ignored"),
+    jobs: z.number().int().min(1).max(8).default(1).describe("Files processed at once (default 1 = sequential; capped at min(jobs, cpu count, 8))"),
+    output_suffix: z.string().max(32).optional().describe("Output filename suffix (default -<operation>). Empty string only with an output_dir different from the input dir"),
+    cache: z.boolean().default(true).describe("Skip files whose input bytes + operation + args already produced the cached output (verified by output size + sha256)"),
+    stop_on_error: z.boolean().default(false).describe("Stop starting new files after the first failure (in-flight files still finish; the rest are reported skipped)"),
+    timeout_seconds: z.number().min(1).max(86400).default(1800).describe("Shared time budget for the whole batch in seconds (default 1800); files not started before it expires are reported skipped"),
+    max_files: z.number().int().min(1).max(1000).default(200).describe("Cap on matched files (extra matches are reported via truncated)"),
+    dry_run: z.boolean().default(false).describe("List matched files + planned outputs without running anything or writing any file"),
+  },
+  async (a) => safe(() => core.batch({
+    operation: a.operation,
+    pattern: a.pattern,
+    inputDir: a.input_dir,
+    outputDir: a.output_dir,
+    args: a.args ?? {},
+    jobs: a.jobs,
+    outputSuffix: a.output_suffix ?? null,
+    cache: a.cache,
+    stopOnError: a.stop_on_error,
+    timeoutSeconds: a.timeout_seconds,
+    maxFiles: a.max_files,
+    dryRun: a.dry_run,
+  })),
+);
+
 // ---------------------------------------------------------------- MCP resources
 // Workspace-scoped reads (idea: conneroisu/vfx-mcp's videos:// URIs):
 // a client can list the workspace's media, read one file's probe, and

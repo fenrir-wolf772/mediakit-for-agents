@@ -522,6 +522,26 @@ paths and symlink escapes are refused even with the sandbox off. A
 resource URI is how a client *looks*; it is never a way to reach
 outside the workspace.
 
+### 35. Batch a folder with one call — and trust the rows, not the count
+When the same operation belongs on many files, use `batch`, not a loop
+of single calls: one glob (`**/*.mp4`, or a bare `*.mp4` for every match
+at any depth), one args object for all files, outputs
+`<stem>-<operation>.<ext>` under the output dir, mirroring the input
+tree. Read the per-file rows, not just the summary counts: `ok` carries
+the operation's own measured result, `error` names the file and the
+reason, `cached` means the content-hash cache already held that exact
+input + operation + args (verified against the cached output's size +
+sha256, so a hand-edited output is re-run, never reported as done),
+`skipped` means the run stopped or the shared timeout expired before
+that file started. A second identical run re-encodes nothing — if it
+does, something changed: the input bytes, the args, or the cached
+output. A mistyped arg fails every file identically and aborts after
+three leading failures in sequential mode — that is the guard working,
+not a broken folder. Keep the output dir outside the input tree when
+you can (files under it are never treated as inputs), and use
+`--dry-run` first when the glob is new, so you see the planned outputs
+before anything encodes.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

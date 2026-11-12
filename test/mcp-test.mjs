@@ -84,10 +84,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 38 tools present");
-checkOk(missing.length === 0, "tools/list has all 38 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 39 tools present");
+checkOk(missing.length === 0, "tools/list has all 39 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -1925,7 +1925,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 38 && infoJson.tools_available >= 37 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 38 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 39 && infoJson.tools_available >= 38 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 39 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -1952,6 +1952,78 @@ checkOk(wdMetaJson.relative_path === "source.mp4" && near(wdMetaJson.duration_se
 const wdEsc = await readResourceExpectError(wdClient, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(wdEsc), "workdir-scoped metadata refuses '..' out of test/", wdEsc.slice(0, 200));
 await wdClient.close();
+
+// batch: one operation over many files matching a glob. Input tree:
+// source.mp4 + source2.mp4 at the top, deep-clip.mp4 nested one
+// level down — the outputs must mirror that tree with a
+// -<operation> suffix, and a second identical run must hit the
+// content-hash cache instead of re-encoding.
+await mkdir(path.join(root, "outputs/mcp-batch-in/sub"), { recursive: true });
+await copyFile(path.join(root, "test/source.mp4"), path.join(root, "outputs/mcp-batch-in/source.mp4"));
+await copyFile(path.join(root, "test/source2.mp4"), path.join(root, "outputs/mcp-batch-in/source2.mp4"));
+await copyFile(path.join(root, "test/nested/deep-clip.mp4"), path.join(root, "outputs/mcp-batch-in/sub/deep-clip.mp4"));
+const batchDryRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "loudness", pattern: "**/*.mp4", input_dir: path.join(root, "outputs/mcp-batch-in"), output_dir: path.join(root, "outputs/mcp-batch-dry"), args: { target_lufs: -16 }, dry_run: true },
+});
+const batchDryJson = JSON.parse(batchDryRes.content[0].text);
+checkOk(batchDryJson.dry_run === true && batchDryJson.files_matched === 3 && batchDryJson.results.every((r) => r.status === "planned"), "batch dry-run plans 3 files, no run", JSON.stringify(batchDryJson.results.map((r) => r.status)));
+checkOk(!existsSync(path.join(root, "outputs/mcp-batch-dry")), "batch dry-run writes no output directory", "outputs/mcp-batch-dry exists");
+const batchRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "loudness", pattern: "**/*.mp4", input_dir: path.join(root, "outputs/mcp-batch-in"), output_dir: path.join(root, "outputs/mcp-batch-out"), args: { target_lufs: -16 }, jobs: 2 },
+});
+const batchJson = JSON.parse(batchRes.content[0].text);
+console.log("batch loudness:", batchJson.succeeded, "ok /", batchJson.failed, "failed /", batchJson.cached, "cached /", batchJson.elapsed_seconds + "s");
+checkOk(batchJson.succeeded === 3 && batchJson.failed === 0 && batchJson.cached === 0, "batch loudness succeeds on all 3 files", JSON.stringify(batchJson.results.map((r) => r.status)));
+checkOk(batchJson.results.every((r) => r.status === "ok" && r.result?.output_lufs === -16), "batch loudness reports -16 LUFS per file", JSON.stringify(batchJson.results.map((r) => r.result?.output_lufs)));
+checkOk(existsSync(path.join(root, "outputs/mcp-batch-out/sub/deep-clip-loudness.mp4")), "batch mirrors the nested input tree in the output dir", "sub/deep-clip-loudness.mp4 missing");
+const batchLufs = await measureLufs(path.join(root, "outputs/mcp-batch-out/source-loudness.mp4"));
+checkOk(near(batchLufs, -16, 1), "batch loudness output measures -16 LUFS independently", `got ${batchLufs}`);
+const batchManifest = JSON.parse(await readFile(path.join(root, "outputs/mcp-batch-out/batch-manifest.json"), "utf8"));
+checkOk(batchManifest.results.length === 3 && batchManifest.succeeded === 3, "batch writes batch-manifest.json with all 3 rows", `got ${batchManifest.results?.length} rows`);
+const batchMtimeBefore = statSync(path.join(root, "outputs/mcp-batch-out/source-loudness.mp4")).mtimeMs;
+await new Promise((r) => setTimeout(r, 1100));
+const batchCachedRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "loudness", pattern: "**/*.mp4", input_dir: path.join(root, "outputs/mcp-batch-in"), output_dir: path.join(root, "outputs/mcp-batch-out"), args: { target_lufs: -16 }, jobs: 2 },
+});
+const batchCachedJson = JSON.parse(batchCachedRes.content[0].text);
+checkOk(batchCachedJson.cached === 3 && batchCachedJson.succeeded === 0, "batch second run serves all 3 files from the content-hash cache", `cached=${batchCachedJson.cached} succeeded=${batchCachedJson.succeeded}`);
+checkOk(statSync(path.join(root, "outputs/mcp-batch-out/source-loudness.mp4")).mtimeMs === batchMtimeBefore, "batch cache hit does not touch the output file (mtime unchanged)", "mtime moved");
+const batchBadArgText = await callExpectThrow("batch", { operation: "loudness", pattern: "**/*.mp4", input_dir: path.join(root, "outputs/mcp-batch-in"), output_dir: path.join(root, "outputs/mcp-batch-badarg"), args: { bogus_key: 1 } });
+checkOk(/does not take argument/.test(batchBadArgText) && /bogus_key/.test(batchBadArgText), "batch refuses an unknown operation argument by name", batchBadArgText.slice(0, 160));
+const batchBadValRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "loudness", pattern: "**/*.mp4", input_dir: path.join(root, "outputs/mcp-batch-in"), output_dir: path.join(root, "outputs/mcp-batch-badval"), args: { target_lufs: 999 } },
+});
+const batchBadValJson = JSON.parse(batchBadValRes.content[0].text);
+checkOk(batchBadValJson.failed === 3 && batchBadValJson.succeeded === 0, "batch bad arg fails every file (no silent fallback)", `failed=${batchBadValJson.failed}`);
+checkOk(/target_lufs/.test(batchBadValJson.results[0].error ?? ""), "batch bad arg reports the failing argument per file", (batchBadValJson.results[0].error ?? "").slice(0, 120));
+const batchBadOpText = await callExpectThrow("batch", { operation: "nosuchop", pattern: "**/*.mp4", input_dir: path.join(root, "outputs/mcp-batch-in"), output_dir: path.join(root, "outputs/mcp-batch-badop") });
+checkOk(/Invalid enum value/.test(batchBadOpText) && /nosuchop/.test(batchBadOpText), "batch rejects an unknown operation (MCP enum validation)", batchBadOpText.slice(0, 160));
+const batchNoMatchText = await callExpectThrow("batch", { operation: "loudness", pattern: "*.nomatch", input_dir: path.join(root, "outputs/mcp-batch-in"), output_dir: path.join(root, "outputs/mcp-batch-nomatch") });
+checkOk(/matched no files/.test(batchNoMatchText), "batch with no matches errors instead of reporting an empty success", batchNoMatchText.slice(0, 160));
+// stop_on_error: the audio-only file fails grade first (alphabetical
+// order), so the video after it must be reported skipped, not run.
+await mkdir(path.join(root, "outputs/mcp-batch-stop"), { recursive: true });
+await copyFile(path.join(root, "test/mix-voice.mp3"), path.join(root, "outputs/mcp-batch-stop/a-voice.mp3"));
+await copyFile(path.join(root, "test/source.mp4"), path.join(root, "outputs/mcp-batch-stop/b-source.mp4"));
+const batchStopRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "grade", pattern: "*.*", input_dir: path.join(root, "outputs/mcp-batch-stop"), output_dir: path.join(root, "outputs/mcp-batch-stop-out"), args: { preset: "noir" }, stop_on_error: true },
+});
+const batchStopJson = JSON.parse(batchStopRes.content[0].text);
+checkOk(batchStopJson.failed === 1 && batchStopJson.skipped === 1 && batchStopJson.succeeded === 0, "batch stop_on_error fails the first file and skips the rest", `failed=${batchStopJson.failed} skipped=${batchStopJson.skipped}`);
+checkOk(batchStopJson.results[1].status === "skipped", "batch stop_on_error marks the unstarted file skipped", JSON.stringify(batchStopJson.results[1]));
+// extract_audio batch: a video input defaults to .mp3 output.
+const batchAudioRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "extract_audio", pattern: "source*.mp4", input_dir: path.join(root, "outputs/mcp-batch-in"), output_dir: path.join(root, "outputs/mcp-batch-audio") },
+});
+const batchAudioJson = JSON.parse(batchAudioRes.content[0].text);
+checkOk(batchAudioJson.succeeded === 2 && batchAudioJson.results.every((r) => r.output.endsWith("-extract_audio.mp3")), "batch extract_audio writes .mp3 outputs for video inputs", JSON.stringify(batchAudioJson.results.map((r) => r.output)));
+checkOk(existsSync(path.join(root, "outputs/mcp-batch-audio/source-extract_audio.mp3")), "batch extract_audio output file exists on disk", "source-extract_audio.mp3 missing");
 
 await client.close();
 if (failures.length) {

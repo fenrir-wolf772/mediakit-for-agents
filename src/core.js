@@ -7,7 +7,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { access, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, unlink, writeFile } from "node:fs/promises";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, createReadStream } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -3321,6 +3321,7 @@ const TOOL_REQUIREMENTS = {
   convert_captions: {},
   generate_srt: {},
   find: {},
+  batch: {},
   mux: {},
   svg_animate: { decoders: ["librsvg"], encoders: ["libx264"] },
   transcribe: {},
@@ -4315,4 +4316,321 @@ export async function mux({ video, audio, output, audioOffsetSeconds = 0, shorte
     duration_seconds: outMeta.duration_seconds,
     ...info,
   };
+}
+
+// ---------------------------------------------------------------- batch
+// Apply ONE operation to many files matching a glob under a folder
+// (AmolDerickSoans/ffmpeg-mcp's batch_process idea, rebuilt the
+// MediaKit way — and the design of kajisho5/ffmpeg-skill's batch.py:
+// a content-hash cache so unchanged inputs are skipped, --jobs N
+// files at once under ONE shared timeout, and a result row for every
+// input, in input order, even after an error or a stop).
+//
+// Operations are the single-input/single-output tools only: each file
+// gets the same args, one output per input named
+// <stem>-<operation>.<ext> under the output dir, mirroring the input
+// tree (so two same-named files in different subfolders never
+// collide). Per-file failures are recorded, not hidden: the batch
+// still returns every row, and the summary counts ok/error/cached/
+// skipped. A bad argument fails fast on the file itself (each core
+// function validates before spawning ffmpeg), and in sequential mode
+// three leading INVALID_ARG failures abort the batch — a mistyped
+// arg must not burn through 200 files one by one.
+
+export const BATCH_OPERATIONS = {
+  loudness: {
+    args: ["target_lufs", "format"],
+    run: (input, output, a) => loudness({ input, output, targetLufs: a.target_lufs ?? -14, format: a.format ?? null }),
+  },
+  resize: {
+    args: ["width", "height", "keep_aspect", "preset"],
+    run: (input, output, a) => resize({ input, output, width: a.width ?? null, height: a.height ?? null, keepAspect: a.keep_aspect ?? true, preset: a.preset ?? null }),
+  },
+  reframe: {
+    args: ["width", "height", "mode", "x", "y", "blur", "anchor"],
+    run: (input, output, a) => reframe({ input, output, width: a.width ?? 1080, height: a.height ?? 1920, mode: a.mode ?? "crop", x: a.x ?? null, y: a.y ?? null, blur: a.blur ?? 20, anchor: a.anchor ?? null }),
+  },
+  compress: {
+    args: ["quality", "max_width", "crf", "preset", "target_size_mb"],
+    run: (input, output, a) => compress({ input, output, quality: a.quality ?? "medium", maxWidth: a.max_width ?? null, crf: a.crf ?? null, preset: a.preset ?? null, targetSizeMb: a.target_size_mb ?? null }),
+  },
+  convert: {
+    args: ["video_codec", "audio_codec", "crf", "preset", "gop", "gop_seconds"],
+    run: (input, output, a) => convert({ input, output, videoCodec: a.video_codec ?? null, audioCodec: a.audio_codec ?? null, crf: a.crf ?? 23, preset: a.preset ?? "medium", gop: a.gop ?? null, gopSeconds: a.gop_seconds ?? null }),
+  },
+  extract_audio: {
+    args: ["format", "whisper", "channel"],
+    run: (input, output, a) => extractAudio({ input, output, format: a.format ?? null, whisper: a.whisper ?? false, channel: a.channel ?? null }),
+  },
+  reverse: {
+    args: ["audio", "crf"],
+    run: (input, output, a) => reverseClip({ input, output, audio: a.audio ?? true, crf: a.crf ?? 23 }),
+  },
+  grade: {
+    args: ["preset", "filter", "crf"],
+    run: (input, output, a) => grade({ input, output, preset: a.preset ?? null, filter: a.filter ?? null, crf: a.crf ?? 23 }),
+  },
+  fit: {
+    args: ["duration", "method", "max_fps"],
+    run: (input, output, a) => fitDuration({ input, output, duration: a.duration, method: a.method ?? "speed", maxFps: a.max_fps ?? null }),
+  },
+  trim: {
+    args: ["start", "end", "duration", "stream_copy", "snap_to_keyframe"],
+    run: (input, output, a) => trim({ input, output, start: a.start ?? 0, duration: a.duration ?? null, end: a.end ?? null, streamCopy: a.stream_copy ?? false, snapToKeyframe: a.snap_to_keyframe ?? false }),
+  },
+  silence: {
+    args: ["threshold_db", "min_duration", "margin"],
+    run: (input, output, a) => silence({ input, output, thresholdDb: a.threshold_db ?? -40, minDuration: a.min_duration ?? 0.5, margin: a.margin ?? 0.2, detectOnly: false }),
+  },
+};
+
+const BATCH_CACHE_FILENAME = ".mediakit-batch-cache.json";
+const BATCH_MANIFEST_FILENAME = "batch-manifest.json";
+
+// Output extension for a batch item: the input's, except
+// extract_audio (whisper forces .wav; an explicit format wins; an
+// audio input keeps its own audio extension, a video input defaults
+// to .mp3) and loudness with an explicit --format (the file's
+// container must match the codec the tool was told to write).
+function batchOutputExt(operation, inputExt, args) {
+  if (operation === "extract_audio") {
+    if (args.whisper) return "wav";
+    if (args.format) return String(args.format).toLowerCase().replace(/^\./, "");
+    return AUDIO_FORMATS[inputExt] ? inputExt : "mp3";
+  }
+  if (operation === "loudness" && args.format) return String(args.format).toLowerCase().replace(/^\./, "");
+  return inputExt;
+}
+
+function globSegmentToRegExp(seg) {
+  let re = "^";
+  for (const ch of seg) {
+    if (ch === "*") re += "[^/]*";
+    else if (ch === "?") re += "[^/]";
+    else re += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`${re}$`);
+}
+
+// Match a glob against a '/'-separated relative path. `**` crosses
+// directories; a bare pattern with no '/' (e.g. `*.mp4`) matches the
+// basename at any depth — the form people actually type for "every
+// mp4 in this folder".
+function matchBatchPattern(pattern, relPosix) {
+  const patSegs = pattern.split("/");
+  const pathSegs = relPosix.split("/");
+  if (patSegs.length === 1) return globSegmentToRegExp(patSegs[0]).test(pathSegs[pathSegs.length - 1]);
+  function match(pi, si) {
+    if (pi === patSegs.length) return si === pathSegs.length;
+    if (patSegs[pi] === "**") {
+      for (let k = si; k <= pathSegs.length; k++) if (match(pi + 1, k)) return true;
+      return false;
+    }
+    if (si >= pathSegs.length) return false;
+    return globSegmentToRegExp(patSegs[pi]).test(pathSegs[si]) && match(pi + 1, si + 1);
+  }
+  return match(0, 0);
+}
+
+async function hashFile(file) {
+  const h = createHash("sha256");
+  await new Promise((resolve, reject) => {
+    const s = createReadStream(file);
+    s.on("data", (c) => h.update(c));
+    s.on("error", reject);
+    s.on("end", resolve);
+  });
+  return h.digest("hex");
+}
+
+// JSON with sorted keys, so the same args hash the same way no
+// matter what order the caller wrote them in.
+function stableStringify(v) {
+  if (v === null || typeof v !== "object") return JSON.stringify(v);
+  if (Array.isArray(v)) return `[${v.map(stableStringify).join(",")}]`;
+  return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stableStringify(v[k])}`).join(",")}}`;
+}
+
+async function collectBatchFiles(dirPath, pattern, excludeDir) {
+  const found = [];
+  let skippedDirectories = 0;
+  async function walk(dir, isRoot) {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      skippedDirectories++;
+      return;
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (e.isSymbolicLink()) continue;
+        // Never treat a previous batch's outputs as new inputs when
+        // the output dir sits inside the input tree.
+        if (excludeDir && (full === excludeDir || isInsideDir(excludeDir, full))) continue;
+        if (!isRoot && (e.name.startsWith(".") || FIND_SKIP_DIRS.has(e.name))) continue;
+        await walk(full, false);
+      } else if (e.isFile()) {
+        const ext = e.name.includes(".") ? e.name.split(".").pop().toLowerCase() : "";
+        if (!FIND_EXTENSIONS.includes(ext)) continue;
+        const rel = path.relative(dirPath, full).split(path.sep).join("/");
+        if (matchBatchPattern(pattern, rel)) found.push(full);
+      }
+    }
+  }
+  await walk(dirPath, true);
+  found.sort();
+  return { files: found, skippedDirectories };
+}
+
+export async function batch({ operation, pattern, inputDir, outputDir, args = {}, jobs = 1, outputSuffix = null, cache = true, stopOnError = false, timeoutSeconds = 1800, maxFiles = 200, dryRun = false }) {
+  const spec = BATCH_OPERATIONS[operation];
+  if (!spec) throw new MediaKitError(`unknown batch operation: ${operation} (supported: ${Object.keys(BATCH_OPERATIONS).join(", ")})`, "INVALID_ARG");
+  if (args === null || typeof args !== "object" || Array.isArray(args)) throw new MediaKitError("batch args must be an object", "INVALID_ARG");
+  for (const k of Object.keys(args)) {
+    if (!spec.args.includes(k)) throw new MediaKitError(`batch ${operation} does not take argument "${k}" (supported: ${spec.args.join(", ") || "none"})`, "INVALID_ARG");
+    const v = args[k];
+    if (v !== null && typeof v === "object") throw new MediaKitError(`batch argument "${k}" must be a string, number or boolean`, "INVALID_ARG");
+  }
+  if (typeof pattern !== "string" || !pattern.trim()) throw new MediaKitError("batch pattern is required (glob like **/*.mp4)", "INVALID_ARG");
+  const inDir = await requireInput(inputDir, "input directory");
+  if (!(await stat(inDir)).isDirectory()) throw new MediaKitError(`not a directory: ${inputDir}`, "INVALID_ARG");
+  const max = num(maxFiles, "max_files", { min: 1, max: 1000, integer: true });
+  // Parallelism capped like ffmpeg-skill's batch.py: min(N, cpus, 8).
+  const jobCount = Math.min(num(jobs, "jobs", { min: 1, max: 8, integer: true }), os.cpus().length, 8);
+  const timeout = num(timeoutSeconds, "timeout_seconds", { min: 1, max: 86400 });
+  const suffix = outputSuffix === null || outputSuffix === undefined ? `-${operation}` : String(outputSuffix);
+  if (!/^[A-Za-z0-9._-]{0,32}$/.test(suffix)) throw new MediaKitError(`batch output suffix must be 0-32 chars of [A-Za-z0-9._-], got: ${suffix}`, "INVALID_ARG");
+  const outDirAbs = path.resolve(String(outputDir));
+  await assertInsideWorkdir(outDirAbs, "output directory");
+  if (suffix === "" && path.resolve(inDir) === outDirAbs) {
+    throw new MediaKitError("batch with an empty suffix would overwrite its inputs — use a suffix or a different output directory", "INVALID_ARG");
+  }
+
+  const { files, skippedDirectories } = await collectBatchFiles(inDir, pattern.trim(), outDirAbs);
+  if (!files.length) throw new MediaKitError(`batch matched no files: pattern "${pattern}" under ${inDir}`, "NO_MATCH");
+  const truncated = files.length > max;
+  const selected = files.slice(0, max);
+  const items = selected.map((f) => {
+    const rel = path.relative(inDir, f);
+    const ext = batchOutputExt(operation, path.extname(f).slice(1).toLowerCase(), args);
+    const outRel = path.join(path.dirname(rel), `${path.basename(f, path.extname(f))}${suffix}.${ext}`);
+    return { input: f, relative: rel.split(path.sep).join("/"), output: path.join(outDirAbs, outRel), outputRelative: outRel.split(path.sep).join("/") };
+  });
+
+  if (dryRun) {
+    return {
+      operation, pattern: pattern.trim(), input_dir: inDir, output_dir: outDirAbs,
+      args, jobs: jobCount, cache, output_suffix: suffix, dry_run: true,
+      files_total: files.length, files_matched: selected.length, truncated,
+      results: items.map((it) => ({ input: it.input, output: it.output, status: "planned" })),
+      ...(skippedDirectories ? { skipped_directories: skippedDirectories } : {}),
+    };
+  }
+
+  const startedAt = Date.now();
+  const deadline = startedAt + timeout * 1000;
+  const outDir = await prepareOutputDir(outDirAbs);
+
+  // Content-hash cache (ffmpeg-skill's batch.py idea): the key covers
+  // the input bytes + operation + args + suffix, so an unchanged file
+  // is never re-encoded. A hit is only trusted when the cached output
+  // still exists on disk with the recorded size AND sha256 — a stale
+  // or hand-edited output is re-run, not reported as done.
+  const cachePath = path.join(outDir, BATCH_CACHE_FILENAME);
+  let cacheData = { version: 1, entries: {} };
+  if (cache) {
+    try {
+      const raw = JSON.parse(await readFile(cachePath, "utf8"));
+      if (raw && raw.version === 1 && raw.entries && typeof raw.entries === "object") cacheData = raw;
+    } catch { /* missing or corrupt cache starts fresh, never fails the batch */ }
+  }
+  const cacheKeyFor = async (item) => {
+    const inputHash = await hashFile(item.input);
+    return createHash("sha256").update(stableStringify({ operation, args, suffix, inputHash })).digest("hex");
+  };
+
+  const results = new Array(items.length);
+  let next = 0;
+  let aborted = false;
+  let invalidArgStreak = 0;
+  async function worker() {
+    for (;;) {
+      if (aborted) return;
+      const i = next++;
+      if (i >= items.length) return;
+      const item = items[i];
+      if (Date.now() > deadline) {
+        results[i] = { input: item.input, output: item.output, status: "skipped", error: `batch timeout exceeded (${timeout}s shared budget)` };
+        continue;
+      }
+      if (cache) {
+        const key = await cacheKeyFor(item);
+        const hit = cacheData.entries[key];
+        if (hit) {
+          try {
+            const st = await stat(hit.output);
+            if (st.size === hit.output_size_bytes && (await hashFile(hit.output)) === hit.output_sha256) {
+              results[i] = { input: item.input, output: item.output, status: "cached", result: hit.result };
+              continue;
+            }
+          } catch { /* cached output gone or changed: fall through and re-run */ }
+        }
+        item.cacheKey = key;
+      }
+      const fileStarted = Date.now();
+      try {
+        const r = await spec.run(item.input, item.output, args);
+        const elapsedMs = Date.now() - fileStarted;
+        results[i] = { input: item.input, output: item.output, status: "ok", elapsed_ms: elapsedMs, result: r };
+        invalidArgStreak = 0;
+        if (cache) {
+          try {
+            const st = await stat(item.output);
+            cacheData.entries[item.cacheKey] = {
+              output: item.output, output_size_bytes: st.size,
+              output_sha256: await hashFile(item.output), result: r,
+            };
+          } catch { /* cache write is best-effort; the file itself is done */ }
+        }
+      } catch (e) {
+        const code = e instanceof MediaKitError ? e.code : "ERROR";
+        results[i] = { input: item.input, output: item.output, status: "error", elapsed_ms: Date.now() - fileStarted, error: e.message, code };
+        if (stopOnError) aborted = true;
+        else if (jobCount === 1 && code === "INVALID_ARG") {
+          // A mistyped arg fails every file identically — abort after
+          // three leading validation failures instead of burning
+          // through the whole folder. (Sequential mode only: with
+          // parallel workers the "first three" are not well-defined.)
+          invalidArgStreak++;
+          if (invalidArgStreak >= 3) aborted = true;
+        } else invalidArgStreak = 0;
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(jobCount, items.length) }, worker));
+  for (let i = 0; i < items.length; i++) {
+    if (!results[i]) {
+      results[i] = { input: items[i].input, output: items[i].output, status: "skipped", error: "batch stopped early (see the first error)" };
+    }
+  }
+
+  const summary = {
+    operation, pattern: pattern.trim(), input_dir: inDir, output_dir: outDir,
+    args, jobs: jobCount, cache, output_suffix: suffix,
+    files_total: files.length, files_matched: selected.length, truncated,
+    succeeded: results.filter((r) => r.status === "ok").length,
+    failed: results.filter((r) => r.status === "error").length,
+    cached: results.filter((r) => r.status === "cached").length,
+    skipped: results.filter((r) => r.status === "skipped").length,
+    elapsed_seconds: +((Date.now() - startedAt) / 1000).toFixed(1),
+    results,
+    ...(skippedDirectories ? { skipped_directories: skippedDirectories } : {}),
+  };
+  const manifestPath = path.join(outDir, BATCH_MANIFEST_FILENAME);
+  summary.manifest = manifestPath;
+  await writeFile(manifestPath, JSON.stringify(summary, null, 2), "utf8");
+  if (cache) await writeFile(cachePath, JSON.stringify(cacheData, null, 2), "utf8");
+  return summary;
 }
