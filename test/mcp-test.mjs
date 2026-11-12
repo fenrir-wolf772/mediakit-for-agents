@@ -1081,6 +1081,53 @@ checkOk(titleBandA !== null && titleBandA > 50, "titlecard band is opaque (the b
 checkOk(titleCornerA !== null && titleCornerA < 5, "titlecard corner is fully transparent", `got A=${titleCornerA}`);
 checkOk(titleCornerR !== null && titleCornerR < 5, "titlecard corner is dark (nothing drawn there)", `got R=${titleCornerR}`);
 
+// titlecard --style: all three locked ids resolve to the styles.json
+// palette (this also proves the loader's id cross-check passes), a
+// scoped override wins for one key only and is reported, and an
+// unknown id is refused. Pixel-verify minimal-line: near-black box
+// (0x111111) with white text — the band is dark and grey (R=G=B),
+// unlike the default orange card (R high, G mid, B low).
+const styleExpected = {
+  "clean-bold": { text_color: "FFD60A", box_color: "F97316", font_size: 120 },
+  "minimal-line": { text_color: "FFFFFF", box_color: "111111", font_size: 120 },
+  "warm-story": { text_color: "FFF7ED", box_color: "B45309", font_size: 120 },
+};
+for (const [id, want] of Object.entries(styleExpected)) {
+  const r = await client.callTool({
+    name: "titlecard",
+    arguments: { text: "Style Check", output: path.join(root, `outputs/mcp-titlecard-${id}.png`), style: id },
+  });
+  const j = JSON.parse(r.content[0].text);
+  checkOk(j.style === id && j.text_color === want.text_color && j.box_color === want.box_color && j.font_size === want.font_size,
+    `titlecard --style ${id} resolves to the locked palette`, JSON.stringify({ style: j.style, text_color: j.text_color, box_color: j.box_color, font_size: j.font_size }));
+  checkOk(Array.isArray(j.style_overrides) && j.style_overrides.length === 0, `titlecard --style ${id} reports no overrides`, JSON.stringify(j.style_overrides));
+}
+const titleOverrideRes = await client.callTool({
+  name: "titlecard",
+  arguments: { text: "Style Check", output: path.join(root, "outputs/mcp-titlecard-override.png"), style: "clean-bold", text_color: "FFFFFF" },
+});
+const titleOverrideJson = JSON.parse(titleOverrideRes.content[0].text);
+checkOk(titleOverrideJson.text_color === "FFFFFF" && titleOverrideJson.box_color === "F97316" && titleOverrideJson.style === "clean-bold",
+  "titlecard scoped override wins for text_color only", JSON.stringify({ text_color: titleOverrideJson.text_color, box_color: titleOverrideJson.box_color }));
+checkOk(JSON.stringify(titleOverrideJson.style_overrides) === JSON.stringify(["text_color"]),
+  "titlecard reports the scoped override", JSON.stringify(titleOverrideJson.style_overrides));
+const titleBadStyleRes = await client.callTool({
+  name: "titlecard",
+  arguments: { text: "Hi", output: path.join(root, "outputs/mcp-titlecard-bad.png"), style: "neon" },
+});
+const titleBadStyleJson = JSON.parse(titleBadStyleRes.content[0].text);
+checkOk(titleBadStyleRes.isError === true && /style must be one of/.test(titleBadStyleJson.error ?? ""),
+  "titlecard rejects an unknown style id", JSON.stringify(titleBadStyleJson));
+const minBandR = await planeMean(path.join(root, "outputs/mcp-titlecard-minimal-line.png"), "1080:500:0:800", "r");
+const minBandG = await planeMean(path.join(root, "outputs/mcp-titlecard-minimal-line.png"), "1080:500:0:800", "g");
+const minBandB = await planeMean(path.join(root, "outputs/mcp-titlecard-minimal-line.png"), "1080:500:0:800", "b");
+const minBandA = await planeMean(path.join(root, "outputs/mcp-titlecard-minimal-line.png"), "1080:500:0:800", "a");
+console.log("titlecard minimal-line pixels: band R/G/B/A =", minBandR, minBandG, minBandB, minBandA);
+checkOk(minBandR !== null && minBandR < 45, "titlecard minimal-line band is dark (near-black box)", `got R=${minBandR}`);
+checkOk(minBandR !== null && minBandG !== null && Math.abs(minBandR - minBandG) < 5 && minBandB !== null && Math.abs(minBandR - minBandB) < 5,
+  "titlecard minimal-line band is grey, not warm (R=G=B)", `got R/G/B=${minBandR}/${minBandG}/${minBandB}`);
+checkOk(minBandA !== null && minBandA > 50, "titlecard minimal-line band is opaque (the box is there)", `got A=${minBandA}`);
+
 // burn_captions: defaults scale with frame height and sit above the
 // platform UI. On 1280x720: font 22px, margin 187px from the bottom.
 // Pixel-verify at t=3.5s (cue 2): the caption band differs a lot
@@ -1224,6 +1271,37 @@ const introBadRes = await client.callTool({
 });
 const introBadJson = JSON.parse(introBadRes.content[0].text);
 checkOk(introBadRes.isError === true && /fade_in \+ fade_out/.test(introBadJson.error ?? ""), "intro rejects fades longer than duration", JSON.stringify(introBadJson));
+
+// intro --style: the locked titlecard palette maps onto the intro
+// (box colour becomes the background). Pixel-verify clean-bold at
+// full fade: the centre band is the orange background (R ~249, G
+// ~115, B ~22) with yellow text — nothing like the default dark-navy
+// intro (mid-band R 68.4).
+const introStyleRes = await client.callTool({
+  name: "intro",
+  arguments: { text: "Welcome Back", output: path.join(root, "outputs/mcp-intro-style.mp4"), style: "clean-bold" },
+});
+const introStyleJson = JSON.parse(introStyleRes.content[0].text);
+console.log("intro --style call:", "bg", introStyleJson.bg_color, "| text", introStyleJson.text_color, "| font", introStyleJson.font_size, "| style", introStyleJson.style);
+checkOk(introStyleJson.style === "clean-bold" && introStyleJson.bg_color === "F97316" && introStyleJson.text_color === "FFD60A" && introStyleJson.font_size === 120,
+  "intro --style clean-bold resolves to the locked palette", JSON.stringify({ style: introStyleJson.style, bg_color: introStyleJson.bg_color, text_color: introStyleJson.text_color, font_size: introStyleJson.font_size }));
+checkOk(Array.isArray(introStyleJson.style_overrides) && introStyleJson.style_overrides.length === 0, "intro --style clean-bold reports no overrides", JSON.stringify(introStyleJson.style_overrides));
+const introStyleMidPng = path.join(root, "outputs/mcp-intro-style-mid.png");
+await execFileAsync("ffmpeg", ["-v", "error", "-y", "-ss", "1.5", "-i", path.join(root, "outputs/mcp-intro-style.mp4"), "-frames:v", "1", introStyleMidPng]);
+const introStyleR = await planeMean(introStyleMidPng, "800:160:240:280", "r");
+const introStyleG = await planeMean(introStyleMidPng, "800:160:240:280", "g");
+const introStyleB = await planeMean(introStyleMidPng, "800:160:240:280", "b");
+console.log("intro --style pixels: centre-band R/G/B =", introStyleR, introStyleG, introStyleB);
+checkOk(introStyleR !== null && introStyleR > 200, "intro --style clean-bold background is orange (R high)", `got R=${introStyleR}`);
+checkOk(introStyleG !== null && introStyleG > 100 && introStyleG < 180, "intro --style clean-bold background is orange (G mid)", `got G=${introStyleG}`);
+checkOk(introStyleB !== null && introStyleB < 40, "intro --style clean-bold background is orange (B low)", `got B=${introStyleB}`);
+const introStyleBadRes = await client.callTool({
+  name: "intro",
+  arguments: { text: "Hi", output: path.join(root, "outputs/mcp-intro-badstyle.mp4"), style: "neon" },
+});
+const introStyleBadJson = JSON.parse(introStyleBadRes.content[0].text);
+checkOk(introStyleBadRes.isError === true && /style must be one of/.test(introStyleBadJson.error ?? ""),
+  "intro rejects an unknown style id", JSON.stringify(introStyleBadJson));
 
 // social: one call exports tiktok + shorts + instagram-feed from the
 // 1280x720 10s source. Each output must be the platform size, ~10s,

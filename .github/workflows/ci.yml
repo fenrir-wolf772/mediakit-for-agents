@@ -93,5 +93,7 @@ jobs:
           printf '%s' '{"version":1,"input":"../test/source.mp4","output":"ci-manifest.mp4","steps":[{"tool":"trim","args":{"start":2,"end":8}},{"tool":"reframe","args":{"mode":"blur","width":1080,"height":1920}},{"tool":"loudness","args":{"target_lufs":-14}}],"qa":"tiktok"}' > outputs/ci-manifest.json
           node bin/mediakit.js manifest outputs/ci-manifest.json | grep '"cache_hits": 0'
           node bin/mediakit.js manifest outputs/ci-manifest.json | grep '"cache_hits": 3'
+          node bin/mediakit.js titlecard "Style Check" -o outputs/ci-titlecard-style.png --style minimal-line | grep '"box_color": "111111"'
+          node bin/mediakit.js intro "Welcome Back" -o outputs/ci-intro-style.mp4 --style clean-bold | grep '"bg_color": "F97316"'
       - name: MCP test
         run: npm test

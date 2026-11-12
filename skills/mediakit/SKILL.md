@@ -644,6 +644,19 @@ file instead of guessing. Only single-input steps chain
 `burn_captions`/`overlay`); multi-input work (`concat`, `mix`,
 `mux`, `pip`) stays a separate call before or after the manifest.
 
+### 41. One style id for the whole video — don't retype hex values
+Pick the style once (`clean-bold`, `minimal-line` or `warm-story`,
+locked in `skills/shorts-video/styles.json`) and pass
+`--style <id>` to `titlecard` and `intro`: both tools use the same
+locked palette, so the intro card and the title card match without
+retyping colours. `publish_kit` enforces the same three ids. An
+explicit `--text-color` / `--box-color` / `--bg-color` /
+`--font-size` on one call is a scoped override for that call only —
+it wins over the locked value, is reported in `style_overrides`, and
+never rewrites the library. Changing the style after captions are
+burned means re-burning and re-verifying (same rule as the
+style-lock): the old render is not the new style.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

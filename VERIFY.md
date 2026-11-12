@@ -1282,3 +1282,26 @@ tone [6,10)), `test/content-lead-black.mp4` (đen 1s đầu + testsrc 9s),
   4. Test hardcode `tools_total === 44` lại fail 1 assert — sửa 44 → 45 (lần thứ 4 gặp; grep số tool cũ mỗi lần thêm tool).
 - Push: commit ee6ea7d "Add manifest tool: whole pipeline from one JSON file (45 tools total)" → GitHub main. **CI run #43258194885 success** — kiểm tra lượt sau.
 - Còn lại: chưa stage/publish npm (đợi Tony duyệt từng lần — npm vẫn 0.1.0); backlog tiếp: `stabilize` (cần footage rung thật), Verified-Trap Guard ledger, operation envelope, MCP logging progress, contract machine-readable + CI fail khi drift, MCP advertise core 12 mặc định, `dry-run` cho các tool khác, thư viện style đặt tên cho titlecard/intro, Demo GIF mới cho README.
+
+## Lượt 34 — 2026-11-13 00:58 (+07): named --style for titlecard + intro (45 tools, không thêm tool)
+- **Học**: `barckley75/resolve-claude-mcp` (395★, 52 tools, Python/FastMCP, cầu nối DaVinci Resolve Studio — đọc README thật trên GitHub + bài roundup delivvo.io). Ý áp dụng được:
+  1. Thư viện style đặt tên (registry of named blocks — cùng ý heygen-com/hyperframes, backlog từ lượt 21) → đã làm `--style` cho `titlecard` + `intro`: một id chọn đúng palette đã khóa trong `skills/shorts-video/styles.json`.
+  2. "Use at your own risk — work on backups": AI có thể sửa/xóa dữ liệu project → củng cố backlog Verified-Trap Guard ledger (MediaKit đã cấm đè input; ledger vẫn chưa làm).
+  3. Transcription auto-chunk file dài bằng ffmpeg (5-phút/piece, tránh timeout) → follow-up cho `transcribe` (faster-whisper hiện chạy cả file; chunking khi gặp file giờ-long).
+  4. Render job queue + `get_render_status` (theo dõi tiến độ render) → củng cố backlog MCP logging progress.
+  5. CDL adjustments (slope/offset/power/saturation) cho color grade → follow-up nhỏ cho `grade --filter` (đã có filter tùy ý).
+  6. `execute_resolve_code` (chạy code Python tùy ý trong Resolve) → KHÔNG áp dụng: MediaKit cố ý không có `ffmpeg.execute` chung — tool typed + validate trước, không cho agent chạy lệnh tự do.
+  KHÔNG copy code của họ — chỉ học ý tưởng, tự implement bằng Node/ffmpeg.
+- **Làm**:
+  - `titlecard --style <id>` / `intro --style <id>` (core+CLI+MCP, không thêm tool): `clean-bold` | `minimal-line` | `warm-story` — palette khóa đọc từ `skills/shorts-video/styles.json` (single source of truth, ship trong npm package vì "skills" nằm trong package.json "files"). `titlecard` dùng trực tiếp text/box/font đã khóa; `intro` map box_color → bg, text_color → text, font_size → font — intro card và title card của một video chia một look, không gõ lại hex. Arg màu/font tường minh là scoped override cho đúng 1 key của lần gọi đó, báo trong `style_overrides`, không ghi lại library (đúng luật styles.json). Loader `getShortsStyles()`/`resolveShortsStyle()` fail loudly khi file thiếu/sai JSON/thiếu trường khóa/id lệch với `SHORTS_STYLE_IDS` (không fallback lặng lẽ về default).
+  - CLI/MCP: `--style` mới cho cả 2 lệnh; màu/font chuyển sang optional (null khi vắng) để default chảy qua core — hành vi không style giữ nguyên (titlecard FFD60A/F97316/119px, intro 0F172A/FFFFFF/102px).
+  - README (2 dòng bảng), SKILL.md (rule 41 mới trong skills/mediakit + đoạn style-lock trong skills/shorts-video), CI smoke thêm 2 dòng (titlecard minimal-line grep box 111111, intro clean-bold grep bg F97316).
+- **Test** (ffmpeg 8.1.2):
+  - Đo trước khi code (CLI): titlecard minimal-line → **FFFFFF/111111/120px, style_overrides []**; clean-bold → **FFD60A/F97316/120px**; override `--text-color FFFFFF` → **text FFFFFF, box F97316, overrides ["text_color"]**; intro clean-bold → **bg F97316/text FFD60A/120px**; warm-story → **bg B45309/text FFF7ED**; style lạ → **exit 2 INVALID_ARG** + in `Retry:`.
+  - Pixel-verify: titlecard minimal-line band (1080:500:0:800) **R=G=B=38.3, A=132.3** (hộp gần đen 0x111111 + chữ trắng thưa — xám, không ấm, khác hẳn card cam mặc định R>50/G>20/B<20); intro clean-bold frame giữa (t=1.5) band **R=248.6, G=140.2, B=16.9** (nền cam F97316 + chữ vàng, khác hẳn intro navy mặc định R 68.4).
+  - `npm run check` sạch (check-docs: 45 tools khớp README); `npm test` **484/484 PASS, exit 0** (466 + 18 mới: titlecard style 12 + intro style 6). `doctor` 45/45 available.
+- **Bẫy đo lường**:
+  1. `signalstats` grep `YAVG` trực tiếp ra rỗng trong shell — phải qua `metadata=print:key=lavfi.signalstats.YAVG` với `-v info` như helper `planeMean` trong test mới đúng (cùng lỗi pipe đo lường đã gặp ở lượt 7/33: cờ log sai là mất số đo, không phải tool hỏng).
+  2. Edit CI smoke: file dùng dấu `"` thật trong grep, không phải `\"` — lần edit đầu không khớp old_text, phải đọc lại file mới sửa đúng.
+- Push: (ghi sau khi push) **CI run #… …** — kiểm tra lượt sau.
+- Còn lại: chưa stage/publish npm (đợi Tony duyệt từng lần — npm vẫn 0.1.0); backlog tiếp: `stabilize` (cần footage rung thật), Verified-Trap Guard ledger, operation envelope, MCP logging progress, contract machine-readable + CI fail khi drift, MCP advertise core 12 mặc định, `dry-run` cho các tool khác, `transcribe` chunking file dài (ý từ barckley75), `grade --cdl` (ý từ barckley75), Demo GIF mới cho README.

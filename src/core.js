@@ -1789,6 +1789,71 @@ export async function generateSrt({ cues = null, words = null, output }) {
 // tool only flags unsupported-promise phrasing as a warning.
 export const SHORTS_STYLE_IDS = ["clean-bold", "minimal-line", "warm-story"];
 
+// Named style library for titlecard + intro (backlog item; the
+// registry-of-named-blocks idea from heygen-com/hyperframes, applied
+// to MediaKit's own style-lock). One id picks the locked palette
+// (text/box/font) for both tools, so a whole video keeps one look
+// without retyping hex values. The JSON file is the single source of
+// truth — it ships in the npm package ("skills" is in package.json
+// "files") — and it is read lazily here, failing loudly when it is
+// missing, malformed, or out of sync with SHORTS_STYLE_IDS, instead
+// of silently falling back to defaults. An explicit colour/font arg
+// is a scoped override for that one call only (per the styles.json
+// rules): it wins over the locked value and is reported in
+// style_overrides, never written back to the library.
+let _shortsStylesCache = null;
+
+export async function getShortsStyles() {
+  if (_shortsStylesCache) return _shortsStylesCache;
+  const url = new URL("../skills/shorts-video/styles.json", import.meta.url);
+  let raw;
+  try {
+    raw = await readFile(url, "utf8");
+  } catch {
+    throw new MediaKitError("shorts style library missing: skills/shorts-video/styles.json not found next to the package", "STYLE_LIBRARY_MISSING");
+  }
+  let doc;
+  try {
+    doc = JSON.parse(raw);
+  } catch {
+    throw new MediaKitError("shorts style library is not valid JSON: skills/shorts-video/styles.json", "STYLE_LIBRARY_INVALID");
+  }
+  if (!doc || !Array.isArray(doc.styles) || doc.styles.length === 0) {
+    throw new MediaKitError("shorts style library has no styles: skills/shorts-video/styles.json", "STYLE_LIBRARY_INVALID");
+  }
+  const byId = {};
+  for (const s of doc.styles) {
+    const tc = s?.locked?.titlecard;
+    if (!s?.id || !tc || !tc.text_color || !tc.box_color || !Number.isFinite(tc.font_size)) {
+      throw new MediaKitError(`shorts style library: style ${JSON.stringify(s?.id)} is missing locked.titlecard {text_color, box_color, font_size}`, "STYLE_LIBRARY_INVALID");
+    }
+    byId[s.id] = {
+      id: s.id,
+      name: s.name ?? s.id,
+      titlecard: { text_color: String(tc.text_color), box_color: String(tc.box_color), font_size: tc.font_size },
+    };
+  }
+  const ids = Object.keys(byId).sort();
+  if (JSON.stringify(ids) !== JSON.stringify([...SHORTS_STYLE_IDS].sort())) {
+    throw new MediaKitError(`shorts style library ids (${ids.join(", ")}) do not match SHORTS_STYLE_IDS (${SHORTS_STYLE_IDS.join(", ")}); update both together`, "STYLE_LIBRARY_INVALID");
+  }
+  _shortsStylesCache = byId;
+  return byId;
+}
+
+export async function resolveShortsStyle(style) {
+  if (style === null || style === undefined) return null;
+  if (typeof style !== "string" || !SHORTS_STYLE_IDS.includes(style)) {
+    throw new MediaKitError(`style must be one of ${SHORTS_STYLE_IDS.join(", ")}, got: ${style}`, "INVALID_ARG");
+  }
+  const styles = await getShortsStyles();
+  const found = styles[style];
+  if (!found) {
+    throw new MediaKitError(`style ${style} is listed but has no locked palette in skills/shorts-video/styles.json`, "STYLE_LIBRARY_INVALID");
+  }
+  return found;
+}
+
 const PUBLISH_KIT_HYPE = [
   /guaranteed/i,
   /100%\s*viral/i,
@@ -2195,15 +2260,32 @@ function normalizeColor(c, name) {
   return v;
 }
 
-export async function titlecard({ text, output, width = 1080, height = 1920, fontSize = null, textColor = "FFD60A", boxColor = "F97316" }) {
+export async function titlecard({ text, output, width = 1080, height = 1920, fontSize = null, textColor = null, boxColor = null, style = null }) {
   if (!text || !String(text).trim()) throw new MediaKitError("titlecard needs text", "INVALID_ARG");
   const outPath = await prepareOutput(output, []);
   const w = num(width, "width", { min: 2, integer: true });
   const h = num(height, "height", { min: 2, integer: true });
   if (w % 2 !== 0 || h % 2 !== 0) throw new MediaKitError("titlecard width/height must be even", "INVALID_ARG");
-  const size = fontSize === null ? Math.round(w * 0.11) : num(fontSize, "font_size", { min: 16, max: 400, integer: true });
-  const fg = normalizeColor(textColor, "text_color");
-  const bg = normalizeColor(boxColor, "box_color");
+  // Named style (clean-bold / minimal-line / warm-story) supplies the
+  // locked palette; an explicit colour/font arg overrides just that
+  // one value for this call and is reported in style_overrides.
+  const locked = await resolveShortsStyle(style);
+  const overrides = [];
+  let size;
+  let fg;
+  let bg;
+  if (locked) {
+    if (textColor !== null && textColor !== undefined) overrides.push("text_color");
+    if (boxColor !== null && boxColor !== undefined) overrides.push("box_color");
+    if (fontSize !== null && fontSize !== undefined) overrides.push("font_size");
+    fg = normalizeColor(textColor ?? locked.titlecard.text_color, "text_color");
+    bg = normalizeColor(boxColor ?? locked.titlecard.box_color, "box_color");
+    size = fontSize === null || fontSize === undefined ? locked.titlecard.font_size : num(fontSize, "font_size", { min: 16, max: 400, integer: true });
+  } else {
+    fg = normalizeColor(textColor ?? "FFD60A", "text_color");
+    bg = normalizeColor(boxColor ?? "F97316", "box_color");
+    size = fontSize === null || fontSize === undefined ? Math.round(w * 0.11) : num(fontSize, "font_size", { min: 16, max: 400, integer: true });
+  }
   const lines = wrapTitleLines(String(text).trim().toUpperCase());
   // Textfile (not inline text): drawtext reads newlines natively and
   // draws one box around the whole block.
@@ -2226,7 +2308,7 @@ export async function titlecard({ text, output, width = 1080, height = 1920, fon
   }
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
-  return { operation: "titlecard", output: outPath, text: String(text).trim(), lines, font_size: size, text_color: fg, box_color: bg, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null };
+  return { operation: "titlecard", output: outPath, text: String(text).trim(), lines, font_size: size, text_color: fg, box_color: bg, style: style ?? null, style_overrides: overrides, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null };
 }
 
 // ---------------------------------------------------------------- intro
@@ -2235,7 +2317,7 @@ export async function titlecard({ text, output, width = 1080, height = 1920, fon
 // rebuilt on ffmpeg directly). Text goes through a textfile like
 // titlecard, so quoting can never break the filter. Silent video.
 
-export async function intro({ text, output, width = 1280, height = 720, duration = 3, bgColor = "0F172A", textColor = "FFFFFF", fontSize = null, fadeIn = 0.5, fadeOut = 0.5 }) {
+export async function intro({ text, output, width = 1280, height = 720, duration = 3, bgColor = null, textColor = null, fontSize = null, fadeIn = 0.5, fadeOut = 0.5, style = null }) {
   if (!text || !String(text).trim()) throw new MediaKitError("intro needs text", "INVALID_ARG");
   const outPath = await prepareOutput(output, []);
   const w = num(width, "width", { min: 2, integer: true });
@@ -2245,9 +2327,28 @@ export async function intro({ text, output, width = 1280, height = 720, duration
   const fi = num(fadeIn, "fade_in", { min: 0, max: 30 });
   const fo = num(fadeOut, "fade_out", { min: 0, max: 30 });
   if (fi + fo >= d) throw new MediaKitError(`intro fade_in + fade_out (${fi + fo}s) must be shorter than duration (${d}s)`, "INVALID_ARG");
-  const size = fontSize === null ? Math.round(w * 0.08) : num(fontSize, "font_size", { min: 16, max: 400, integer: true });
-  const bg = normalizeColor(bgColor, "bg_color");
-  const fg = normalizeColor(textColor, "text_color");
+  // Named style reuses the locked titlecard palette: the box colour
+  // becomes the intro background, the text colour stays the text
+  // colour, and the titlecard font size is the intro font size — so
+  // the intro card and the title card of one video share one look.
+  // Explicit args override just that value for this call.
+  const locked = await resolveShortsStyle(style);
+  const overrides = [];
+  let size;
+  let bg;
+  let fg;
+  if (locked) {
+    if (bgColor !== null && bgColor !== undefined) overrides.push("bg_color");
+    if (textColor !== null && textColor !== undefined) overrides.push("text_color");
+    if (fontSize !== null && fontSize !== undefined) overrides.push("font_size");
+    bg = normalizeColor(bgColor ?? locked.titlecard.box_color, "bg_color");
+    fg = normalizeColor(textColor ?? locked.titlecard.text_color, "text_color");
+    size = fontSize === null || fontSize === undefined ? locked.titlecard.font_size : num(fontSize, "font_size", { min: 16, max: 400, integer: true });
+  } else {
+    bg = normalizeColor(bgColor ?? "0F172A", "bg_color");
+    fg = normalizeColor(textColor ?? "FFFFFF", "text_color");
+    size = fontSize === null || fontSize === undefined ? Math.round(w * 0.08) : num(fontSize, "font_size", { min: 16, max: 400, integer: true });
+  }
   const lines = wrapTitleLines(String(text).trim().toUpperCase());
   const tmpFile = path.join(path.dirname(outPath), `.intro-${process.pid}.txt`);
   await writeFile(tmpFile, lines.join("\n"), "utf8");
@@ -2270,7 +2371,7 @@ export async function intro({ text, output, width = 1280, height = 720, duration
   }
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
-  return { operation: "intro", output: outPath, text: String(text).trim(), lines, font_size: size, bg_color: bg, text_color: fg, fade_in: fi, fade_out: fo, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null, duration_seconds: out.duration_seconds };
+  return { operation: "intro", output: outPath, text: String(text).trim(), lines, font_size: size, bg_color: bg, text_color: fg, fade_in: fi, fade_out: fo, style: style ?? null, style_overrides: overrides, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null, duration_seconds: out.duration_seconds };
 }
 
 // ---------------------------------------------------------------- svg_animate

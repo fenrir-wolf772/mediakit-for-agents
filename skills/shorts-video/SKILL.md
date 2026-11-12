@@ -28,6 +28,12 @@ three ids in code).
   the new style.
 - A user request for one specific value (e.g. bigger type) is a scoped
   override for that video only: record it, do not rewrite `styles.json`.
+  The tools report it for you: pass the value explicitly alongside
+  `--style <id>` and the result lists it in `style_overrides`.
+- `titlecard` and `intro` take the same `--style <id>` — the title card
+  uses the style's locked text/box/font directly; the intro maps the
+  box colour to its background. No hex values to retype, no drift
+  between the two cards.
 - Do not import another style's look into this video, and do not fall
   back to a different style because a tool failed — fix the tool call,
   or say what is blocked.
