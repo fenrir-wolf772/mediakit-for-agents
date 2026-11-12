@@ -1138,4 +1138,4 @@ tone [6,10)), `test/content-lead-black.mp4` (đen 1s đầu + testsrc 9s),
   2. Assert `size_bytes > 0` sai: `outputs/mcp-tone.srt` + `cli-tone.srt` là 0 byte — đúng vì transcribe tone không lời ra .srt rỗng. Fix: `>= 0`.
 - npm: HIỆU CHÍNH trong lượt này (MEMORY.md cập nhật 12/11): **0.1.0 ĐÃ LIVE từ 9/11** (registry latest = 0.1.0) — helper npm_api.py "stage" thực ra publish thẳng dist-tag latest, không có bước Approve nào; việc nhắc Tony bật 2FA/bấm Approve trước đây là hiểu sai, bỏ. 0.2.0 (38 tool + resources) chờ Tony quyết publish hay xem 0.1.0 trước — cron KHÔNG stage/publish gì thêm.
 - Version giữ 0.1.0.
-- Push: commit (chưa push lúc ghi) → GitHub main. CI run: (ghi sau khi push).
+- Push: commit 426158c "Add MCP Resources videos://list, metadata, workspace/info (38 tools)" → GitHub main (origin/main = 426158c). **CI run #43154815878 success** — xanh ngay lượt này.
