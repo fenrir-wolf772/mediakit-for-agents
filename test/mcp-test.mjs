@@ -97,10 +97,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 41 tools present");
-checkOk(missing.length === 0, "tools/list has all 41 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 42 tools present");
+checkOk(missing.length === 0, "tools/list has all 42 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -444,6 +444,54 @@ const denoiseNlRes = await client.callTool({
 const denoiseNlJson = JSON.parse(denoiseNlRes.content[0].text);
 checkOk(denoiseNlJson.filter === "nlmeans" && denoiseNlJson.filter_value === 5 && near(denoiseNlJson.duration_seconds, 1, 0.1), "denoise nlmeans runs on a tiny clip (strength 0.5 -> s=5)", JSON.stringify(denoiseNlJson));
 
+// segment: HLS VOD playlist + .ts segments. The fixture source.mp4
+// has keyframes every 8.333s, so a copy with segment_time 2 gives 2
+// keyframe-aligned segments (8.333 + 1.667), NOT 5 x 2s — the
+// reencode path is what lands exactly on the grid.
+await rm(path.join(root, "outputs/mcp-seg-copy"), { recursive: true, force: true });
+await rm(path.join(root, "outputs/mcp-seg-re"), { recursive: true, force: true });
+const segCopyRes = await client.callTool({
+  name: "segment",
+  arguments: { input: path.join(root, "test/source.mp4"), output_dir: path.join(root, "outputs/mcp-seg-copy"), segment_time: 2 },
+});
+const segCopyJson = JSON.parse(segCopyRes.content[0].text);
+console.log("segment copy call:", JSON.stringify(segCopyJson));
+checkOk(segCopyJson.mode === "copy" && segCopyJson.segment_count === 2, "segment copy: 2 keyframe-aligned segments on the sparse-GOP fixture", JSON.stringify(segCopyJson.segments));
+checkOk(segCopyJson.segments[0].duration_seconds === 8.333 && segCopyJson.segments[1].duration_seconds === 1.667, "segment copy: durations follow the source keyframes (8.333 + 1.667)", JSON.stringify(segCopyJson.segments));
+checkOk(near(segCopyJson.total_duration_seconds, 10, 0.05) && segCopyJson.duration_error_seconds === 0 && segCopyJson.dimensions === "1280x720" && segCopyJson.size_bytes > 0, "segment copy: total duration 10s, error 0, dimensions + size reported", `${segCopyJson.total_duration_seconds}s err ${segCopyJson.duration_error_seconds} ${segCopyJson.size_bytes} B`);
+// Independent check: read the playlist back from disk and parse it
+// ourselves — the tool's segment list must match the file on disk.
+const playlistText = await readFile(path.join(root, "outputs/mcp-seg-copy/index.m3u8"), "utf8");
+const extinf = [...playlistText.matchAll(/#EXTINF:([0-9.]+),/g)].map((m) => +parseFloat(m[1]).toFixed(3));
+checkOk(playlistText.includes("#EXT-X-ENDLIST") && playlistText.includes("#EXT-X-PLAYLIST-TYPE:VOD"), "segment copy: playlist on disk is a VOD playlist with ENDLIST", playlistText.split("\n").slice(0, 6).join(" | "));
+checkOk(JSON.stringify(extinf) === JSON.stringify(segCopyJson.segments.map((s) => s.duration_seconds)), "segment copy: playlist EXTINF durations match the tool's report", JSON.stringify(extinf));
+const segProbe = await probeStreams(path.join(root, "outputs/mcp-seg-copy/seg000.ts"));
+checkOk(segProbe?.streams?.[0]?.codec_name === "h264" && segProbe.streams[0].width === 1280, "segment copy: first .ts probes as h264 1280 wide", JSON.stringify(segProbe?.streams?.[0]));
+const segReRes = await client.callTool({
+  name: "segment",
+  arguments: { input: path.join(root, "test/source.mp4"), output_dir: path.join(root, "outputs/mcp-seg-re"), segment_time: 2, reencode: true },
+});
+const segReJson = JSON.parse(segReRes.content[0].text);
+checkOk(segReJson.mode === "reencode" && segReJson.segment_count === 5 && segReJson.segments.every((s) => s.duration_seconds === 2), "segment reencode: 5 x 2.000s segments on the exact grid", JSON.stringify(segReJson.segments));
+checkOk(near(segReJson.total_duration_seconds, 10, 0.05) && segReJson.duration_error_seconds === 0, "segment reencode: total duration 10s, error 0", `${segReJson.total_duration_seconds}s`);
+// Copy mode refuses a non-H.264 source up front (vp9 clip made
+// in-test) instead of failing mid-mux; reencode accepts it.
+await execFileAsync("ffmpeg", ["-y", "-v", "error", "-i", path.join(root, "test/source.mp4"), "-t", "2", "-c:v", "libvpx-vp9", "-b:v", "500k", "-c:a", "libopus", path.join(root, "outputs/mcp-seg-vp9.webm")]);
+const segVp9 = await callExpectThrow("segment", { input: path.join(root, "outputs/mcp-seg-vp9.webm"), output_dir: path.join(root, "outputs/mcp-seg-vp9"), segment_time: 2 });
+checkOk(/H\.264/.test(segVp9) && /reencode/.test(segVp9), "segment copy refuses a vp9 source and points at --reencode", segVp9.slice(0, 200));
+const segVp9Re = await client.callTool({
+  name: "segment",
+  arguments: { input: path.join(root, "outputs/mcp-seg-vp9.webm"), output_dir: path.join(root, "outputs/mcp-seg-vp9-re"), segment_time: 2, reencode: true },
+});
+const segVp9ReJson = JSON.parse(segVp9Re.content[0].text);
+checkOk(segVp9ReJson.mode === "reencode" && segVp9ReJson.segment_count === 1 && near(segVp9ReJson.total_duration_seconds, 2, 0.05), "segment reencode accepts the vp9 source (1 segment, ~2s)", JSON.stringify(segVp9ReJson.segments));
+const segAudio = await callExpectThrow("segment", { input: path.join(root, "test/mix-voice.mp3"), output_dir: path.join(root, "outputs/mcp-seg-audio"), segment_time: 2 });
+checkOk(/needs a video/.test(segAudio), "segment refuses an audio-only input", segAudio.slice(0, 200));
+const segBadTime = await callExpectThrow("segment", { input: path.join(root, "test/source.mp4"), output_dir: path.join(root, "outputs/mcp-seg-bad"), segment_time: 0 });
+checkOk(/segment_time/.test(segBadTime), "segment refuses segment_time 0 (MCP validation)", segBadTime.slice(0, 200));
+const segBadPlaylist = await callExpectThrow("segment", { input: path.join(root, "test/source.mp4"), output_dir: path.join(root, "outputs/mcp-seg-bad2"), playlist: "index.txt" });
+checkOk(/playlist/.test(segBadPlaylist), "segment refuses a playlist name that is not .m3u8", segBadPlaylist.slice(0, 200));
+
 const doctorRes = await client.callTool({
   name: "doctor",
   arguments: {},
@@ -473,6 +521,7 @@ checkOk(doctorJson.tools.check?.available === true, "doctor: check is available 
 checkOk(doctorJson.tools.reverse?.available === true, "doctor: reverse is available (reverse/areverse filters present)");
 checkOk(doctorJson.tools.interpolate?.available === true, "doctor: interpolate is available (minterpolate filter present)");
 checkOk(doctorJson.tools.denoise?.available === true, "doctor: denoise is available (hqdn3d/nlmeans filters present)");
+checkOk(doctorJson.tools.segment?.available === true, "doctor: segment is available (HLS muxer is built-in)");
 checkOk(typeof doctorJson.gpu?.available === "boolean" && Array.isArray(doctorJson.gpu?.encoders) && "working_encoder" in (doctorJson.gpu ?? {}), "doctor: gpu section reports available + listed encoders + working encoder", JSON.stringify(doctorJson.gpu));
 checkOk(doctorJson.gpu.available === (doctorJson.gpu.working_encoder !== null), "doctor: gpu available is true exactly when a probe encode worked", JSON.stringify(doctorJson.gpu));
 console.log("doctor gpu:", JSON.stringify(doctorJson.gpu));
@@ -2009,7 +2058,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 41 && infoJson.tools_available >= 40 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 41 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 42 && infoJson.tools_available >= 41 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 42 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");

@@ -3003,6 +3003,114 @@ export async function denoise({ input, output, filter = "hqdn3d", strength = 0.5
   };
 }
 
+// ---------------------------------------------------------------- segment
+// Cut a video into an HLS VOD playlist: index.m3u8 + .ts segments in
+// an output directory, ready to serve statically or preview in a
+// player (hyepartners-gmail/vibevideo-mcp's HLS segmenter idea).
+// Stream-copy is the default — fast, lossless, but segments can
+// only start on keyframes, so the actual segment lengths follow the
+// source GOP: on the test fixture (keyframes every 8.333s) a
+// --segment-time 2 copy gives 2 segments of 8.333s + 1.667s, NOT 5
+// x 2s. --reencode re-encodes to libx264/aac with forced keyframes
+// every segment_time seconds, so the segments land exactly on the
+// requested grid (measured 2026-11-12: 5 x 2.000s). Copy mode
+// refuses a non-H.264 video or non-AAC/MP3 audio up front instead
+// of letting ffmpeg fail mid-mux — use --reencode for those.
+// The result parses the playlist back from disk and stats every
+// segment file, so the count and durations are measured, not
+// assumed. Stale segments/playlist with the same prefix in the
+// output dir are removed before the run so a re-run never counts
+// leftovers.
+const HLS_TS_AUDIO = ["aac", "mp3"];
+
+export async function segment({ input, outputDir, segmentTime = 6, playlist = "index.m3u8", segmentPrefix = "seg", reencode = false, crf = 23 }) {
+  const inPath = await requireInput(input);
+  const seg = num(segmentTime, "segment_time", { min: 1, max: 60 });
+  const c = num(crf, "crf", { min: 0, max: 51, integer: true });
+  if (typeof playlist !== "string" || !playlist.endsWith(".m3u8") || playlist.includes("/") || playlist.includes("\\") || playlist === ".m3u8") {
+    throw new MediaKitError(`segment playlist must be a bare .m3u8 filename, got: ${playlist}`, "INVALID_ARG");
+  }
+  if (typeof segmentPrefix !== "string" || !/^[A-Za-z0-9._-]+$/.test(segmentPrefix) || segmentPrefix.startsWith(".")) {
+    throw new MediaKitError(`segment prefix must be a plain filename stem (letters, digits, . _ -), got: ${segmentPrefix}`, "INVALID_ARG");
+  }
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("segment needs a video input", "INVALID_ARG");
+  const mode = reencode ? "reencode" : "copy";
+  if (!reencode) {
+    if (meta.video.codec !== "h264") {
+      throw new MediaKitError(`segment stream-copy needs H.264 video (got ${meta.video.codec}) — use --reencode to re-encode to H.264`, "INVALID_ARG");
+    }
+    if (meta.audio && !HLS_TS_AUDIO.includes(meta.audio.codec)) {
+      throw new MediaKitError(`segment stream-copy needs AAC or MP3 audio in the .ts segments (got ${meta.audio.codec}) — use --reencode to re-encode the audio to AAC`, "INVALID_ARG");
+    }
+  }
+  const rawDir = path.resolve(outputDir);
+  if (typeof outputDir !== "string" || !outputDir.trim()) {
+    throw new MediaKitError("output directory is required", "INVALID_OUTPUT");
+  }
+  if (rawDir === inPath || rawDir.startsWith(inPath + path.sep)) {
+    throw new MediaKitError("segment output directory must not be inside the input file", "INVALID_OUTPUT");
+  }
+  const dir = await prepareOutputDir(outputDir);
+  const { readdir, readFile, unlink } = await import("node:fs/promises");
+  // Clear stale output from a previous run with the same prefix so
+  // the segment count below never includes leftovers.
+  for (const f of await readdir(dir)) {
+    if ((f.startsWith(segmentPrefix) && f.endsWith(".ts")) || f === playlist) {
+      await unlink(path.join(dir, f));
+    }
+  }
+  const playlistPath = path.join(dir, playlist);
+  const pattern = path.join(dir, `${segmentPrefix}%03d.ts`);
+  const args = ["-y", "-i", inPath];
+  if (reencode) {
+    args.push("-c:v", "libx264", "-crf", String(c), "-preset", "medium",
+      "-force_key_frames", `expr:gte(t,n_forced*${seg})`);
+    if (meta.audio) {
+      if (meta.audio.codec === "aac") args.push("-c:a", "copy");
+      else args.push("-c:a", "aac", "-b:a", "128k");
+    }
+  } else {
+    args.push("-c", "copy");
+  }
+  args.push("-hls_time", String(seg), "-hls_playlist_type", "vod",
+    "-hls_flags", "independent_segments",
+    "-hls_segment_filename", pattern, "-f", "hls", playlistPath);
+  await run(FFMPEG, args);
+  const text = await readFile(playlistPath, "utf8");
+  if (!text.includes("#EXT-X-ENDLIST")) {
+    throw new MediaKitError("segment playlist is missing #EXT-X-ENDLIST — the HLS mux did not finish a VOD playlist", "VERIFY_FAILED");
+  }
+  const lines = text.split(/\r?\n/);
+  const segments = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^#EXTINF:([0-9.]+),/);
+    if (!m) continue;
+    const file = (lines[i + 1] || "").trim();
+    if (!file) throw new MediaKitError("segment playlist has an #EXTINF line with no segment file after it", "VERIFY_FAILED");
+    const info = await fileInfo(path.join(dir, file));
+    segments.push({ file, duration_seconds: +parseFloat(m[1]).toFixed(3), size_bytes: info.size_bytes });
+  }
+  if (!segments.length) {
+    throw new MediaKitError("segment playlist lists no segments", "VERIFY_FAILED");
+  }
+  const totalDuration = +segments.reduce((a, s) => a + s.duration_seconds, 0).toFixed(3);
+  const sourceDuration = meta.duration_seconds;
+  const playlistInfo = await fileInfo(playlistPath);
+  const totalSize = segments.reduce((a, s) => a + s.size_bytes, 0) + playlistInfo.size_bytes;
+  return {
+    operation: "segment", input: inPath, output_dir: dir,
+    playlist: playlistPath, playlist_name: playlist, mode,
+    segment_time_seconds: seg,
+    segment_count: segments.length, segments,
+    total_duration_seconds: totalDuration,
+    source_duration_seconds: sourceDuration,
+    duration_error_seconds: sourceDuration === null ? null : +(totalDuration - sourceDuration).toFixed(3),
+    dimensions: meta.video ? `${meta.video.width}x${meta.video.height}` : null,
+    size_bytes: totalSize,
+  };
+}
+
 // ---------------------------------------------------------------- convert
 
 const VIDEO_CODECS = { libx264: "mp4", libx265: "mp4", vp9: "webm", av1: "mp4", mpeg4: "mp4", copy: null };
@@ -3421,6 +3529,7 @@ const TOOL_REQUIREMENTS = {
   reverse: { filters: ["reverse", "areverse"], encoders: ["libx264", "aac"] },
   interpolate: { filters: ["minterpolate"], encoders: ["libx264"] },
   denoise: { filters: ["hqdn3d", "nlmeans"], encoders: ["libx264"] },
+  segment: {},
   convert: { encoders: ["libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4"] },
   compress: { filters: ["scale"], encoders: ["libx264", "aac"] },
   receipt: { filters: ["loudnorm"] },

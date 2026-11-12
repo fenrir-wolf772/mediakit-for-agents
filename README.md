@@ -75,6 +75,7 @@ Then ask your agent things like:
 | `reverse` | Play a clip backwards: video frames reversed, audio reversed too by default (`--no-audio` keeps the audio playing forward); works on audio-only input as well. The `reverse` filter buffers every frame, so very long inputs cost memory | `mediakit reverse in.mp4 -o backwards.mp4` |
 | `interpolate` | Raise the frame rate with motion interpolation (`minterpolate`): 30fps to 60fps for smoother playback or slow motion. Modes: `blend` (fast default, cross-fades neighbours), `mci` (true motion compensation, best quality but much slower — ~9x realtime on CPU), `dup` (repeats frames). Only raises the frame rate; use `fit --max-fps` to lower it. Reports fps and frame counts measured on the output file | `mediakit interpolate in.mp4 --fps 60 -o smooth.mp4` |
 | `denoise` | Reduce sensor noise: `hqdn3d` (fast default) or `nlmeans` (better on fine detail, much slower). Strength 0–1 maps to hqdn3d 0–30 (0.5 is 15, the level that gained +2.9 dB PSNR on sigma-10 noise in testing) or nlmeans `s` 0–10. Reports high-frequency noise energy before and after, measured on disk | `mediakit denoise noisy.mp4 --strength 0.5 -o clean.mp4` |
+| `segment` | Cut a video into an HLS VOD playlist (`index.m3u8` + `.ts` segments) in a directory, ready to serve statically. Stream-copy by default (fast, lossless) — but segments can only start on keyframes, so actual lengths follow the source GOP; `--reencode` re-encodes to libx264/aac with forced keyframes for exact segment boundaries. Reports the segment count and durations parsed back from the playlist on disk | `mediakit segment in.mp4 --segment-time 6 -o hls/` |
 | `batch` | Apply one operation to every file matching a glob under a folder — `loudness`, `resize`, `reframe`, `compress`, `convert`, `extract_audio`, `reverse`, `grade`, `fit`, `trim` or `silence`, same args for all. Outputs are `<stem>-<operation>.<ext>` under the output dir, mirroring the input tree; `batch-manifest.json` records one row per file (`ok`/`error`/`cached`/`skipped`, in input order). Unchanged files are skipped via a content-hash cache (verified against the cached output's size + sha256); `--jobs N` runs files in parallel under one shared `--timeout`; `--dry-run` lists the planned outputs and writes nothing | `mediakit batch loudness --pattern '**/*.mp4' --input-dir clips/ -o out/ --args-json '{"target_lufs": -14}'` |
 | `silence` | Remove silent stretches, keeping a margin around speech | `mediakit silence in.mp4 -o tight.mp4` |
 | `cropdetect` | Measure letterbox/pillarbox bars; returns the crop rect + a ready crop command | `mediakit cropdetect in.mp4` |
@@ -253,7 +254,16 @@ minutes for a few seconds of 720p). Strength 0–1 maps to hqdn3d 0–30:
 testing — note the 0–10 scale some other servers use is too weak for
 real noise (hqdn3d=8 gained only +0.24 dB on the same fixture). The
 result measures high-frequency noise energy before and after, so the
-reduction is measured on disk. `batch` runs one operation over a whole folder: give it a
+reduction is measured on disk. `segment` cuts a video into an HLS
+VOD playlist (`index.m3u8` + `.ts` segments) in a directory, ready
+to serve statically. Stream-copy is the default — fast and lossless
+— but segments can only start on keyframes, so the actual lengths
+follow the source GOP: a clip with keyframes every 8s gives 8s
+segments no matter what `--segment-time` you ask for. `--reencode`
+re-encodes to libx264/aac with forced keyframes every segment, so
+the segments land exactly on the requested grid. The result parses
+the playlist back from disk, so the count and durations are measured,
+not assumed. `batch` runs one operation over a whole folder: give it a
 glob (`**/*.mp4`, or a bare `*.mp4` for every match at any depth) and the
 same args for every file, and it returns one row per file in input order
 — `ok` with the operation's own measured result, `error` with the

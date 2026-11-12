@@ -362,6 +362,29 @@ server.tool(
 );
 
 server.tool(
+  "segment",
+  "Cut a video into an HLS VOD playlist: index.m3u8 plus .ts segments in an output directory, ready to serve statically or preview in a player. Stream-copy is the default (fast, lossless) but segments can only start on keyframes, so actual segment lengths follow the source GOP — a sparse-GOP source gives fewer, longer segments than requested; use reencode=true to re-encode to libx264/aac with forced keyframes so segments land exactly on the requested grid. Copy mode refuses non-H.264 video or non-AAC/MP3 audio up front. The result parses the playlist back from disk and stats every segment file, so the count and durations are measured, not assumed.",
+  {
+    input: pathSchema,
+    output_dir: pathSchema.describe("Output directory for the playlist and .ts segments (created if needed)"),
+    segment_time: z.number().min(1).max(60).default(6).describe("Target segment length in seconds (default 6)"),
+    playlist: z.string().default("index.m3u8").describe("Playlist filename, must end .m3u8 (default index.m3u8)"),
+    segment_prefix: z.string().default("seg").describe("Segment filename stem (default seg -> seg000.ts, seg001.ts, ...)"),
+    reencode: z.boolean().default(false).describe("Re-encode to libx264/aac with forced keyframes for exact segment boundaries (default false = stream-copy)"),
+    crf: z.number().int().min(0).max(51).default(23),
+  },
+  async (a) => safe(() => core.segment({
+    input: a.input,
+    outputDir: a.output_dir,
+    segmentTime: a.segment_time,
+    playlist: a.playlist,
+    segmentPrefix: a.segment_prefix,
+    reencode: a.reencode,
+    crf: a.crf,
+  })),
+);
+
+server.tool(
   "convert",
   "Change container or codec. Omit video_codec/audio_codec to stream-copy that stream. crf 23 is a good default for H.264. gop (frames) or gop_seconds sets an exact keyframe interval on re-encode (scene-cut keyframes disabled for libx264/libx265/mpeg4); the result measures the keyframes on the output file. A GOP is required for keyframe-snapped stream-copy cuts.",
   {

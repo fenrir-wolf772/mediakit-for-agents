@@ -266,6 +266,19 @@ const COMMANDS = {
       ["-o, --output", "Output file (required)"],
     ],
   },
+  segment: {
+    usage: "mediakit segment <input> -o <directory> [--segment-time 6] [--playlist index.m3u8] [--segment-prefix seg] [--reencode] [--crf 23]",
+    desc: "Cut a video into an HLS VOD playlist (index.m3u8 + .ts segments) in a directory. Stream-copy by default (fast, lossless) — but segments can only start on keyframes, so actual lengths follow the source GOP; --reencode re-encodes to libx264/aac with forced keyframes for exact segment boundaries. Reports the segment count and durations parsed back from the playlist on disk.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--segment-time", "Target segment length in seconds, 1-60 (default 6)"],
+      ["--playlist", "Playlist filename, must end .m3u8 (default index.m3u8)"],
+      ["--segment-prefix", "Segment filename stem (default seg -> seg000.ts, ...)"],
+      ["--reencode", "Re-encode to libx264/aac with forced keyframes (exact segment grid)"],
+      ["--crf", "Quality 0-51, lower is better (default 23, reencode only)"],
+      ["-o, --output", "Output directory (required, created if needed)"],
+    ],
+  },
   convert: {
     usage: "mediakit convert <input> -o <output> [--video-codec <c>] [--audio-codec <c>] [--crf <n>] [--preset <p>] [--gop <frames>] [--gop-seconds <s>]",
     desc: "Change container or codec. Omit a codec to stream-copy that stream. --gop / --gop-seconds sets an exact keyframe interval on re-encode (measured on the output file).",
@@ -784,6 +797,16 @@ async function main() {
           input: needInput(), output: needOutput(opts),
           filter: opts.filter ?? "hqdn3d",
           strength: numOpt(opts, "strength") ?? 0.5,
+          crf: numOpt(opts, "crf") ?? 23,
+        });
+        break;
+      case "segment":
+        result = await core.segment({
+          input: needInput(), outputDir: needOutput(opts),
+          segmentTime: numOpt(opts, "segment_time") ?? 6,
+          playlist: opts.playlist ?? "index.m3u8",
+          segmentPrefix: opts.segment_prefix ?? "seg",
+          reencode: opts.reencode === true,
           crf: numOpt(opts, "crf") ?? 23,
         });
         break;

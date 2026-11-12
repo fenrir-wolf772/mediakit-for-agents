@@ -557,6 +557,22 @@ measured effect on the output file (frame counts for `interpolate`,
 high-frequency noise energy before/after for `denoise`) — read those
 numbers, don't assume the filter worked.
 
+### 37. HLS segments follow the keyframes, not the clock
+`segment` writes a VOD playlist (`index.m3u8` + `.ts` segments) into
+a directory. Stream-copy is the default and is fast and lossless,
+but a segment can only start on a keyframe: with a sparse GOP the
+segments are longer than `--segment-time` asks for (a fixture with
+keyframes every 8.333s gives 8.333s + 1.667s segments for a requested
+2s). That is correct HLS behaviour, not a bug — the tool reports the
+measured durations parsed back from the playlist, so read
+`segment_count` and `segments` instead of assuming the grid.
+`--reencode` re-encodes to libx264/aac with forced keyframes every
+segment, so the segments land exactly on the requested grid (5 x
+2.000s for a 10s clip at `--segment-time 2`). Copy mode refuses a
+non-H.264 video or non-AAC/MP3 audio up front — use `--reencode`
+for those sources. Serve the output directory statically; any
+player that speaks HLS plays `index.m3u8`.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

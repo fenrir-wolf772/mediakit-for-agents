@@ -86,5 +86,7 @@ jobs:
           node bin/mediakit.js batch loudness --pattern 'source*.mp4' --input-dir test -o outputs/ci-batch --args-json '{"target_lufs": -16}' | grep '"cached": 2'
           node bin/mediakit.js interpolate test/source.mp4 --fps 60 -o outputs/ci-interp.mp4 | grep '"fps_after": 60'
           node bin/mediakit.js denoise test/noisy.mp4 --strength 0.5 -o outputs/ci-denoise.mp4 | grep '"filter": "hqdn3d"'
+          node bin/mediakit.js segment test/source.mp4 --segment-time 2 -o outputs/ci-seg-copy | grep '"segment_count": 2'
+          node bin/mediakit.js segment test/source.mp4 --segment-time 2 --reencode -o outputs/ci-seg-re | grep '"segment_count": 5'
       - name: MCP test
         run: npm test
