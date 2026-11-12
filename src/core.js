@@ -3572,6 +3572,214 @@ export async function reverseClip({ input, output, audio = true, crf = 23 }) {
   };
 }
 
+// ---------------------------------------------------------------- chroma_key
+// Remove a green/blue screen (ffmpeg-cookbook's chromakey recipe +
+// MakeMyClip's backlog item): `chromakey=color:similarity:blend`
+// makes the key color transparent. The transparency lives in an
+// alpha channel, so the output container must carry one — and that
+// is where the naive recipe breaks: on this ffmpeg 8.1.2 build,
+// `libvpx-vp9 -pix_fmt yuva420p` decodes back as yuv420p (measured
+// 2026-11-13, even with -auto-alt-ref 0: alphaextract fails with
+// "Requested planes not available"). So transparent mode writes
+// .mov with ProRes 4444 (measured: corner alpha 256/4095,
+// subject 3760/4095 on 12-bit limited range — transparent vs
+// opaque). .mp4 is refused outright (H.264 has no alpha) and
+// .webm is refused with the reason above. With --background (an
+// image file or a hex color) the keyed foreground is composited
+// onto it in the same call and the output is a normal flat .mp4
+// (or .webm). The result measures the alpha on disk (middle frame,
+// 8-bit normalized via format=rgba so ProRes 12-bit depth does not
+// leak into the numbers): full-frame mean plus a corner region
+// (should be ~0 for a full-screen key) and a center region
+// (should be ~255 where the subject sits).
+function normalizeKeyColor(color) {
+  if (typeof color !== "string") {
+    throw new MediaKitError(`chroma_key --color must be a 6-digit hex color (e.g. 00FF00), got ${JSON.stringify(color)}`, "INVALID_ARG");
+  }
+  const hex = color.trim().replace(/^#/, "").replace(/^0x/i, "").toUpperCase();
+  if (!/^[0-9A-F]{6}$/.test(hex)) {
+    throw new MediaKitError(`chroma_key --color must be a 6-digit hex color (e.g. 00FF00 for green, 0000FF for blue), got "${color}"`, "INVALID_ARG");
+  }
+  return hex;
+}
+
+// Mean alpha (0-255, 8-bit normalized) of one frame, optionally
+// cropped to a W:H:X:Y pixel rect. Null when the measurement fails
+// (e.g. the file has no alpha plane at all — alphaextract refuses).
+async function alphaMeanAt(file, timeSeconds, crop) {
+  try {
+    const vf = crop
+      ? `format=rgba,crop=${crop},alphaextract,signalstats,metadata=print:key=lavfi.signalstats.YAVG`
+      : `format=rgba,alphaextract,signalstats,metadata=print:key=lavfi.signalstats.YAVG`;
+    const { stderr } = await run(FFMPEG, [
+      "-hide_banner", "-nostats", "-ss", String(timeSeconds), "-i", file,
+      "-vf", vf, "-frames:v", "1", "-f", "null", "-",
+    ]);
+    const m = stderr.match(/lavfi\.signalstats\.YAVG=([0-9.]+)/);
+    return m ? +parseFloat(m[1]).toFixed(1) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function chromaKey({ input, output, color = "00FF00", similarity = 0.1, blend = 0.0, background = null, crf = 23 }) {
+  const inPath = await requireInput(input);
+  const outPath = await prepareOutput(output, [inPath]);
+  const key = normalizeKeyColor(color);
+  const sim = num(similarity, "similarity", { min: 0, max: 1 });
+  const bl = num(blend, "blend", { min: 0, max: 1 });
+  const c = num(crf, "crf", { min: 0, max: 51, integer: true });
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("chroma_key needs a video input", "INVALID_ARG");
+  const { width: W, height: H } = meta.video;
+  const ext = path.extname(outPath).slice(1).toLowerCase();
+  const keyFilter = `chromakey=0x${key}:${sim}:${bl}`;
+
+  // --background: an image file, or a hex color (00FF00 / #00FF00).
+  let bg = null;
+  if (background !== null && background !== undefined && background !== "") {
+    const b = String(background).trim();
+    if (/^#?[0-9A-Fa-f]{6}$/.test(b) || /^0x[0-9A-Fa-f]{6}$/.test(b)) {
+      bg = { kind: "color", value: b.replace(/^#|^0x/i, "").toUpperCase() };
+    } else {
+      bg = { kind: "image", path: await requireInput(b, "background") };
+    }
+  }
+
+  let args;
+  if (!bg) {
+    // Transparent mode: only .mov (ProRes 4444) keeps the alpha on
+    // this build — see the header comment for the measured WebM loss.
+    if (ext !== "mov") {
+      throw new MediaKitError(
+        `chroma_key without --background keeps transparency, so the output must be .mov (ProRes 4444) — got .${ext || "(no extension)"}. ` +
+        `.mp4/H.264 has no alpha channel, and this ffmpeg build drops VP9 alpha in .webm (measured 2026-11-13). ` +
+        `Add --background <image|hex-color> to composite onto a background and write .mp4/.webm instead.`,
+        "INVALID_ARG",
+      );
+    }
+    args = ["-y", "-i", inPath, "-vf", `${keyFilter},format=yuva444p10le`,
+      "-c:v", "prores_ks", "-profile:v", "4444"];
+    if (meta.audio) args.push("-c:a", "aac");
+    args.push(outPath);
+  } else {
+    // Composite mode: flat yuv420p output, .mp4 (libx264) or .webm (VP9).
+    if (ext !== "mp4" && ext !== "webm") {
+      throw new MediaKitError(`chroma_key with --background writes a flat video, so the output must be .mp4 or .webm — got .${ext || "(no extension)"}`, "INVALID_ARG");
+    }
+    const fps = meta.video.fps ?? 30;
+    const dur = meta.duration_seconds ?? 0;
+    const videoCodec = ext === "webm" ? "libvpx-vp9" : "libx264";
+    const bgFilter = bg.kind === "color"
+      ? null
+      : `scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H}`;
+    const fc = bg.kind === "color"
+      ? `[1:v]${keyFilter}[fg];[0:v][fg]overlay=0:0,format=yuv420p[v]`
+      : `[0:v]${bgFilter}[bg];[1:v]${keyFilter}[fg];[bg][fg]overlay=0:0,format=yuv420p[v]`;
+    args = ["-y"];
+    if (bg.kind === "color") args.push("-f", "lavfi", "-i", `color=c=0x${bg.value}:s=${W}x${H}:r=${fps}:d=${dur}`);
+    else args.push("-framerate", String(fps), "-loop", "1", "-i", bg.path);
+    args.push("-i", inPath, "-filter_complex", fc, "-map", "[v]");
+    if (meta.audio) args.push("-map", "1:a", "-c:a", "copy");
+    args.push("-c:v", videoCodec, "-crf", String(c), "-preset", "medium");
+    if (dur) args.push("-t", String(dur));
+    args.push(outPath);
+  }
+  await run(FFMPEG, args);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  const pixFmt = out.video?.pixel_format ?? null;
+  const hasAlpha = !!pixFmt && /(yuva|argb|rgba|abgr|bgra)/.test(pixFmt);
+  // Alpha is measured on the middle frame; corner (1/8 of the frame)
+  // should be ~0 for a full-screen key, center ~255 on the subject.
+  let alphaMean = null, alphaCornerMean = null, alphaCenterMean = null;
+  if (!bg && hasAlpha) {
+    const t = (out.duration_seconds ?? meta.duration_seconds ?? 3) / 2;
+    const cw = Math.max(2, Math.floor(W / 8));
+    const ch = Math.max(2, Math.floor(H / 8));
+    alphaMean = await alphaMeanAt(outPath, t, null);
+    alphaCornerMean = await alphaMeanAt(outPath, t, `${cw}:${ch}:0:0`);
+    alphaCenterMean = await alphaMeanAt(outPath, t, `${cw}:${ch}:${Math.floor(W / 2 - cw / 2)}:${Math.floor(H / 2 - ch / 2)}`);
+  }
+  return {
+    operation: "chroma_key", input: inPath, output: outPath,
+    color: key, similarity: sim, blend: bl,
+    background: bg ? (bg.kind === "color" ? bg.value : bg.path) : null,
+    mode: bg ? "composite" : "transparent",
+    pixel_format: pixFmt, has_alpha: hasAlpha,
+    alpha_mean: alphaMean, alpha_corner_mean: alphaCornerMean, alpha_center_mean: alphaCenterMean,
+    duration_seconds: out.duration_seconds,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+    size_bytes: info.size_bytes,
+  };
+}
+
+// ---------------------------------------------------------------- zoom_pan
+// Ken Burns effect: turn a still image into a moving clip
+// (dev.to's AI Shorts pipeline + salivity's zoompan guides —
+// MakeMyClip's backlog item). zoompan crops a moving window out of
+// the frame and scales it back to the output size, so zoom and pan
+// are one linear interpolation each: zoom z0→z1 and focus
+// (fx0,fy0)→(fx1,fy1), both driven by the output frame number `on`.
+// Two measured gotchas baked in: (1) zoompan does its crop math in
+// integer pixels, so slow moves jitter — the input is pre-scaled
+// 1.25x bigger than the output first (the guides' fix); (2) a video
+// input would be stretched by d frames per input frame, so this
+// tool takes a still image only and refuses video/audio inputs.
+// Frame 0 is exactly the full image (zoom z0, focus start) and the
+// last frame is exactly the zoomed window (zoom z1, focus end) —
+// the test suite verifies both against crops computed independently.
+export async function zoomPan({ input, output, duration = 5, fps = 30, zoomFrom = 1, zoomTo = 1.5, focusX = 0.5, focusY = 0.5, focusEndX = null, focusEndY = null, width = 1280, height = 720, crf = 23 }) {
+  const inPath = await requireInput(input);
+  const outPath = await prepareOutput(output, [inPath]);
+  const dur = num(duration, "duration", { min: 0.5, max: 600 });
+  const f = num(fps, "fps", { min: 1, max: 120, integer: true });
+  const z0 = num(zoomFrom, "zoom_from", { min: 1, max: 10 });
+  const z1 = num(zoomTo, "zoom_to", { min: 1, max: 10 });
+  const fx0 = num(focusX, "focus_x", { min: 0, max: 1 });
+  const fy0 = num(focusY, "focus_y", { min: 0, max: 1 });
+  const fx1 = focusEndX === null || focusEndX === undefined ? fx0 : num(focusEndX, "focus_end_x", { min: 0, max: 1 });
+  const fy1 = focusEndY === null || focusEndY === undefined ? fy0 : num(focusEndY, "focus_end_y", { min: 0, max: 1 });
+  const w = num(width, "width", { min: 2, max: 7680, integer: true });
+  const h = num(height, "height", { min: 2, max: 4320, integer: true });
+  if (w % 2 || h % 2) throw new MediaKitError(`zoom_pan width/height must be even (got ${w}x${h})`, "INVALID_ARG");
+  const c = num(crf, "crf", { min: 0, max: 51, integer: true });
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("zoom_pan needs a still image input", "INVALID_ARG");
+  if (meta.audio || meta.duration_seconds !== null) {
+    throw new MediaKitError("zoom_pan takes a still image, not a video (zoompan would stretch a video by d frames per input frame — extract a frame first)", "INVALID_ARG");
+  }
+  const n = Math.max(2, Math.round(dur * f));
+  const preW = Math.ceil((w * 1.25) / 2) * 2;
+  const preH = Math.ceil((h * 1.25) / 2) * 2;
+  const fmt = (x) => +x.toFixed(4);
+  // Linear in `on` (0..n-1); at on=0 the window is the full frame at
+  // zoom z0, at on=n-1 it is the z1 window on the end focus.
+  const zExpr = `${fmt(z0)}+(${fmt(z1 - z0)})*on/${n - 1}`;
+  const fxExpr = `(${fmt(fx0)}+(${fmt(fx1 - fx0)})*on/${n - 1})`;
+  const fyExpr = `(${fmt(fy0)}+(${fmt(fy1 - fy0)})*on/${n - 1})`;
+  const xExpr = `min(max(${fxExpr}*iw-(iw/zoom)/2,0),iw-iw/zoom)`;
+  const yExpr = `min(max(${fyExpr}*ih-(ih/zoom)/2,0),ih-ih/zoom)`;
+  const vf = `scale=${preW}:${preH}:force_original_aspect_ratio=increase,crop=${preW}:${preH},zoompan=z='${zExpr}':x='${xExpr}':y='${yExpr}':d=${n}:s=${w}x${h}:fps=${f}`;
+  await run(FFMPEG, [
+    "-y", "-loop", "1", "-i", inPath, "-vf", vf,
+    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", String(c), "-preset", "medium",
+    "-t", String(dur), outPath,
+  ]);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  const frames = await countVideoFrames(outPath);
+  return {
+    operation: "zoom_pan", input: inPath, output: outPath,
+    duration_seconds: out.duration_seconds,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+    fps: out.video?.fps ?? null, frames,
+    zoom_from: z0, zoom_to: z1,
+    focus_start: [fx0, fy0], focus_end: [fx1, fy1],
+    size_bytes: info.size_bytes,
+  };
+}
+
 // ---------------------------------------------------------------- interpolate
 // Motion-interpolate a clip up to a higher frame rate
 // (hyepartners-gmail/vibevideo-mcp's MotionInterpolator idea —
@@ -4183,9 +4391,10 @@ const DOCTOR_FILTERS = [
   "astats", "ametadata", "eq", "hue", "colorbalance", "lutrgb",
   "reverse", "areverse",
   "minterpolate", "hqdn3d", "nlmeans",
+  "chromakey", "zoompan",
 ];
 const DOCTOR_ENCODERS = [
-  "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4",
+  "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4", "prores_ks",
   "aac", "libopus", "libmp3lame", "libvorbis", "flac", "pcm_s16le",
 ];
 const DOCTOR_DECODERS = [
@@ -4239,6 +4448,8 @@ const TOOL_REQUIREMENTS = {
   mux: {},
   svg_animate: { decoders: ["librsvg"], encoders: ["libx264"] },
   transcribe: {},
+  chroma_key: { filters: ["chromakey", "overlay", "scale"], encoders: ["libvpx-vp9", "prores_ks", "libx264"] },
+  zoom_pan: { filters: ["zoompan", "scale", "crop"], encoders: ["libx264"] },
   doctor: {},
 };
 
@@ -5296,6 +5507,10 @@ export const BATCH_OPERATIONS = {
     args: ["threshold_db", "min_duration", "margin"],
     run: (input, output, a) => silence({ input, output, thresholdDb: a.threshold_db ?? -40, minDuration: a.min_duration ?? 0.5, margin: a.margin ?? 0.2, detectOnly: false }),
   },
+  chroma_key: {
+    args: ["color", "similarity", "blend", "background", "crf"],
+    run: (input, output, a) => chromaKey({ input, output, color: a.color ?? "00FF00", similarity: a.similarity ?? 0.1, blend: a.blend ?? 0.0, background: a.background ?? null, crf: a.crf ?? 23 }),
+  },
 };
 
 const BATCH_CACHE_FILENAME = ".mediakit-batch-cache.json";
@@ -5313,6 +5528,13 @@ function batchOutputExt(operation, inputExt, args) {
     return AUDIO_FORMATS[inputExt] ? inputExt : "mp3";
   }
   if (operation === "loudness" && args.format) return String(args.format).toLowerCase().replace(/^\./, "");
+  // chroma_key without a background keeps transparency, so the batch
+  // output must be .mov (ProRes 4444); with a background it is a
+  // flat video — .mp4, or .webm when the input already was one.
+  if (operation === "chroma_key") {
+    if (!args.background) return "mov";
+    return inputExt === "webm" ? "webm" : "mp4";
+  }
   return inputExt;
 }
 
@@ -5604,6 +5826,10 @@ export const MANIFEST_STEPS = {
   overlay: {
     args: ["overlay", "position", "margin", "width", "opacity", "start", "end"],
     run: (input, output, a) => overlayImage({ input, output, overlay: a.overlay, position: a.position ?? "top-right", margin: a.margin ?? 24, width: a.width ?? null, opacity: a.opacity ?? 1, start: a.start ?? null, end: a.end ?? null }),
+  },
+  chroma_key: {
+    args: ["color", "similarity", "blend", "background", "crf"],
+    run: (input, output, a) => chromaKey({ input, output, color: a.color ?? "00FF00", similarity: a.similarity ?? 0.1, blend: a.blend ?? 0.0, background: a.background ?? null, crf: a.crf ?? 23 }),
   },
 };
 

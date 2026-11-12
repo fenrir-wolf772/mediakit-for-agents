@@ -655,7 +655,7 @@ dir — the error names the directory, so inspect the broken step's
 file instead of guessing. Only single-input steps chain
 (`trim`/`resize`/`reframe`/`compress`/`convert`/`extract_audio`/
 `reverse`/`grade`/`fit`/`silence`/`denoise`/`interpolate`/
-`burn_captions`/`overlay`); multi-input work (`concat`, `mix`,
+`burn_captions`/`overlay`/`chroma_key`); multi-input work (`concat`, `mix`,
 `mux`, `pip`) stays a separate call before or after the manifest.
 
 ### 41. One style id for the whole video — don't retype hex values
@@ -670,6 +670,32 @@ it wins over the locked value, is reported in `style_overrides`, and
 never rewrites the library. Changing the style after captions are
 burned means re-burning and re-verifying (same rule as the
 style-lock): the old render is not the new style.
+
+### 42. Green screen out is a measured alpha, Ken Burns is a measured zoom
+`chroma_key` keys one color out (`--color` hex, `--similarity`
+tolerance, `--blend` edge softness) and either keeps the
+transparency or composites onto a background in the same call.
+Without `--background` the output MUST be `.mov` (ProRes 4444):
+`.mp4`/H.264 has no alpha channel, and this ffmpeg build drops VP9
+alpha in `.webm` (measured, even with `-auto-alt-ref 0`), so a
+`.webm` that "worked" is a file with the alpha silently gone — the
+tool refuses it instead of writing it. With `--background` (an
+image file, or a hex color like `1E40AF`) the output is a flat
+`.mp4`/`.webm`. Read the measured alpha in the result: on a
+full-screen key the corner reads ~0 and the subject ~255, and the
+frame mean equals the subject's share of the frame — if the corner
+is not near 0, the similarity is too low or the screen is not the
+color you named; if the subject is not near 255, the similarity is
+too high and is eating it. `zoom_pan` turns a still image into a
+Ken Burns clip: zoom `--zoom-from` → `--zoom-to` while the focus
+point travels from (`--focus-x`, `--focus-y`) to (`--focus-end-x`,
+`--focus-end-y`), 0–1 fractions of the frame. A video input is
+refused (zoompan would stretch it by `d` frames per input frame) —
+extract a frame first. Verify a zoom the same way the test suite
+does: frame 0 against the full image scaled, the last frame against
+the zoomed window cropped by hand — both must match within a few dB
+of PSNR, and the last frame must be clearly closer to the zoomed
+crop than to the full image.
 
 ## Workflow: vertical captioned clip from a landscape source
 

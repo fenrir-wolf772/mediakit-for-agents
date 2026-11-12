@@ -347,6 +347,64 @@ server.tool(
 );
 
 server.tool(
+  "chroma_key",
+  "Remove a green/blue screen: keys out one color (chromakey filter) and either keeps the transparency (output MUST be .mov, ProRes 4444 — .mp4 has no alpha channel, and this ffmpeg build drops VP9 alpha in .webm) or composites the subject onto a background in the same call (image file or hex color, output .mp4/.webm). similarity 0-1 is the tolerance (too high eats the subject), blend 0-1 softens the edge. The result measures the alpha on disk (middle frame, 0-255): full-frame mean plus corner (should be ~0 for a full-screen key) and center (should be ~255 on the subject).",
+  {
+    input: pathSchema,
+    output: pathSchema.describe("Output file path: .mov for transparency, .mp4/.webm when background is given"),
+    color: z.string().default("00FF00").describe("Key color as 6-digit hex (default 00FF00 green; 0000FF for blue)"),
+    similarity: z.number().min(0).max(1).default(0.1).describe("Color tolerance 0-1 (default 0.1)"),
+    blend: z.number().min(0).max(1).default(0).describe("Edge blend 0-1 (default 0)"),
+    background: z.string().optional().describe("Optional background to composite onto: an image file path, or a hex color (e.g. 1E40AF). Without it the output keeps transparency and must be .mov"),
+    crf: z.number().int().min(0).max(51).default(23),
+  },
+  async (a) => safe(() => core.chromaKey({
+    input: a.input,
+    output: a.output,
+    color: a.color,
+    similarity: a.similarity,
+    blend: a.blend,
+    background: a.background ?? null,
+    crf: a.crf,
+  })),
+);
+
+server.tool(
+  "zoom_pan",
+  "Ken Burns effect: turn a still image into a moving clip (zoompan filter). Zooms linearly from zoom_from to zoom_to while the focus point moves from (focus_x, focus_y) to (focus_end_x, focus_end_y) — all 0-1 fractions of the frame, 0.5 is center. The input is pre-scaled 1.25x before zooming (avoids the integer-crop jitter zoompan is known for). Input must be a still image, not a video. The result counts frames on the output file, so duration and fps are measured, not assumed.",
+  {
+    input: pathSchema.describe("Still image file (PNG/JPG/WebP)"),
+    output: pathSchema,
+    duration: z.number().min(0.5).max(600).default(5).describe("Clip length in seconds (default 5)"),
+    fps: z.number().int().min(1).max(120).default(30).describe("Output frame rate (default 30)"),
+    zoom_from: z.number().min(1).max(10).default(1).describe("Zoom at the first frame, 1 = full image (default 1)"),
+    zoom_to: z.number().min(1).max(10).default(1.5).describe("Zoom at the last frame (default 1.5)"),
+    focus_x: z.number().min(0).max(1).default(0.5).describe("Focus point x at the first frame, 0-1 (default 0.5 center)"),
+    focus_y: z.number().min(0).max(1).default(0.5).describe("Focus point y at the first frame, 0-1 (default 0.5 center)"),
+    focus_end_x: z.number().min(0).max(1).optional().describe("Focus point x at the last frame (default = focus_x)"),
+    focus_end_y: z.number().min(0).max(1).optional().describe("Focus point y at the last frame (default = focus_y)"),
+    width: z.number().int().min(2).max(7680).default(1280).describe("Output width in pixels, even (default 1280)"),
+    height: z.number().int().min(2).max(4320).default(720).describe("Output height in pixels, even (default 720)"),
+    crf: z.number().int().min(0).max(51).default(23),
+  },
+  async (a) => safe(() => core.zoomPan({
+    input: a.input,
+    output: a.output,
+    duration: a.duration,
+    fps: a.fps,
+    zoomFrom: a.zoom_from,
+    zoomTo: a.zoom_to,
+    focusX: a.focus_x,
+    focusY: a.focus_y,
+    focusEndX: a.focus_end_x ?? null,
+    focusEndY: a.focus_end_y ?? null,
+    width: a.width,
+    height: a.height,
+    crf: a.crf,
+  })),
+);
+
+server.tool(
   "interpolate",
   "Raise a clip's frame rate with motion interpolation (minterpolate): 30fps to 60fps for smoother playback or slow motion. Modes: blend (fast default, cross-fades neighbours), mci (true motion-compensated frames, best quality but much slower — about 9x realtime on CPU), dup (repeats frames). Only raises the frame rate; use fit --max-fps to lower it. The result counts frames on the output file, so the fps is measured, not assumed.",
   {

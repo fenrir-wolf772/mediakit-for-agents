@@ -260,6 +260,38 @@ const COMMANDS = {
       ["-o, --output", "Output file (required)"],
     ],
   },
+  "chroma-key": {
+    usage: "mediakit chroma-key <input> -o <output.mov> [--color 00FF00] [--similarity 0.1] [--blend 0] [--background <image|hex>] [--crf 23]",
+    desc: "Remove a green/blue screen. Without --background the output keeps transparency and MUST be .mov (ProRes 4444) — .mp4 has no alpha, and this ffmpeg build drops VP9 alpha in .webm. With --background (an image file or a hex color) the subject is composited onto it and the output is a flat .mp4/.webm. Reports the alpha measured on disk (middle frame): full-frame mean, corner (~0 for a full-screen key) and center (~255 on the subject).",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--color", "Key color as 6-digit hex (default 00FF00 green; 0000FF for blue)"],
+      ["--similarity", "Color tolerance 0-1 (default 0.1; too high eats the subject)"],
+      ["--blend", "Edge blend 0-1 (default 0)"],
+      ["--background", "Image file or hex color to composite onto (e.g. bg.jpg or 1E40AF); without it the output keeps transparency and must be .mov"],
+      ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["-o, --output", "Output file (required)"],
+    ],
+  },
+  "zoom-pan": {
+    usage: "mediakit zoom-pan <image> -o <output.mp4> [--duration 5] [--fps 30] [--zoom-from 1] [--zoom-to 1.5] [--focus-x 0.5] [--focus-y 0.5] [--focus-end-x 0.5] [--focus-end-y 0.5] [--width 1280] [--height 720] [--crf 23]",
+    desc: "Ken Burns effect: turn a still image into a moving clip. Zooms linearly from --zoom-from to --zoom-to while the focus point moves from (--focus-x, --focus-y) to (--focus-end-x, --focus-end-y), 0-1 fractions of the frame (0.5 is center). The input is pre-scaled 1.25x before zooming to avoid zoompan's integer-crop jitter. Input must be a still image, not a video.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--duration", "Clip length in seconds (default 5)"],
+      ["--fps", "Output frame rate (default 30)"],
+      ["--zoom-from", "Zoom at the first frame, 1 = full image (default 1)"],
+      ["--zoom-to", "Zoom at the last frame (default 1.5)"],
+      ["--focus-x", "Focus point x at the first frame, 0-1 (default 0.5)"],
+      ["--focus-y", "Focus point y at the first frame, 0-1 (default 0.5)"],
+      ["--focus-end-x", "Focus point x at the last frame (default = --focus-x)"],
+      ["--focus-end-y", "Focus point y at the last frame (default = --focus-y)"],
+      ["--width", "Output width in pixels, even (default 1280)"],
+      ["--height", "Output height in pixels, even (default 720)"],
+      ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["-o, --output", "Output file (required)"],
+    ],
+  },
   interpolate: {
     usage: "mediakit interpolate <input> -o <output> --fps 60 [--mode mci|blend|dup] [--crf 23]",
     desc: "Raise the frame rate with motion interpolation (minterpolate). blend is the fast default; mci is true motion compensation but much slower (~9x realtime on CPU). Reports fps and frame counts measured on the output file.",
@@ -504,7 +536,7 @@ const COMMANDS = {
   },
   batch: {
     usage: "mediakit batch <operation> --pattern <glob> --input-dir <dir> -o <output-dir> [--args-json '{\"target_lufs\": -14}'] [--jobs 1] [--suffix -loudness] [--no-cache] [--stop-on-error] [--timeout 1800] [--max-files 200] [--dry-run]",
-    desc: "Apply one operation (loudness|resize|reframe|compress|convert|extract-audio|reverse|grade|fit|trim|silence) to every file matching a glob under a folder, with the same args for all. Outputs are <stem>-<operation>.<ext> under the output dir, mirroring the input tree; a batch-manifest.json records every file's result. Unchanged files are skipped via a content-hash cache; --dry-run lists the planned outputs and writes nothing.",
+    desc: "Apply one operation (loudness|resize|reframe|compress|convert|extract-audio|reverse|grade|fit|trim|silence|chroma-key) to every file matching a glob under a folder, with the same args for all. Outputs are <stem>-<operation>.<ext> under the output dir, mirroring the input tree; a batch-manifest.json records every file's result. Unchanged files are skipped via a content-hash cache; --dry-run lists the planned outputs and writes nothing.",
     args: [{ name: "operation", required: true }],
     options: [
       ["--pattern", "Glob under --input-dir: **/*.mp4 (any depth), sub/*.mp4 (one folder), or bare *.mp4 (basename at any depth) (required)"],
@@ -522,7 +554,7 @@ const COMMANDS = {
   },
   manifest: {
     usage: "mediakit manifest <manifest.json> [-o <output.mp4>] [--dry-run] [--no-cache] [--keep-intermediates]",
-    desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (trim|resize|reframe|compress|convert|extract-audio|reverse|grade|fit|trim|silence|denoise|interpolate|burn-captions|overlay), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file.",
+    desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (trim|resize|reframe|compress|convert|extract-audio|reverse|grade|fit|trim|silence|denoise|interpolate|burn-captions|overlay|chroma-key), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file.",
     args: [{ name: "manifest", required: true }],
     options: [
       ["--dry-run", "Validate the manifest and list the planned steps without running anything"],
@@ -852,6 +884,32 @@ async function main() {
           crf: numOpt(opts, "crf") ?? 23,
         });
         break;
+      case "chroma-key":
+        result = await core.chromaKey({
+          input: needInput(), output: needOutput(opts),
+          color: opts.color ?? "00FF00",
+          similarity: numOpt(opts, "similarity") ?? 0.1,
+          blend: numOpt(opts, "blend") ?? 0.0,
+          background: opts.background ?? null,
+          crf: numOpt(opts, "crf") ?? 23,
+        });
+        break;
+      case "zoom-pan":
+        result = await core.zoomPan({
+          input: needInput(), output: needOutput(opts),
+          duration: numOpt(opts, "duration") ?? 5,
+          fps: numOpt(opts, "fps") ?? 30,
+          zoomFrom: numOpt(opts, "zoom_from") ?? 1,
+          zoomTo: numOpt(opts, "zoom_to") ?? 1.5,
+          focusX: numOpt(opts, "focus_x") ?? 0.5,
+          focusY: numOpt(opts, "focus_y") ?? 0.5,
+          focusEndX: numOpt(opts, "focus_end_x") ?? null,
+          focusEndY: numOpt(opts, "focus_end_y") ?? null,
+          width: numOpt(opts, "width") ?? 1280,
+          height: numOpt(opts, "height") ?? 720,
+          crf: numOpt(opts, "crf") ?? 23,
+        });
+        break;
       case "interpolate":
         result = await core.interpolate({
           input: needInput(), output: needOutput(opts),
@@ -1108,7 +1166,7 @@ async function main() {
         break;
       }
       case "batch": {
-        if (!positional[0]) fail("missing operation: loudness|resize|reframe|compress|convert|extract-audio|reverse|grade|fit|trim|silence");
+        if (!positional[0]) fail("missing operation: loudness|resize|reframe|compress|convert|extract-audio|reverse|grade|fit|trim|silence|chroma-key");
         if (!opts.pattern) fail("missing required option: --pattern <glob>");
         if (!opts.input_dir) fail("missing required option: --input-dir <dir>");
         const opName = positional[0].replace(/-/g, "_");

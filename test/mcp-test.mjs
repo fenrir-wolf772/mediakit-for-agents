@@ -98,10 +98,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 45 tools present");
-checkOk(missing.length === 0, "tools/list has all 45 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 47 tools present");
+checkOk(missing.length === 0, "tools/list has all 47 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -400,6 +400,98 @@ const reverseVideoOnlyJson = JSON.parse(reverseVideoOnlyRes.content[0].text);
 checkOk(reverseVideoOnlyJson.video_reversed === true && reverseVideoOnlyJson.audio_reversed === false && near(reverseVideoOnlyJson.duration_seconds, 10, 0.1), "reverse on video-only input reverses video, no audio to reverse", JSON.stringify(reverseVideoOnlyJson));
 const reverseNoop = await callExpectThrow("reverse", { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-reverse-noop.mp3"), audio: false });
 checkOk(/reverses nothing/.test(reverseNoop), "reverse audio-only + audio=false is refused (nothing to reverse)", reverseNoop.slice(0, 200));
+
+// chroma_key: green screen out. Fixture test/greenscreen.mp4 is pure
+// green 640x360 with a red 200x140 rect in the middle. Transparent
+// mode must keep an alpha channel (.mov ProRes 4444); composite mode
+// puts the subject on a color or an image background.
+const chromaRes = await client.callTool({
+  name: "chroma_key",
+  arguments: { input: path.join(root, "test/greenscreen.mp4"), output: path.join(root, "outputs/mcp-chroma.mov") },
+});
+const chromaJson = JSON.parse(chromaRes.content[0].text);
+console.log("chroma_key call:", JSON.stringify(chromaJson));
+checkOk(chromaJson.mode === "transparent" && chromaJson.has_alpha === true && /yuva/.test(chromaJson.pixel_format ?? ""), "chroma_key transparent mode keeps an alpha channel (ProRes 4444 .mov)", JSON.stringify(chromaJson));
+checkOk(chromaJson.alpha_corner_mean !== null && chromaJson.alpha_corner_mean < 20, "chroma_key keyed-out green corner is transparent (alpha ~0)", `corner alpha=${chromaJson.alpha_corner_mean}`);
+checkOk(chromaJson.alpha_center_mean !== null && chromaJson.alpha_center_mean > 235, "chroma_key red subject stays opaque (alpha ~255)", `center alpha=${chromaJson.alpha_center_mean}`);
+checkOk(near(chromaJson.alpha_mean, 31, 6), "chroma_key alpha mean matches the subject share of the frame (200x140 of 640x360)", `alpha_mean=${chromaJson.alpha_mean}`);
+checkOk(chromaJson.dimensions === "640x360" && near(chromaJson.duration_seconds, 3, 0.1) && typeof chromaJson.size_bytes === "number" && chromaJson.size_bytes > 0, "chroma_key keeps dimensions/duration, real bytes", JSON.stringify(chromaJson));
+// Independent: ffprobe (not the tool's report) sees the alpha pixel format.
+const { stdout: chromaProbeOut } = await execFileAsync("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=pix_fmt", "-of", "csv=p=0", path.join(root, "outputs/mcp-chroma.mov")]);
+checkOk(/yuva/.test(chromaProbeOut.trim()), "ffprobe independently reads a yuva pixel format on the keyed file", chromaProbeOut.trim());
+const chromaBgRes = await client.callTool({
+  name: "chroma_key",
+  arguments: { input: path.join(root, "test/greenscreen.mp4"), output: path.join(root, "outputs/mcp-chroma-bg.mp4"), background: "1E40AF" },
+});
+const chromaBgJson = JSON.parse(chromaBgRes.content[0].text);
+checkOk(chromaBgJson.mode === "composite" && chromaBgJson.has_alpha === false && chromaBgJson.pixel_format === "yuv420p", "chroma_key --background composites to a flat yuv420p mp4", JSON.stringify(chromaBgJson));
+const chromaBgB = await planeMean(path.join(root, "outputs/mcp-chroma-bg.mp4"), "100:100:0:0", "b");
+const chromaBgR = await planeMean(path.join(root, "outputs/mcp-chroma-bg.mp4"), "100:100:270:130", "r");
+console.log("chroma composite pixels: corner B =", chromaBgB, "| center R =", chromaBgR);
+checkOk(chromaBgB !== null && chromaBgB > 160, "chroma_key composite corner is the background blue (B~175)", `B=${chromaBgB}`);
+checkOk(chromaBgR !== null && chromaBgR > 240, "chroma_key composite center is the red subject (R~253)", `R=${chromaBgR}`);
+const chromaBgImgRes = await client.callTool({
+  name: "chroma_key",
+  arguments: { input: path.join(root, "test/greenscreen.mp4"), output: path.join(root, "outputs/mcp-chroma-bgimg.mp4"), background: path.join(root, "test/kenburns.png") },
+});
+const chromaBgImgJson = JSON.parse(chromaBgImgRes.content[0].text);
+checkOk(chromaBgImgJson.mode === "composite" && typeof chromaBgImgJson.background === "string" && chromaBgImgJson.background.endsWith("kenburns.png"), "chroma_key --background accepts an image file", JSON.stringify(chromaBgImgJson));
+const chromaBgImgB = await planeMean(path.join(root, "outputs/mcp-chroma-bgimg.mp4"), "100:100:0:0", "b");
+checkOk(chromaBgImgB !== null && chromaBgImgB > 160, "chroma_key image background shows through the keyed corner", `B=${chromaBgImgB}`);
+const chromaMp4 = await callExpectThrow("chroma_key", { input: path.join(root, "test/greenscreen.mp4"), output: path.join(root, "outputs/mcp-chroma-bad.mp4") });
+checkOk(/must be \.mov/.test(chromaMp4), "chroma_key refuses .mp4 without a background (no alpha channel)", chromaMp4.slice(0, 200));
+const chromaBadColor = await callExpectThrow("chroma_key", { input: path.join(root, "test/greenscreen.mp4"), output: path.join(root, "outputs/mcp-chroma-bad2.mov"), color: "ZZZZZZ" });
+checkOk(/6-digit hex/.test(chromaBadColor), "chroma_key refuses a non-hex key color", chromaBadColor.slice(0, 200));
+const chromaBadSim = await callExpectThrow("chroma_key", { input: path.join(root, "test/greenscreen.mp4"), output: path.join(root, "outputs/mcp-chroma-bad3.mov"), similarity: 2 });
+checkOk(/similarity/.test(chromaBadSim), "chroma_key refuses similarity above 1", chromaBadSim.slice(0, 200));
+
+// zoom_pan: Ken Burns on test/kenburns.png (blue field, yellow rect
+// center, red rect bottom-left). Frame 0 must be the full image, the
+// last frame the 2x center window — both checked against crops
+// computed independently with plain ffmpeg (frames extracted as mp4
+// so psnrY sees YUV, not RGB).
+async function frameMp4(input, frameNo, out) {
+  await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-i", input, "-vf", `select='eq(n\\,${frameNo})'`, "-frames:v", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", out]);
+}
+const zoomRes = await client.callTool({
+  name: "zoom_pan",
+  arguments: { input: path.join(root, "test/kenburns.png"), output: path.join(root, "outputs/mcp-zoompan.mp4"), duration: 3, fps: 30, zoom_from: 1, zoom_to: 2, width: 640, height: 360 },
+});
+const zoomJson = JSON.parse(zoomRes.content[0].text);
+console.log("zoom_pan call:", JSON.stringify(zoomJson));
+checkOk(zoomJson.frames === 90 && near(zoomJson.duration_seconds, 3, 0.1) && zoomJson.dimensions === "640x360" && zoomJson.fps === 30, "zoom_pan makes a 3s 30fps 640x360 clip with 90 frames", JSON.stringify(zoomJson));
+await frameMp4(path.join(root, "outputs/mcp-zoompan.mp4"), 0, path.join(root, "outputs/mcp-zoompan-f0.mp4"));
+await frameMp4(path.join(root, "outputs/mcp-zoompan.mp4"), 89, path.join(root, "outputs/mcp-zoompan-f89.mp4"));
+await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-i", path.join(root, "test/kenburns.png"), "-vf", "scale=640:360", "-c:v", "libx264", "-pix_fmt", "yuv420p", path.join(root, "outputs/mcp-zoompan-exp-f0.mp4")]);
+await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-i", path.join(root, "test/kenburns.png"), "-vf", "crop=640:360:320:180,scale=640:360", "-c:v", "libx264", "-pix_fmt", "yuv420p", path.join(root, "outputs/mcp-zoompan-exp-f89.mp4")]);
+const zoomF0Psnr = await psnrY(path.join(root, "outputs/mcp-zoompan-exp-f0.mp4"), path.join(root, "outputs/mcp-zoompan-f0.mp4"));
+const zoomF89Psnr = await psnrY(path.join(root, "outputs/mcp-zoompan-exp-f89.mp4"), path.join(root, "outputs/mcp-zoompan-f89.mp4"));
+const zoomF89VsFull = await psnrY(path.join(root, "outputs/mcp-zoompan-exp-f0.mp4"), path.join(root, "outputs/mcp-zoompan-f89.mp4"));
+console.log("zoom_pan PSNR: f0 vs full =", zoomF0Psnr, "| f89 vs center-crop =", zoomF89Psnr, "| f89 vs full =", zoomF89VsFull);
+checkOk(zoomF0Psnr !== null && zoomF0Psnr > 40, "zoom_pan first frame is the full image", `PSNR ${zoomF0Psnr}`);
+checkOk(zoomF89Psnr !== null && zoomF89Psnr > 25 && zoomF89VsFull !== null && zoomF89Psnr > zoomF89VsFull + 10, "zoom_pan last frame is the 2x center window (not the full image)", `center ${zoomF89Psnr} vs full ${zoomF89VsFull}`);
+// Pan at fixed 2x zoom: focus 0.2 -> 0.8 moves the window left to
+// right. End window in source pixels: x=704 (0.8*1280-320), y=180.
+const zoomPanRes = await client.callTool({
+  name: "zoom_pan",
+  arguments: { input: path.join(root, "test/kenburns.png"), output: path.join(root, "outputs/mcp-zoompan-pan.mp4"), duration: 3, fps: 30, zoom_from: 2, zoom_to: 2, focus_x: 0.2, focus_end_x: 0.8, width: 640, height: 360 },
+});
+const zoomPanJson = JSON.parse(zoomPanRes.content[0].text);
+checkOk(zoomPanJson.frames === 90 && zoomPanJson.focus_end[0] === 0.8, "zoom_pan pan case: fixed 2x zoom, focus moves 0.2 -> 0.8", JSON.stringify(zoomPanJson));
+await frameMp4(path.join(root, "outputs/mcp-zoompan-pan.mp4"), 0, path.join(root, "outputs/mcp-zoompan-pan-f0.mp4"));
+await frameMp4(path.join(root, "outputs/mcp-zoompan-pan.mp4"), 89, path.join(root, "outputs/mcp-zoompan-pan-f89.mp4"));
+await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-i", path.join(root, "test/kenburns.png"), "-vf", "crop=640:360:0:180,scale=640:360", "-c:v", "libx264", "-pix_fmt", "yuv420p", path.join(root, "outputs/mcp-zoompan-exp-pan-start.mp4")]);
+await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-i", path.join(root, "test/kenburns.png"), "-vf", "crop=640:360:704:180,scale=640:360", "-c:v", "libx264", "-pix_fmt", "yuv420p", path.join(root, "outputs/mcp-zoompan-exp-pan-end.mp4")]);
+const panF0Psnr = await psnrY(path.join(root, "outputs/mcp-zoompan-exp-pan-start.mp4"), path.join(root, "outputs/mcp-zoompan-pan-f0.mp4"));
+const panF89EndPsnr = await psnrY(path.join(root, "outputs/mcp-zoompan-exp-pan-end.mp4"), path.join(root, "outputs/mcp-zoompan-pan-f89.mp4"));
+const panF89StartPsnr = await psnrY(path.join(root, "outputs/mcp-zoompan-exp-pan-start.mp4"), path.join(root, "outputs/mcp-zoompan-pan-f89.mp4"));
+console.log("zoom_pan pan PSNR: f0 vs left =", panF0Psnr, "| f89 vs right =", panF89EndPsnr, "| f89 vs left =", panF89StartPsnr);
+checkOk(panF0Psnr !== null && panF0Psnr > 25, "zoom_pan pan starts at the left window", `PSNR ${panF0Psnr}`);
+checkOk(panF89EndPsnr !== null && panF89EndPsnr > 25 && panF89StartPsnr !== null && panF89EndPsnr > panF89StartPsnr + 10, "zoom_pan pan ends at the right window (not the left one)", `right ${panF89EndPsnr} vs left ${panF89StartPsnr}`);
+const zoomVideo = await callExpectThrow("zoom_pan", { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-zoompan-bad.mp4") });
+checkOk(/still image/.test(zoomVideo), "zoom_pan refuses a video input", zoomVideo.slice(0, 200));
+const zoomBad = await callExpectThrow("zoom_pan", { input: path.join(root, "test/kenburns.png"), output: path.join(root, "outputs/mcp-zoompan-bad2.mp4"), zoom_to: 0 });
+checkOk(/zoom_to/.test(zoomBad), "zoom_pan refuses zoom_to below 1", zoomBad.slice(0, 200));
 
 // interpolate: 30fps -> 60fps with blend (fast mode). The frame count
 // is asserted on the output file, not just r_frame_rate.
@@ -2310,7 +2402,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 45 && infoJson.tools_available >= 44 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 45 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 47 && infoJson.tools_available >= 46 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 47 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");

@@ -77,6 +77,8 @@ Then ask your agent things like:
 | `reverse` | Play a clip backwards: video frames reversed, audio reversed too by default (`--no-audio` keeps the audio playing forward); works on audio-only input as well. The `reverse` filter buffers every frame, so very long inputs cost memory | `mediakit reverse in.mp4 -o backwards.mp4` |
 | `interpolate` | Raise the frame rate with motion interpolation (`minterpolate`): 30fps to 60fps for smoother playback or slow motion. Modes: `blend` (fast default, cross-fades neighbours), `mci` (true motion compensation, best quality but much slower — ~9x realtime on CPU), `dup` (repeats frames). Only raises the frame rate; use `fit --max-fps` to lower it. Reports fps and frame counts measured on the output file | `mediakit interpolate in.mp4 --fps 60 -o smooth.mp4` |
 | `denoise` | Reduce sensor noise: `hqdn3d` (fast default) or `nlmeans` (better on fine detail, much slower). Strength 0–1 maps to hqdn3d 0–30 (0.5 is 15, the level that gained +2.9 dB PSNR on sigma-10 noise in testing) or nlmeans `s` 0–10. Reports high-frequency noise energy before and after, measured on disk | `mediakit denoise noisy.mp4 --strength 0.5 -o clean.mp4` |
+| `chroma_key` | Remove a green/blue screen: keys out one hex color (`--color 00FF00`, `--similarity` 0–1, `--blend` 0–1). Without `--background` the output keeps transparency and must be `.mov` (ProRes 4444 — `.mp4` has no alpha, and this ffmpeg build drops VP9 alpha in `.webm`). With `--background <image\|hex-color>` the subject is composited onto it and the output is a flat `.mp4`/`.webm`. Reports the alpha measured on disk (middle frame): full-frame mean, corner (~0 for a full-screen key) and center (~255 on the subject) | `mediakit chroma-key greenscreen.mp4 -o keyed.mov` |
+| `zoom_pan` | Ken Burns effect: turn a still image into a moving clip. Zooms linearly from `--zoom-from` to `--zoom-to` while the focus point moves from (`--focus-x`, `--focus-y`) to (`--focus-end-x`, `--focus-end-y`), 0–1 fractions of the frame. The input is pre-scaled 1.25x before zooming to avoid zoompan's integer-crop jitter. Input must be a still image, not a video. Reports frame count measured on the output file | `mediakit zoom-pan photo.png --duration 5 --zoom-to 1.5 -o kenburns.mp4` |
 | `segment` | Cut a video into an HLS VOD playlist (`index.m3u8` + `.ts` segments) in a directory, ready to serve statically. Stream-copy by default (fast, lossless) — but segments can only start on keyframes, so actual lengths follow the source GOP; `--reencode` re-encodes to libx264/aac with forced keyframes for exact segment boundaries. Reports the segment count and durations parsed back from the playlist on disk | `mediakit segment in.mp4 --segment-time 6 -o hls/` |
 | `batch` | Apply one operation to every file matching a glob under a folder — `loudness`, `resize`, `reframe`, `compress`, `convert`, `extract_audio`, `reverse`, `grade`, `fit`, `trim` or `silence`, same args for all. Outputs are `<stem>-<operation>.<ext>` under the output dir, mirroring the input tree; `batch-manifest.json` records one row per file (`ok`/`error`/`cached`/`skipped`, in input order). Unchanged files are skipped via a content-hash cache (verified against the cached output's size + sha256); `--jobs N` runs files in parallel under one shared `--timeout`; `--dry-run` lists the planned outputs and writes nothing | `mediakit batch loudness --pattern '**/*.mp4' --input-dir clips/ -o out/ --args-json '{"target_lufs": -14}'` |
 | `manifest` | Run a whole edit pipeline from one declarative JSON manifest: `{version: 1, input, output, steps: [{tool, args}], qa?}` — paths relative to the manifest file. Steps run in order (`trim`, `resize`, `reframe`, `compress`, `convert`, `extract_audio`, `reverse`, `grade`, `fit`, `trim`, `silence`, `denoise`, `interpolate`, `burn_captions`, `overlay`), each feeding the next; the whole plan is validated before anything renders, so a typo fails in seconds, not after step 3 of 5. Each step is cached by content hash (verified against the cached output's size + sha256) — re-running an unchanged manifest re-encodes nothing, and editing step 3 only re-runs from step 3. `--dry-run` lists the planned steps and writes nothing; `qa` runs `qa_report` on the final file | `mediakit manifest recipe.json -o final.mp4` |
@@ -260,7 +262,26 @@ minutes for a few seconds of 720p). Strength 0–1 maps to hqdn3d 0–30:
 testing — note the 0–10 scale some other servers use is too weak for
 real noise (hqdn3d=8 gained only +0.24 dB on the same fixture). The
 result measures high-frequency noise energy before and after, so the
-reduction is measured on disk. `segment` cuts a video into an HLS
+reduction is measured on disk. `chroma_key` removes a green or blue
+screen in one call: without `--background` it keys the color out and
+keeps the transparency, so the output must be `.mov` (ProRes 4444) —
+`.mp4`/H.264 has no alpha channel at all, and this ffmpeg build drops
+VP9 alpha in `.webm` (measured 2026-11-13, even with `-auto-alt-ref
+0`). With `--background` (an image file or a hex color) the subject is
+composited onto it in the same call and the output is a flat
+`.mp4`/`.webm`. The result measures the alpha on disk at the middle
+frame: a full-screen green key reads corner alpha 0, subject alpha
+255, and a frame mean equal to the subject's share of the frame.
+`zoom_pan` is the Ken Burns effect for stills: it zooms from
+`--zoom-from` to `--zoom-to` while the focus point travels from
+(`--focus-x`, `--focus-y`) to (`--focus-end-x`, `--focus-end-y`),
+0–1 fractions of the frame, 0.5 is center. The input is pre-scaled
+1.25x before `zoompan` runs — the filter's crop math is integer
+pixels, so a slow move over a 1:1 image jitters. Frame 0 is exactly
+the full image and the last frame exactly the zoomed window, so a
+zoom is verifiable by comparing frames against crops computed by
+hand. Input must be a still image: a video input would be stretched
+by `d` frames per input frame, so the tool refuses one. `segment` cuts a video into an HLS
 VOD playlist (`index.m3u8` + `.ts` segments) in a directory, ready
 to serve statically. Stream-copy is the default — fast and lossless
 — but segments can only start on keyframes, so the actual lengths
