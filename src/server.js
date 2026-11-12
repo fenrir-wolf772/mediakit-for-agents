@@ -918,6 +918,25 @@ server.tool(
   })),
 );
 
+server.tool(
+  "manifest",
+  "Run a whole edit pipeline from ONE declarative JSON manifest file: {version: 1, input, output, steps: [{tool, args}], qa?} — paths in the manifest are relative to the manifest file. Steps run in order, each feeding the next (trim, resize, reframe, compress, convert, extract_audio, reverse, grade, fit, trim, silence, denoise, interpolate, burn_captions, overlay); the whole plan is validated before anything renders, so a typo fails in seconds. Each step is cached by content hash (input bytes + tool + args + sidecar-file bytes, verified against the cached output's size + sha256) — re-running an unchanged manifest re-encodes nothing, and editing step 3 only re-runs from step 3. Set qa to a platform (or 'any') to run qa_report on the final file. dry_run prints the plan and writes nothing — the approve-before-render gate. A step failure aborts the run and keeps the intermediates for inspection.",
+  {
+    manifest_path: pathSchema.describe("Path to the manifest JSON file"),
+    output: pathSchema.optional().describe("Output file path (overrides the manifest's output; the extension is adjusted to the step chain's final format when needed)"),
+    dry_run: z.boolean().default(false).describe("Validate the manifest and list the planned steps without running anything or writing any file"),
+    cache: z.boolean().default(true).describe("Skip steps whose input bytes + tool + args already produced the cached intermediate (verified by size + sha256)"),
+    keep_intermediates: z.boolean().default(false).describe("Keep the per-step intermediate files under the output dir (deleted on success by default; always kept when a step fails)"),
+  },
+  async (a) => safe(() => core.manifest({
+    manifestPath: a.manifest_path,
+    output: a.output ?? null,
+    cache: a.cache,
+    dryRun: a.dry_run,
+    keepIntermediates: a.keep_intermediates,
+  })),
+);
+
 // ---------------------------------------------------------------- MCP resources
 // Workspace-scoped reads (idea: conneroisu/vfx-mcp's videos:// URIs):
 // a client can list the workspace's media, read one file's probe, and

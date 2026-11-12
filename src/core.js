@@ -4025,6 +4025,7 @@ const TOOL_REQUIREMENTS = {
   generate_srt: {},
   find: {},
   batch: {},
+  manifest: {},
   mux: {},
   svg_animate: { decoders: ["librsvg"], encoders: ["libx264"] },
   transcribe: {},
@@ -5336,4 +5337,286 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
   await writeFile(manifestPath, JSON.stringify(summary, null, 2), "utf8");
   if (cache) await writeFile(cachePath, JSON.stringify(cacheData, null, 2), "utf8");
   return summary;
+}
+
+// ---------------------------------------------------------------- manifest
+// Run a whole edit pipeline from ONE declarative JSON file (the idea
+// behind kaomei/stickman-video-director's Autopilot manifest + the
+// edit.json plan in KKHS AI Video Studio: an agent writes the plan,
+// a human can read and tweak it, one call renders it).
+//
+//   {
+//     "version": 1,
+//     "input": "source.mp4",            // relative to the manifest file
+//     "output": "final.mp4",            // relative to the manifest file
+//     "steps": [
+//       {"tool": "trim", "args": {"start": 2, "end": 8}},
+//       {"tool": "reframe", "args": {"strategy": "blur", "width": 1080, "height": 1920}},
+//       {"tool": "loudness", "args": {"target_lufs": -14}}
+//     ],
+//     "qa": "tiktok"                    // optional: qa_report the result
+//   }
+//
+// Rules, all enforced before any ffmpeg runs (lint-before-render):
+// the whole manifest is validated up front — version, tool names,
+// arg keys, output extension chain — so a typo fails in seconds,
+// not after step 3 of 5. Steps run in order, each one's output
+// feeding the next; a step failure aborts the run and the
+// intermediates are kept for inspection. Each step is cached by
+// content hash (input bytes + tool + args + sidecar-file bytes, same
+// design as batch's cache), verified against the cached output's
+// size + sha256 — re-running an unchanged manifest re-encodes
+// nothing, and editing step 3 only re-runs from step 3 (its input
+// hash is unchanged, its args differ). --dry-run prints the plan
+// and writes nothing: the approve-before-render gate. Intermediates
+// live under the output dir (never /tmp, so MEDIAKIT_WORKDIR still
+// holds) and are deleted on success unless --keep-intermediates.
+
+// Single-input/single-output steps a manifest may chain: the batch
+// operations plus the four single-input tools batch does not cover.
+// Multi-input tools (concat, mix, mux, pip) and probe-only tools
+// (probe, check, keyframes...) are not chainable steps — a manifest
+// is one pipeline through one file.
+export const MANIFEST_STEPS = {
+  ...BATCH_OPERATIONS,
+  denoise: {
+    args: ["filter", "strength", "crf"],
+    run: (input, output, a) => denoise({ input, output, filter: a.filter ?? "hqdn3d", strength: a.strength ?? 0.5, crf: a.crf ?? 23 }),
+  },
+  interpolate: {
+    args: ["fps", "mode", "crf"],
+    run: (input, output, a) => interpolate({ input, output, fps: a.fps, mode: a.mode ?? "blend", crf: a.crf ?? 23 }),
+  },
+  burn_captions: {
+    args: ["captions", "font_size", "margin_v", "style", "outline_color"],
+    run: (input, output, a) => burnCaptions({ input, output, captions: a.captions, fontSize: a.font_size ?? null, marginV: a.margin_v ?? null, style: a.style ?? null, outlineColor: a.outline_color ?? "black" }),
+  },
+  overlay: {
+    args: ["overlay", "position", "margin", "width", "opacity", "start", "end"],
+    run: (input, output, a) => overlayImage({ input, output, overlay: a.overlay, position: a.position ?? "top-right", margin: a.margin ?? 24, width: a.width ?? null, opacity: a.opacity ?? 1, start: a.start ?? null, end: a.end ?? null }),
+  },
+};
+
+const MANIFEST_CACHE_DIRNAME = ".mediakit-manifest-cache";
+const MANIFEST_MAX_STEPS = 32;
+
+// Step args that name a sidecar file: resolved relative to the
+// manifest file (like input/output), and hashed into the cache key
+// so editing the captions file re-runs the burn step.
+const MANIFEST_FILE_ARGS = ["captions", "overlay"];
+
+export async function manifest({ manifestPath, output = null, cache = true, dryRun = false, keepIntermediates = false }) {
+  const manifestAbs = await requireInput(manifestPath, "manifest");
+  let raw;
+  try {
+    raw = await readFile(manifestAbs, "utf8");
+  } catch (e) {
+    throw new MediaKitError(`cannot read manifest ${manifestPath}: ${e.message}`, "INVALID_INPUT");
+  }
+  let doc;
+  try {
+    doc = JSON.parse(raw);
+  } catch (e) {
+    throw new MediaKitError(`manifest is not valid JSON: ${e.message}`, "INVALID_ARG");
+  }
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
+    throw new MediaKitError("manifest must be a JSON object {version, input, steps}", "INVALID_ARG");
+  }
+  if (doc.version !== 1) {
+    throw new MediaKitError(`manifest version must be 1, got: ${doc.version}`, "INVALID_ARG");
+  }
+  if (typeof doc.input !== "string" || !doc.input.trim()) {
+    throw new MediaKitError("manifest needs an \"input\" file path", "INVALID_ARG");
+  }
+  if (!Array.isArray(doc.steps) || !doc.steps.length || doc.steps.length > MANIFEST_MAX_STEPS) {
+    throw new MediaKitError(`manifest needs 1-${MANIFEST_MAX_STEPS} steps, got: ${Array.isArray(doc.steps) ? doc.steps.length : "not an array"}`, "INVALID_ARG");
+  }
+  const qaTargets = [...Object.keys(PLATFORMS), "any"];
+  if (doc.qa !== undefined && doc.qa !== null && !qaTargets.includes(doc.qa)) {
+    throw new MediaKitError(`manifest qa must be one of ${qaTargets.join(", ")}, got: ${doc.qa}`, "INVALID_ARG");
+  }
+  const manifestDir = path.dirname(manifestAbs);
+  const resolveRel = (p) => (path.isAbsolute(p) ? p : path.join(manifestDir, p));
+  const inputAbs = await requireInput(resolveRel(doc.input), "manifest input");
+  const outputRaw = output ?? doc.output;
+  if (typeof outputRaw !== "string" || !outputRaw.trim()) {
+    throw new MediaKitError("manifest needs an \"output\" file path (in the manifest or -o)", "INVALID_ARG");
+  }
+
+  // Validate every step up front: unknown tool / unknown arg key /
+  // non-scalar arg value all fail before step 1 runs.
+  const steps = doc.steps.map((step, i) => {
+    const label = `manifest step ${i + 1}`;
+    if (!step || typeof step !== "object" || Array.isArray(step)) {
+      throw new MediaKitError(`${label} must be an object {tool, args}`, "INVALID_ARG");
+    }
+    const spec = MANIFEST_STEPS[step.tool];
+    if (!spec) {
+      throw new MediaKitError(`${label}: unknown tool "${step.tool}" (supported: ${Object.keys(MANIFEST_STEPS).join(", ")})`, "INVALID_ARG");
+    }
+    const args = step.args ?? {};
+    if (args === null || typeof args !== "object" || Array.isArray(args)) {
+      throw new MediaKitError(`${label}: args must be an object`, "INVALID_ARG");
+    }
+    for (const k of Object.keys(args)) {
+      if (!spec.args.includes(k)) {
+        throw new MediaKitError(`${label} (${step.tool}) does not take argument "${k}" (supported: ${spec.args.join(", ") || "none"})`, "INVALID_ARG");
+      }
+      const v = args[k];
+      if (v !== null && typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") {
+        throw new MediaKitError(`${label} (${step.tool}): argument "${k}" must be a string, number or boolean`, "INVALID_ARG");
+      }
+    }
+    // Sidecar files resolve relative to the manifest, like input.
+    const resolved = { ...args };
+    for (const k of MANIFEST_FILE_ARGS) {
+      if (typeof resolved[k] === "string" && resolved[k].trim()) resolved[k] = resolveRel(resolved[k]);
+    }
+    return { index: i, tool: step.tool, spec, args, resolved };
+  });
+
+  // Output extension follows the step chain (extract_audio changes
+  // it); a mismatched output extension is adjusted and reported,
+  // never silently written with wrong bytes under a wrong name.
+  let ext = path.extname(inputAbs).slice(1).toLowerCase();
+  const chainExts = steps.map((s) => {
+    ext = batchOutputExt(s.tool, ext, s.args);
+    return ext;
+  });
+  const finalExt = chainExts[chainExts.length - 1];
+  let finalOutput = resolveRel(outputRaw);
+  let outputAdjusted = false;
+  if (path.extname(finalOutput).slice(1).toLowerCase() !== finalExt) {
+    finalOutput = `${finalOutput.slice(0, finalOutput.length - path.extname(finalOutput).length)}.${finalExt}`;
+    outputAdjusted = true;
+  }
+  const outDir = path.dirname(finalOutput);
+  const inputProbe = await probe(inputAbs);
+
+  if (dryRun) {
+    // Plan only: probe the input (read-only) and list the chain.
+    // No directory is created, no file is written.
+    let cur = inputAbs;
+    const planned = steps.map((s, i) => {
+      const out = path.join(outDir, `.mediakit-manifest-tmp-plan`, `step-${String(i).padStart(2, "0")}-${s.tool}.${chainExts[i]}`);
+      const row = { index: i, tool: s.tool, args: s.args, input: cur, output: out, status: "planned" };
+      cur = out;
+      return row;
+    });
+    return {
+      operation: "manifest", manifest: manifestAbs, input: inputAbs, output: finalOutput,
+      ...(outputAdjusted ? { output_adjusted: true } : {}),
+      qa: doc.qa ?? null, dry_run: true, cache,
+      input_duration_seconds: inputProbe.duration_seconds,
+      input_dimensions: inputProbe.video ? `${inputProbe.video.width}x${inputProbe.video.height}` : null,
+      steps: planned,
+    };
+  }
+
+  const outDirAbs = await prepareOutputDir(outDir);
+  const finalOutputAbs = await prepareOutput(finalOutput, [inputAbs]);
+  const tmpDir = path.join(outDirAbs, `.mediakit-manifest-tmp-${process.pid}`);
+  await mkdir(tmpDir, { recursive: true });
+  const cacheDir = path.join(outDirAbs, MANIFEST_CACHE_DIRNAME);
+  const cacheIndexPath = path.join(cacheDir, "index.json");
+  let cacheIndex = {};
+  if (cache) {
+    await mkdir(cacheDir, { recursive: true });
+    try {
+      const parsed = JSON.parse(await readFile(cacheIndexPath, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) cacheIndex = parsed;
+    } catch { /* missing or corrupt cache index starts fresh */ }
+  }
+  const saveCacheIndex = async () => {
+    if (!cache) return;
+    try { await writeFile(cacheIndexPath, JSON.stringify(cacheIndex, null, 2), "utf8"); } catch { /* cache index is best-effort */ }
+  };
+
+  const startedAt = Date.now();
+  const stepResults = [];
+  let cacheHits = 0;
+  let curInput = inputAbs;
+  try {
+    for (const s of steps) {
+      const nextExt = chainExts[s.index];
+      const stepOut = path.join(tmpDir, `step-${String(s.index).padStart(2, "0")}-${s.tool}.${nextExt}`);
+      const inputHash = await hashFile(curInput);
+      let extraHash = null;
+      for (const k of MANIFEST_FILE_ARGS) {
+        if (typeof s.resolved[k] === "string") {
+          try { extraHash = await hashFile(s.resolved[k]); } catch { extraHash = null; }
+        }
+      }
+      const key = createHash("sha256")
+        .update(stableStringify({ index: s.index, tool: s.tool, args: s.args, inputHash, extraHash }))
+        .digest("hex");
+      const cacheFile = path.join(cacheDir, `${key}.${nextExt}`);
+      let hit = null;
+      if (cache) {
+        const entry = cacheIndex[key];
+        if (entry) {
+          try {
+            const st = await stat(cacheFile);
+            if (st.size === entry.output_size_bytes && (await hashFile(cacheFile)) === entry.output_sha256) hit = entry;
+          } catch { /* cached intermediate gone or changed: re-run */ }
+        }
+      }
+      if (hit) {
+        await copyFile(cacheFile, stepOut);
+        cacheHits++;
+        stepResults.push({ index: s.index, tool: s.tool, args: s.args, status: "cached", output: stepOut, result: hit.result });
+      } else {
+        const stepStarted = Date.now();
+        let r;
+        try {
+          r = await s.spec.run(curInput, stepOut, s.resolved);
+        } catch (e) {
+          const code = e instanceof MediaKitError ? e.code : "ERROR";
+          throw new MediaKitError(`manifest step ${s.index + 1} (${s.tool}) failed: ${e.message} [${code}] — intermediates kept in ${tmpDir}`, code);
+        }
+        stepResults.push({ index: s.index, tool: s.tool, args: s.args, status: "ok", elapsed_ms: Date.now() - stepStarted, output: stepOut, result: r });
+        if (cache) {
+          try {
+            await copyFile(stepOut, cacheFile);
+            const st = await stat(cacheFile);
+            cacheIndex[key] = {
+              output: cacheFile, output_size_bytes: st.size,
+              output_sha256: await hashFile(cacheFile), result: r,
+            };
+            await saveCacheIndex();
+          } catch { /* cache write is best-effort; the step itself is done */ }
+        }
+      }
+      curInput = stepOut;
+    }
+  } catch (e) {
+    // Intermediates are kept on failure so the broken step can be
+    // inspected and re-run by hand; the error names the directory.
+    throw e;
+  }
+
+  await copyFile(curInput, finalOutputAbs);
+  const finalProbe = await probe(finalOutputAbs);
+  const finalInfo = await fileInfo(finalOutputAbs);
+  let qaResult = null;
+  if (doc.qa) qaResult = await qaReport({ input: finalOutputAbs, target: doc.qa });
+  if (!keepIntermediates) {
+    try { await rm(tmpDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+  }
+  return {
+    operation: "manifest", manifest: manifestAbs, input: inputAbs, output: finalOutputAbs,
+    ...(outputAdjusted ? { output_adjusted: true } : {}),
+    qa: doc.qa ?? null, dry_run: false, cache,
+    steps: stepResults,
+    cache_hits: cacheHits,
+    steps_run: stepResults.filter((r) => r.status === "ok").length,
+    elapsed_seconds: +((Date.now() - startedAt) / 1000).toFixed(1),
+    final: {
+      duration_seconds: finalProbe.duration_seconds,
+      dimensions: finalProbe.video ? `${finalProbe.video.width}x${finalProbe.video.height}` : null,
+      ...finalInfo,
+    },
+    qa_result: qaResult,
+    ...(keepIntermediates ? { intermediates_dir: tmpDir } : {}),
+  };
 }

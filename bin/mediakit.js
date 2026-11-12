@@ -513,6 +513,17 @@ const COMMANDS = {
       ["-o, --output", "Output directory (required, created if needed)"],
     ],
   },
+  manifest: {
+    usage: "mediakit manifest <manifest.json> [-o <output.mp4>] [--dry-run] [--no-cache] [--keep-intermediates]",
+    desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (trim|resize|reframe|compress|convert|extract-audio|reverse|grade|fit|trim|silence|denoise|interpolate|burn-captions|overlay), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file.",
+    args: [{ name: "manifest", required: true }],
+    options: [
+      ["--dry-run", "Validate the manifest and list the planned steps without running anything"],
+      ["--no-cache", "Do not use the content-hash cache — re-encode every step"],
+      ["--keep-intermediates", "Keep the per-step intermediate files under the output dir (deleted on success by default; always kept when a step fails)"],
+      ["-o, --output", "Output file (overrides the manifest's output; extension is adjusted to the step chain's final format when needed)"],
+    ],
+  },
   doctor: {
     usage: "mediakit doctor",
     desc: "Read-only preflight: ffmpeg/ffprobe versions, available filters/encoders, and which tools that enables.",
@@ -1094,6 +1105,17 @@ async function main() {
           timeoutSeconds: numOpt(opts, "timeout") ?? 1800,
           maxFiles: numOpt(opts, "max_files") ?? 200,
           dryRun: opts.dry_run === true,
+        });
+        break;
+      }
+      case "manifest": {
+        if (!positional[0]) fail("missing manifest file: mediakit manifest <manifest.json> [-o <output.mp4>]");
+        result = await core.manifest({
+          manifestPath: positional[0],
+          output: opts.output ?? null,
+          cache: opts.cache !== false,
+          dryRun: opts.dry_run === true,
+          keepIntermediates: opts.keep_intermediates === true,
         });
         break;
       }

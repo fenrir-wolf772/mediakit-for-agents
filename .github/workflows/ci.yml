@@ -90,5 +90,8 @@ jobs:
           node bin/mediakit.js segment test/source.mp4 --segment-time 2 --reencode -o outputs/ci-seg-re | grep '"segment_count": 5'
           node bin/mediakit.js qa-report outputs/ci-reframe-loud.mp4 --target tiktok | grep '"verdict": "warn"'
           node bin/mediakit.js thumbnail test/source.mp4 -o outputs/ci-thumb.png | grep '"timestamps": true'
+          printf '%s' '{"version":1,"input":"../test/source.mp4","output":"ci-manifest.mp4","steps":[{"tool":"trim","args":{"start":2,"end":8}},{"tool":"reframe","args":{"mode":"blur","width":1080,"height":1920}},{"tool":"loudness","args":{"target_lufs":-14}}],"qa":"tiktok"}' > outputs/ci-manifest.json
+          node bin/mediakit.js manifest outputs/ci-manifest.json | grep '"cache_hits": 0'
+          node bin/mediakit.js manifest outputs/ci-manifest.json | grep '"cache_hits": 3'
       - name: MCP test
         run: npm test

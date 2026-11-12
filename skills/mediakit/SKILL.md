@@ -619,6 +619,31 @@ thumbnail sheet labels each tile with its own timestamp in seconds
 8.1.2, so plain seconds are used), so read the times off the sheet
 when you decide where to cut.
 
+### 40. One manifest, one finished clip — don't retype a pipeline
+When the same chain of steps belongs on a clip (trim → reframe →
+loudness, or any longer pipeline), write it once as a `manifest`
+JSON file and run it with one call, instead of re-issuing five tool
+calls and re-typing the same args. Paths in the manifest are
+relative to the manifest file, so keep the recipe next to its
+media. The whole plan is validated before anything renders — an
+unknown tool or arg key fails in seconds, with the step number and
+the name, not after step 3 of 5. `--dry-run` prints the planned
+steps and writes nothing: read it before the real run, the way you
+read a mix dry-run. A second identical run re-encodes nothing: each
+step is cached by content hash (input bytes + tool + args +
+sidecar-file bytes), so editing step 3 only re-runs from step 3 —
+but a changed input file re-runs everything downstream, which is
+correct, not a bug. Put `"qa": "tiktok"` (or any platform, or
+`"any"`) in the manifest and the gate runs itself at the end; a
+`warn` verdict still writes the file, so read the checks. A step
+failure aborts the run and keeps the intermediates under the output
+dir — the error names the directory, so inspect the broken step's
+file instead of guessing. Only single-input steps chain
+(`trim`/`resize`/`reframe`/`compress`/`convert`/`extract_audio`/
+`reverse`/`grade`/`fit`/`silence`/`denoise`/`interpolate`/
+`burn_captions`/`overlay`); multi-input work (`concat`, `mix`,
+`mux`, `pip`) stays a separate call before or after the manifest.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

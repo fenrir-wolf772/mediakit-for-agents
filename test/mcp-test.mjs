@@ -7,7 +7,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "node:url";
 import { existsSync, statSync } from "node:fs";
-import { copyFile, mkdir, readFile, rm, symlink } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -97,10 +98,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 44 tools present");
-checkOk(missing.length === 0, "tools/list has all 44 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 45 tools present");
+checkOk(missing.length === 0, "tools/list has all 45 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -2169,7 +2170,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 44 && infoJson.tools_available >= 43 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 44 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 45 && infoJson.tools_available >= 44 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 45 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -2405,6 +2406,66 @@ const qaPassRes = await client.callTool({
 const qaPassJson = JSON.parse(qaPassRes.content[0].text);
 console.log("qa_report pass-case:", qaPassJson.verdict, "|", qaPassJson.checks.map((c) => `${c.check}:${c.status}`).join(" "));
 checkOk(qaPassJson.verdict === "pass" && qaPassJson.checks.every((c) => c.status === "pass"), "qa_report pass-case: 3-shot -14 LUFS clip passes every check", JSON.stringify(qaPassJson.checks));
+
+// manifest: one JSON file drives a whole pipeline — trim 2-8s,
+// reframe blur to 1080x1920, loudness -14 — then qa_report tiktok
+// on the result (fixture test/manifest.json). A second identical
+// run must serve every step from the content-hash cache; --dry-run
+// plans without writing; a bad tool/arg/version fails up front,
+// before step 1 renders.
+async function sha256File(file) {
+  const buf = await readFile(file);
+  return createHash("sha256").update(buf).digest("hex");
+}
+await rm(path.join(root, "outputs/mcp-manifest.mp4"), { force: true });
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const manifestDryRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest.json"), dry_run: true },
+});
+const manifestDryJson = JSON.parse(manifestDryRes.content[0].text);
+checkOk(manifestDryJson.dry_run === true && manifestDryJson.steps.length === 3 && manifestDryJson.steps.every((s) => s.status === "planned") && near(manifestDryJson.input_duration_seconds, 10, 0.01), "manifest dry-run plans 3 steps, no run", JSON.stringify(manifestDryJson.steps.map((s) => s.status)));
+checkOk(!existsSync(path.join(root, "outputs/mcp-manifest.mp4")), "manifest dry-run writes no output file", "outputs/mcp-manifest.mp4 exists");
+const manifestRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest.json") },
+});
+const manRunJson = JSON.parse(manifestRes.content[0].text);
+console.log("manifest:", manRunJson.steps.map((s) => `${s.tool}:${s.status}`).join(" "), "| final", manRunJson.final.dimensions, manRunJson.final.duration_seconds + "s", "| qa", manRunJson.qa_result?.verdict);
+checkOk(manRunJson.steps.every((s) => s.status === "ok") && manRunJson.cache_hits === 0 && manRunJson.steps_run === 3, "manifest runs all 3 steps (trim, reframe, loudness)", JSON.stringify(manRunJson.steps.map((s) => s.status)));
+checkOk(near(manRunJson.final.duration_seconds, 6.1, 0.2) && manRunJson.final.dimensions === "1080x1920" && manRunJson.final.size_bytes > 0, "manifest final is 6.1s 1080x1920 with real bytes", JSON.stringify(manRunJson.final));
+checkOk(manRunJson.steps[0].result?.duration_actual === 6, "manifest trim step reports 6s on disk", JSON.stringify(manRunJson.steps[0].result?.duration_actual));
+const manifestLufs = await measureLufs(path.join(root, "outputs/mcp-manifest.mp4"));
+checkOk(near(manifestLufs, -14, 0.5), "manifest loudness step measures -14 LUFS independently", `got ${manifestLufs}`);
+checkOk(manRunJson.qa_result?.verdict === "warn" && qaOf(manRunJson.qa_result, "loudness")?.status === "pass" && qaOf(manRunJson.qa_result, "pacing")?.status === "warn", "manifest qa gate: warn on pacing only, loudness passes", JSON.stringify(manRunJson.qa_result?.checks.map((c) => `${c.check}:${c.status}`)));
+const manifestHashBefore = await sha256File(path.join(root, "outputs/mcp-manifest.mp4"));
+const manifestCachedRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest.json") },
+});
+const manifestCachedJson = JSON.parse(manifestCachedRes.content[0].text);
+checkOk(manifestCachedJson.cache_hits === 3 && manifestCachedJson.steps_run === 0 && manifestCachedJson.steps.every((s) => s.status === "cached"), "manifest second run serves all 3 steps from the content-hash cache", `cache_hits=${manifestCachedJson.cache_hits} steps_run=${manifestCachedJson.steps_run}`);
+checkOk((await sha256File(path.join(root, "outputs/mcp-manifest.mp4"))) === manifestHashBefore, "manifest cache hit leaves the output bytes untouched", "sha256 moved");
+const manifestNoCacheRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest.json"), cache: false },
+});
+const manifestNoCacheJson = JSON.parse(manifestNoCacheRes.content[0].text);
+checkOk(manifestNoCacheJson.cache_hits === 0 && manifestNoCacheJson.steps_run === 3, "manifest cache=false re-runs every step", `cache_hits=${manifestNoCacheJson.cache_hits} steps_run=${manifestNoCacheJson.steps_run}`);
+const manifestBadToolPath = path.join(root, "outputs/mcp-manifest-badtool.json");
+await writeFile(manifestBadToolPath, JSON.stringify({ version: 1, input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-manifest-badtool.mp4"), steps: [{ tool: "nosuchtool", args: {} }] }), "utf8");
+const manifestBadToolText = await callExpectThrow("manifest", { manifest_path: manifestBadToolPath });
+checkOk(/unknown tool/.test(manifestBadToolText) && /nosuchtool/.test(manifestBadToolText), "manifest refuses an unknown step tool by name, before rendering", manifestBadToolText.slice(0, 160));
+const manifestBadArgPath = path.join(root, "outputs/mcp-manifest-badarg.json");
+await writeFile(manifestBadArgPath, JSON.stringify({ version: 1, input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-manifest-badarg.mp4"), steps: [{ tool: "trim", args: { bogus: 1 } }] }), "utf8");
+const manifestBadArgText = await callExpectThrow("manifest", { manifest_path: manifestBadArgPath });
+checkOk(/does not take argument/.test(manifestBadArgText) && /bogus/.test(manifestBadArgText), "manifest refuses an unknown step argument by name, before rendering", manifestBadArgText.slice(0, 160));
+const manifestBadVersionPath = path.join(root, "outputs/mcp-manifest-badversion.json");
+await writeFile(manifestBadVersionPath, JSON.stringify({ version: 2, input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-manifest-badversion.mp4"), steps: [{ tool: "trim", args: { start: 1 } }] }), "utf8");
+const manifestBadVersionText = await callExpectThrow("manifest", { manifest_path: manifestBadVersionPath });
+checkOk(/version must be 1/.test(manifestBadVersionText), "manifest refuses version 2", manifestBadVersionText.slice(0, 160));
+const manifestMissingText = await callExpectThrow("manifest", { manifest_path: path.join(root, "test/no-such-manifest.json") });
+checkOk(/not found/.test(manifestMissingText), "manifest with a missing file errors instead of planning", manifestMissingText.slice(0, 160));
 
 await client.close();
 if (failures.length) {
