@@ -1303,5 +1303,5 @@ tone [6,10)), `test/content-lead-black.mp4` (đen 1s đầu + testsrc 9s),
 - **Bẫy đo lường**:
   1. `signalstats` grep `YAVG` trực tiếp ra rỗng trong shell — phải qua `metadata=print:key=lavfi.signalstats.YAVG` với `-v info` như helper `planeMean` trong test mới đúng (cùng lỗi pipe đo lường đã gặp ở lượt 7/33: cờ log sai là mất số đo, không phải tool hỏng).
   2. Edit CI smoke: file dùng dấu `"` thật trong grep, không phải `\"` — lần edit đầu không khớp old_text, phải đọc lại file mới sửa đúng.
-- Push: (ghi sau khi push) **CI run #… …** — kiểm tra lượt sau.
+- Push: commit 1df1983 "Add named --style for titlecard + intro (locked palettes from styles.json, 45 tools)" → GitHub main (xác nhận origin/main = 1df1983). **CI run #43278940011 success** — xanh ngay lượt này (gồm 2 dòng smoke mới: titlecard minimal-line + intro clean-bold).
 - Còn lại: chưa stage/publish npm (đợi Tony duyệt từng lần — npm vẫn 0.1.0); backlog tiếp: `stabilize` (cần footage rung thật), Verified-Trap Guard ledger, operation envelope, MCP logging progress, contract machine-readable + CI fail khi drift, MCP advertise core 12 mặc định, `dry-run` cho các tool khác, `transcribe` chunking file dài (ý từ barckley75), `grade --cdl` (ý từ barckley75), Demo GIF mới cho README.
