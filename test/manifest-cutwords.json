@@ -1,0 +1,1 @@
+{"input":"source.mp4","output":"../outputs/mcp-manifest-cw.mp4","steps":[{"args":{"remove":"um,uh","words_file":"cut-words.json"},"tool":"cut_words"},{"args":{"target_lufs":-14},"tool":"loudness"}],"version":1}

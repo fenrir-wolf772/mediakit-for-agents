@@ -103,5 +103,10 @@ jobs:
           node bin/mediakit.js cut-words test/source.mp4 --words-file test/cut-words.json --remove um,uh -o outputs/ci-cutwords.mp4 | grep '"removed_count": 2'
           ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-cutwords.mp4 | grep '^3.48'
           node bin/mediakit.js cut-words test/source.mp4 --words-file test/cut-words.json --remove um,uh --dry-run | grep '"dry_run": true'
+          mkdir -p outputs/ci-batch-cw-in && cp test/source.mp4 outputs/ci-batch-cw-in/take.mp4 && cp test/cut-words.json outputs/ci-batch-cw-in/take.words.json
+          node bin/mediakit.js batch cut-words --pattern '*.mp4' --input-dir outputs/ci-batch-cw-in -o outputs/ci-batch-cw --args-json '{"remove": "um,uh"}' | grep '"succeeded": 1'
+          ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-batch-cw/take-cut_words.mp4 | grep '^3.48'
+          printf '%s' '{"version":1,"input":"../test/source.mp4","output":"ci-manifest-cw.mp4","steps":[{"tool":"cut_words","args":{"words_file":"../test/cut-words.json","remove":"um,uh"}}]}' > outputs/ci-manifest-cw.json
+          node bin/mediakit.js manifest outputs/ci-manifest-cw.json | grep '"steps_run": 1'
       - name: MCP test
         run: npm test

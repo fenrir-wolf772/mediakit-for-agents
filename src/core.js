@@ -4554,8 +4554,8 @@ export function buildKeepSegmentsFromWords(words, cutSet, duration, { padBefore 
   const padded = runs.map((r) => {
     const firstIdx = r.indices[0];
     const lastIdx = r.indices[r.indices.length - 1];
-    const leftEdge = firstIdx === 0 ? 0 : (cutSet.has(firstIdx - 1) ? words[firstIdx - 1].end : words[firstIdx - 1].end);
-    const rightEdge = lastIdx === words.length - 1 ? duration : (cutSet.has(lastIdx + 1) ? words[lastIdx + 1].start : words[lastIdx + 1].start);
+    const leftEdge = firstIdx === 0 ? 0 : words[firstIdx - 1].end;
+    const rightEdge = lastIdx === words.length - 1 ? duration : words[lastIdx + 1].start;
     const start = Math.max(0, r.start - Math.min(padBefore, Math.max(0, r.start - leftEdge)));
     const end = Math.min(duration, r.end + Math.min(padAfter, Math.max(0, rightEdge - r.end)));
     return { start: +start.toFixed(3), end: +end.toFixed(3), duration: +(end - start).toFixed(3), indices: r.indices };
@@ -5775,6 +5775,20 @@ export async function mux({ video, audio, output, audioOffsetSeconds = 0, shorte
 // three leading INVALID_ARG failures abort the batch — a mistyped
 // arg must not burn through 200 files one by one.
 
+// The words file for one clip in a batch: <words_dir>/<stem>.words.json.
+// Shared with the cut_words batch spec below (run + cache key).
+function cutWordsFileFor(input, wordsDir) {
+  return path.join(wordsDir ?? path.dirname(input), `${path.basename(input, path.extname(input))}.words.json`);
+}
+
+// Hash a sidecar file for the batch cache key; a missing file hashes
+// to null — the run then fails per-file as designed, and a missing
+// file can never collide with a present one (the present one hashes
+// to real bytes).
+async function hashSidecar(p) {
+  try { return await hashFile(p); } catch { return null; }
+}
+
 export const BATCH_OPERATIONS = {
   loudness: {
     args: ["target_lufs", "format"],
@@ -5823,6 +5837,35 @@ export const BATCH_OPERATIONS = {
   chroma_key: {
     args: ["color", "similarity", "blend", "background", "crf"],
     run: (input, output, a) => chromaKey({ input, output, color: a.color ?? "00FF00", similarity: a.similarity ?? 0.1, blend: a.blend ?? 0.0, background: a.background ?? null, crf: a.crf ?? 23 }),
+    // A background image is a sidecar: its bytes (not just its path)
+    // belong in the cache key, or editing the image re-serves the old
+    // composite. A hex color needs no hash — it is already in args.
+    extraHash: async (input, a) => {
+      const b = a.background == null ? null : String(a.background).trim();
+      if (!b) return null;
+      if (/^#?[0-9A-Fa-f]{6}$/.test(b) || /^0x[0-9A-Fa-f]{6}$/.test(b)) return null;
+      return hashSidecar(b);
+    },
+  },
+  // cut_words in batch: one words file per input, found by convention
+  // — <words_dir>/<stem>.words.json, defaulting to the input's own
+  // folder (the file transcribe --word-timestamps writes next to the
+  // clip when its output is <stem>.words.json). A shared words file
+  // cannot apply to many clips — each clip has its own timings — so
+  // there is no plain `words_file` arg here; a file with no words
+  // file fails its own row only, the rest of the batch still runs.
+  cut_words: {
+    args: ["words_dir", "remove", "fillers", "indices", "keep", "pad_before", "pad_after", "min_keep"],
+    run: (input, output, a) => cutWords({
+      input, output,
+      wordsFile: cutWordsFileFor(input, a.words_dir),
+      remove: a.remove ?? null, fillers: a.fillers ?? false, indices: a.indices ?? null, keep: a.keep ?? null,
+      padBefore: a.pad_before ?? 0.06, padAfter: a.pad_after ?? 0.12, minKeep: a.min_keep ?? 0.2,
+    }),
+    // Two byte-identical clips with different words files are
+    // different jobs: the words bytes belong in the cache key, or
+    // the second clip is served the first clip's cut.
+    extraHash: async (input, a) => hashSidecar(cutWordsFileFor(input, a.words_dir)),
   },
 };
 
@@ -5984,9 +6027,13 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
 
   // Content-hash cache (ffmpeg-skill's batch.py idea): the key covers
   // the input bytes + operation + args + suffix, so an unchanged file
-  // is never re-encoded. A hit is only trusted when the cached output
-  // still exists on disk with the recorded size AND sha256 — a stale
-  // or hand-edited output is re-run, not reported as done.
+  // is never re-encoded. Operations with a sidecar file (cut_words'
+  // words file, chroma_key's background image) add the sidecar's
+  // bytes via spec.extraHash — two byte-identical inputs with
+  // different sidecars are different jobs. A hit is only trusted when
+  // the cached output still exists on disk with the recorded size AND
+  // sha256 — a stale or hand-edited output is re-run, not reported
+  // as done.
   const cachePath = path.join(outDir, BATCH_CACHE_FILENAME);
   let cacheData = { version: 1, entries: {} };
   if (cache) {
@@ -5997,7 +6044,11 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
   }
   const cacheKeyFor = async (item) => {
     const inputHash = await hashFile(item.input);
-    return createHash("sha256").update(stableStringify({ operation, args, suffix, inputHash })).digest("hex");
+    let extraHash = null;
+    if (typeof spec.extraHash === "function") {
+      try { extraHash = await spec.extraHash(item.input, args); } catch { extraHash = null; }
+    }
+    return createHash("sha256").update(stableStringify({ operation, args, suffix, inputHash, extraHash })).digest("hex");
   };
 
   const results = new Array(items.length);
@@ -6021,7 +6072,22 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
           try {
             const st = await stat(hit.output);
             if (st.size === hit.output_size_bytes && (await hashFile(hit.output)) === hit.output_sha256) {
-              results[i] = { input: item.input, output: item.output, status: "cached", result: hit.result };
+              // A hit still owes this item its own output file: a
+              // byte-identical twin input must not be reported
+              // "cached" while its file only exists under the first
+              // twin's name. Copy (same bytes, verified above) — but
+              // only when this item's own output is missing or stale:
+              // a second run of the same batch must leave its files
+              // untouched (mtime), not re-copy them.
+              if (hit.output !== item.output) {
+                let needCopy = true;
+                try {
+                  const ost = await stat(item.output);
+                  if (ost.size === hit.output_size_bytes && (await hashFile(item.output)) === hit.output_sha256) needCopy = false;
+                } catch { /* missing output: copy below */ }
+                if (needCopy) await copyFile(hit.output, item.output);
+              }
+              results[i] = { input: item.input, output: item.output, status: "cached", result: { ...hit.result, output: item.output } };
               continue;
             }
           } catch { /* cached output gone or changed: fall through and re-run */ }
@@ -6144,6 +6210,16 @@ export const MANIFEST_STEPS = {
     args: ["color", "similarity", "blend", "background", "crf"],
     run: (input, output, a) => chromaKey({ input, output, color: a.color ?? "00FF00", similarity: a.similarity ?? 0.1, blend: a.blend ?? 0.0, background: a.background ?? null, crf: a.crf ?? 23 }),
   },
+  // Manifest overrides the batch shape: a manifest is one input, so
+  // the step takes one words file, not a words directory.
+  cut_words: {
+    args: ["words_file", "remove", "fillers", "indices", "keep", "pad_before", "pad_after", "min_keep"],
+    run: (input, output, a) => cutWords({
+      input, output, wordsFile: a.words_file,
+      remove: a.remove ?? null, fillers: a.fillers ?? false, indices: a.indices ?? null, keep: a.keep ?? null,
+      padBefore: a.pad_before ?? 0.06, padAfter: a.pad_after ?? 0.12, minKeep: a.min_keep ?? 0.2,
+    }),
+  },
 };
 
 const MANIFEST_CACHE_DIRNAME = ".mediakit-manifest-cache";
@@ -6152,7 +6228,7 @@ const MANIFEST_MAX_STEPS = 32;
 // Step args that name a sidecar file: resolved relative to the
 // manifest file (like input/output), and hashed into the cache key
 // so editing the captions file re-runs the burn step.
-const MANIFEST_FILE_ARGS = ["captions", "overlay"];
+const MANIFEST_FILE_ARGS = ["captions", "overlay", "words_file"];
 
 export async function manifest({ manifestPath, output = null, cache = true, dryRun = false, keepIntermediates = false }) {
   const manifestAbs = await requireInput(manifestPath, "manifest");

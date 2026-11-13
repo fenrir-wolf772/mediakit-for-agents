@@ -1430,7 +1430,12 @@ const socialRes = await client.callTool({
     platforms: ["tiktok", "shorts", "instagram-feed"],
     strategy: "blur",
   },
-});
+  // 3 platforms x (reframe blur + 2-pass loudness + check) costs ~93s
+  // on this 1.5-CPU VM (measured 2026-11-13, CLI equivalent 1m32s) —
+  // the SDK's 60s default timeout kills the call even though the tool
+  // itself finishes fine (all_pass true). The timeout is the test
+  // client's, not the tool's: keep the real work, raise the wait.
+}, undefined, { timeout: 300000 });
 const socialJson = JSON.parse(socialRes.content[0].text);
 console.log("social call:", "all_pass", socialJson.all_pass, "|", socialJson.outputs.map((o) => `${o.platform} ${o.dimensions} ${o.duration_seconds}s LUFS ${o.lufs} pass=${o.check_pass}`).join(" | "));
 checkOk(socialJson.all_pass === true, "social all platforms pass their check", JSON.stringify(socialJson.outputs.map((o) => ({ p: o.platform, pass: o.check_pass, issues: o.issues }))));
@@ -2616,6 +2621,78 @@ const batchAudioRes = await client.callTool({
 const batchAudioJson = JSON.parse(batchAudioRes.content[0].text);
 checkOk(batchAudioJson.succeeded === 2 && batchAudioJson.results.every((r) => r.output.endsWith("-extract_audio.mp3")), "batch extract_audio writes .mp3 outputs for video inputs", JSON.stringify(batchAudioJson.results.map((r) => r.output)));
 checkOk(existsSync(path.join(root, "outputs/mcp-batch-audio/source-extract_audio.mp3")), "batch extract_audio output file exists on disk", "source-extract_audio.mp3 missing");
+// batch cut_words (lượt 38): per-file <stem>.words.json next to each
+// input (words_dir defaults to the input's own folder). take-c has no
+// words file, so its row fails while the rest still run. take-b's
+// words file holds the same words in different bytes (compact JSON),
+// so it must run fresh — not be served take-a's cut. take-d is
+// take-a's exact twin (same clip bytes, same words bytes), so it is
+// served from the cache — and the cache must still write take-d's
+// own output file, not just point at take-a's.
+await mkdir(path.join(root, "outputs/mcp-batch-cw-in"), { recursive: true });
+for (const stem of ["take-a", "take-b", "take-c", "take-d"]) {
+  await copyFile(path.join(root, "test/source.mp4"), path.join(root, `outputs/mcp-batch-cw-in/${stem}.mp4`));
+}
+const cwWordsRaw = await readFile(path.join(root, "test/cut-words.json"), "utf8");
+await writeFile(path.join(root, "outputs/mcp-batch-cw-in/take-a.words.json"), cwWordsRaw, "utf8");
+await writeFile(path.join(root, "outputs/mcp-batch-cw-in/take-b.words.json"), JSON.stringify(JSON.parse(cwWordsRaw)), "utf8");
+await writeFile(path.join(root, "outputs/mcp-batch-cw-in/take-d.words.json"), cwWordsRaw, "utf8");
+await rm(path.join(root, "outputs/mcp-batch-cw-out"), { recursive: true, force: true });
+const batchCwRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "cut_words", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-cw-in"), output_dir: path.join(root, "outputs/mcp-batch-cw-out"), args: { remove: "um,uh" } },
+});
+const batchCwJson = JSON.parse(batchCwRes.content[0].text);
+checkOk(batchCwJson.succeeded === 2 && batchCwJson.failed === 1 && batchCwJson.cached === 1, "batch cut_words cuts 2 files, caches the exact twin, fails the one with no words file", `succeeded=${batchCwJson.succeeded} cached=${batchCwJson.cached} failed=${batchCwJson.failed}`);
+const batchCwRowA = batchCwJson.results.find((r) => r.input.endsWith("take-a.mp4"));
+const batchCwRowB = batchCwJson.results.find((r) => r.input.endsWith("take-b.mp4"));
+const batchCwRowC = batchCwJson.results.find((r) => r.input.endsWith("take-c.mp4"));
+const batchCwRowD = batchCwJson.results.find((r) => r.input.endsWith("take-d.mp4"));
+checkOk(batchCwRowA?.status === "ok" && batchCwRowA?.result?.removed_count === 2 && near(batchCwRowA?.result?.duration_after, 3.48, 0.05), "batch cut_words take-a: removes um+uh, 3.48s after", JSON.stringify(batchCwRowA?.result));
+checkOk(batchCwRowB?.status === "ok" && near(batchCwRowB?.result?.duration_after, 3.48, 0.05), "batch cut_words take-b (same words, different bytes) runs fresh instead of serving take-a's cut", JSON.stringify(batchCwRowB));
+checkOk(batchCwRowC?.status === "error" && /take-c\.words\.json/.test(batchCwRowC?.error ?? ""), "batch cut_words take-c: error names the missing words file, other rows unaffected", (batchCwRowC?.error ?? "").slice(0, 160));
+checkOk(batchCwRowD?.status === "cached" && near(batchCwRowD?.result?.duration_after, 3.48, 0.05), "batch cut_words take-d (exact twin of take-a) is served from the cache", JSON.stringify(batchCwRowD));
+checkOk(existsSync(path.join(root, "outputs/mcp-batch-cw-out/take-d-cut_words.mp4")), "batch cache hit still writes the twin's own output file", "take-d-cut_words.mp4 missing");
+const { stdout: batchCwDurOut } = await execFileAsync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path.join(root, "outputs/mcp-batch-cw-out/take-a-cut_words.mp4")]);
+checkOk(near(parseFloat(batchCwDurOut.trim()), 3.48, 0.05), "batch cut_words output measures 3.48s independently (ffprobe)", `got ${batchCwDurOut.trim()}`);
+const { stdout: batchCwDurDOut } = await execFileAsync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path.join(root, "outputs/mcp-batch-cw-out/take-d-cut_words.mp4")]);
+checkOk(near(parseFloat(batchCwDurDOut.trim()), 3.48, 0.05), "batch cached twin output measures 3.48s independently (ffprobe)", `got ${batchCwDurDOut.trim()}`);
+// batch chroma_key via MCP (enum regression, lượt 38): lượt 36 added
+// chroma_key to BATCH_OPERATIONS but not the MCP batch enum, so MCP
+// callers got "Invalid enum value" while the CLI worked. The
+// check-docs batch-enum guard now fails CI on that drift.
+await mkdir(path.join(root, "outputs/mcp-batch-chroma-in"), { recursive: true });
+await copyFile(path.join(root, "test/greenscreen.mp4"), path.join(root, "outputs/mcp-batch-chroma-in/green.mp4"));
+await rm(path.join(root, "outputs/mcp-batch-chroma-out"), { recursive: true, force: true });
+const batchChromaRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "chroma_key", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-chroma-in"), output_dir: path.join(root, "outputs/mcp-batch-chroma-out"), args: {} },
+});
+const batchChromaJson = JSON.parse(batchChromaRes.content[0].text);
+checkOk(batchChromaJson.succeeded === 1 && batchChromaJson.results[0].output.endsWith("-chroma_key.mov"), "batch chroma_key runs via MCP and writes a transparent .mov", JSON.stringify(batchChromaJson.results.map((r) => r.output)));
+checkOk(existsSync(path.join(root, "outputs/mcp-batch-chroma-out/green-chroma_key.mov")), "batch chroma_key output file exists on disk", "green-chroma_key.mov missing");
+// batch chroma_key with an image background: editing the background
+// image must re-run the file, not serve the cached composite — the
+// background's bytes (not just its path) are in the cache key.
+await mkdir(path.join(root, "outputs/mcp-batch-chroma-bg"), { recursive: true });
+await copyFile(path.join(root, "test/greenscreen.mp4"), path.join(root, "outputs/mcp-batch-chroma-bg/green.mp4"));
+await copyFile(path.join(root, "test/logo.png"), path.join(root, "outputs/mcp-batch-chroma-bg/bg.png"));
+await rm(path.join(root, "outputs/mcp-batch-chroma-bg-out"), { recursive: true, force: true });
+const batchChromaBg1 = JSON.parse((await client.callTool({
+  name: "batch",
+  arguments: { operation: "chroma_key", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-chroma-bg"), output_dir: path.join(root, "outputs/mcp-batch-chroma-bg-out"), args: { background: path.join(root, "outputs/mcp-batch-chroma-bg/bg.png") } },
+})).content[0].text);
+checkOk(batchChromaBg1.succeeded === 1, "batch chroma_key with image background succeeds", `succeeded=${batchChromaBg1.succeeded}`);
+const chromaBgR1 = await planeMean(path.join(root, "outputs/mcp-batch-chroma-bg-out/green-chroma_key.mp4"), "100:100:0:0", "r");
+checkOk(chromaBgR1 !== null && chromaBgR1 > 200, "batch chroma_key composite shows the red background first (corner R high)", `corner R=${chromaBgR1}`);
+await execFileAsync("ffmpeg", ["-y", "-f", "lavfi", "-i", "color=c=blue:s=200x200", "-frames:v", "1", path.join(root, "outputs/mcp-batch-chroma-bg/bg.png")]);
+const batchChromaBg2 = JSON.parse((await client.callTool({
+  name: "batch",
+  arguments: { operation: "chroma_key", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-chroma-bg"), output_dir: path.join(root, "outputs/mcp-batch-chroma-bg-out"), args: { background: path.join(root, "outputs/mcp-batch-chroma-bg/bg.png") } },
+})).content[0].text);
+checkOk(batchChromaBg2.succeeded === 1 && batchChromaBg2.cached === 0, "batch chroma_key re-runs after the background image changes (no stale cache hit)", `succeeded=${batchChromaBg2.succeeded} cached=${batchChromaBg2.cached}`);
+const chromaBgB2 = await planeMean(path.join(root, "outputs/mcp-batch-chroma-bg-out/green-chroma_key.mp4"), "100:100:0:0", "b");
+checkOk(chromaBgB2 !== null && chromaBgB2 > 200, "batch chroma_key re-run composites the new blue background (corner B high)", `corner B=${chromaBgB2}`);
 
 // qa_report + thumbnail timestamps (lượt 31; idea: github774/claude-video-studio
 // contact_sheet + qa_report — run the gate, plus a contact sheet, on
@@ -2806,6 +2883,27 @@ const manifestBadVersionText = await callExpectThrow("manifest", { manifest_path
 checkOk(/version must be 1/.test(manifestBadVersionText), "manifest refuses version 2", manifestBadVersionText.slice(0, 160));
 const manifestMissingText = await callExpectThrow("manifest", { manifest_path: path.join(root, "test/no-such-manifest.json") });
 checkOk(/not found/.test(manifestMissingText), "manifest with a missing file errors instead of planning", manifestMissingText.slice(0, 160));
+// manifest cut_words step (lượt 38, fixture test/manifest-cutwords.json):
+// cut um/uh first, then loudness — the words file resolves relative
+// to the manifest, is hashed into the step cache, and a second run
+// serves both steps from cache.
+await rm(path.join(root, "outputs/mcp-manifest-cw.mp4"), { force: true });
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const manifestCwRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-cutwords.json") },
+});
+const manifestCwJson = JSON.parse(manifestCwRes.content[0].text);
+checkOk(manifestCwJson.steps.every((s) => s.status === "ok") && manifestCwJson.steps_run === 2 && manifestCwJson.steps[0].result?.removed_count === 2, "manifest cut_words step removes um+uh, loudness step follows", JSON.stringify(manifestCwJson.steps.map((s) => `${s.tool}:${s.status}`)));
+checkOk(near(manifestCwJson.final.duration_seconds, 3.48, 0.05), "manifest cut_words final is 3.48s", JSON.stringify(manifestCwJson.final));
+const manifestCwLufs = await measureLufs(path.join(root, "outputs/mcp-manifest-cw.mp4"));
+checkOk(near(manifestCwLufs, -14, 0.5), "manifest cut_words + loudness final measures -14 LUFS independently", `got ${manifestCwLufs}`);
+const manifestCwCachedRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-cutwords.json") },
+});
+const manifestCwCachedJson = JSON.parse(manifestCwCachedRes.content[0].text);
+checkOk(manifestCwCachedJson.cache_hits === 2 && manifestCwCachedJson.steps_run === 0, "manifest cut_words second run serves both steps from cache", `cache_hits=${manifestCwCachedJson.cache_hits} steps_run=${manifestCwCachedJson.steps_run}`);
 
 await client.close();
 if (failures.length) {

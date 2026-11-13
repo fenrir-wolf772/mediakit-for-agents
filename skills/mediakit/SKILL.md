@@ -719,6 +719,20 @@ stream-copies the input unchanged. After a real cut, re-transcribe
 the output and check the removed word is gone — Whisper sometimes
 hides a restart inside one long word on the first pass.
 
+### 44. cut_words in batch and manifest: one words file per clip
+Batch runs one operation over many files with the same args, but a
+words file is per-clip — timings from one clip must never cut
+another. So batch `cut_words` finds each clip's file by convention:
+`<words_dir>/<stem>.words.json`, default the input's own folder
+(`take.mp4` looks for `take.words.json` next to it; `--words-dir`
+points at a shared folder of per-clip files). A clip with no words
+file fails its own row only — the rest of the batch still runs, and
+the error names the missing file. In a manifest the step is one clip,
+so it takes a single `words_file` instead, resolved relative to the
+manifest (like `captions`/`overlay`) and hashed into the step cache,
+so editing the words file re-runs the cut step. A full talking-head
+cleanup is one manifest: `cut_words` → `silence` → `loudness`.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.
