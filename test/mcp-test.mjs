@@ -1593,6 +1593,40 @@ console.log("loudness quiet bed:", "target", loudJson.target_lufs, "| input", lo
 checkOk(typeof loudJson.output_lufs === "number" && loudJson.output_lufs > loudJson.input_lufs, "loudness quiet bed improves on input LUFS", `input ${loudJson.input_lufs} -> output ${loudJson.output_lufs}`);
 checkOk(typeof loudJson.warning === "string" && loudJson.warning.length > 0, "loudness quiet bed warns it cannot reach target", `got warning=${JSON.stringify(loudJson.warning)}`);
 
+// loudness --compressor: quiet, high-crest Kokoro speech
+// (test/kokoro-voice.wav, -25.6 LUFS in, crest ~19 dB) stalls at
+// -15.2 with two-pass alone (true-peak ceiling). A gentle
+// compressor first (threshold -24 dB, ratio 4, 1 ms attack — the
+// attack is the point: 20 ms lets plosive transients straight
+// through) pulls the true peak down ~9.5 dB while integrated only
+// falls ~5.6 dB, so the target becomes reachable: -14.3 on wav,
+// -14.6 on mp3 (the extra 0.3 is the known mp3 encode loss).
+const loudKokoroNoCompRes = await client.callTool({
+  name: "loudness",
+  arguments: { input: path.join(root, "test/kokoro-voice.wav"), output: path.join(root, "outputs/mcp-loudness-kokoro-nocomp.mp3") },
+});
+const loudKokoroNoCompJson = JSON.parse(loudKokoroNoCompRes.content[0].text);
+console.log("loudness kokoro no-comp:", "input", loudKokoroNoCompJson.input_lufs, "| output", loudKokoroNoCompJson.output_lufs, "| warning", loudKokoroNoCompJson.warning ?? "(none)");
+checkOk(near(loudKokoroNoCompJson.output_lufs, -15.2, 0.5) && typeof loudKokoroNoCompJson.warning === "string", "loudness without compressor stalls below target on high-crest Kokoro voice (-15.2, warns)", `got ${loudKokoroNoCompJson.output_lufs}`);
+const loudKokoroCompRes = await client.callTool({
+  name: "loudness",
+  arguments: { input: path.join(root, "test/kokoro-voice.wav"), output: path.join(root, "outputs/mcp-loudness-kokoro-comp.wav"), compressor: true },
+});
+const loudKokoroCompJson = JSON.parse(loudKokoroCompRes.content[0].text);
+console.log("loudness kokoro +compressor:", "input", loudKokoroCompJson.input_lufs, "| compressed", loudKokoroCompJson.compressed_lufs, "| output", loudKokoroCompJson.output_lufs, "| warning", loudKokoroCompJson.warning ?? "(none)");
+checkOk(loudKokoroCompJson.compressor?.threshold_db === -24 && loudKokoroCompJson.compressor?.ratio === 4 && typeof loudKokoroCompJson.compressed_lufs === "number" && loudKokoroCompJson.compressed_lufs < loudKokoroCompJson.input_lufs, "loudness compressor reports its settings and the compressed level (below input — no makeup gain)", JSON.stringify(loudKokoroCompJson.compressor));
+checkOk(near(loudKokoroCompJson.output_lufs, -14, 0.5) && !loudKokoroCompJson.warning, "loudness with compressor hits -14 LUFS (±0.5) on Kokoro voice, no warning", `got ${loudKokoroCompJson.output_lufs}`);
+const loudKokoroCompMeasured = await measureLufs(path.join(root, "outputs/mcp-loudness-kokoro-comp.wav"));
+checkOk(near(loudKokoroCompMeasured, -14, 0.5), "loudness compressor output independently measures -14 LUFS (±0.5)", `got ${loudKokoroCompMeasured}`);
+const loudKokoroCompMp3Res = await client.callTool({
+  name: "loudness",
+  arguments: { input: path.join(root, "test/kokoro-voice.wav"), output: path.join(root, "outputs/mcp-loudness-kokoro-comp.mp3"), compressor: true },
+});
+const loudKokoroCompMp3Json = JSON.parse(loudKokoroCompMp3Res.content[0].text);
+checkOk(loudKokoroCompMp3Json.output_lufs > loudKokoroNoCompJson.output_lufs, "loudness with compressor improves the mp3 master over no-compressor", `no-comp ${loudKokoroNoCompJson.output_lufs} -> comp ${loudKokoroCompMp3Json.output_lufs}`);
+const loudCompBadText = await callExpectThrow("loudness", { input: path.join(root, "test/kokoro-voice.wav"), output: path.join(root, "outputs/mcp-loudness-bad.mp3"), compressor: true, compressor_ratio: 0 });
+checkOk(/greater than or equal to 1/.test(loudCompBadText ?? ""), "loudness refuses compressor_ratio 0", loudCompBadText ?? "");
+
 // intro: title on a dark background, fading in and out. Pixel-verify
 // the fade on the centre band (text sits there): dim at t=0.05 and
 // t=2.95, bright at t=1.5. Thresholds from direct measurement on the
@@ -3491,6 +3525,68 @@ checkOk(assembleTransReceipt.approval === "forced" && assembleTransReceipt.joins
 const assembleTransRender2Res = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleTransStage.manifestPath, mode: "render", output_dir: assembleTransOut, force: true } }, undefined, { timeout: 300000 });
 const assembleTransRender2Json = JSON.parse(assembleTransRender2Res.content[0].text);
 checkOk(assembleTransRender2Json.cache_hits === 4, "assemble second transitions render reuses all 4 shot segments from the cache", `cache_hits=${assembleTransRender2Json.cache_hits}`);
+
+// Per-shot text layers: shot.text is a drawtext lower-third /
+// title timed inside the shot (top by default, clear of the burned
+// captions). Fixture: test/assemble-text.json — 10s / 300 frames,
+// no music or captions (keeps the render fast): t1 is a dark color
+// card with "TITLE CARD" top, 0.5–1.5s; t2 a zooming image with
+// "THE CHASE" center, yellow, 1–3s into the shot. The pixel check
+// uses the solid card as its own control: the top band is exactly
+// 0x11 (R=17) with no text, brighter with text, and back to 0x11
+// after the layer's end — timing proved both ways, not assumed.
+const assembleTextStage = await stageAssembleManifest("assemble-text.json");
+const assembleTextOut = path.join(assembleTextStage.dir, "out");
+const assembleTextValidateRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleTextStage.manifestPath, mode: "validate" } });
+const assembleTextValidateJson = JSON.parse(assembleTextValidateRes.content[0].text);
+checkOk(assembleTextValidateJson.total_seconds === 10 && assembleTextValidateJson.total_frames === 300 && assembleTextValidateJson.shots?.[0]?.text_layers?.[0]?.text === "TITLE CARD" && assembleTextValidateJson.shots?.[0]?.text_layers?.[0]?.position === "top" && assembleTextValidateJson.shots?.[0]?.text_layers?.[0]?.size === 90 && assembleTextValidateJson.shots?.[0]?.text_layers?.[0]?.start_seconds === 0.5 && assembleTextValidateJson.shots?.[0]?.text_layers?.[0]?.end_seconds === 1.5 && assembleTextValidateJson.shots?.[1]?.text_layers?.[0]?.color === "FFD60A" && assembleTextValidateJson.shots?.[1]?.text_layers?.[0]?.position === "center", "assemble validate echoes the parsed text layers (TITLE CARD top 90px 0.5-1.5s; THE CHASE center yellow)", JSON.stringify(assembleTextValidateJson.shots?.map((s) => s.text_layers)));
+// Bad layers fail validate, not mid-render: mutate the staged
+// manifest in place (same voice/shots, so only the layer is at
+// fault) and check the error names the problem.
+const assembleTextDoc = JSON.parse(await readFile(assembleTextStage.manifestPath, "utf8"));
+const assembleTextBad = async (mutate, re) => {
+  const doc = JSON.parse(JSON.stringify(assembleTextDoc));
+  mutate(doc);
+  const p = path.join(assembleTextStage.dir, `bad-${Math.random().toString(36).slice(2, 8)}.json`);
+  await writeFile(p, JSON.stringify(doc), "utf8");
+  const text = await callExpectThrow("assemble", { manifest_path: p, mode: "validate" });
+  return re.test(text ?? "");
+};
+checkOk(await assembleTextBad((d) => { d.shots[0].text.position = "left"; }, /top, center or bottom/), "assemble validate refuses a text layer with position left", "");
+checkOk(await assembleTextBad((d) => { d.shots[0].text.end = 5; }, /past the shot duration/), "assemble validate refuses a text layer ending past its shot", "");
+checkOk(await assembleTextBad((d) => { d.shots[0].text.text = "  "; }, /non-empty text/), "assemble validate refuses an empty text layer", "");
+checkOk(await assembleTextBad((d) => { d.shots[0].text.start = 1.5; d.shots[0].text.end = 0.5; }, /must be before end/), "assemble validate refuses a text layer with start after end", "");
+const assembleTextRenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleTextStage.manifestPath, mode: "render", output_dir: assembleTextOut, force: true } }, undefined, { timeout: 300000 });
+const assembleTextRenderJson = JSON.parse(assembleTextRenderRes.content[0].text);
+const assembleTextFinalPath = path.join(assembleTextOut, "final.mp4");
+const assembleTextFinalProbe = await probeStreams(assembleTextFinalPath);
+const assembleTextFinalFrames = await countFrames(assembleTextFinalPath);
+checkOk(assembleTextRenderJson.approval === "forced" && assembleTextFinalProbe?.streams?.find((s) => s.codec_type === "video")?.width === 1080 && near(parseFloat(assembleTextFinalProbe?.format?.duration), 10, 0.15) && assembleTextFinalFrames === 300, "assemble force render with text layers is 1080x1920, 10s, exactly 300 frames", `duration=${assembleTextFinalProbe?.format?.duration} frames=${assembleTextFinalFrames}`);
+const assembleTextBandOff1 = await planeMean(assembleTextFinalPath, "1080:300:0:150", "r", 0.25);
+const assembleTextBandOn = await planeMean(assembleTextFinalPath, "1080:300:0:150", "r", 1.0);
+const assembleTextBandOff2 = await planeMean(assembleTextFinalPath, "1080:300:0:150", "r", 1.75);
+checkOk(assembleTextBandOff1 !== null && near(assembleTextBandOff1, 17, 3) && assembleTextBandOn !== null && assembleTextBandOn > assembleTextBandOff1 + 8 && assembleTextBandOff2 !== null && near(assembleTextBandOff2, 17, 3), "assemble text layer is visible only inside its window (top band R 17 -> brighter -> 17)", `R t=0.25:${assembleTextBandOff1} t=1.0:${assembleTextBandOn} t=1.75:${assembleTextBandOff2}`);
+// The text is part of the segment cache key: changing only the
+// layer text rebuilds that one segment (cache_hits 3, not 4).
+const assembleTextEditDoc = JSON.parse(JSON.stringify(assembleTextDoc));
+assembleTextEditDoc.shots[0].text.text = "OTHER TITLE";
+const assembleTextEditPath = path.join(assembleTextStage.dir, "assemble-text-edit.json");
+await writeFile(assembleTextEditPath, JSON.stringify(assembleTextEditDoc), "utf8");
+const assembleTextEditRenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleTextEditPath, mode: "render", output_dir: path.join(assembleTextStage.dir, "out-edit"), force: true } }, undefined, { timeout: 300000 });
+const assembleTextEditRenderJson = JSON.parse(assembleTextEditRenderRes.content[0].text);
+checkOk(assembleTextEditRenderJson.cache_hits === 3, "assemble changing only the layer text rebuilds just that shot's segment (cache_hits 3)", `cache_hits=${assembleTextEditRenderJson.cache_hits}`);
+// Preview renders at half size: the text layer must scale down and
+// re-wrap for the render width instead of overflowing both sides
+// (measured 2026-11-13: "MINUS 14 LUFS" clipped to "NUS 14 LU" in
+// the preview before the fix — the layer was sized for 1080 and
+// drawn unscaled on a 540-wide frame). The band as a whole must be
+// bright (text present) while a 20px strip at the frame edge stays
+// near the card background (no text touching the edge).
+const assembleTextPreviewRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleTextStage.manifestPath, mode: "preview", output_dir: path.join(assembleTextStage.dir, "out-preview"), preview_seconds: 3 } });
+const assembleTextPreviewJson = JSON.parse(assembleTextPreviewRes.content[0].text);
+const assembleTextPreviewBand = await planeMean(path.join(assembleTextStage.dir, "out-preview", "preview.mp4"), "540:150:0:75", "r", 1.0);
+const assembleTextPreviewEdge = await planeMean(path.join(assembleTextStage.dir, "out-preview", "preview.mp4"), "20:150:0:75", "r", 1.0);
+checkOk(assembleTextPreviewJson.dimensions === "540x960" && assembleTextPreviewBand !== null && assembleTextPreviewBand > 25 && assembleTextPreviewEdge !== null && assembleTextPreviewEdge < 22, "assemble preview scales text layers to half size (band bright, frame edge dark)", `dimensions=${assembleTextPreviewJson.dimensions} band=${assembleTextPreviewBand} edge=${assembleTextPreviewEdge}`);
 
 // Canvas scenes: a shot drawn in code (Canvas 2D, node-canvas).
 // Fixture: test/assemble-canvas.json (voice 3s + lead/tail 0.5 = 4s,

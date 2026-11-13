@@ -976,10 +976,39 @@ const VIDEO_CONTAINER_AUDIO = { mp4: "aac", mov: "aac", m4v: "aac", mkv: "aac", 
 // the ±0.5 LUFS tolerance instead of sitting on its edge.
 const mp3BitrateArgs = (codec) => (codec === "libmp3lame" ? ["-b:a", "192k"] : []);
 
-export async function loudness({ input, output, targetLufs = -14, format = null }) {
+// acompressor takes a LINEAR threshold (0-1), so -24 dB = 0.0631 —
+// the same conversion mix() uses for its -18 dB voice compressor
+// (0.125). The compressor stage for loudness() is the same idea,
+// exposed as an option: quiet, high-crest speech (Kokoro measured
+// -25.5 LUFS, crest ~19 dB) hits the true-peak ceiling before the
+// target, so two-pass alone stalls at ~-15.1; a gentle compressor
+// first (threshold -24 dB, ratio 4, peak detection) lifts it to
+// ~-14.5. The compressed audio is measured BEFORE the loudnorm pass
+// so the gain is computed against what loudnorm actually receives.
+function normalizeCompressor(compressor) {
+  if (compressor === null || compressor === undefined || compressor === false) return null;
+  const o = compressor === true ? {} : compressor;
+  if (typeof o !== "object" || Array.isArray(o)) {
+    throw new MediaKitError("loudness compressor must be true or an object {threshold_db?, ratio?, attack_ms?, release_ms?, knee_db?, detection?}", "INVALID_ARG");
+  }
+  return {
+    threshold_db: num(o.threshold_db ?? o.threshold ?? -24, "compressor.threshold_db", { min: -60, max: 0 }),
+    ratio: num(o.ratio ?? 4, "compressor.ratio", { min: 1, max: 20 }),
+    attack_ms: num(o.attack_ms ?? o.attack ?? 1, "compressor.attack_ms", { min: 0.01, max: 1000 }),
+    release_ms: num(o.release_ms ?? o.release ?? 250, "compressor.release_ms", { min: 10, max: 5000 }),
+    knee_db: num(o.knee_db ?? o.knee ?? 2, "compressor.knee_db", { min: 0, max: 10 }),
+    detection: o.detection ?? "peak",
+  };
+}
+
+export async function loudness({ input, output, targetLufs = -14, format = null, compressor = null }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const target = num(targetLufs, "target_lufs", { min: -70, max: 0 });
+  const comp = normalizeCompressor(compressor);
+  if (comp && !["peak", "rms"].includes(comp.detection)) {
+    throw new MediaKitError(`loudness compressor detection must be peak or rms, got: ${comp.detection}`, "INVALID_ARG");
+  }
   const ext = (format || path.extname(outPath).slice(1) || "mp3").toLowerCase();
   const codec = AUDIO_FORMATS[ext] ?? VIDEO_CONTAINER_AUDIO[ext];
   if (!codec) throw new MediaKitError(`unsupported audio format: ${ext}`, "INVALID_ARG");
@@ -989,6 +1018,14 @@ export async function loudness({ input, output, targetLufs = -14, format = null 
   // true peak, LRA, threshold, target offset); pass 2 applies the exact
   // linear gain. Single-pass cannot hit the target when the input is far
   // from it — a -26 LUFS music bed only reached -21.6 in one pass.
+// Attack is 1 ms, not ffmpeg's 20 ms default: speech peaks are
+// plosive transients, and a 20 ms attack lets them straight through
+// (measured on the Kokoro fixture: TP -6.3 dB untouched, offset
+// +0.81, output stuck at -15.2). With attack 1 ms the same
+// compressor pulls TP to -15.8 while integrated only falls to
+// -31.2, so the target becomes reachable: on-disk -14.3 LUFS
+// (wav/m4a) and -14.6 (mp3 — the extra 0.3 is the known mp3
+// encode loss). Same 1 ms attack mix() uses on its voice compressor.
   // TP is -2, not the usual -1.5: the AAC/MP3 encode after loudnorm
   // adds ~1-1.5 dB of inter-sample overshoot (measured 2026-11-13:
   // speech mastered at TP -1.5 measured -0.55 on disk, a film final
@@ -996,20 +1033,51 @@ export async function loudness({ input, output, targetLufs = -14, format = null 
   // goal and the file passes the qa true-peak max of -0.3 dBTP.
   const measured = await measureLoudnessFull(inPath);
   let twoPass = false;
-  if (measured) {
-    await run(FFMPEG, [
-      "-y", "-i", inPath,
-      "-af", `loudnorm=I=${target}:TP=-2:LRA=11:measured_I=${measured.i}:measured_TP=${measured.tp}:measured_LRA=${measured.lra}:measured_thresh=${measured.thresh}:offset=${measured.offset}:linear=true`,
-      "-ar", "48000", "-c:v", "copy", "-c:a", codec, ...mp3BitrateArgs(codec), outPath,
-    ]);
-    twoPass = true;
-  } else {
-    // Measurement failed (unusual input): fall back to single-pass.
-    await run(FFMPEG, [
-      "-y", "-i", inPath,
-      "-af", `loudnorm=I=${target}:TP=-2:LRA=11`,
-      "-ar", "48000", "-c:v", "copy", "-c:a", codec, ...mp3BitrateArgs(codec), outPath,
-    ]);
+  let compressedLufs = null;
+  let compPath = null;
+  try {
+    // Compressor pre-stage: compress to a lossless temp, measure THAT,
+    // then loudnorm with the compressed measurement. The temp is
+    // audio-only, so pass 2 takes video (if any) from the original
+    // input and audio from the temp — the picture is never dropped.
+    let normSource = inPath;
+    let normMeasured = measured;
+    if (comp) {
+      compPath = path.join(path.dirname(outPath), `.loudness-comp-${process.pid}.wav`);
+      const thrLin = +(10 ** (comp.threshold_db / 20)).toFixed(4);
+      await run(FFMPEG, [
+        "-y", "-i", inPath, "-vn",
+        "-af", `acompressor=threshold=${thrLin}:ratio=${comp.ratio}:attack=${comp.attack_ms}:release=${comp.release_ms}:knee=${comp.knee_db}:detection=${comp.detection}`,
+        "-ar", "48000", "-c:a", "pcm_s16le", compPath,
+      ]);
+      const compMeasured = await measureLoudnessFull(compPath);
+      if (compMeasured) {
+        normMeasured = compMeasured;
+        compressedLufs = compMeasured.i;
+        normSource = compPath;
+      }
+    }
+    if (normMeasured) {
+      const args = ["-y", "-i", inPath];
+      if (normSource !== inPath) args.push("-i", normSource);
+      args.push(
+        "-af", `loudnorm=I=${target}:TP=-2:LRA=11:measured_I=${normMeasured.i}:measured_TP=${normMeasured.tp}:measured_LRA=${normMeasured.lra}:measured_thresh=${normMeasured.thresh}:offset=${normMeasured.offset}:linear=true`,
+        "-ar", "48000",
+      );
+      if (normSource !== inPath) args.push("-map", "0:v?", "-map", "1:a");
+      args.push("-c:v", "copy", "-c:a", codec, ...mp3BitrateArgs(codec), outPath);
+      await run(FFMPEG, args);
+      twoPass = true;
+    } else {
+      // Measurement failed (unusual input): fall back to single-pass.
+      await run(FFMPEG, [
+        "-y", "-i", inPath,
+        "-af", `${comp ? `acompressor=threshold=${+(10 ** (comp.threshold_db / 20)).toFixed(4)}:ratio=${comp.ratio}:attack=${comp.attack_ms}:release=${comp.release_ms}:knee=${comp.knee_db}:detection=${comp.detection},` : ""}loudnorm=I=${target}:TP=-2:LRA=11`,
+        "-ar", "48000", "-c:v", "copy", "-c:a", codec, ...mp3BitrateArgs(codec), outPath,
+      ]);
+    }
+  } finally {
+    if (compPath) await unlink(compPath).catch(() => {});
   }
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
@@ -1020,9 +1088,9 @@ export async function loudness({ input, output, targetLufs = -14, format = null 
   // pretending the target was hit.
   const offTarget = outputLufs === null ? null : +(outputLufs - target).toFixed(1);
   const warning = offTarget !== null && Math.abs(offTarget) > 0.5
-    ? `reached ${outputLufs} LUFS, ${Math.abs(offTarget)} LUFS ${offTarget < 0 ? "below" : "above"} target — input is peak-limited (true peak caps the gain); high-pass sub-bass or compress first, then normalize again`
+    ? `reached ${outputLufs} LUFS, ${Math.abs(offTarget)} LUFS ${offTarget < 0 ? "below" : "above"} target — input is peak-limited (true peak caps the gain)${comp ? " (compressor already applied)" : "; high-pass sub-bass or compress first, then normalize again"}`
     : null;
-  return { operation: "loudness", input: inPath, output: outPath, target_lufs: target, input_lufs: measured?.i ?? null, output_lufs: outputLufs, two_pass: twoPass, ...(warning ? { warning } : {}), format: ext, ...info, duration_seconds: out.duration_seconds };
+  return { operation: "loudness", input: inPath, output: outPath, target_lufs: target, input_lufs: measured?.i ?? null, output_lufs: outputLufs, two_pass: twoPass, ...(comp ? { compressor: { threshold_db: comp.threshold_db, ratio: comp.ratio, attack_ms: comp.attack_ms, release_ms: comp.release_ms, knee_db: comp.knee_db, detection: comp.detection }, compressed_lufs: compressedLufs } : {}), ...(warning ? { warning } : {}), format: ext, ...info, duration_seconds: out.duration_seconds };
 }
 
 // ---------------------------------------------------------------- concat
@@ -5239,6 +5307,7 @@ const DOCTOR_FILTERS = [
   "silencedetect", "loudnorm", "subtitles", "ass", "scale", "crop",
   "cropdetect", "blackdetect", "freezedetect", "gblur", "trim", "atrim", "concat", "select", "tile", "pad", "overlay",
   "drawtext", "volume", "sidechaincompress", "amix", "aresample",
+  "acompressor",
   "xfade", "acrossfade", "fps", "anullsrc", "setpts", "asetpts",
   "format", "colorchannelmixer", "atempo", "aloop", "geq", "color",
   "palettegen", "paletteuse", "adelay", "apad", "pan",
@@ -5265,7 +5334,7 @@ const TOOL_REQUIREMENTS = {
   extract_audio: { encoders: ["libmp3lame", "aac", "pcm_s16le", "libvorbis", "libopus", "flac"] },
   extract_frame: {},
   thumbnail: { filters: ["select", "scale", "tile", "drawtext"] },
-  loudness: { filters: ["loudnorm"] },
+  loudness: { filters: ["loudnorm", "acompressor"] },
   qa_report: { filters: ["loudnorm", "blackdetect", "freezedetect", "silencedetect", "astats", "ametadata", "select"] },
   concat: { filters: ["concat", "xfade", "acrossfade", "fps", "scale", "pad"] },
   frames: { filters: ["fps", "scale"] },
@@ -5288,7 +5357,7 @@ const TOOL_REQUIREMENTS = {
   package: {},
   publish_kit: {},
   assemble: {
-    filters: ["zoompan", "xfade", "scale", "crop", "fps", "trim", "setpts", "format", "subtitles", "sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay", "apad"],
+    filters: ["zoompan", "xfade", "scale", "crop", "fps", "trim", "setpts", "format", "subtitles", "sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay", "apad", "drawtext"],
     encoders: ["libx264", "aac"],
   },
   mix: { filters: ["sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay"], encoders: ["aac", "libmp3lame"] },
@@ -6414,8 +6483,8 @@ async function hashSidecar(p) {
 
 export const BATCH_OPERATIONS = {
   loudness: {
-    args: ["target_lufs", "format"],
-    run: (input, output, a) => loudness({ input, output, targetLufs: a.target_lufs ?? -14, format: a.format ?? null }),
+    args: ["target_lufs", "format", "compressor", "compressor_threshold", "compressor_ratio"],
+    run: (input, output, a) => loudness({ input, output, targetLufs: a.target_lufs ?? -14, format: a.format ?? null, compressor: a.compressor ? { threshold_db: a.compressor_threshold ?? -24, ratio: a.compressor_ratio ?? 4 } : null }),
   },
   resize: {
     args: ["width", "height", "keep_aspect", "preset"],
@@ -7114,9 +7183,11 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
 // matching preview), render (needs approval unless force:true).
 // Shot segments are cached per shot (content hash, like the manifest
 // tool) and verified by size + SHA-256 on reuse. v1 limits (stated,
-// not hidden): plain cuts, no per-shot text layers, one aspect per
-// manifest, video shots are assumed to move.
-const ASSEMBLE_VERSION = "assemble-v1";
+// not hidden): plain cuts, one aspect per manifest, video shots are
+// assumed to move. Per-shot text layers ARE supported (shot.text):
+// drawtext lower-thirds/titles timed inside the shot, rendered in a
+// second pass over the built segment.
+const ASSEMBLE_VERSION = "assemble-v2";
 const ASSEMBLE_MAX_SHOTS = 64;
 const ASSEMBLE_MOTION_GATE_SECONDS = 2.5;
 const ASSEMBLE_CANVAS_MAX_SECONDS = 60;
@@ -7228,6 +7299,74 @@ function deriveAssembleJoins(shots, fps) {
 function planAssembleVideo(shots, fps) {
   const built = deriveAssembleHandles(shots, fps);
   return { shots: built, joins: deriveAssembleJoins(built, fps) };
+}
+
+// Per-shot text layers (the director's lower-thirds / titles).
+// shot.text is one layer object or an array of up to 4:
+//   {text, position?, size?, color?, box?, start?, end?}
+// position is top (default — clear of the burned captions, which
+// sit ~500px from the bottom), center or bottom; size defaults to
+// min(width,height)/12; color is 6-digit hex, default white; box
+// draws the black@0.6 box behind the text (default on); start/end
+// are seconds inside the NOMINAL shot (default the whole shot).
+// Long lines are wrapped to fit the frame — drawtext never wraps
+// on its own. Text goes through a textfile like titlecard (no
+// inline-text escaping traps, newlines and Vietnamese diacritics
+// pass through). Caveat, from ffmpeg-skill 1.17: drawtext shapes
+// Latin/Vietnamese correctly but not complex scripts (Indic, Thai)
+// — those need libass, which assemble does not use for layers.
+const ASSEMBLE_TEXT_POSITIONS = ["top", "center", "bottom"];
+const ASSEMBLE_MAX_TEXT_LAYERS = 4;
+function parseAssembleTextLayers(raw, label, id, duration, width, height) {
+  if (raw === undefined || raw === null) return [];
+  const list = Array.isArray(raw) ? raw : [raw];
+  if (list.length > ASSEMBLE_MAX_TEXT_LAYERS) {
+    throw new MediaKitError(`${label} (${id}): at most ${ASSEMBLE_MAX_TEXT_LAYERS} text layers, got ${list.length}`, "INVALID_ARG");
+  }
+  const defaultSize = Math.round(Math.min(width, height) / 12);
+  return list.map((entry, j) => {
+    const llabel = `${label} (${id}) text[${j}]`;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new MediaKitError(`${llabel} must be an object {text, position?, size?, color?, box?, start?, end?}`, "INVALID_ARG");
+    }
+    if (typeof entry.text !== "string" || !entry.text.trim()) {
+      throw new MediaKitError(`${llabel} needs non-empty text`, "INVALID_ARG");
+    }
+    const text = entry.text.trim();
+    if (text.length > 200) {
+      throw new MediaKitError(`${llabel} text is ${text.length} characters (max 200)`, "INVALID_ARG");
+    }
+    const position = entry.position ?? "top";
+    if (!ASSEMBLE_TEXT_POSITIONS.includes(position)) {
+      throw new MediaKitError(`${llabel} position must be top, center or bottom, got: ${position}`, "INVALID_ARG");
+    }
+    const size = entry.size === undefined || entry.size === null
+      ? defaultSize
+      : num(entry.size, `${llabel} size`, { min: 8, max: 400, integer: true });
+    const color = entry.color === undefined || entry.color === null
+      ? "FFFFFF"
+      : String(entry.color).trim().replace(/^#/, "");
+    if (!/^[0-9a-fA-F]{6}$/.test(color)) {
+      throw new MediaKitError(`${llabel} color must be a 6-digit hex like FFFFFF, got: ${entry.color}`, "INVALID_ARG");
+    }
+    const box = entry.box ?? true;
+    if (typeof box !== "boolean") {
+      throw new MediaKitError(`${llabel} box must be true or false`, "INVALID_ARG");
+    }
+    const start = entry.start === undefined || entry.start === null
+      ? 0 : num(entry.start, `${llabel} start`, { min: 0 });
+    const end = entry.end === undefined || entry.end === null
+      ? duration : num(entry.end, `${llabel} end`, { min: 0 });
+    if (!(start < end)) {
+      throw new MediaKitError(`${llabel} start ${start}s must be before end ${end}s`, "INVALID_ARG");
+    }
+    if (end > duration + 1e-9) {
+      throw new MediaKitError(`${llabel} end ${end}s is past the shot duration ${duration}s`, "INVALID_ARG");
+    }
+    const maxChars = Math.max(8, Math.floor(width / (size * 0.55)));
+    const lines = wrapTitleLines(text, maxChars);
+    return { text, lines, position, size, color: color.toUpperCase(), box, start_seconds: +start.toFixed(3), end_seconds: +end.toFixed(3) };
+  });
 }
 
 // Validate a parsed film manifest against the files on disk and
@@ -7454,6 +7593,9 @@ async function validateAssembleManifest(doc, manifestAbs) {
         );
       }
     }
+    // Per-shot text layers (any kind): parsed + validated here so
+    // a bad layer fails validate, not mid-render.
+    shot.textLayers = parseAssembleTextLayers(raw.text, label, id, duration, width, height);
     // Transition into this shot (the join from the previous shot).
     // Parsed here, cross-shot rules checked after the loop, when
     // both neighbors exist.
@@ -7641,6 +7783,57 @@ async function buildAssembleCanvasShot(plan, shot, opts, outPath, tmpDir) {
   return outPath;
 }
 
+// Per-shot text layers, applied as one drawtext re-encode over the
+// built segment (uniform across image/video/color/canvas_scene, so
+// each kind's builder stays untouched). Timing is nominal-shot
+// seconds, shifted by the incoming transition handle — the segment
+// is longer than the shot by its handles, and the visible window
+// starts at handleInFrames/fps. Frame count is pinned with
+// -frames:v so the join math downstream never shifts.
+// Size and wrapping scale with the RENDER width (plan.width is the
+// manifest size, opts.width is what this build actually renders):
+// a preview renders at half size, and a 90px layer drawn unscaled
+// on a 540-wide frame overflows both sides (measured 2026-11-13:
+// "MINUS 14 LUFS" clipped to "NUS 14 LU" in the preview). So the
+// layer is re-wrapped for the render width here, not at validate.
+async function applyAssembleTextLayers(plan, shot, opts, inPath) {
+  const layers = shot.textLayers ?? [];
+  if (!layers.length) return inPath;
+  const { fps, crf, preset } = opts;
+  const scale = opts.width / plan.width;
+  const handleInSec = (shot.handleInFrames ?? 0) / fps;
+  const tmpFiles = [];
+  try {
+    const jobs = [];
+    for (const [i, layer] of layers.entries()) {
+      const tmpFile = path.join(path.dirname(inPath), `.assemble-text-${process.pid}-${i}.txt`);
+      tmpFiles.push(tmpFile);
+      const size = Math.max(8, Math.round(layer.size * scale));
+      const maxChars = Math.max(8, Math.floor(opts.width / (size * 0.55)));
+      await writeFile(tmpFile, wrapTitleLines(layer.text, maxChars).join("\n"), "utf8");
+      jobs.push({ layer, tmpFile, size });
+    }
+    const vf = jobs.map(({ layer, tmpFile, size }) => {
+      const esc = tmpFile.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
+      const y = layer.position === "top" ? "h*0.08"
+        : layer.position === "center" ? "(h-text_h)/2" : "h-text_h-h*0.08";
+      const segStart = +(handleInSec + layer.start_seconds).toFixed(4);
+      const segEnd = +(handleInSec + layer.end_seconds).toFixed(4);
+      const box = layer.box ? `:box=1:boxcolor=black@0.6:boxborderw=${Math.round(size * 0.25)}` : "";
+      return `drawtext=fontfile=${TITLECARD_FONT}:textfile=${esc}:fontsize=${size}:fontcolor=0x${layer.color}:borderw=4:bordercolor=black${box}:x=(w-text_w)/2:y=${y}:enable=between(t\\,${segStart}\\,${segEnd})`;
+    }).join(",");
+    const tmpOut = `${inPath}.text.mp4`;
+    await run(FFMPEG, [
+      "-y", "-i", inPath, "-vf", vf, "-frames:v", String(shot.buildFrames),
+      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", String(crf), "-preset", preset, "-an", tmpOut,
+    ]);
+    await rename(tmpOut, inPath);
+  } finally {
+    for (const f of tmpFiles) await unlink(f).catch(() => {});
+  }
+  return inPath;
+}
+
 // One shot -> one uniform segment (libx264/yuv420p, target size/fps,
 // no audio, exactly shot.buildFrames frames — counted on disk, not
 // assumed). The segment covers the nominal shot PLUS its transition
@@ -7655,9 +7848,8 @@ async function buildAssembleCanvasShot(plan, shot, opts, outPath, tmpDir) {
 async function buildAssembleShot(plan, shot, opts, outPath) {
   const { width, height, fps, crf, preset } = opts;
   if (shot.kind === "canvas_scene") {
-    return buildAssembleCanvasShot(plan, shot, opts, outPath, opts.tmpDir);
-  }
-  if (shot.kind === "image") {
+    await buildAssembleCanvasShot(plan, shot, opts, outPath, opts.tmpDir);
+  } else if (shot.kind === "image") {
     const z = shot.zoom ?? { from: 1, to: 1, focus: [0.5, 0.5], focus_end: [0.5, 0.5] };
     const r = await zoomPan({
       input: shot.source, output: outPath, duration: shot.buildSeconds, fps,
@@ -7669,9 +7861,7 @@ async function buildAssembleShot(plan, shot, opts, outPath) {
     if (r.frames !== shot.buildFrames) {
       throw new MediaKitError(`assemble shot ${shot.id}: built ${r.frames} frames, expected ${shot.buildFrames}`, "ASSEMBLE_FRAME_MISMATCH");
     }
-    return outPath;
-  }
-  if (shot.kind === "video") {
+  } else if (shot.kind === "video") {
     const vf = `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},setpts=PTS-STARTPTS,fps=${fps},format=yuv420p`;
     await run(FFMPEG, [
       "-y", "-ss", String(shot.buildStart), "-t", String(shot.buildSeconds), "-i", shot.source,
@@ -7685,6 +7875,7 @@ async function buildAssembleShot(plan, shot, opts, outPath) {
       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", String(crf), "-preset", preset, "-an", outPath,
     ]);
   }
+  await applyAssembleTextLayers(plan, shot, opts, outPath);
   const counted = await countVideoFrames(outPath);
   if (counted !== shot.buildFrames) {
     throw new MediaKitError(`assemble shot ${shot.id}: built ${counted} frames, expected ${shot.buildFrames}`, "ASSEMBLE_FRAME_MISMATCH");
@@ -7736,6 +7927,7 @@ async function assembleCachedShot(plan, shot, opts, tmpDir) {
     frames: shot.buildFrames,
     transition: shot.transition ? { type: shot.transition.type, frames: shot.transition.frames } : null,
     zoom: shot.zoom ?? null,
+    text: shot.textLayers ?? null,
     params: shot.params ?? null,
     width: opts.width, height: opts.height, fps: opts.fps, crf: opts.crf, preset: opts.preset,
   })).digest("hex");
@@ -7825,7 +8017,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       music: plan.music ? { volume: plan.music.volume, duck_db: plan.music.duck_db } : null,
       sfx_count: plan.sfx.length,
       captions: plan.captions,
-      shots: plan.shots.map((s) => ({ id: s.id, kind: s.kind, duration: s.duration, frames: s.frames, ...(s.transition ? { transition: { type: s.transition.type, duration_seconds: s.transition.duration_seconds, frames: s.transition.frames } } : {}) })),
+      shots: plan.shots.map((s) => ({ id: s.id, kind: s.kind, duration: s.duration, frames: s.frames, ...(s.transition ? { transition: { type: s.transition.type, duration_seconds: s.transition.duration_seconds, frames: s.transition.frames } } : {}), ...(s.textLayers?.length ? { text_layers: s.textLayers.map((t) => ({ text: t.text, position: t.position, size: t.size, color: t.color, box: t.box, start_seconds: t.start_seconds, end_seconds: t.end_seconds })) } : {}) })),
     };
   }
   if (!["preview", "approve", "render"].includes(mode)) {

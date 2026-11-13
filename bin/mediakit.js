@@ -96,12 +96,15 @@ const COMMANDS = {
     ],
   },
   loudness: {
-    usage: "mediakit loudness <input> -o <output> [--target-lufs <n>] [--format <fmt>]",
-    desc: "Normalize loudness (default -14 LUFS, YouTube/Spotify standard).",
+    usage: "mediakit loudness <input> -o <output> [--target-lufs <n>] [--format <fmt>] [--compressor] [--compressor-threshold <dB>] [--compressor-ratio <n>]",
+    desc: "Normalize loudness (default -14 LUFS, YouTube/Spotify standard). --compressor runs a gentle compressor (threshold -24 dB, ratio 4) before the loudnorm pass, for quiet high-crest speech.",
     args: [{ name: "input", required: true }],
     options: [
       ["--target-lufs", "Target loudness in LUFS (default -14)"],
       ["--format", "Audio format (overrides output extension)"],
+      ["--compressor", "Compress before normalizing (threshold -24 dB, ratio 4)"],
+      ["--compressor-threshold", "Compressor threshold in dB (default -24, only with --compressor)"],
+      ["--compressor-ratio", "Compressor ratio (default 4, only with --compressor)"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -857,6 +860,7 @@ async function main() {
           input: needInput(), output: needOutput(opts),
           targetLufs: numOpt(opts, "target_lufs") ?? -14,
           format: opts.format ?? null,
+          compressor: opts.compressor === true ? { threshold_db: numOpt(opts, "compressor_threshold") ?? -24, ratio: numOpt(opts, "compressor_ratio") ?? 4 } : null,
         });
         break;
       case "concat":

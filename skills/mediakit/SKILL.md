@@ -117,7 +117,15 @@ voice and normal mixed audio. On peak-limited input (sub-bass-heavy
 music, crest ~20 dB) the true-peak ceiling caps the gain — the tool
 gets as close as it can and warns instead of pretending it hit −14;
 high-pass the sub-bass or compress first, then normalize again. It is
-not sample-exact broadcast mastering.
+not sample-exact broadcast mastering. For quiet, high-crest speech
+(Kokoro voice at −25.5 LUFS stalls at −15.2 on two-pass alone),
+pass `compressor: true` — a gentle compressor (threshold −24 dB,
+ratio 4, 1 ms attack) runs before the loudnorm pass and the
+compressed signal is measured before the gain is computed, so the
+target becomes reachable (−14.3 on wav/m4a, −14.6 on mp3). The 1 ms
+attack is the point: speech peaks are plosive transients, and
+ffmpeg's 20 ms default lets them straight through. The result
+reports `compressor` (settings) and `compressed_lufs`.
 
 ### 7. Captions must exist before you burn them
 `burn_captions` needs a real `.srt`, `.ass`, or `.vtt` file. If the user
@@ -823,9 +831,19 @@ exactly; a gap or an overlap fails validation with the difference
 in frames and seconds, never a silent trim or pad. Shot kinds:
 `image` (with `zoom` → `zoom_pan`, without → a still hold),
 `video` (trimmed + reframed to the manifest size), `color`
-(a solid card). A still image without zoom, and a color card, may
+(a solid card), `canvas_scene` (a JS module that draws every
+frame in code with Canvas 2D — real 30fps motion, the director's
+animation path). A still image without zoom, and a color card, may
 last at most 2.5s (the motion gate — split the shot or add a
-zoom). A shot after the first may carry `transition: {type,
+zoom). Any shot may carry `text` — one text layer object or an
+array of up to 4 `{text, position?, size?, color?, box?, start?,
+end?}`: a drawtext lower-third/title timed inside the shot
+(`top` by default, clear of the burned captions; `size` defaults
+to min(width,height)/12; `color` is 6-digit hex; `box` draws the
+black@0.6 box, default on; `start`/`end` are seconds inside the
+nominal shot). Long lines wrap to fit the frame. Layers are part
+of the segment cache key, so changing only the text rebuilds just
+that shot. A shot after the first may carry `transition: {type,
 duration}` — one of the 49 xfade names `concat` accepts, centered
 on the cut: half the transition shows the tail of the previous
 shot, half the head of this one. The total duration and the audio
@@ -851,8 +869,7 @@ final duration/dimensions/loudness, and the `qa_report` result.
 Captions burn with the locked style's values from `styles.json`
 (read from the file at render time, with embedded fallback
 values if the file is missing). v1 limits, stated not hidden:
-plain cuts (no transitions), no per-shot text layers, one
-aspect per manifest. This is not the `manifest` tool — that one
+one aspect per manifest. This is not the `manifest` tool — that one
 runs a linear edit pipeline (input → steps → output).
 
 ### 49. A retake is a repeated phrase, not a feeling — detect it, review it, then cut

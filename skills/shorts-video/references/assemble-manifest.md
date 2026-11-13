@@ -64,7 +64,8 @@ pictures — pictures fit the voice:
      "zoom": {"from": 1.0, "to": 1.15, "focus": [0.5, 0.5], "focus_end": [0.5, 0.4]}},
     {"id": "s2", "kind": "video", "source": "clip.mp4", "start": 2, "duration": 5},
     {"id": "s3", "kind": "image", "source": "still.png", "duration": 1.0},
-    {"id": "s4", "kind": "color", "color": "111111", "duration": 1.5}
+    {"id": "s4", "kind": "color", "color": "111111", "duration": 1.5,
+     "text": {"text": "THE MOON IS LEAVING", "position": "top", "start": 0.5, "end": 1.5}}
   ]
 }
 ```
@@ -96,6 +97,22 @@ pictures — pictures fit the voice:
     there (the loader says so when it happens).
   - Any shot after the first may carry `transition: {type,
     duration}` — see Transitions below.
+  - Any shot may carry `text` — one text layer object, or an array
+    of up to 4: `{text, position?, size?, color?, box?, start?,
+    end?}`. A drawtext lower-third / title timed inside the shot:
+    `text` is 1–200 characters (long lines wrap to fit the frame);
+    `position` is `top` (default — clear of the burned captions,
+    which sit near the bottom), `center` or `bottom`; `size` is
+    pixels (default min(width, height)/12 — 90px at 1080×1920);
+    `color` is a 6-digit hex (default white); `box` draws the
+    black@0.6 box behind the text (default on); `start`/`end` are
+    seconds inside the nominal shot (default the whole shot) and
+    are validated against the shot duration. Layers render in a
+    second pass over the built segment, so they work on every shot
+    kind (image / video / color / canvas_scene) and are part of
+    the segment cache key — changing only the text rebuilds just
+    that shot. Latin and Vietnamese shape correctly; complex
+    scripts (Indic, Thai) need libass, which layers do not use.
 
 ## Motion gate
 
@@ -238,7 +255,6 @@ mediakit assemble film.json --mode render -o out/ --force
 
 ## Out of scope for v1
 
-Per-shot text layers (use captions, or a `color` card under a
-burned caption), dual-format output (one manifest = one aspect —
-run `social` after for the other ratios), and motion detection
-inside video shots.
+Dual-format output (one manifest = one aspect — run `social`
+after for the other ratios), and motion detection inside video
+shots.

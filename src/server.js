@@ -163,18 +163,22 @@ server.tool(
 
 server.tool(
   "loudness",
-  "Normalize loudness to a target (default -14 LUFS, the YouTube/Spotify standard) with a single-pass loudnorm filter. Good for speech and creator audio.",
+  "Normalize loudness to a target (default -14 LUFS, the YouTube/Spotify standard) with two-pass loudnorm: the input is measured first, then the exact linear gain is applied, and the output is re-measured on disk. Pass compressor=true for quiet, high-crest speech (a gentle compressor, threshold -24 dB / ratio 4 by default, runs before the loudnorm pass — without it a peak-limited voice stalls below target and the result says so in `warning`). Good for speech and creator audio.",
   {
     input: pathSchema,
     output: pathSchema,
     target_lufs: z.number().min(-70).max(0).default(-14),
     format: z.enum(["mp3", "aac", "wav", "ogg", "opus", "flac"]).optional(),
+    compressor: z.boolean().optional().describe("Run a gentle compressor (threshold -24 dB, ratio 4, peak detection) before the loudnorm pass — for quiet, high-crest speech that two-pass alone cannot lift to target"),
+    compressor_threshold: z.number().min(-60).max(0).optional().describe("Compressor threshold in dB (default -24, only with compressor=true)"),
+    compressor_ratio: z.number().min(1).max(20).optional().describe("Compressor ratio (default 4, only with compressor=true)"),
   },
   async (a) => safe(() => core.loudness({
     input: a.input,
     output: a.output,
     targetLufs: a.target_lufs,
     format: a.format ?? null,
+    compressor: a.compressor ? { threshold_db: a.compressor_threshold ?? -24, ratio: a.compressor_ratio ?? 4 } : null,
   })),
 );
 

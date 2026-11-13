@@ -46,6 +46,30 @@ for (const op of batchEnum) {
   if (!batchOps.includes(op)) problems.push(`batch operation "${op}" is in the MCP batch enum but missing from BATCH_OPERATIONS`);
 }
 
+// Doctor probe guard (lượt 46): every filter/encoder/decoder a
+// TOOL_REQUIREMENTS entry names must also be in the matching
+// DOCTOR_* probe list — otherwise doctor reports the tool missing
+// on a healthy machine (loudness named "acompressor" while the
+// probe list did not include it, so doctor said loudness was
+// unavailable even though ffmpeg has the filter).
+const probeList = (name) => {
+  const m = coreSrc.match(new RegExp(`const ${name} = \\[([\\s\\S]*?)\\];`));
+  return m ? new Set([...m[1].matchAll(/"([a-z0-9_]+)"/g)].map((x) => x[1])) : new Set();
+};
+const probedFilters = probeList("DOCTOR_FILTERS");
+const probedEncoders = probeList("DOCTOR_ENCODERS");
+const probedDecoders = probeList("DOCTOR_DECODERS");
+const reqMatch = coreSrc.match(/const TOOL_REQUIREMENTS = \{([\s\S]*?)\n\};/);
+if (!reqMatch) problems.push("could not find TOOL_REQUIREMENTS in src/core.js");
+if (reqMatch) {
+  for (const [, list, kind] of [...reqMatch[1].matchAll(/(filters|encoders|decoders): \[([^\]]*)\]/g)]) {
+    const probed = kind === "filters" ? probedFilters : kind === "encoders" ? probedEncoders : probedDecoders;
+    for (const name of [...list.matchAll(/"([a-z0-9_]+)"/g)].map((x) => x[1])) {
+      if (!probed.has(name)) problems.push(`TOOL_REQUIREMENTS names ${kind.slice(0, -1)} "${name}" but it is not in DOCTOR_${kind.toUpperCase()} — doctor would report its tool missing on a healthy machine`);
+    }
+  }
+}
+
 if (problems.length) {
   console.error("check-docs FAILED:");
   for (const p of problems) console.error(`  - ${p}`);
