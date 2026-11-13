@@ -373,15 +373,16 @@ const COMMANDS = {
     ],
   },
   compress: {
-    usage: "mediakit compress <input> -o <output> [--quality low|medium|high] [--max-width <px>] [--crf <n>] [--preset <p>] [--target-size <MB>]",
-    desc: "Shrink a file with one named quality preset (low/medium/high). Reports the size before/after and the reduction actually achieved. --target-size <MB> encodes to fit under an exact size instead (two-pass ABR, e.g. 10 for Discord); it ignores --quality and cannot combine with --crf.",
+    usage: "mediakit compress <input> -o <output> [--quality low|medium|high|email-25mb] [--max-width <px>] [--crf <n>] [--preset <p>] [--target-size <MB>] [--no-resolution-ladder]",
+    desc: "Shrink a file with one named quality preset (low/medium/high, or email-25mb = target 18 MB so it still fits a 25 MB email attachment after base64). Reports the size before/after and the reduction actually achieved. --target-size <MB> encodes to fit under an exact size instead (two-pass ABR, e.g. 10 for Discord); it ignores --quality and cannot combine with --crf. In target-size mode a resolution ladder steps the frame down when the bitrate buys less than 0.045 bits per pixel per frame, so a starved encode stays watchable instead of mush; --no-resolution-ladder keeps the source frame.",
     args: [{ name: "input", required: true }],
     options: [
-      ["--quality", "low | medium | high (default medium; ignored with --target-size)"],
+      ["--quality", "low | medium | high | email-25mb (default medium; ignored with --target-size)"],
       ["--max-width", "Scale video down to this width first (only when wider)"],
       ["--crf", "Override the preset's CRF (0-51; cannot combine with --target-size)"],
       ["--preset", "Override the preset's x264 preset (ultrafast..veryslow)"],
       ["--target-size", "Target size in decimal MB (1 MB = 1,000,000 bytes); two-pass encode to fit under it"],
+      ["--no-resolution-ladder", "In target-size mode, keep the source frame even when the bitrate is starved"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -988,6 +989,7 @@ async function main() {
           crf: numOpt(opts, "crf") ?? null,
           preset: opts.preset ?? null,
           targetSizeMb: numOpt(opts, "target_size") ?? null,
+          resolutionLadder: opts.resolution_ladder === false ? false : true,
         });
         break;
       case "receipt":

@@ -59,6 +59,10 @@ jobs:
           node bin/mediakit.js svg-animate test/svg-demo.svg --anim test/svg-demo-anim.json --duration 2 --fps 10 --background 0F172A -o outputs/ci-svg.mp4
           node bin/mediakit.js compress test/source.mp4 --quality low -o outputs/ci-compress.mp4
           node bin/mediakit.js compress test/source.mp4 --target-size 1 -o outputs/ci-compress-target.mp4
+          ffprobe -v error -show_entries stream=width,height -of csv=p=0 outputs/ci-compress-target.mp4 | grep '^854,480$'
+          node bin/mediakit.js compress test/source.mp4 --target-size 1 --no-resolution-ladder -o outputs/ci-compress-noladder.mp4
+          ffprobe -v error -show_entries stream=width,height -of csv=p=0 outputs/ci-compress-noladder.mp4 | grep '^1280,720$'
+          node bin/mediakit.js compress test/source.mp4 --quality email-25mb -o outputs/ci-compress-email.mp4
           node bin/mediakit.js extract-audio test/source.mp4 --whisper -o outputs/ci-whisper.mp3
           node bin/mediakit.js receipt outputs/ci-compress.mp4 -o outputs/ci-receipt.json --platform tiktok
           node bin/mediakit.js burn-captions test/source.mp4 --captions test/captions.srt -o outputs/ci-captions-glow.mp4 --style glow

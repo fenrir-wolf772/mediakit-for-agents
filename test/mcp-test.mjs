@@ -1742,15 +1742,17 @@ const compressTJson = JSON.parse(compressTRes.content[0].text);
 console.log("compress target-size 1MB:", JSON.stringify(compressTJson));
 checkOk(compressTJson.mode === "target_size" && compressTJson.passes === 2, "compress target-size runs two passes in target_size mode", JSON.stringify(compressTJson));
 checkOk(compressTJson.target_met === true && compressTJson.size_after_bytes <= 1000000, "compress target-size 1MB lands under the target", `got ${compressTJson.size_after_bytes} bytes`);
-checkOk(near(compressTJson.duration_seconds, 10, 0.1) && compressTJson.dimensions === "1280x720", "compress target-size keeps 10s and 1280x720", JSON.stringify(compressTJson));
-checkOk(compressTJson.video_bitrate_kbps === 656 && compressTJson.audio_bitrate_kbps === 128, "compress target-size budgets 656k video + 128k audio for 1MB/10s", JSON.stringify(compressTJson));
-// Tighter target still met.
+checkOk(near(compressTJson.duration_seconds, 10, 0.1) && compressTJson.dimensions === "854x480", "compress target-size 1MB steps the ladder down to 854x480 (592k buys only 0.0214 bpp at 720p)", JSON.stringify(compressTJson));
+checkOk(compressTJson.video_bitrate_kbps === 592 && compressTJson.audio_bitrate_kbps === 128, "compress target-size budgets 592k video + 128k audio for 1MB/10s (10% safety margin)", JSON.stringify(compressTJson));
+checkOk(compressTJson.resolution_ladder_applied === true && compressTJson.scaled_to === "854x480" && near(compressTJson.bpp_before, 0.0214, 0.001) && near(compressTJson.bpp_after, 0.0481, 0.001) && compressTJson.bpp_threshold === 0.045, "compress resolution ladder reports bpp 0.0214 -> 0.0481 across the 0.045 threshold", JSON.stringify(compressTJson));
+// Tighter target still met — ladder falls all the way to 240p.
 const compressT05Res = await client.callTool({
   name: "compress",
   arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-compress-target05.mp4"), target_size_mb: 0.5 },
 });
 const compressT05Json = JSON.parse(compressT05Res.content[0].text);
 checkOk(compressT05Json.target_met === true && compressT05Json.size_after_bytes <= 500000, "compress target-size 0.5MB lands under the target", `got ${compressT05Json.size_after_bytes} bytes`);
+checkOk(compressT05Json.dimensions === "426x240" && compressT05Json.resolution_ladder_applied === true && near(compressT05Json.bpp_after, 0.0756, 0.001), "compress target-size 0.5MB ladders to 426x240 (bpp 0.0756)", JSON.stringify(compressT05Json));
 // Audio-only target-size: single pass, all budget to audio.
 const compressTARes = await client.callTool({
   name: "compress",
@@ -1764,7 +1766,7 @@ const compressTinyRes = await client.callTool({
   arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-compress-tiny.mp4"), target_size_mb: 0.1 },
 });
 const compressTinyText = compressTinyRes.content?.[0]?.text ?? "";
-checkOk(/too small/.test(compressTinyText) && /0\.29/.test(compressTinyText), "compress target-size 0.1MB is refused with the minimum size", compressTinyText.slice(0, 200));
+checkOk(/too small/.test(compressTinyText) && /0\.32/.test(compressTinyText), "compress target-size 0.1MB is refused with the minimum size", compressTinyText.slice(0, 200));
 // target-size + crf: mutually exclusive, not silently ignored.
 const compressConflictRes = await client.callTool({
   name: "compress",
@@ -1772,6 +1774,53 @@ const compressConflictRes = await client.callTool({
 });
 const compressConflictText = compressConflictRes.content?.[0]?.text ?? "";
 checkOk(/mutually exclusive/.test(compressConflictText), "compress target-size + crf is rejected as mutually exclusive", compressConflictText.slice(0, 200));
+// Ladder off: same 1 MB budget, the frame stays 1280x720 and the bpp
+// numbers show exactly what the ladder would have fixed.
+const compressNoLadderRes = await client.callTool({
+  name: "compress",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-compress-noladder.mp4"), target_size_mb: 1, resolution_ladder: false },
+});
+const compressNoLadderJson = JSON.parse(compressNoLadderRes.content[0].text);
+checkOk(compressNoLadderJson.dimensions === "1280x720" && compressNoLadderJson.resolution_ladder_applied === false && near(compressNoLadderJson.bpp_before, 0.0214, 0.001) && compressNoLadderJson.bpp_after === compressNoLadderJson.bpp_before, "compress resolution_ladder=false keeps 1280x720 and reports the starved bpp", JSON.stringify(compressNoLadderJson));
+// Generous target: 5 MB buys 0.1256 bpp at 720p, so the ladder does
+// not trigger and the frame is untouched.
+const compressT5Res = await client.callTool({
+  name: "compress",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-compress-target5.mp4"), target_size_mb: 5 },
+});
+const compressT5Json = JSON.parse(compressT5Res.content[0].text);
+checkOk(compressT5Json.dimensions === "1280x720" && compressT5Json.resolution_ladder_applied === false && near(compressT5Json.bpp_before, 0.1256, 0.001) && compressT5Json.target_met === true, "compress target-size 5MB does not trigger the ladder (bpp 0.1256)", JSON.stringify(compressT5Json));
+// Ladder + max-width: --max-width already shrinks the frame to
+// 640x360, where 592k buys 0.0856 bpp — above the threshold, so the
+// ladder leaves it alone.
+const compressMWRes = await client.callTool({
+  name: "compress",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-compress-target1-w640.mp4"), target_size_mb: 1, max_width: 640 },
+});
+const compressMWJson = JSON.parse(compressMWRes.content[0].text);
+checkOk(compressMWJson.dimensions === "640x360" && compressMWJson.scaled_to === "640x360" && compressMWJson.resolution_ladder_applied === false && near(compressMWJson.bpp_before, 0.0856, 0.001), "compress target-size + max-width 640 does not ladder further (bpp 0.0856)", JSON.stringify(compressMWJson));
+// email-25mb: shorthand for target-size 18 MB (25 MB Gmail limit ÷
+// ~1.37 base64 inflation). The 10s testsrc saturates near 700 kbps,
+// so the file lands far under 18 MB — the target is a cap, not a floor.
+const compressEmailRes = await client.callTool({
+  name: "compress",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-compress-email.mp4"), quality: "email-25mb" },
+});
+const compressEmailJson = JSON.parse(compressEmailRes.content[0].text);
+checkOk(compressEmailJson.mode === "target_size" && compressEmailJson.quality === "email-25mb" && compressEmailJson.target_size_mb === 18 && compressEmailJson.target_met === true && compressEmailJson.size_after_bytes <= 18000000, "compress email-25mb targets 18 MB in target_size mode", JSON.stringify(compressEmailJson));
+checkOk(compressEmailJson.dimensions === "1280x720" && compressEmailJson.resolution_ladder_applied === false, "compress email-25mb does not ladder (bpp 0.46 at 720p)", JSON.stringify(compressEmailJson));
+const compressEmailBadRes = await client.callTool({
+  name: "compress",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-compress-email-bad.mp4"), quality: "email-25mb", target_size_mb: 5 },
+});
+const compressEmailBadText = compressEmailBadRes.content?.[0]?.text ?? "";
+checkOk(/mutually exclusive/.test(compressEmailBadText) && /email-25mb/.test(compressEmailBadText), "compress email-25mb + target-size is rejected as mutually exclusive", compressEmailBadText.slice(0, 200));
+const compressEmailCrfRes = await client.callTool({
+  name: "compress",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-compress-email-crf.mp4"), quality: "email-25mb", crf: 28 },
+});
+const compressEmailCrfText = compressEmailCrfRes.content?.[0]?.text ?? "";
+checkOk(/mutually exclusive/.test(compressEmailCrfText), "compress email-25mb + crf is rejected as mutually exclusive", compressEmailCrfText.slice(0, 200));
 
 // extract_audio --whisper: 16 kHz mono WAV, the direct input for a
 // transcribe step. The output was requested as .mp3 — whisper renames

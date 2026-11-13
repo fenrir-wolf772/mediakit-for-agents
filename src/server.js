@@ -492,15 +492,16 @@ server.tool(
 
 server.tool(
   "compress",
-  "Shrink a file with one named quality preset instead of guessing CRF numbers: low (CRF 32), medium (CRF 26) or high (CRF 20), each with its own x264 preset and audio bitrate. Optional max_width scales the video down first. Set target_size_mb to hit an exact size instead (e.g. 10 for a Discord upload): two-pass ABR encoding from the size + duration budget, with a 2% safety margin; reports target_met measured on disk. target_size_mb ignores quality and cannot be combined with crf. Returns the size before/after and the reduction percent actually measured on disk, so the agent can check the tradeoff worked.",
+  "Shrink a file with one named quality preset instead of guessing CRF numbers: low (CRF 32), medium (CRF 26), high (CRF 20) or email-25mb (targets 18 MB so the file still fits a 25 MB email attachment after base64 inflation), each with its own x264 preset and audio bitrate. Optional max_width scales the video down first. Set target_size_mb to hit an exact size instead (e.g. 10 for a Discord upload): two-pass ABR encoding from the size + duration budget, with a 10% safety margin; reports target_met measured on disk. In target-size mode a resolution ladder steps the frame down (1080→720→480→360→240) when the bitrate buys less than 0.045 bits per pixel per frame, so a starved encode stays watchable instead of mush; set resolution_ladder=false to keep the source frame. target_size_mb ignores quality and cannot be combined with crf. Returns the size before/after and the reduction percent actually measured on disk, so the agent can check the tradeoff worked.",
   {
     input: pathSchema,
     output: pathSchema.describe("Output file path"),
-    quality: z.enum(["low", "medium", "high"]).default("medium").describe("Size/quality tradeoff: low = smallest, high = best quality (ignored when target_size_mb is set)"),
+    quality: z.enum(["low", "medium", "high", "email-25mb"]).default("medium").describe("Size/quality tradeoff: low = smallest, high = best quality, email-25mb = target 18 MB for a 25 MB email attachment (ignored when target_size_mb is set)"),
     max_width: z.number().int().min(16).optional().describe("Scale video down to this width first (only when the source is wider)"),
     crf: z.number().int().min(0).max(51).optional().describe("Override the preset's CRF (cannot combine with target_size_mb)"),
     preset: z.string().optional().describe("Override the preset's x264 preset (ultrafast..veryslow)"),
     target_size_mb: z.number().min(0.05).max(10000).optional().describe("Target size in decimal MB (1 MB = 1,000,000 bytes): two-pass encode to fit under it"),
+    resolution_ladder: z.boolean().default(true).describe("In target-size mode, step the frame down when the bitrate buys less than 0.045 bits per pixel per frame (default true; false keeps the source frame)"),
   },
   async (a) => safe(() => core.compress({
     input: a.input,
@@ -510,6 +511,7 @@ server.tool(
     crf: a.crf ?? null,
     preset: a.preset ?? null,
     targetSizeMb: a.target_size_mb ?? null,
+    resolutionLadder: a.resolution_ladder ?? true,
   })),
 );
 

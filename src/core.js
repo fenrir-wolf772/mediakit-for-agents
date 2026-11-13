@@ -4181,18 +4181,40 @@ const COMPRESS_PRESETS = {
   medium: { crf: 26, preset: "medium", audio_bitrate_kbps: 128 },
   high: { crf: 20, preset: "slow", audio_bitrate_kbps: 192 },
 };
+// email-25mb is not a CRF preset: it is shorthand for "target 18 MB"
+// (25 MB Gmail attachment limit ÷ ~1.37 base64 inflation ≈ 18.2 MB,
+// so the file still fits after base64 encoding). It runs the
+// target-size path below, with the resolution ladder on.
+const EMAIL_25MB_TARGET_MB = 18;
+// Resolution ladder (0xmortuex/ffmpeg-mcp's idea): below ~0.045 bits
+// per pixel per frame, x264 at the target bitrate smears detail into
+// mush — a smaller frame at the same bitrate looks better than a big
+// frame starved of bits. In target-size mode the ladder steps the
+// frame down (1080 → 720 → 480 → 360 → 240) until the bitrate buys
+// at least that many bits per pixel per frame; if even 240p is
+// starved it takes 240p anyway. Only ever scales down, never up.
+const LADDER_MIN_BPP = 0.045;
+const LADDER_HEIGHTS = [1080, 720, 480, 360, 240];
 
-export async function compress({ input, output, quality = "medium", maxWidth = null, crf = null, preset = null, targetSizeMb = null }) {
+export async function compress({ input, output, quality = "medium", maxWidth = null, crf = null, preset = null, targetSizeMb = null, resolutionLadder = true }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
+  const emailPreset = quality === "email-25mb";
   const targetMb = targetSizeMb === null || targetSizeMb === undefined ? null : num(targetSizeMb, "target_size_mb", { min: 0.05, max: 10000 });
-  if (targetMb !== null && crf !== null && crf !== undefined) {
+  let effectiveTargetMb = targetMb;
+  if (emailPreset) {
+    if (targetMb !== null) {
+      throw new MediaKitError("compress --quality email-25mb and --target-size are mutually exclusive (email-25mb already targets 18 MB)", "INVALID_ARG");
+    }
+    effectiveTargetMb = EMAIL_25MB_TARGET_MB;
+  }
+  if (effectiveTargetMb !== null && crf !== null && crf !== undefined) {
     throw new MediaKitError("compress --target-size and --crf are mutually exclusive (target size picks the bitrate itself)", "INVALID_ARG");
   }
-  if (!(quality in COMPRESS_PRESETS)) {
-    throw new MediaKitError(`unknown quality: ${quality} (supported: ${Object.keys(COMPRESS_PRESETS).join(", ")})`, "INVALID_ARG");
+  if (!(quality in COMPRESS_PRESETS) && !emailPreset) {
+    throw new MediaKitError(`unknown quality: ${quality} (supported: ${Object.keys(COMPRESS_PRESETS).join(", ")}, email-25mb)`, "INVALID_ARG");
   }
-  const settings = COMPRESS_PRESETS[quality];
+  const settings = COMPRESS_PRESETS[quality] ?? COMPRESS_PRESETS.medium;
   const X264_PRESETS = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"];
   const p = preset ?? settings.preset;
   if (!X264_PRESETS.includes(p)) throw new MediaKitError(`unknown x264 preset: ${p} (supported: ${X264_PRESETS.join(", ")})`, "INVALID_ARG");
@@ -4208,19 +4230,23 @@ export async function compress({ input, output, quality = "medium", maxWidth = n
     scaledTo = `${w}x${h}`;
   }
 
-  if (targetMb !== null) {
+  if (effectiveTargetMb !== null) {
     // Target-size mode (Ashutos1997/ffmpeg-mcp-server's compress_video
     // targetSizeMB idea, rebuilt as two-pass ABR): the bitrate budget
-    // comes from the size + duration, not from a CRF. A 2% safety
-    // margin absorbs container overhead so the measured size lands
-    // under the target instead of just near it. quality/crf are
-    // ignored in this mode — the result says so (mode: target_size).
+    // comes from the size + duration, not from a CRF. A 10% safety
+    // margin absorbs container overhead AND two-pass ABR overshoot:
+    // measured 2026-11-13, downscaled testsrc overshoots its video
+    // bitrate by +6.5–8.4% at 480p (400k→426k, 656k→705k, 1000k→
+    // 1084k) while the same content at 720p lands within 0.2% — the
+    // old 2% margin let the 1 MB ladder case land at 1,015,839 bytes
+    // (target_met false). quality/crf are ignored in this mode — the
+    // result says so (mode: target_size).
     const duration = meta.duration_seconds;
     if (!duration || duration <= 0) {
       throw new MediaKitError("compress --target-size needs a file with a known duration", "INVALID_ARG");
     }
-    const targetBytes = Math.floor(targetMb * 1_000_000); // decimal MB, like Discord's 10 MB / 25 MB limits
-    const budgetBytes = Math.floor(targetBytes * 0.98);
+    const targetBytes = Math.floor(effectiveTargetMb * 1_000_000); // decimal MB, like Discord's 10 MB / 25 MB limits
+    const budgetBytes = Math.floor(targetBytes * 0.90);
     const totalKbps = (budgetBytes * 8) / duration / 1000;
     const MIN_VIDEO_KBPS = 100;
     const MIN_AUDIO_KBPS = 32;
@@ -4230,17 +4256,60 @@ export async function compress({ input, output, quality = "medium", maxWidth = n
       audioKbps = meta.audio ? 128 : 0;
       videoKbps = Math.floor(totalKbps - audioKbps);
       if (videoKbps < MIN_VIDEO_KBPS) {
-        const minMb = (((MIN_VIDEO_KBPS + audioKbps) * 1000 * duration) / 8 / 0.98 / 1_000_000).toFixed(2);
-        throw new MediaKitError(`target ${targetMb} MB is too small for ${duration}s — minimum is about ${minMb} MB (${MIN_VIDEO_KBPS} kbps video + ${audioKbps} kbps audio)`, "INVALID_ARG");
+        const minMb = (((MIN_VIDEO_KBPS + audioKbps) * 1000 * duration) / 8 / 0.90 / 1_000_000).toFixed(2);
+        throw new MediaKitError(`target ${effectiveTargetMb} MB is too small for ${duration}s — minimum is about ${minMb} MB (${MIN_VIDEO_KBPS} kbps video + ${audioKbps} kbps audio)`, "INVALID_ARG");
       }
     } else if (meta.audio) {
       audioKbps = Math.floor(totalKbps);
       if (audioKbps < MIN_AUDIO_KBPS) {
-        const minMb = ((MIN_AUDIO_KBPS * 1000 * duration) / 8 / 0.98 / 1_000_000).toFixed(2);
-        throw new MediaKitError(`target ${targetMb} MB is too small for ${duration}s of audio — minimum is about ${minMb} MB (${MIN_AUDIO_KBPS} kbps audio)`, "INVALID_ARG");
+        const minMb = ((MIN_AUDIO_KBPS * 1000 * duration) / 8 / 0.90 / 1_000_000).toFixed(2);
+        throw new MediaKitError(`target ${effectiveTargetMb} MB is too small for ${duration}s of audio — minimum is about ${minMb} MB (${MIN_AUDIO_KBPS} kbps audio)`, "INVALID_ARG");
       }
     } else {
       throw new MediaKitError("compress needs a video or audio stream", "INVALID_ARG");
+    }
+    // Resolution ladder: measure bits per pixel per frame at the
+    // budgeted bitrate and step the frame down until the bitrate can
+    // actually buy detail (see LADDER_MIN_BPP). The bpp numbers are
+    // measured whether the ladder runs or not — they are the
+    // diagnosis; only the stepping down is gated by the flag. Starts
+    // from the --max-width dimensions when one already scaled the frame.
+    let ladderApplied = false;
+    let bppBefore = null;
+    let bppAfter = null;
+    if (meta.video) {
+      const fps = meta.video.fps;
+      let effW = meta.video.width;
+      let effH = meta.video.height;
+      if (scaledTo) [effW, effH] = scaledTo.split("x").map(Number);
+      if (fps && fps > 0) {
+        const bppAt = (w, h) => (videoKbps * 1000) / (w * h * fps);
+        bppBefore = +bppAt(effW, effH).toFixed(4);
+        bppAfter = bppBefore;
+        if (bppBefore < LADDER_MIN_BPP && resolutionLadder !== false) {
+          for (const h of LADDER_HEIGHTS) {
+            if (h >= effH) continue;
+            const w = Math.max(2, Math.round((effW * h) / effH / 2) * 2);
+            if (bppAt(w, h) >= LADDER_MIN_BPP) {
+              scaleFilter = `scale=${w}:${h}`;
+              scaledTo = `${w}x${h}`;
+              ladderApplied = true;
+              break;
+            }
+          }
+          if (!ladderApplied && LADDER_HEIGHTS[LADDER_HEIGHTS.length - 1] < effH) {
+            const h = LADDER_HEIGHTS[LADDER_HEIGHTS.length - 1];
+            const w = Math.max(2, Math.round((effW * h) / effH / 2) * 2);
+            scaleFilter = `scale=${w}:${h}`;
+            scaledTo = `${w}x${h}`;
+            ladderApplied = true;
+          }
+          if (ladderApplied) {
+            const [lw, lh] = scaledTo.split("x").map(Number);
+            bppAfter = +bppAt(lw, lh).toFixed(4);
+          }
+        }
+      }
     }
     let passes = 1;
     if (meta.video) {
@@ -4275,8 +4344,13 @@ export async function compress({ input, output, quality = "medium", maxWidth = n
     const reduction = +(((before.size_bytes - after.size_bytes) / before.size_bytes) * 100).toFixed(1);
     return {
       operation: "compress", input: inPath, output: outPath, mode: "target_size",
-      target_size_mb: targetMb, target_size_bytes: targetBytes,
+      target_size_mb: effectiveTargetMb, target_size_bytes: targetBytes,
       video_bitrate_kbps: videoKbps, audio_bitrate_kbps: audioKbps, passes,
+      ...(meta.video ? {
+        resolution_ladder_applied: ladderApplied,
+        bpp_before: bppBefore, bpp_after: bppAfter, bpp_threshold: LADDER_MIN_BPP,
+      } : {}),
+      ...(emailPreset ? { quality: "email-25mb" } : {}),
       ...(scaledTo ? { scaled_to: scaledTo } : {}),
       size_before_bytes: before.size_bytes, size_before_human: before.size_human,
       size_after_bytes: after.size_bytes, size_after_human: after.size_human,
@@ -5803,8 +5877,8 @@ export const BATCH_OPERATIONS = {
     run: (input, output, a) => reframe({ input, output, width: a.width ?? 1080, height: a.height ?? 1920, mode: a.mode ?? "crop", x: a.x ?? null, y: a.y ?? null, blur: a.blur ?? 20, anchor: a.anchor ?? null }),
   },
   compress: {
-    args: ["quality", "max_width", "crf", "preset", "target_size_mb"],
-    run: (input, output, a) => compress({ input, output, quality: a.quality ?? "medium", maxWidth: a.max_width ?? null, crf: a.crf ?? null, preset: a.preset ?? null, targetSizeMb: a.target_size_mb ?? null }),
+    args: ["quality", "max_width", "crf", "preset", "target_size_mb", "resolution_ladder"],
+    run: (input, output, a) => compress({ input, output, quality: a.quality ?? "medium", maxWidth: a.max_width ?? null, crf: a.crf ?? null, preset: a.preset ?? null, targetSizeMb: a.target_size_mb ?? null, resolutionLadder: a.resolution_ladder ?? true }),
   },
   convert: {
     args: ["video_codec", "audio_codec", "crf", "preset", "gop", "gop_seconds"],

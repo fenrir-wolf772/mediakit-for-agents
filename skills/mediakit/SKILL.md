@@ -345,12 +345,18 @@ or high, and the tool says so instead of pretending it shrank.
 Audio-only input is re-encoded at the preset's audio bitrate.
 When a platform caps the size (Discord 10/25 MB, GitHub PR 10 MB),
 use `--target-size <MB>` instead of a preset: two-pass ABR encoding
-from the size + duration budget, with a 2% safety margin, and the
+from the size + duration budget, with a 10% safety margin, and the
 result reports `target_met` measured on disk. It ignores `--quality`
 and refuses `--crf` outright (the bitrate comes from the size, not a
 CRF). A target below the floor (100 kbps video + 128 kbps audio) is
 refused with the minimum size spelled out — raise the target or
-`--max-width` the video down first.
+`--max-width` the video down first. The margin is 10% because
+two-pass ABR overshoots on hard content: downscaled testsrc ran
++6.5–8.4% over its video bitrate at 480p while 720p landed within
+0.2% (measured 2026-11-13) — a 2% margin let the 1 MB case land
+over target. `--quality email-25mb` is shorthand for a target of
+18 MB (25 MB Gmail limit ÷ ~1.37 base64 inflation), for files that
+will be emailed as attachments.
 `extract_audio --whisper` is the Whisper ASR preset: 16 kHz mono WAV
 (the output is renamed to .wav when needed, and the real path is
 reported) — the direct input for a transcribe step.
@@ -732,6 +738,23 @@ so it takes a single `words_file` instead, resolved relative to the
 manifest (like `captions`/`overlay`) and hashed into the step cache,
 so editing the words file re-runs the cut step. A full talking-head
 cleanup is one manifest: `cut_words` → `silence` → `loudness`.
+
+### 45. A starved bitrate gets a smaller frame, not mush
+In `--target-size` mode the bitrate budget is fixed, so a big frame
+at a tiny bitrate smears detail into mush. The resolution ladder
+steps the frame down instead: it measures bits per pixel per frame
+(`video_kbps × 1000 ÷ (width × height × fps)`) and walks
+1080 → 720 → 480 → 360 → 240 until the budget buys at least
+0.045 bpp — if even 240p is starved it takes 240p anyway. It only
+ever scales down, never up, and it starts from the `--max-width`
+dimensions when one already shrank the frame (640 wide at 592k
+buys 0.0856 bpp, so no further step). The result reports
+`resolution_ladder_applied`, `bpp_before`/`bpp_after` and
+`bpp_threshold: 0.045` — read those before trusting the output size:
+a 1 MB target on 1280×720/30fps buys 0.0214 bpp, so the ladder
+lands at 854×480 (0.0481 bpp). `--no-resolution-ladder`
+(`resolution_ladder: false`) keeps the source frame when the mush
+is acceptable or the platform needs the exact dimensions.
 
 ## Workflow: vertical captioned clip from a landscape source
 
