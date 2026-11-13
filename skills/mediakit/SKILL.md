@@ -861,7 +861,12 @@ exact manifest + voice + assets + captions the preview showed),
 `render` (needs a matching approval; `force:true` bypasses it
 and is recorded as `approval:'forced'`). Any change to the
 manifest, voice, assets or captions invalidates the approval,
-and the render error names what changed. Shot segments are
+and the render error names what changed. A manifest may also
+carry `chapters: [{title, at}]` — up to 32 named markers,
+strictly increasing, inside the film (`at` in seconds or
+`MM:SS`); on render they become real MP4 chapters in
+`final.mp4` (the last chapter runs to the film end; a preview
+carries no chapters — it is a clipped window). Shot segments are
 cached by content hash next to the manifest, so a re-render
 rebuilds only changed shots; the receipt records the
 fingerprint, the approval status, cache hits, the measured
@@ -894,6 +899,25 @@ you meant to say twice is a false positive, not a retake. In
 batch and manifest it follows the same words-file convention as
 `cut_words` (rule 44): `<words_dir>/<stem>.words.json` per clip,
 a single `words_file` in a manifest step.
+
+### 50. A long render runs in the background — poll the job, don't block on it
+`assemble --async` (render mode only, MCP `async:true`) returns
+in milliseconds with a `job_id` instead of waiting for the
+render: the manifest + approval are validated synchronously
+first, so a bad manifest or a missing/stale approval fails the
+call itself — a job is never born dead. The render runs in a
+detached worker process; poll it with the `job` tool (`status`
+shows `stage` + `percent` + the live `pid`, then the terminal
+`result` — output, duration, frames, LUFS, SHA-256, QA verdict —
+or the `error`). `job --list` shows all jobs, newest first;
+`job --cancel <id>` stops a queued or running job and kills
+the worker's whole process group, ffmpeg children included, so
+nothing keeps encoding after the cancel — and a cancelled job
+stays cancelled, the worker never overwrites it with
+done/failed. Jobs live under `MEDIAKIT_JOBS_DIR`, else
+`<workdir>/.mediakit-jobs`, one directory per job (`job.json` +
+`worker.log`). Never poll in a tight loop: 2s between polls is
+plenty — a render takes minutes, not seconds.
 
 ## Workflow: vertical captioned clip from a landscape source
 

@@ -4,7 +4,7 @@
  * array. There is NO shell involved anywhere: user input can never be
  * interpreted as a shell command.
  */
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { access, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants, createReadStream } from "node:fs";
@@ -5381,6 +5381,7 @@ const TOOL_REQUIREMENTS = {
   zoom_pan: { filters: ["zoompan", "scale", "crop"], encoders: ["libx264"] },
   image_to_video: { filters: ["scale", "pad"], encoders: ["libx264", "libvpx-vp9"] },
   slideshow: { filters: ["scale", "pad", "xfade", "acrossfade", "fps"], encoders: ["libx264", "aac"] },
+  job: {},
   doctor: {},
 };
 
@@ -7661,6 +7662,36 @@ async function validateAssembleManifest(doc, manifestAbs) {
       "INVALID_ARG",
     );
   }
+  // Chapters (optional): named markers on the film timeline —
+  // written as real MP4 chapters into final.mp4 on render (not
+  // preview: the preview is a clipped window, so chapter times
+  // would not line up). Validated here so a bad chapter fails
+  // validate, not mid-render. The fingerprint already covers them
+  // through the manifest hash.
+  let chapters = [];
+  if (doc.chapters !== undefined && doc.chapters !== null) {
+    if (!Array.isArray(doc.chapters) || doc.chapters.length < 1 || doc.chapters.length > 32) {
+      throw new MediaKitError(`assemble chapters must be an array of 1-32 entries, got: ${Array.isArray(doc.chapters) ? doc.chapters.length : "not an array"}`, "INVALID_ARG");
+    }
+    let prevAt = -1;
+    for (const [i, entry] of doc.chapters.entries()) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        throw new MediaKitError(`chapters[${i}] must be an object {title, at}`, "INVALID_ARG");
+      }
+      if (typeof entry.title !== "string" || !entry.title.trim() || entry.title.trim().length > 128) {
+        throw new MediaKitError(`chapters[${i}] needs a title (1-128 characters)`, "INVALID_ARG");
+      }
+      const at = parseTime(entry.at ?? entry.at_seconds, `chapters[${i}] at`);
+      if (!(at >= 0 && at < totalSeconds)) {
+        throw new MediaKitError(`chapters[${i}] "${entry.title.trim()}" at ${at}s is outside the film (0..${totalSeconds}s)`, "INVALID_ARG");
+      }
+      if (at <= prevAt) {
+        throw new MediaKitError(`chapters[${i}] at ${at}s must come after the previous chapter (${prevAt}s) — chapters must be strictly increasing`, "INVALID_ARG");
+      }
+      prevAt = at;
+      chapters.push({ title: entry.title.trim(), at_seconds: +at.toFixed(3) });
+    }
+  }
   const manifestHash = await hashFile(manifestAbs);
   const voiceHash = await hashFile(voicePath);
   const musicHash = music ? await hashFile(music.path) : null;
@@ -7684,7 +7715,7 @@ async function validateAssembleManifest(doc, manifestAbs) {
     manifest: manifestAbs, manifestDir, title, width, height, fps, style, styleValues,
     voice: { path: voicePath, lead, tail, duration_seconds: voiceDuration },
     total_seconds: totalSeconds, total_frames: totalFrames,
-    music, sfx, captions, shots, warnings, fingerprint,
+    music, sfx, captions, shots, chapters, warnings, fingerprint,
     fingerprint_parts: { manifest: manifestHash, voice: voiceHash, music: musicHash, sfx: sfxHashes, captions: captionsHash, assets: assetHashes },
   };
 }
@@ -7980,7 +8011,35 @@ function assembleApprovalPath(plan) {
   return path.join(plan.manifestDir, `${stem}.assemble-approval.json`);
 }
 
-export async function assemble({ manifestPath, mode = "validate", outputDir = null, previewSeconds = 20, force = false }) {
+// Approval gate for full renders, shared by the sync render path
+// and startAssembleJob: the async job must fail fast with the same
+// error instead of being born dead and hiding it behind a poll.
+async function requireAssembleApproval(plan, force) {
+  if (force) return "forced";
+  let approval = null;
+  try {
+    approval = JSON.parse(await readFile(assembleApprovalPath(plan), "utf8"));
+  } catch { /* no approval file */ }
+  if (!approval) {
+    throw new MediaKitError("assemble render needs approval: run --mode preview, show it to the user, then --mode approve (or pass force:true to render without approval)", "INVALID_ARG");
+  }
+  if (approval.fingerprint !== plan.fingerprint) {
+    const changed = [];
+    const parts = approval.fingerprint_parts ?? {};
+    for (const k of ["manifest", "voice", "music", "captions"]) {
+      if (JSON.stringify(parts[k] ?? null) !== JSON.stringify(plan.fingerprint_parts[k] ?? null)) changed.push(k);
+    }
+    if (JSON.stringify(parts.assets ?? {}) !== JSON.stringify(plan.fingerprint_parts.assets ?? {})) changed.push("assets");
+    if (JSON.stringify(parts.sfx ?? []) !== JSON.stringify(plan.fingerprint_parts.sfx ?? [])) changed.push("sfx");
+    throw new MediaKitError(
+      `assemble approval is stale — changed since approval: ${changed.length ? changed.join(", ") : "unknown"}. Re-render the preview and approve again (or pass force:true).`,
+      "INVALID_ARG",
+    );
+  }
+  return "approved";
+}
+
+export async function assemble({ manifestPath, mode = "validate", outputDir = null, previewSeconds = 20, force = false, onProgress = null, jobId = null, jobDir = null }) {
   const manifestAbs = await requireInput(manifestPath, "manifest");
   let raw;
   try {
@@ -8017,6 +8076,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       music: plan.music ? { volume: plan.music.volume, duck_db: plan.music.duck_db } : null,
       sfx_count: plan.sfx.length,
       captions: plan.captions,
+      chapters: plan.chapters,
       shots: plan.shots.map((s) => ({ id: s.id, kind: s.kind, duration: s.duration, frames: s.frames, ...(s.transition ? { transition: { type: s.transition.type, duration_seconds: s.transition.duration_seconds, frames: s.transition.frames } } : {}), ...(s.textLayers?.length ? { text_layers: s.textLayers.map((t) => ({ text: t.text, position: t.position, size: t.size, color: t.color, box: t.box, start_seconds: t.start_seconds, end_seconds: t.end_seconds })) } : {}) })),
     };
   }
@@ -8063,30 +8123,30 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
   // Approval gate for full renders (preview never needs approval).
   let approvalStatus = null;
   if (!isPreview) {
-    if (force) {
-      approvalStatus = "forced";
-    } else {
-      let approval = null;
-      try {
-        approval = JSON.parse(await readFile(assembleApprovalPath(plan), "utf8"));
-      } catch { /* no approval file */ }
-      if (!approval) {
-        throw new MediaKitError("assemble render needs approval: run --mode preview, show it to the user, then --mode approve (or pass force:true to render without approval)", "INVALID_ARG");
-      }
-      if (approval.fingerprint !== plan.fingerprint) {
-        const changed = [];
-        const parts = approval.fingerprint_parts ?? {};
-        for (const k of ["manifest", "voice", "music", "captions"]) {
-          if (JSON.stringify(parts[k] ?? null) !== JSON.stringify(plan.fingerprint_parts[k] ?? null)) changed.push(k);
-        }
-        if (JSON.stringify(parts.assets ?? {}) !== JSON.stringify(plan.fingerprint_parts.assets ?? {})) changed.push("assets");
-        if (JSON.stringify(parts.sfx ?? []) !== JSON.stringify(plan.fingerprint_parts.sfx ?? [])) changed.push("sfx");
-        throw new MediaKitError(
-          `assemble approval is stale — changed since approval: ${changed.length ? changed.join(", ") : "unknown"}. Re-render the preview and approve again (or pass force:true).`,
-          "INVALID_ARG",
-        );
-      }
-      approvalStatus = "approved";
+    approvalStatus = await requireAssembleApproval(plan, force);
+  }
+
+  // Progress reporting for async jobs: stage-level, honest about
+  // what is known — the caller polls the job record, so a stage
+  // name + a percent that only moves when a stage actually starts
+  // or finishes. A progress callback must never fail the render.
+  const PROGRESS_STAGES = isPreview ? ["shots", "join", "audio", "mux", "captions"] : ["shots", "join", "audio", "mux", "captions", "qa"];
+  const emitProgress = (stage, fraction, detail = null) => {
+    if (typeof onProgress !== "function") return;
+    const idx = PROGRESS_STAGES.indexOf(stage);
+    if (idx === -1) return;
+    const percent = Math.min(100, Math.round((100 * (idx + Math.min(1, Math.max(0, fraction)))) / PROGRESS_STAGES.length));
+    try { onProgress({ stage, percent, detail }); } catch { /* never fail the render on progress */ }
+  };
+  // The worker process marks itself running (with its pid, so `job
+  // --cancel` can kill the whole process group) as soon as the gate
+  // has passed — before the first ffmpeg call. If the job was
+  // cancelled while queued, the worker aborts here instead of
+  // rendering into a cancelled job.
+  if (jobId && jobDir) {
+    const rec = await markJobRunning(jobId, jobDir, process.pid);
+    if (rec?.status === "cancelled") {
+      throw new MediaKitError(`job ${jobId} was cancelled before the render started`, "JOB_CANCELLED");
     }
   }
 
@@ -8129,12 +8189,15 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
   let completed = false;
   const segmentPaths = [];
   try {
-    for (const shot of renderShotsBuilt) {
+    for (const [i, shot] of renderShotsBuilt.entries()) {
+      emitProgress("shots", i / renderShotsBuilt.length, shot.id);
       const r = await assembleCachedShot(plan, shot, opts, tmpDir);
       if (r.cached) cacheHits++;
       segmentPaths.push(r.path);
     }
+    emitProgress("shots", 1);
     const videoOnlyPath = path.join(tmpDir, "video-only.mp4");
+    emitProgress("join", 0);
     if (joins.length === 0) {
       const listPath = path.join(tmpDir, "concat.txt");
       await writeFile(listPath, segmentPaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join("\n") + "\n", "utf8");
@@ -8142,11 +8205,13 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
     } else {
       await joinAssembleSegments(segmentPaths, joins, opts, videoOnlyPath);
     }
+    emitProgress("join", 1);
     const concatFrames = await countVideoFrames(videoOnlyPath);
     if (concatFrames !== renderTotalFrames) {
       throw new MediaKitError(`assemble concat produced ${concatFrames} frames, expected ${renderTotalFrames}`, "ASSEMBLE_FRAME_MISMATCH");
     }
     // Audio: padded voice (the final timeline) + music bed + SFX.
+    emitProgress("audio", 0);
     const paddedPath = path.join(tmpDir, "voice-padded.m4a");
     await buildPaddedVoice(plan, renderTotalSeconds, paddedPath);
     const previewSfx = isPreview ? plan.sfx.filter((s) => s.at_seconds < renderTotalSeconds) : plan.sfx;
@@ -8160,14 +8225,34 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
     } else {
       await loudness({ input: paddedPath, output: mixedPath, targetLufs: -14 });
     }
+    emitProgress("audio", 1);
+    // Chapters (render only): an ffmetadata sidecar with one
+    // [CHAPTER] per entry — the last chapter runs to the film end.
+    // Titles are sanitized: ffmetadata treats = ; # \ and newlines
+    // as syntax, so they become spaces.
+    let chapterPath = null;
+    if (!isPreview && plan.chapters?.length) {
+      chapterPath = path.join(tmpDir, "chapters.txt");
+      const lines = [";FFMETADATA1"];
+      for (let i = 0; i < plan.chapters.length; i++) {
+        const startMs = Math.round(plan.chapters[i].at_seconds * 1000);
+        const endMs = i + 1 < plan.chapters.length ? Math.round(plan.chapters[i + 1].at_seconds * 1000) : Math.round(renderTotalSeconds * 1000);
+        lines.push("[CHAPTER]", "TIMEBASE=1/1000", `START=${startMs}`, `END=${endMs}`, `title=${plan.chapters[i].title.replace(/[\r\n=;#\\]/g, " ")}`);
+      }
+      await writeFile(chapterPath, lines.join("\n") + "\n", "utf8");
+    }
     const muxedPath = path.join(tmpDir, "muxed.mp4");
-    await run(FFMPEG, [
-      "-y", "-i", videoOnlyPath, "-i", mixedPath,
-      "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "copy",
-      "-t", String(renderTotalSeconds), "-movflags", "+faststart", muxedPath,
-    ]);
+    emitProgress("mux", 0);
+    const muxArgs = ["-y", "-i", videoOnlyPath, "-i", mixedPath];
+    if (chapterPath) muxArgs.push("-i", chapterPath);
+    muxArgs.push("-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "copy", "-t", String(renderTotalSeconds));
+    if (chapterPath) muxArgs.push("-map_metadata", "2", "-map_chapters", "2");
+    muxArgs.push("-movflags", "+faststart", muxedPath);
+    await run(FFMPEG, muxArgs);
+    emitProgress("mux", 1);
     const finalName = isPreview ? "preview.mp4" : "final.mp4";
     const finalPath = path.join(outDirAbs, finalName);
+    emitProgress("captions", 0);
     if (plan.captions) {
       const bv = plan.styleValues?.burn_captions ?? { font_size: null, margin_v: null, style: "background" };
       await burnCaptions({
@@ -8177,6 +8262,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
     } else {
       await copyFile(muxedPath, finalPath);
     }
+    emitProgress("captions", 1);
     const finalProbe = await probe(finalPath);
     const finalFrames = await countVideoFrames(finalPath);
     if (finalFrames !== renderTotalFrames) {
@@ -8202,13 +8288,16 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
         final: { duration_seconds: finalProbe.duration_seconds, dimensions: `${finalProbe.video?.width}x${finalProbe.video?.height}`, loudness_lufs: finalLufs },
       };
     }
+    emitProgress("qa", 0);
     const qa = await qaReport({ input: finalPath, target: "any", expectedDuration: plan.total_seconds });
+    emitProgress("qa", 1);
     const finalSha = await hashFile(finalPath);
     const receipt = {
       ...base,
       approval: approvalStatus,
       output: finalPath,
       cache_hits: cacheHits,
+      chapters: plan.chapters,
       shots_run: renderShots.length,
       joins: joins.map((j) => ({ into_shot: renderShotsBuilt[j.index]?.id ?? null, type: j.type, duration_seconds: j.durationSeconds, offset_seconds: j.offsetSeconds })),
       elapsed_seconds: elapsed,
@@ -8223,9 +8312,27 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       qa,
     };
     await writeFile(path.join(outDirAbs, "assemble-receipt.json"), JSON.stringify(receipt, null, 2) + "\n", "utf8");
+    // The async worker's terminal write: the job record carries the
+    // receipt summary so a poller never has to open the receipt file.
+    if (jobId && jobDir) {
+      await finishJob(jobId, jobDir, {
+        output: finalPath,
+        duration_seconds: finalProbe.duration_seconds,
+        dimensions: finalProbe.video ? `${finalProbe.video.width}x${finalProbe.video.height}` : null,
+        frames: finalFrames,
+        loudness_lufs: finalLufs,
+        sha256: finalSha,
+        qa_verdict: qa?.verdict ?? null,
+      });
+    }
     completed = true;
     return receipt;
   } catch (e) {
+    // The worker records its own failure — unless the job was
+    // cancelled meanwhile, in which case the canceller's record wins.
+    if (jobId && jobDir) {
+      await failJob(jobId, jobDir, e);
+    }
     // Intermediates are kept on failure so the broken shot can be
     // inspected and re-run by hand; the error names the directory.
     if (e instanceof MediaKitError && !e.message.includes(tmpDir)) {
@@ -8239,4 +8346,227 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       try { await rm(tmpDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
     }
   }
+}
+
+// ---------------------------------------------------------------- render jobs
+// Durable async render jobs (idea: AH64-dll/OpenEdit's trigger_render /
+// get_render_job / cancel_render_job): a long assemble render runs in a
+// detached worker process, so the MCP call returns in milliseconds with
+// a job_id and the caller polls `job` for progress and the terminal
+// result. The job record is the source of truth — a running job carries
+// its live pid, a finished job its receipt summary or its error. Jobs
+// live under MEDIAKIT_JOBS_DIR, else <MEDIAKIT_WORKDIR or cwd>/
+// .mediakit-jobs. The id is validated on every read so no job path can
+// escape the jobs root, and the worker is its own process group, so
+// cancelling kills the ffmpeg children too — not just the wrapper.
+const JOB_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+const JOB_TERMINAL = new Set(["done", "failed", "cancelled"]);
+
+export function jobsRoot() {
+  const env = process.env.MEDIAKIT_JOBS_DIR;
+  if (env?.trim()) return path.resolve(env.trim());
+  const base = process.env.MEDIAKIT_WORKDIR?.trim() ? path.resolve(process.env.MEDIAKIT_WORKDIR.trim()) : process.cwd();
+  return path.join(base, ".mediakit-jobs");
+}
+
+function newJobId() {
+  const d = new Date();
+  const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}-${String(d.getHours()).padStart(2, "0")}${String(d.getMinutes()).padStart(2, "0")}${String(d.getSeconds()).padStart(2, "0")}`;
+  return `job-${stamp}-${createHash("sha256").update(`${process.pid}-${Date.now()}-${Math.random()}`).digest("hex").slice(0, 8)}`;
+}
+
+function jobRecordPath(root, id) {
+  if (!JOB_ID_RE.test(id)) throw new MediaKitError(`invalid job id: ${id}`, "INVALID_ARG");
+  return path.join(root, id, "job.json");
+}
+
+// Serialized job-record writes: progress callbacks fire without await,
+// so two writes could otherwise read the same stale record and the
+// second would clobber the first. One promise chain per process keeps
+// every read-modify-write in order.
+let jobWriteChain = Promise.resolve();
+function queueJobWrite(fn) {
+  jobWriteChain = jobWriteChain.then(fn, fn);
+  return jobWriteChain;
+}
+
+async function writeJobRecord(root, record) {
+  const dir = path.join(root, record.job_id);
+  await mkdir(dir, { recursive: true });
+  const tmp = path.join(dir, `.job.json.tmp-${process.pid}`);
+  await writeFile(tmp, JSON.stringify(record, null, 2) + "\n", "utf8");
+  await rename(tmp, path.join(dir, "job.json"));
+}
+
+async function readJobRecord(dir) {
+  return JSON.parse(await readFile(path.join(dir, "job.json"), "utf8"));
+}
+
+async function updateJobRecord(jobId, jobDir, patch) {
+  // jobDir is supplied by the worker (it knows its own directory);
+  // the id is still validated so a bad caller cannot address a path
+  // outside the jobs root.
+  if (!JOB_ID_RE.test(jobId)) throw new MediaKitError(`invalid job id: ${jobId}`, "INVALID_ARG");
+  if (path.basename(path.resolve(jobDir)) !== jobId) throw new MediaKitError(`job directory does not match job id: ${jobDir}`, "INVALID_ARG");
+  return queueJobWrite(async () => {
+    let record;
+    try {
+      record = await readJobRecord(jobDir);
+    } catch {
+      return null;
+    }
+    // A cancelled job stays cancelled: the worker must not overwrite
+    // the canceller's record with done/failed after the kill.
+    if (JOB_TERMINAL.has(record.status) && record.status === "cancelled") return record;
+    const next = { ...record, ...patch, updated_at: new Date().toISOString() };
+    await writeJobRecord(path.dirname(jobDir), next);
+    return next;
+  });
+}
+
+async function markJobRunning(jobId, jobDir, pid) {
+  try {
+    return await updateJobRecord(jobId, jobDir, { status: "running", pid, progress: { stage: "shots", percent: 0, detail: null } });
+  } catch { /* a job-record write must never fail the render itself */ return null; }
+}
+
+async function finishJob(jobId, jobDir, result) {
+  try {
+    await updateJobRecord(jobId, jobDir, { status: "done", result, progress: { stage: "done", percent: 100, detail: null } });
+  } catch { /* best-effort: the receipt file on disk is the backup */ }
+}
+
+async function failJob(jobId, jobDir, err) {
+  try {
+    await updateJobRecord(jobId, jobDir, { status: "failed", error: { message: err?.message ?? String(err), code: err?.code ?? "ERROR" } });
+  } catch { /* best-effort: the thrown error still reaches the caller */ }
+}
+
+export async function updateJobProgress(jobId, jobDir, progress) {
+  // Called by the CLI worker's onProgress (fire-and-forget): the
+  // write chain serializes it, and a failure here is swallowed so a
+  // progress write can never break the render.
+  try {
+    await updateJobRecord(jobId, jobDir, { progress: { stage: progress.stage ?? null, percent: progress.percent ?? 0, detail: progress.detail ?? null } });
+  } catch { /* progress is advisory */ }
+}
+
+export async function startAssembleJob({ manifestPath, outputDir, force = false }) {
+  // Fail fast, before spawning anything: the manifest must validate
+  // and the approval gate must pass — a job that is born dead hides
+  // the real error behind a poll.
+  const manifestAbs = await requireInput(manifestPath, "manifest");
+  let raw;
+  try {
+    raw = await readFile(manifestAbs, "utf8");
+  } catch (e) {
+    throw new MediaKitError(`cannot read manifest ${manifestPath}: ${e.message}`, "INVALID_INPUT");
+  }
+  let doc;
+  try {
+    doc = JSON.parse(raw);
+  } catch (e) {
+    throw new MediaKitError(`assemble manifest is not valid JSON: ${e.message}`, "INVALID_ARG");
+  }
+  const plan = await validateAssembleManifest(doc, manifestAbs);
+  const approvalStatus = await requireAssembleApproval(plan, force);
+  if (typeof outputDir !== "string" || !outputDir.trim()) {
+    throw new MediaKitError("assemble --mode render needs an output directory", "INVALID_ARG");
+  }
+  const outDirAbs = await prepareOutputDir(outputDir);
+  const root = jobsRoot();
+  const jobId = newJobId();
+  const jobDir = path.join(root, jobId);
+  await mkdir(jobDir, { recursive: true });
+  const now = new Date().toISOString();
+  const record = {
+    job_id: jobId, operation: "assemble", status: "queued",
+    manifest: manifestAbs, output_dir: outDirAbs, mode: "render", force: !!force,
+    approval: approvalStatus, title: plan.title,
+    total_seconds: plan.total_seconds, total_frames: plan.total_frames,
+    pid: null, progress: { stage: null, percent: 0, detail: null },
+    created_at: now, updated_at: now, result: null, error: null,
+  };
+  await writeJobRecord(root, record);
+  const cliPath = fileURLToPath(new URL("../bin/mediakit.js", import.meta.url));
+  // The worker's stdout/stderr go to worker.log. spawn needs a real
+  // fd (a WriteStream is still opening when spawn runs — it threw
+  // "The argument 'stdio' is invalid"), so open the file
+  // synchronously and hand the fd over; the parent closes its own
+  // copy right after spawn, the child's inherited fd stays valid.
+  const { openSync, closeSync } = await import("node:fs");
+  const logFd = openSync(path.join(jobDir, "worker.log"), "w");
+  let child;
+  try {
+    child = spawn(process.execPath, [
+      cliPath, "assemble", manifestAbs, "--mode", "render", "-o", outDirAbs,
+      "--job-id", jobId, "--job-dir", jobDir, ...(force ? ["--force"] : []),
+    ], { detached: true, stdio: ["ignore", logFd, logFd], env: process.env });
+  } catch (e) {
+    try { closeSync(logFd); } catch { /* already closed */ }
+    await failJob(jobId, jobDir, e);
+    throw e;
+  }
+  try { closeSync(logFd); } catch { /* already closed */ }
+  child.unref();
+  const started = { ...record, pid: child.pid ?? null };
+  await writeJobRecord(root, started);
+  return {
+    job_id: jobId, status: "queued", operation: "assemble",
+    jobs_root: root, manifest: manifestAbs, output_dir: outDirAbs,
+    title: plan.title, total_seconds: plan.total_seconds, total_frames: plan.total_frames,
+    approval: approvalStatus,
+    hint: `poll with: mediakit job ${jobId}`,
+  };
+}
+
+export async function getJob(jobId) {
+  const root = jobsRoot();
+  let raw;
+  try {
+    raw = await readFile(jobRecordPath(root, jobId), "utf8");
+  } catch {
+    throw new MediaKitError(`unknown job id: ${jobId} (jobs live under ${root})`, "JOB_NOT_FOUND");
+  }
+  return JSON.parse(raw);
+}
+
+export async function listJobs({ limit = 50 } = {}) {
+  const root = jobsRoot();
+  let names = [];
+  try {
+    names = (await readdir(root, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch { /* no jobs dir yet — zero jobs, not an error */ }
+  const jobs = [];
+  for (const name of names.sort().reverse()) {
+    if (!JOB_ID_RE.test(name)) continue;
+    try {
+      jobs.push(JSON.parse(await readFile(path.join(root, name, "job.json"), "utf8")));
+    } catch { /* skip unreadable entries */ }
+    if (jobs.length >= limit) break;
+  }
+  return { jobs_root: root, count: jobs.length, jobs };
+}
+
+export async function cancelJob(jobId) {
+  const root = jobsRoot();
+  const record = await getJob(jobId);
+  if (JOB_TERMINAL.has(record.status)) {
+    throw new MediaKitError(`job ${jobId} is already ${record.status} — nothing to cancel`, "INVALID_ARG");
+  }
+  if (record.pid) {
+    // The worker is its own process group (detached spawn), so a
+    // negative-pid kill takes the ffmpeg children with it. Fall back
+    // to the bare pid when the group is already gone.
+    try { process.kill(-record.pid, "SIGTERM"); } catch { try { process.kill(record.pid, "SIGTERM"); } catch { /* already gone */ } }
+    // Give the worker a moment to die on its own; if it finished in
+    // the meantime, its done/failed record stands and the cancel
+    // does not overwrite it.
+    await new Promise((r) => setTimeout(r, 300));
+    const current = await getJob(jobId);
+    if (JOB_TERMINAL.has(current.status)) return current;
+  }
+  const cancelled = { ...record, status: "cancelled", updated_at: new Date().toISOString(), error: { message: "cancelled by user", code: "JOB_CANCELLED" } };
+  await writeJobRecord(root, cancelled);
+  return cancelled;
 }

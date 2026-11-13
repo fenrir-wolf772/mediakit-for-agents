@@ -1146,21 +1146,51 @@ server.tool(
 
 server.tool(
   "assemble",
-  "Film assembler (Autopilot-style): build a finished video from ONE declarative film manifest — shots on a voice-led timeline, mixed audio, burned captions, QA and a receipt. The voice is the master clock: total = lead + measured voice duration + tail, and shot durations must cover that total EXACTLY in frames (no silent trim/pad/speed change). Modes: validate (no writes), preview (first N seconds at half size — show it to the user), approve (records the fingerprint of the previewed files; a human must have seen the preview), render (needs a matching approval, unless force:true). Shot segments are cached by content hash, so a re-render rebuilds only changed shots. v1: plain cuts, no per-shot text layers, one aspect per manifest. NOT the manifest tool (that runs a linear edit pipeline).",
+  "Film assembler (Autopilot-style): build a finished video from ONE declarative film manifest — shots on a voice-led timeline, mixed audio, burned captions, QA and a receipt. The voice is the master clock: total = lead + measured voice duration + tail, and shot durations must cover that total EXACTLY in frames (no silent trim/pad/speed change). Modes: validate (no writes), preview (first N seconds at half size — show it to the user), approve (records the fingerprint of the previewed files; a human must have seen the preview), render (needs a matching approval, unless force:true). Shot segments are cached by content hash, so a re-render rebuilds only changed shots. v1: plain cuts, no per-shot text layers, one aspect per manifest. async:true (render only) returns a job_id immediately and renders in the background — poll the job tool. chapters [{title, at}] in the manifest become MP4 chapters in final.mp4. NOT the manifest tool (that runs a linear edit pipeline).",
   {
     manifest_path: pathSchema.describe("Path to the film manifest JSON file (see skills/shorts-video/references/assemble-manifest.md for the schema)"),
     mode: z.enum(["validate", "preview", "approve", "render"]).default("validate").describe("validate: check the timeline math and files, write nothing. preview: render the first preview_seconds at half size. approve: record approval for the previewed files. render: full-resolution film (needs approval unless force)."),
     output_dir: pathSchema.optional().describe("Output directory (required for preview/approve/render): preview.mp4 + preview.json, or final.mp4 + assemble-receipt.json"),
     preview_seconds: z.number().min(1).max(60).default(20).describe("Preview length in seconds (preview mode only, default 20)"),
     force: z.boolean().default(false).describe("Render without approval (render mode only; recorded as approval:'forced' in the receipt — use only when the user explicitly says so)"),
+    async: z.boolean().default(false).describe("Render in the background (render mode only): validate + approval are checked now, then the call returns a job_id immediately and the render runs in a detached worker — poll the job tool for progress and the terminal result. Chapters [{title, at}] in the manifest become MP4 chapters in final.mp4."),
   },
-  async (a) => safe(() => core.assemble({
-    manifestPath: a.manifest_path,
-    mode: a.mode,
-    outputDir: a.output_dir ?? null,
-    previewSeconds: a.preview_seconds,
-    force: a.force,
-  })),
+  async (a) => safe(async () => {
+    if (a.async) {
+      if (a.mode !== "render") throw new core.MediaKitError("assemble async:true needs mode render (validate/preview/approve are already fast)", "INVALID_ARG");
+      return core.startAssembleJob({
+        manifestPath: a.manifest_path,
+        outputDir: a.output_dir ?? null,
+        force: a.force,
+      });
+    }
+    return core.assemble({
+      manifestPath: a.manifest_path,
+      mode: a.mode,
+      outputDir: a.output_dir ?? null,
+      previewSeconds: a.preview_seconds,
+      force: a.force,
+    });
+  }),
+);
+
+// Durable render jobs (idea: AH64-dll/OpenEdit's get_render_job /
+// cancel_render_job): assemble --async returns a job_id; this tool
+// polls it. status shows progress + the terminal result/error, list
+// shows all jobs newest-first, cancel stops a queued/running job
+// (kills the worker's whole process group, ffmpeg children included).
+server.tool(
+  "job",
+  "Inspect a durable async render job (started by assemble async:true): status shows progress (stage + percent) and the terminal result or error; list shows all jobs newest-first; cancel stops a queued or running job. Jobs live under MEDIAKIT_JOBS_DIR or <workdir>/.mediakit-jobs.",
+  {
+    job_id: z.string().optional().describe("Job id (e.g. job-20261114-005800-a1b2c3d4) — required for status/cancel"),
+    action: z.enum(["status", "list", "cancel"]).default("status").describe("status: read one job; list: all jobs; cancel: stop a queued/running job"),
+  },
+  async (a) => safe(async () => {
+    if (a.action === "list") return core.listJobs({});
+    if (!a.job_id) throw new core.MediaKitError("job needs a job_id for status/cancel", "INVALID_ARG");
+    return a.action === "cancel" ? core.cancelJob(a.job_id) : core.getJob(a.job_id);
+  }),
 );
 
 // ---------------------------------------------------------------- MCP resources

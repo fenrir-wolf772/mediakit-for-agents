@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "title": "Async job demo",
+  "width": 1080,
+  "height": 1920,
+  "fps": 30,
+  "voice": {
+    "path": "canvas-voice.mp3",
+    "lead": 0.5,
+    "tail": 0.5
+  },
+  "shots": [
+    {
+      "id": "a1",
+      "kind": "image",
+      "source": "kenburns.png",
+      "duration": 2,
+      "zoom": {
+        "from": 1.0,
+        "to": 1.15
+      }
+    },
+    {
+      "id": "a2",
+      "kind": "video",
+      "source": "source.mp4",
+      "start": 1,
+      "duration": 2
+    }
+  ]
+}

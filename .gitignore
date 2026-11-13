@@ -1,8 +1,14 @@
 node_modules/
 outputs/
 .mediakit-assemble-cache/
+.mediakit-jobs/
 *.assemble-approval.json
 test/media/
 *.log
 .DS_Store
 *.tgz
+
+# Local working dirs: demo/report videos, never committed
+cat-mouse/
+report-luot*/
+report-transitions/

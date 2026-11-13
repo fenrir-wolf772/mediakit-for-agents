@@ -28,6 +28,18 @@ async function measureLufs(file) {
   }
 }
 
+// Independent chapter list: ffprobe -show_chapters on disk (not the
+// tool's own report) — a chapter with the wrong time or title is a
+// wrong file, whatever the receipt says.
+async function probeChapters(file) {
+  try {
+    const { stdout } = await execFileAsync("ffprobe", ["-v", "error", "-show_chapters", "-of", "json", file]);
+    return JSON.parse(stdout).chapters ?? [];
+  } catch {
+    return null;
+  }
+}
+
 async function probeStreams(file) {
   try {
     const { stdout } = await execFileAsync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,codec_name,width,height,start_time,duration", "-show_entries", "format=duration", "-of", "json", file]);
@@ -99,6 +111,12 @@ async function callExpectThrow(name, args) {
 }
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+// Hermetic jobs root for the async-job tests: one fresh directory per
+// suite run, so smoke-test jobs from the shell never leak into the
+// suite's `job --list` assertions. The server child inherits this env
+// (transport env is process.env), and the worker inherits it from the
+// server, so all three agree on the same root.
+process.env.MEDIAKIT_JOBS_DIR = path.join(root, `outputs/mcp-jobs-${process.pid}`);
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: [path.join(root, "src/server.js")],
@@ -114,10 +132,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 52 tools present");
-checkOk(missing.length === 0, "tools/list has all 52 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 53 tools present");
+checkOk(missing.length === 0, "tools/list has all 53 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -2873,7 +2891,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 52 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 52 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 53 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 53 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -3629,6 +3647,90 @@ checkOk(assembleCanvasMotionPsnr !== null && assembleCanvasMotionPsnr < 28, "ass
 const assembleCanvasRender2Res = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleCanvasStage.manifestPath, mode: "render", output_dir: assembleCanvasOut, force: true } }, undefined, { timeout: 300000 });
 const assembleCanvasRender2Json = JSON.parse(assembleCanvasRender2Res.content[0].text);
 checkOk(assembleCanvasRender2Json.cache_hits === 1, "assemble second canvas render reuses the shot segment from the cache", `cache_hits=${assembleCanvasRender2Json.cache_hits}`);
+
+// Chapters: named markers on the film timeline become real MP4
+// chapters on render (not preview). Fixture:
+// test/assemble-chapters.json (the 10s film + Intro @0 / The turn
+// @3.5s / The payoff @7s).
+const assembleChaptersStage = await stageAssembleManifest("assemble-chapters.json");
+const assembleChaptersOut = path.join(assembleChaptersStage.dir, "out");
+const assembleChaptersValidateRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleChaptersStage.manifestPath, mode: "validate" } });
+const assembleChaptersValidateJson = JSON.parse(assembleChaptersValidateRes.content[0].text);
+checkOk(Array.isArray(assembleChaptersValidateJson.chapters) && assembleChaptersValidateJson.chapters.length === 3 && assembleChaptersValidateJson.chapters[1]?.title === "The turn" && assembleChaptersValidateJson.chapters[1]?.at_seconds === 3.5, "assemble validate echoes 3 chapters (Intro / The turn @3.5s / The payoff)", JSON.stringify(assembleChaptersValidateJson.chapters));
+const assembleChaptersOrderText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-chapters-order.json"), mode: "validate" });
+checkOk(/strictly increasing/.test(assembleChaptersOrderText ?? ""), "assemble validate refuses chapters out of order", assembleChaptersOrderText ?? "");
+const assembleChaptersEndText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-chapters-end.json"), mode: "validate" });
+checkOk(/outside the film/.test(assembleChaptersEndText ?? ""), "assemble validate refuses a chapter past the film end", assembleChaptersEndText ?? "");
+const assembleChaptersRenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleChaptersStage.manifestPath, mode: "render", output_dir: assembleChaptersOut, force: true } }, undefined, { timeout: 300000 });
+const assembleChaptersRenderJson = JSON.parse(assembleChaptersRenderRes.content[0].text);
+checkOk(assembleChaptersRenderJson.chapters?.length === 3 && assembleChaptersRenderJson.chapters[0]?.title === "Intro", "assemble render receipt echoes the chapters", JSON.stringify(assembleChaptersRenderJson.chapters));
+const chaptersProbe = await probeChapters(path.join(assembleChaptersOut, "final.mp4"));
+checkOk(Array.isArray(chaptersProbe) && chaptersProbe.length === 3 && chaptersProbe[0]?.start_time === "0.000000" && chaptersProbe[0]?.end_time === "3.500000" && chaptersProbe[0]?.tags?.title === "Intro" && chaptersProbe[1]?.tags?.title === "The turn" && chaptersProbe[2]?.start_time === "7.000000" && chaptersProbe[2]?.end_time === "10.000000", "assemble final.mp4 carries 3 MP4 chapters at 0 / 3.5s / 7s with the right titles", JSON.stringify(chaptersProbe));
+const assembleChaptersPreviewRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleChaptersStage.manifestPath, mode: "preview", output_dir: assembleChaptersOut, preview_seconds: 3 } });
+const chaptersPreviewProbe = await probeChapters(path.join(assembleChaptersOut, "preview.mp4"));
+checkOk(Array.isArray(chaptersPreviewProbe) && chaptersPreviewProbe.length === 0, "assemble preview carries no chapters (clipped window)", JSON.stringify(chaptersPreviewProbe));
+
+// Async render jobs: assemble async:true returns in milliseconds
+// with a job_id; the render runs in a detached worker; `job` polls
+// it. Fixture: test/assemble-async.json (4s film, no music/captions).
+const assembleAsyncStage = await stageAssembleManifest("assemble-async.json");
+const assembleAsyncOut = path.join(assembleAsyncStage.dir, "out");
+// Fail fast: no approval exists for the staged copy, so the async
+// call must refuse synchronously — no job is created.
+const assembleAsyncNoApprovalText = await callExpectThrow("assemble", { manifest_path: assembleAsyncStage.manifestPath, mode: "render", output_dir: assembleAsyncOut, async: true });
+checkOk(/needs approval/.test(assembleAsyncNoApprovalText ?? ""), "assemble async render refuses without approval (fail fast, no job created)", assembleAsyncNoApprovalText ?? "");
+const assembleAsyncModeText = await callExpectThrow("assemble", { manifest_path: assembleAsyncStage.manifestPath, mode: "preview", output_dir: assembleAsyncOut, async: true });
+checkOk(/needs mode render/.test(assembleAsyncModeText ?? ""), "assemble async:true refuses non-render modes", assembleAsyncModeText ?? "");
+const asyncStart = Date.now();
+const assembleAsyncRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleAsyncStage.manifestPath, mode: "render", output_dir: assembleAsyncOut, force: true, async: true } });
+const assembleAsyncJson = JSON.parse(assembleAsyncRes.content[0].text);
+const asyncElapsed = (Date.now() - asyncStart) / 1000;
+const asyncJobId = assembleAsyncJson.job_id;
+checkOk(typeof asyncJobId === "string" && /^job-\d{8}-\d{6}-[0-9a-f]{8}$/.test(asyncJobId) && assembleAsyncJson.status === "queued" && asyncElapsed < 10, "assemble async returns a job_id in under 10s (render runs in the background)", `job_id=${asyncJobId} elapsed=${asyncElapsed}s`);
+// Poll the job until it finishes — the call above must NOT have
+// waited for the render.
+let assembleAsyncJob = null;
+let assembleAsyncSawRunning = false;
+for (let i = 0; i < 150; i++) {
+  const jobRes = await client.callTool({ name: "job", arguments: { job_id: asyncJobId, action: "status" } });
+  assembleAsyncJob = JSON.parse(jobRes.content[0].text);
+  if (assembleAsyncJob.status === "running") assembleAsyncSawRunning = true;
+  if (assembleAsyncJob.status === "done" || assembleAsyncJob.status === "failed") break;
+  await new Promise((r) => setTimeout(r, 2000));
+}
+checkOk(assembleAsyncSawRunning && assembleAsyncJob?.status === "done" && assembleAsyncJob?.progress?.percent === 100, "async job moves queued -> running -> done with progress reaching 100%", `status=${assembleAsyncJob?.status} progress=${JSON.stringify(assembleAsyncJob?.progress)}`);
+checkOk(assembleAsyncJob?.result?.output?.endsWith("final.mp4") && near(assembleAsyncJob?.result?.duration_seconds, 4, 0.15) && assembleAsyncJob?.result?.frames === 120 && near(assembleAsyncJob?.result?.loudness_lufs, -14, 0.5) && assembleAsyncJob?.result?.qa_verdict === "pass" && assembleAsyncJob?.result?.sha256?.length === 64, "async job result carries output + 4s/120 frames/-14 LUFS + qa pass + SHA-256", JSON.stringify(assembleAsyncJob?.result));
+const assembleAsyncFinalFrames = await countFrames(path.join(assembleAsyncOut, "final.mp4"));
+checkOk(assembleAsyncFinalFrames === 120, "async-rendered final.mp4 has exactly 120 frames on disk", `frames=${assembleAsyncFinalFrames}`);
+// list shows the finished job; cancelling a terminal job is refused.
+const jobListRes = await client.callTool({ name: "job", arguments: { action: "list" } });
+const jobListJson = JSON.parse(jobListRes.content[0].text);
+checkOk(jobListJson.jobs?.some((j) => j.job_id === asyncJobId && j.status === "done"), "job list contains the finished async job", `count=${jobListJson.count}`);
+const assembleAsyncCancelDoneText = await callExpectThrow("job", { job_id: asyncJobId, action: "cancel" });
+checkOk(/already done/.test(assembleAsyncCancelDoneText ?? ""), "job cancel refuses an already-done job", assembleAsyncCancelDoneText ?? "");
+// Cancel: start a second async render and stop it mid-flight.
+const assembleCancelStage = await stageAssembleManifest("assemble-async.json");
+const assembleCancelOut = path.join(assembleCancelStage.dir, "out");
+const assembleCancelRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleCancelStage.manifestPath, mode: "render", output_dir: assembleCancelOut, force: true, async: true } });
+const assembleCancelJson = JSON.parse(assembleCancelRes.content[0].text);
+const cancelJobId = assembleCancelJson.job_id;
+const assembleCancelCallRes = await client.callTool({ name: "job", arguments: { job_id: cancelJobId, action: "cancel" } });
+const assembleCancelCallJson = JSON.parse(assembleCancelCallRes.content[0].text);
+checkOk(assembleCancelCallJson.status === "cancelled" && assembleCancelCallJson.error?.code === "JOB_CANCELLED", "job cancel stops a running render (status cancelled)", JSON.stringify(assembleCancelCallJson.status));
+const assembleCancelPid = assembleCancelCallJson.pid;
+let cancelWorkerAlive = null;
+if (typeof assembleCancelPid === "number") {
+  try { process.kill(assembleCancelPid, 0); cancelWorkerAlive = true; } catch { cancelWorkerAlive = false; }
+}
+checkOk(cancelWorkerAlive === false, "cancelled job's worker process is gone (process group killed)", `pid=${assembleCancelPid} alive=${cancelWorkerAlive}`);
+// A second status read still says cancelled — the worker did not
+// overwrite it with done/failed after the kill.
+const assembleCancelRecheckRes = await client.callTool({ name: "job", arguments: { job_id: cancelJobId, action: "status" } });
+const assembleCancelRecheckJson = JSON.parse(assembleCancelRecheckRes.content[0].text);
+checkOk(assembleCancelRecheckJson.status === "cancelled" && !existsSync(path.join(assembleCancelOut, "final.mp4")), "cancelled job stays cancelled and wrote no final.mp4", assembleCancelRecheckJson.status);
+// Unknown job id.
+const jobUnknownText = await callExpectThrow("job", { job_id: "job-20000101-000000-deadbeef", action: "status" });
+checkOk(/unknown job/.test(jobUnknownText ?? ""), "job status refuses an unknown job id", jobUnknownText ?? "");
 
 await client.close();
 if (failures.length) {

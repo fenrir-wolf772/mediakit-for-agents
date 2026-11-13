@@ -59,6 +59,11 @@ pictures — pictures fit the voice:
   "music": {"path": "bed.mp3", "volume": 0.3, "duck_db": 12},
   "sfx": [{"file": "ding.mp3", "at": 3.2, "volume": 1}],
   "captions": "subs.srt",
+  "chapters": [
+    {"title": "Intro", "at": 0},
+    {"title": "The turn", "at": 3.5},
+    {"title": "The payoff", "at": 7}
+  ],
   "shots": [
     {"id": "s1", "kind": "image", "source": "frame.png", "duration": 4.2,
      "zoom": {"from": 1.0, "to": 1.15, "focus": [0.5, 0.5], "focus_end": [0.5, 0.4]}},
@@ -79,6 +84,14 @@ pictures — pictures fit the voice:
   optional, at most 16, each `{file, at, volume}` with `at` inside
   the final timeline.
 - `captions` is optional (`.srt`/`.ass`/`.vtt`).
+- `chapters` is optional: 1–32 named markers `{title, at}` with
+  `at` in seconds or `MM:SS`, strictly increasing, inside the
+  film (`0 <= at < total`). On render they become real MP4
+  chapters in `final.mp4` (the last chapter runs to the film
+  end); a preview carries no chapters — it is a clipped window,
+  so chapter times would not line up. Titles are 1–128
+  characters; `= ; # \` and newlines in a title become spaces
+  (ffmetadata syntax).
 - `shots`: 1–64, each with a unique `id` and a `duration` of
   0.5–600s:
   - `image`: `source` is a still. With `zoom` it renders through
@@ -240,8 +253,34 @@ still image cannot do, with no AI video account and no browser.
   changed (manifest / voice / asset / captions).
 - The receipt (`assemble-receipt.json`) records the fingerprint,
   the approval status (`approved` / `forced`), per-shot cache hits,
-  the measured final duration/dimensions/loudness, and the
-  `qa_report` result.
+  the measured final duration/dimensions/loudness, the chapters,
+  and the `qa_report` result.
+
+## Async renders (jobs)
+
+A full render takes minutes, so the MCP call does not have to
+wait for it. `assemble --async` / `async:true` (render mode
+only) validates the manifest and the approval gate
+synchronously, then returns a `job_id` immediately and renders
+in a detached worker process. Poll it with the `job` tool:
+
+- `job {job_id, action: "status"}` — `queued` → `running`
+  (with `progress: {stage, percent}` + the live `pid`) → `done`
+  (with `result`: output, duration, frames, LUFS, SHA-256, QA
+  verdict) or `failed` (with `error`). Poll every 2s — a render
+  takes minutes, not seconds.
+- `job {action: "list"}` — all jobs, newest first.
+- `job {job_id, action: "cancel"}` — stops a queued or running
+  job. The worker is its own process group, so the kill takes
+  the ffmpeg children with it; a job cancelled while queued is
+  never rendered, and a cancelled job stays cancelled — the
+  worker never overwrites it with done/failed afterwards.
+- Cancelling a terminal job (`done` / `failed` / `cancelled`) is
+  refused; an unknown id is `JOB_NOT_FOUND`.
+- Jobs live under `MEDIAKIT_JOBS_DIR`, else
+  `<workdir>/.mediakit-jobs`, one directory per job (`job.json` +
+  `worker.log` — the worker's stdout/stderr, including the
+  receipt JSON it printed).
 
 ## CLI
 
@@ -251,6 +290,10 @@ mediakit assemble film.json --mode preview -o out/ --preview-seconds 20
 mediakit assemble film.json --mode approve -o out/
 mediakit assemble film.json --mode render -o out/
 mediakit assemble film.json --mode render -o out/ --force
+mediakit assemble film.json --mode render -o out/ --force --async
+mediakit job <job-id>            # status
+mediakit job --list              # all jobs, newest first
+mediakit job --cancel <job-id>   # stop a queued/running job
 ```
 
 ## Out of scope for v1

@@ -1,0 +1,63 @@
+{
+  "captions": "captions.srt",
+  "fps": 30,
+  "height": 1920,
+  "music": {
+    "duck_db": 12,
+    "path": "mix-music.mp3",
+    "volume": 0.3
+  },
+  "sfx": [
+    {
+      "at": 2.0,
+      "file": "sfx-beep.mp3",
+      "volume": 1
+    }
+  ],
+  "shots": [
+    {
+      "duration": 4.0,
+      "id": "s1",
+      "kind": "image",
+      "source": "kenburns.png",
+      "zoom": {
+        "from": 1.0,
+        "to": 1.15
+      }
+    },
+    {
+      "duration": 4.0,
+      "id": "s2",
+      "kind": "video",
+      "source": "source.mp4",
+      "start": 1
+    },
+    {
+      "duration": 1.0,
+      "id": "s3",
+      "kind": "image",
+      "source": "kenburns.png"
+    },
+    {
+      "color": "111111",
+      "duration": 1.0,
+      "id": "s4",
+      "kind": "color"
+    }
+  ],
+  "style": "clean-bold",
+  "title": "MediaKit gives agents eyes and ears",
+  "version": 1,
+  "voice": {
+    "lead": 0.5,
+    "path": "mix-voice.mp3",
+    "tail": 0.5
+  },
+  "width": 1080,
+  "chapters": [
+    {
+      "title": "Too late",
+      "at": 10
+    }
+  ]
+}

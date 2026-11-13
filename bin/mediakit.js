@@ -625,14 +625,26 @@ const COMMANDS = {
     ],
   },
   assemble: {
-    usage: "mediakit assemble <film.json> --mode validate|preview|approve|render [-o <output-dir>] [--preview-seconds 20] [--force]",
-    desc: "Film assembler: build a finished video from one declarative film manifest (shots on a voice-led timeline, mixed audio, burned captions, QA + receipt). The voice is the master clock — total = lead + measured voice + tail, and shots must cover it exactly in frames. validate checks the math and writes nothing; preview renders the first N seconds at half size; approve records the fingerprint of the previewed files (a human must have seen the preview); render needs a matching approval unless --force. Shot segments are cached by content hash. Schema: skills/shorts-video/references/assemble-manifest.md.",
+    usage: "mediakit assemble <film.json> --mode validate|preview|approve|render [-o <output-dir>] [--preview-seconds 20] [--force] [--async]",
+    desc: "Film assembler: build a finished video from one declarative film manifest (shots on a voice-led timeline, mixed audio, burned captions, QA + receipt). The voice is the master clock — total = lead + measured voice + tail, and shots must cover it exactly in frames. validate checks the math and writes nothing; preview renders the first N seconds at half size; approve records the fingerprint of the previewed files (a human must have seen the preview); render needs a matching approval unless --force. --async (render mode only) returns a job_id immediately and renders in the background — poll with `mediakit job <id>`. Chapters [{title, at}] in the manifest become MP4 chapters in final.mp4. Shot segments are cached by content hash. Schema: skills/shorts-video/references/assemble-manifest.md.",
     args: [{ name: "manifest", required: true }],
     options: [
       ["--mode", "validate (default) | preview | approve | render"],
       ["--preview-seconds", "Preview length in seconds, 1-60 (default 20, preview mode only)"],
       ["--force", "Render without approval (recorded as approval:'forced' in the receipt)"],
+      ["--async", "Render in the background (render mode only): validate + approval are checked now, then return a job_id immediately; poll with `mediakit job <id>`"],
+      ["--job-id", "Internal: worker job id (used by the async render worker)"],
+      ["--job-dir", "Internal: worker job directory (used by the async render worker)"],
       ["-o, --output", "Output directory (required for preview/approve/render)"],
+    ],
+  },
+  job: {
+    usage: "mediakit job <job-id> | mediakit job --list | mediakit job --cancel <job-id>",
+    desc: "Inspect a durable async render job (started by `assemble --async`): status (default) shows progress + the terminal result or error; --list shows all jobs, newest first; --cancel stops a queued or running job (kills the worker's whole process group). Jobs live under MEDIAKIT_JOBS_DIR or <workdir>/.mediakit-jobs.",
+    args: [{ name: "job-id", required: false }],
+    options: [
+      ["--list", "List jobs (newest first)"],
+      ["--cancel", "Cancel a queued or running job (give the job id)"],
     ],
   },
   manifest: {
@@ -1362,13 +1374,35 @@ async function main() {
       }
       case "assemble": {
         if (!positional[0]) fail("missing manifest file: mediakit assemble <film.json> --mode validate|preview|approve|render [-o <output-dir>]");
+        if (opts.async === true) {
+          if ((opts.mode ?? "validate") !== "render") fail("assemble --async needs --mode render (validate/preview/approve are already fast)");
+          result = await core.startAssembleJob({
+            manifestPath: positional[0],
+            outputDir: opts.output ?? null,
+            force: opts.force === true,
+          });
+          break;
+        }
+        const jobId = typeof opts.job_id === "string" ? opts.job_id : null;
+        const jobDir = typeof opts.job_dir === "string" ? opts.job_dir : null;
+        if ((jobId && !jobDir) || (!jobId && jobDir)) fail("--job-id and --job-dir must be given together (internal worker flags)");
         result = await core.assemble({
           manifestPath: positional[0],
           mode: opts.mode ?? "validate",
           outputDir: opts.output ?? null,
           previewSeconds: numOpt(opts, "preview_seconds") ?? 20,
           force: opts.force === true,
+          onProgress: jobId ? async (p) => { await core.updateJobProgress(jobId, jobDir, p); } : null,
+          jobId,
+          jobDir,
         });
+        break;
+      }
+      case "job": {
+        if (opts.list === true) { result = await core.listJobs({}); break; }
+        if (typeof opts.cancel === "string") { result = await core.cancelJob(opts.cancel); break; }
+        if (!positional[0]) fail("missing job id: mediakit job <job-id> [--list] [--cancel <job-id>]");
+        result = await core.getJob(positional[0]);
         break;
       }
       case "manifest": {
