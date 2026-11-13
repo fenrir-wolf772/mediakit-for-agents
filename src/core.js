@@ -4075,6 +4075,19 @@ function parseSlideshowImage(spec, idx) {
   throw new MediaKitError(`slideshow image ${idx} must be a file path or {file, duration}`, "INVALID_ARG");
 }
 
+// Plain file paths out of a slideshow images array (strings, or
+// {file, duration} objects) — for cache keys and manifest
+// resolution, which need the files, not the per-slide durations.
+function slideshowImageFiles(images) {
+  if (!Array.isArray(images)) return [];
+  const out = [];
+  for (const s of images) {
+    if (typeof s === "string") out.push(s);
+    else if (s && typeof s === "object" && typeof s.file === "string") out.push(s.file);
+  }
+  return out;
+}
+
 /** Run async tasks with at most `limit` in flight; results in order. */
 async function runPool(items, limit, fn) {
   const results = new Array(items.length);
@@ -4819,6 +4832,25 @@ function keptSegments(duration, silences, margin) {
   }));
 }
 
+// Audio joins cut at atrim boundaries — a hard cut at a non-zero
+// sample is an audible click. Every kept segment gets a 12ms fade
+// out at its end and a 15ms fade in at its start (backlog, lượt 37):
+// short enough to be inaudible as a fade, long enough to kill the
+// step. Segments shorter than the two fades combined skip them —
+// the fades would overlap and swallow the segment. cut_words builds
+// the same graph shape, so it shares this helper (remove_retakes
+// inherits it through cutWords).
+const JOIN_FADE_IN_SECONDS = 0.015;
+const JOIN_FADE_OUT_SECONDS = 0.012;
+function joinFadeAudio(seg, i) {
+  const dur = seg.end - seg.start;
+  let chain = `[0:a]atrim=start=${seg.start}:end=${seg.end},asetpts=PTS-STARTPTS`;
+  if (dur > JOIN_FADE_IN_SECONDS + JOIN_FADE_OUT_SECONDS) {
+    chain += `,afade=t=in:st=0:d=${JOIN_FADE_IN_SECONDS},afade=t=out:st=${+(dur - JOIN_FADE_OUT_SECONDS).toFixed(3)}:d=${JOIN_FADE_OUT_SECONDS}`;
+  }
+  return `${chain}[a${i}]`;
+}
+
 export async function silence({ input, output = null, thresholdDb = -40, minDuration = 0.5, margin = 0.2, detectOnly = false }) {
   const inPath = await requireInput(input);
   const m = num(margin, "margin", { min: 0, max: 5 });
@@ -4861,7 +4893,7 @@ export async function silence({ input, output = null, thresholdDb = -40, minDura
       vParts.push(`[0:v]trim=start=${seg.start}:end=${seg.end},setpts=PTS-STARTPTS[v${i}]`);
       vLabels.push(`[v${i}]`);
     }
-    aParts.push(`[0:a]atrim=start=${seg.start}:end=${seg.end},asetpts=PTS-STARTPTS[a${i}]`);
+    aParts.push(joinFadeAudio(seg, i));
     aLabels.push(`[a${i}]`);
   });
   const graph = [...vParts, ...aParts];
@@ -5095,7 +5127,7 @@ export async function cutWords({ input, output = null, wordsFile, remove = null,
       vParts.push(`[0:v]trim=start=${seg.start}:end=${seg.end},setpts=PTS-STARTPTS[v${i}]`);
       vLabels.push(`[v${i}]`);
     }
-    aParts.push(`[0:a]atrim=start=${seg.start}:end=${seg.end},asetpts=PTS-STARTPTS[a${i}]`);
+    aParts.push(joinFadeAudio(seg, i));
     aLabels.push(`[a${i}]`);
   });
   const graph = [...vParts, ...aParts];
@@ -5315,6 +5347,7 @@ const DOCTOR_FILTERS = [
   "reverse", "areverse",
   "minterpolate", "hqdn3d", "nlmeans",
   "chromakey", "zoompan",
+  "afade",
 ];
 const DOCTOR_ENCODERS = [
   "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4", "prores_ks",
@@ -5350,9 +5383,9 @@ const TOOL_REQUIREMENTS = {
   convert: { encoders: ["libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4"] },
   compress: { filters: ["scale"], encoders: ["libx264", "aac"] },
   receipt: { filters: ["loudnorm"] },
-  silence: { filters: ["silencedetect", "trim", "atrim", "concat"], encoders: ["libx264", "aac"] },
-  cut_words: { filters: ["trim", "atrim", "concat", "setpts", "asetpts"], encoders: ["libx264", "aac"] },
-  remove_retakes: { filters: ["trim", "atrim", "concat", "setpts", "asetpts"], encoders: ["libx264", "aac"] },
+  silence: { filters: ["silencedetect", "trim", "atrim", "concat", "afade"], encoders: ["libx264", "aac"] },
+  cut_words: { filters: ["trim", "atrim", "concat", "setpts", "asetpts", "afade"], encoders: ["libx264", "aac"] },
+  remove_retakes: { filters: ["trim", "atrim", "concat", "setpts", "asetpts", "afade"], encoders: ["libx264", "aac"] },
   cropdetect: { filters: ["cropdetect"] },
   package: {},
   publish_kit: {},
@@ -6573,6 +6606,35 @@ export const BATCH_OPERATIONS = {
     }),
     extraHash: async (input, a) => hashSidecar(cutWordsFileFor(input, a.words_dir)),
   },
+  // slideshow in batch is a SET operation, not a per-file one: the
+  // whole matched set becomes ONE slideshow (batch() branches on it
+  // before the per-file loop, so this run is only ever called from
+  // a manifest step, where images come from args). `images` /
+  // `durations` are arrays — batch args must be scalars, so batch
+  // never passes them; a manifest may (see the manifest validator's
+  // array exception). output_name is batch-only: the single output
+  // file's name inside the output dir.
+  slideshow: {
+    args: ["images", "durations", "duration", "transition", "transition_duration", "fps", "width", "height", "audio", "crf", "output_name"],
+    run: (input, output, a) => slideshow({
+      images: a.images, output,
+      durations: a.durations ?? null,
+      duration: a.duration ?? 3,
+      transition: a.transition ?? "fade",
+      transitionDuration: a.transition_duration ?? 1,
+      fps: a.fps ?? 30, width: a.width ?? 1280, height: a.height ?? 720,
+      audio: a.audio ?? null, crf: a.crf ?? 23,
+    }),
+    // The slides are the input: their bytes belong in the cache
+    // key, or editing one image re-serves the old slideshow.
+    extraHash: async (input, a) => {
+      const files = slideshowImageFiles(a.images ?? []);
+      if (!files.length) return null;
+      const hashes = [];
+      for (const f of files) hashes.push(await hashFile(f));
+      return createHash("sha256").update(hashes.join(":")).digest("hex");
+    },
+  },
 };
 
 const BATCH_CACHE_FILENAME = ".mediakit-batch-cache.json";
@@ -6584,6 +6646,7 @@ const BATCH_MANIFEST_FILENAME = "batch-manifest.json";
 // to .mp3) and loudness with an explicit --format (the file's
 // container must match the codec the tool was told to write).
 function batchOutputExt(operation, inputExt, args) {
+  if (operation === "slideshow") return "mp4";
   if (operation === "extract_audio") {
     if (args.whisper) return "wav";
     if (args.format) return String(args.format).toLowerCase().replace(/^\./, "");
@@ -6708,6 +6771,74 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
 
   const { files, skippedDirectories } = await collectBatchFiles(inDir, pattern.trim(), outDirAbs);
   if (!files.length) throw new MediaKitError(`batch matched no files: pattern "${pattern}" under ${inDir}`, "NO_MATCH");
+  // slideshow is a SET operation: the whole matched set becomes ONE
+  // slideshow, not one output per file — it branches here, before
+  // the per-file items exist. The per-file content-hash cache does
+  // not apply (the "file" is a set of images); the summary says so
+  // instead of pretending cache:true. output_name names the single
+  // output file inside the output dir.
+  if (operation === "slideshow") {
+    const imageExts = new Set(["png", "jpg", "jpeg", "webp", "gif"]);
+    const images = files.filter((f) => imageExts.has(path.extname(f).slice(1).toLowerCase()));
+    if (images.length < 2) {
+      throw new MediaKitError(`batch slideshow needs at least 2 images, pattern "${pattern}" matched ${files.length} file(s) but only ${images.length} image(s) — use a pattern like **/*.jpg`, "NO_MATCH");
+    }
+    if (images.length > 32) {
+      throw new MediaKitError(`batch slideshow takes at most 32 images, pattern "${pattern}" matched ${images.length} — narrow the pattern (a subfolder, or fewer images)`, "INVALID_ARG");
+    }
+    const outputName = args.output_name ?? "slideshow.mp4";
+    if (typeof outputName !== "string" || !/^[A-Za-z0-9._-]+\.mp4$/.test(outputName)) {
+      throw new MediaKitError(`batch slideshow output_name must be a plain filename ending in .mp4, got: ${JSON.stringify(outputName)}`, "INVALID_ARG");
+    }
+    const startedAt = Date.now();
+    // Dry-run writes nothing — not even the output directory (the
+    // per-file path returns before prepareOutputDir for the same
+    // reason, and a dry-run that mkdirs would fail its own test).
+    const output = path.join(outDirAbs, outputName);
+    const summaryBase = {
+      operation, pattern: pattern.trim(), input_dir: inDir, output_dir: outDirAbs,
+      args, jobs: 1, cache: false,
+      cache_note: "slideshow is a set operation — the per-file content-hash cache does not apply in v1",
+      output_suffix: null,
+      files_total: files.length, files_matched: images.length, truncated: files.length > max,
+      ...(skippedDirectories ? { skipped_directories: skippedDirectories } : {}),
+    };
+    if (dryRun) {
+      return { ...summaryBase, dry_run: true, succeeded: 0, failed: 0, cached: 0, skipped: 0, elapsed_seconds: 0, results: [{ input: images, output, status: "planned" }] };
+    }
+    const outDir = await prepareOutputDir(outDirAbs);
+    if (Date.now() > startedAt + timeout * 1000) {
+      return { ...summaryBase, dry_run: false, succeeded: 0, failed: 0, cached: 0, skipped: 1, elapsed_seconds: 0, results: [{ input: images, output, status: "skipped", error: `batch timeout exceeded (${timeout}s shared budget)` }] };
+    }
+    const fileStarted = Date.now();
+    let result;
+    let status = "ok";
+    let error = null;
+    let code = null;
+    try {
+      result = await slideshow({
+        images, output,
+        duration: args.duration ?? 3,
+        transition: args.transition ?? "fade",
+        transitionDuration: args.transition_duration ?? 1,
+        fps: args.fps ?? 30, width: args.width ?? 1280, height: args.height ?? 720,
+        audio: args.audio ?? null, crf: args.crf ?? 23,
+      });
+    } catch (e) {
+      status = "error";
+      error = e.message;
+      code = e instanceof MediaKitError ? e.code : "ERROR";
+    }
+    const summary = {
+      ...summaryBase, dry_run: false,
+      succeeded: status === "ok" ? 1 : 0, failed: status === "error" ? 1 : 0, cached: 0, skipped: 0,
+      elapsed_seconds: +((Date.now() - startedAt) / 1000).toFixed(1),
+      results: [{ input: images, output, status, elapsed_ms: Date.now() - fileStarted, ...(result ? { result } : {}), ...(error ? { error, code } : {}) }],
+    };
+    summary.manifest = path.join(outDir, BATCH_MANIFEST_FILENAME);
+    await writeFile(summary.manifest, JSON.stringify(summary, null, 2), "utf8");
+    return summary;
+  }
   const truncated = files.length > max;
   const selected = files.slice(0, max);
   const items = selected.map((f) => {
@@ -6891,6 +7022,9 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
 
 // Single-input/single-output steps a manifest may chain: the batch
 // operations plus the four single-input tools batch does not cover.
+// slideshow is the exception that proves the rule — it builds from
+// images in args, so it may only be step 1 (it ignores the chain
+// input; the manifest's input should be the first slide image).
 // Multi-input tools (concat, mix, mux, pip) and probe-only tools
 // (probe, check, keyframes...) are not chainable steps — a manifest
 // is one pipeline through one file.
@@ -6949,7 +7083,39 @@ const MANIFEST_MAX_STEPS = 32;
 // args, and resolving "FF0000" relative to the manifest would turn
 // a color into a missing file). The resolver and the cache-key loop
 // below both skip hex backgrounds via isHexColorArg.
-const MANIFEST_FILE_ARGS = ["captions", "overlay", "words_file", "background"];
+const MANIFEST_FILE_ARGS = ["captions", "overlay", "words_file", "background", "audio"];
+
+// A manifest slideshow step's array args, validated here (the
+// generic loop below only allows scalars). images: paths or
+// {file, duration} objects, 2-32 entries; durations: one number
+// per image. transitions/transition_durations arrays are NOT
+// exposed in v1 — one transition type for all joins in a manifest.
+function validateSlideshowManifestArgs(step, args, label) {
+  if (args.images === undefined || args.images === null) {
+    throw new MediaKitError(`${label} (slideshow) needs images — an array of 2-32 image paths (or {file, duration} objects)`, "INVALID_ARG");
+  }
+  if (!Array.isArray(args.images) || args.images.length < 2 || args.images.length > 32) {
+    throw new MediaKitError(`${label} (slideshow) images must be an array of 2-32 image paths (or {file, duration} objects), got: ${Array.isArray(args.images) ? `${args.images.length} entries` : typeof args.images}`, "INVALID_ARG");
+  }
+  args.images.forEach((s, j) => {
+      if (typeof s === "string") {
+        if (!s.trim()) throw new MediaKitError(`${label} (slideshow) images[${j}] is an empty path`, "INVALID_ARG");
+      } else if (s && typeof s === "object" && !Array.isArray(s)) {
+        if (typeof s.file !== "string" || !s.file.trim()) throw new MediaKitError(`${label} (slideshow) images[${j}] needs a file path`, "INVALID_ARG");
+        if (s.duration !== undefined && s.duration !== null && typeof s.duration !== "number") throw new MediaKitError(`${label} (slideshow) images[${j}].duration must be a number of seconds`, "INVALID_ARG");
+        for (const k of Object.keys(s)) {
+          if (!["file", "duration"].includes(k)) throw new MediaKitError(`${label} (slideshow) images[${j}] does not take "${k}" (only file, duration)`, "INVALID_ARG");
+        }
+      } else {
+        throw new MediaKitError(`${label} (slideshow) images[${j}] must be a file path or {file, duration}`, "INVALID_ARG");
+      }
+  });
+  if (args.durations !== undefined && args.durations !== null) {
+    if (!Array.isArray(args.durations) || args.durations.some((d) => typeof d !== "number")) {
+      throw new MediaKitError(`${label} (slideshow) durations must be an array of numbers, one per image`, "INVALID_ARG");
+    }
+  }
+}
 
 const isHexColorArg = (v) => typeof v === "string" && (/^#?[0-9A-Fa-f]{6}$/.test(v.trim()) || /^0x[0-9A-Fa-f]{6}$/.test(v.trim()));
 
@@ -7006,11 +7172,18 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
     if (args === null || typeof args !== "object" || Array.isArray(args)) {
       throw new MediaKitError(`${label}: args must be an object`, "INVALID_ARG");
     }
+    // slideshow builds a video from images — it cannot transform
+    // the previous step's output, so it is only the first step.
+    if (step.tool === "slideshow" && i > 0) {
+      throw new MediaKitError(`${label}: slideshow must be the first step — it builds a video from images in args, it does not transform the previous step's output`, "INVALID_ARG");
+    }
+    if (step.tool === "slideshow") validateSlideshowManifestArgs(step, args, label);
     for (const k of Object.keys(args)) {
       if (!spec.args.includes(k)) {
         throw new MediaKitError(`${label} (${step.tool}) does not take argument "${k}" (supported: ${spec.args.join(", ") || "none"})`, "INVALID_ARG");
       }
       const v = args[k];
+      if (step.tool === "slideshow" && (k === "images" || k === "durations")) continue; // arrays, validated above
       if (v !== null && typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") {
         throw new MediaKitError(`${label} (${step.tool}): argument "${k}" must be a string, number or boolean`, "INVALID_ARG");
       }
@@ -7023,6 +7196,11 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
         if (k === "background" && isHexColorArg(resolved[k])) continue;
         resolved[k] = resolveRel(resolved[k]);
       }
+    }
+    // Slideshow images resolve the same way (each entry a path, or
+    // a {file, duration} object whose file resolves).
+    if (step.tool === "slideshow" && Array.isArray(resolved.images)) {
+      resolved.images = resolved.images.map((s) => (typeof s === "string" ? resolveRel(s) : { ...s, file: resolveRel(s.file) }));
     }
     return { index: i, tool: step.tool, spec, args, resolved };
   });
@@ -7098,6 +7276,21 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
         if (typeof s.resolved[k] === "string") {
           if (k === "background" && isHexColorArg(s.resolved[k])) continue;
           try { extraHash = await hashFile(s.resolved[k]); } catch { extraHash = null; }
+        }
+      }
+      // Slideshow: the slides ARE the input — hash every slide
+      // (plus the bed, already hashed above when present) so
+      // editing one image re-runs the step instead of serving the
+      // old slideshow from cache.
+      if (s.tool === "slideshow") {
+        const slideFiles = slideshowImageFiles(s.resolved.images ?? []);
+        if (slideFiles.length) {
+          const hashes = [];
+          for (const f of slideFiles) {
+            try { hashes.push(await hashFile(f)); } catch { hashes.push(null); }
+          }
+          if (extraHash) hashes.push(extraHash);
+          extraHash = createHash("sha256").update(hashes.join(":")).digest("hex");
         }
       }
       const key = createHash("sha256")

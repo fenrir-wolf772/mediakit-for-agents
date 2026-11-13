@@ -104,7 +104,10 @@ returns the exact silence intervals plus the kept segments and
 near zero, nothing was worth cutting (the tool then just stream-copies).
 If the threshold is wrong (music counted as silence, or room tone kept),
 adjust `threshold_db` (−50 is stricter, −30 looser) and re-detect — never
-re-cut blind.
+re-cut blind. A cut never clicks: every kept segment gets a 12ms fade out
++ 15ms fade in at the join (`silence` and `cut_words` share the graph),
+so a cut mid-word or mid-tone is smooth — verify it on samples, not by ear
+alone, when the join matters.
 
 ### 6. Loudness: −14 LUFS is the default for a reason
 YouTube, Spotify, and TikTok all normalize to around −14 LUFS. Normalizing
@@ -591,7 +594,10 @@ three leading failures in sequential mode — that is the guard working,
 not a broken folder. Keep the output dir outside the input tree when
 you can (files under it are never treated as inputs), and use
 `--dry-run` first when the glob is new, so you see the planned outputs
-before anything encodes.
+before anything encodes. `slideshow` is the exception: a set operation
+— the whole matched set of images (2–32) becomes ONE slideshow video
+(`output_name`, default `slideshow.mp4`), not one output per file, and
+the per-file cache does not apply (the summary says `cache: false`).
 
 ### 36. Smooth motion and clean noise are measured effects, not flags
 `interpolate` only raises the frame rate — 30fps to 60fps with
@@ -683,6 +689,11 @@ file instead of guessing. Only single-input steps chain
 `reverse`/`grade`/`fit`/`silence`/`denoise`/`interpolate`/
 `burn_captions`/`overlay`/`chroma_key`); multi-input work (`concat`, `mix`,
 `mux`, `pip`) stays a separate call before or after the manifest.
+`slideshow` is the one exception: it may only be step 1 — it builds a
+video from images in args, so the manifest input should be the first
+slide image, and later steps then trim, reframe or grade the slideshow
+like any clip. Editing a slide image re-runs the step: the image bytes
+are in the cache key, the same as a `chroma_key` background.
 
 ### 41. One style id for the whole video — don't retype hex values
 Pick the style once (`clean-bold`, `minimal-line` or `warm-story`,

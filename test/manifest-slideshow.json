@@ -1,0 +1,1 @@
+{"input":"logo.png","output":"../outputs/mcp-manifest-slideshow.mp4","steps":[{"args":{"duration":2,"images":["logo.png","kenburns.png","slide-blue.png"],"transition_duration":0.5},"tool":"slideshow"},{"args":{"end":4,"start":0},"tool":"trim"}],"version":1}

@@ -136,6 +136,11 @@ jobs:
           ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-batch-rt/take-remove_retakes.mp4 | grep '^5.74'
           printf '%s' '{"version":1,"input":"../test/source.mp4","output":"ci-manifest-rt.mp4","steps":[{"tool":"remove_retakes","args":{"words_file":"../test/retakes-words.json"}}]}' > outputs/ci-manifest-rt.json
           node bin/mediakit.js manifest outputs/ci-manifest-rt.json | grep '"steps_run": 1'
+          node bin/mediakit.js batch slideshow --pattern '*.png' --input-dir test -o outputs/ci-batch-slideshow --args-json '{"duration": 2, "transition_duration": 0.5}' | grep '"succeeded": 1'
+          ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-batch-slideshow/slideshow.mp4 | grep '^6'
+          printf '%s' '{"version":1,"input":"../test/logo.png","output":"ci-manifest-slideshow.mp4","steps":[{"tool":"slideshow","args":{"images":["../test/logo.png","../test/kenburns.png"],"duration":2,"transition_duration":0.5}},{"tool":"trim","args":{"start":0,"end":2}}]}' > outputs/ci-manifest-slideshow.json
+          node bin/mediakit.js manifest outputs/ci-manifest-slideshow.json | grep '"steps_run": 2'
+          ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-manifest-slideshow.mp4 | grep '^2'
           node bin/mediakit.js assemble test/assemble-film-transitions.json --mode validate | grep '"total_frames": 300'
           node bin/mediakit.js assemble test/assemble-film-transitions.json --mode preview -o outputs/ci-assemble-trans --preview-seconds 5 | grep '"preview_seconds": 5'
           node bin/mediakit.js loudness test/kokoro-voice.wav -o outputs/ci-loud-comp.wav --compressor | grep '"compressed_lufs"'

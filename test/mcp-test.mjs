@@ -91,6 +91,36 @@ async function psnrY(ref, file) {
   }
 }
 
+// Independent audio samples: decode a file to raw f32 mono 44.1kHz
+// (not through the tool under test) so a fade or a click can be
+// measured sample by sample instead of believed from a log line.
+async function pcmSamples(file) {
+  try {
+    const { stdout } = await execFileAsync("ffmpeg", ["-v", "error", "-i", file, "-vn", "-ac", "1", "-ar", "44100", "-f", "f32le", "-"], { encoding: "buffer", maxBuffer: 64 * 1024 * 1024 });
+    // Copy into a fresh ArrayBuffer first: a Buffer's pooled backing
+    // store is not guaranteed 4-byte aligned for Float32Array.
+    const bytes = Buffer.from(stdout);
+    const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    return new Float32Array(ab);
+  } catch {
+    return null;
+  }
+}
+function windowRmsDb(x, t0, t1, sr = 44100) {
+  const a = Math.floor(t0 * sr), b = Math.min(x.length, Math.floor(t1 * sr));
+  if (b <= a) return null;
+  let s = 0;
+  for (let i = a; i < b; i++) s += x[i] * x[i];
+  const rms = Math.sqrt(s / (b - a));
+  return rms > 0 ? 20 * Math.log10(rms) : -Infinity;
+}
+function maxSampleJump(x, t0, t1, sr = 44100) {
+  const a = Math.floor(t0 * sr), b = Math.min(x.length, Math.floor(t1 * sr));
+  let m = 0;
+  for (let i = a + 1; i < b; i++) m = Math.max(m, Math.abs(x[i] - x[i - 1]));
+  return m;
+}
+
 const failures = [];
 function checkOk(cond, label, detail = "") {
   if (cond) console.log(`  PASS ${label}`);
@@ -851,6 +881,42 @@ const silenceJson = JSON.parse(silenceRes.content[0].text);
 console.log("silence call: duration", silenceJson.duration_before, "->", silenceJson.duration_after, "| removed", silenceJson.removed_seconds, "s in", silenceJson.removed_count, "gaps");
 checkOk(near(silenceJson.duration_after, 6.867, 0.05), "silence cuts 9s to 6.867s", `got ${silenceJson.duration_after}`);
 checkOk(near(silenceJson.removed_seconds, 2.195, 0.05) && silenceJson.removed_count === 2, "silence removes 2.195s in 2 gaps", `got ${silenceJson.removed_seconds}s in ${silenceJson.removed_count} gaps`);
+// Join fades (lượt 49): every kept segment gets a 12ms fade out +
+// 15ms fade in at the join, so a cut mid-tone has no click. The
+// default margin (0.2s) hides the join inside source silence, so
+// this runs with margin 0 — the join lands exactly on the tone /
+// silence boundary, where an unfaded cut jumps phase. Measured on
+// raw samples, not from the tool's report: the 10ms windows next
+// to the join must sit well below the steady tone, and the biggest
+// sample-to-sample jump at the join must be far below a normal
+// in-tone jump.
+const silenceFadeRes = await client.callTool({
+  name: "silence",
+  arguments: {
+    input: path.join(root, "test/silence-source.mp4"),
+    output: path.join(root, "outputs/mcp-silence-fade.mp4"),
+    threshold_db: -40,
+    min_duration: 0.5,
+    margin: 0,
+  },
+});
+const silenceFadeJson = JSON.parse(silenceFadeRes.content[0].text);
+checkOk(near(silenceFadeJson.duration_after, 6.067, 0.05), "silence margin 0 cuts 9s to 6.067s", `got ${silenceFadeJson.duration_after}`);
+const fadeJoin = silenceFadeJson.kept_segments?.[0]?.duration;
+const fadePcm = await pcmSamples(path.join(root, "outputs/mcp-silence-fade.mp4"));
+checkOk(typeof fadeJoin === "number" && fadePcm !== null && fadePcm.length > 44100 * 6, "silence margin-0 join time + PCM decode available for the fade check", `join=${fadeJoin} samples=${fadePcm?.length}`);
+if (typeof fadeJoin === "number" && fadePcm) {
+  const steadyBefore = windowRmsDb(fadePcm, fadeJoin - 0.11, fadeJoin - 0.1);
+  const steadyAfter = windowRmsDb(fadePcm, fadeJoin + 0.1, fadeJoin + 0.11);
+  const last10 = windowRmsDb(fadePcm, fadeJoin - 0.01, fadeJoin);
+  const first10 = windowRmsDb(fadePcm, fadeJoin, fadeJoin + 0.01);
+  const jump = maxSampleJump(fadePcm, fadeJoin - 0.005, fadeJoin + 0.005);
+  const toneJump = maxSampleJump(fadePcm, fadeJoin + 0.1, fadeJoin + 0.11);
+  console.log(`join fade: last 10ms ${last10?.toFixed(1)} dBFS (steady ${steadyBefore?.toFixed(1)}), first 10ms ${first10?.toFixed(1)} dBFS (steady ${steadyAfter?.toFixed(1)}), max jump at join ${jump.toFixed(3)} vs in-tone ${toneJump.toFixed(3)}`);
+  checkOk(last10 !== null && steadyBefore !== null && last10 < steadyBefore - 8, "silence join: 12ms fade-out pulls the last 10ms >=8 dB under the steady tone", `last10=${last10} steady=${steadyBefore}`);
+  checkOk(first10 !== null && steadyAfter !== null && first10 < steadyAfter - 4, "silence join: 15ms fade-in pulls the first 10ms >=4 dB under the steady tone", `first10=${first10} steady=${steadyAfter}`);
+  checkOk(jump < 0.02 && jump < toneJump * 0.5, "silence join: max sample jump at the join is under 0.02 and under half the in-tone jump (no click)", `jump=${jump.toFixed(3)} tone=${toneJump.toFixed(3)}`);
+}
 
 const cropdetectRes = await client.callTool({
   name: "cropdetect",
@@ -3087,6 +3153,36 @@ const batchChromaBg2 = JSON.parse((await client.callTool({
 checkOk(batchChromaBg2.succeeded === 1 && batchChromaBg2.cached === 0, "batch chroma_key re-runs after the background image changes (no stale cache hit)", `succeeded=${batchChromaBg2.succeeded} cached=${batchChromaBg2.cached}`);
 const chromaBgB2 = await planeMean(path.join(root, "outputs/mcp-batch-chroma-bg-out/green-chroma_key.mp4"), "100:100:0:0", "b");
 checkOk(chromaBgB2 !== null && chromaBgB2 > 200, "batch chroma_key re-run composites the new blue background (corner B high)", `corner B=${chromaBgB2}`);
+// batch slideshow (lượt 49): a SET operation — the whole matched
+// set of images becomes ONE slideshow video (output_name), not one
+// output per file, and the per-file cache does not apply.
+await mkdir(path.join(root, "outputs/mcp-batch-slideshow-in"), { recursive: true });
+await copyFile(path.join(root, "test/logo.png"), path.join(root, "outputs/mcp-batch-slideshow-in/a-logo.png"));
+await copyFile(path.join(root, "test/kenburns.png"), path.join(root, "outputs/mcp-batch-slideshow-in/b-kenburns.png"));
+await copyFile(path.join(root, "test/slide-blue.png"), path.join(root, "outputs/mcp-batch-slideshow-in/c-blue.png"));
+await rm(path.join(root, "outputs/mcp-batch-slideshow-out"), { recursive: true, force: true });
+const batchSlideDryRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "slideshow", pattern: "*.png", input_dir: path.join(root, "outputs/mcp-batch-slideshow-in"), output_dir: path.join(root, "outputs/mcp-batch-slideshow-out"), args: { duration: 2, transition_duration: 0.5 }, dry_run: true },
+});
+const batchSlideDryJson = JSON.parse(batchSlideDryRes.content[0].text);
+checkOk(batchSlideDryJson.dry_run === true && batchSlideDryJson.files_matched === 3 && batchSlideDryJson.results.length === 1 && batchSlideDryJson.results[0].status === "planned" && batchSlideDryJson.results[0].output.endsWith("slideshow.mp4"), "batch slideshow dry-run plans ONE video from 3 images", JSON.stringify(batchSlideDryJson.results.map((r) => r.status)));
+checkOk(!existsSync(path.join(root, "outputs/mcp-batch-slideshow-out")), "batch slideshow dry-run writes no output directory", "outputs/mcp-batch-slideshow-out exists");
+const batchSlideRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "slideshow", pattern: "*.png", input_dir: path.join(root, "outputs/mcp-batch-slideshow-in"), output_dir: path.join(root, "outputs/mcp-batch-slideshow-out"), args: { duration: 2, transition_duration: 0.5 } },
+});
+const batchSlideJson = JSON.parse(batchSlideRes.content[0].text);
+checkOk(batchSlideJson.succeeded === 1 && batchSlideJson.failed === 0 && batchSlideJson.cache === false && typeof batchSlideJson.cache_note === "string", "batch slideshow succeeds with one row and reports the cache does not apply", `succeeded=${batchSlideJson.succeeded} cache=${batchSlideJson.cache}`);
+checkOk(batchSlideJson.results[0].result?.expected_duration_seconds === 6 && batchSlideJson.results[0].result?.slides?.length === 3, "batch slideshow result is 3 slides x 2s = 6s", JSON.stringify(batchSlideJson.results[0].result?.expected_duration_seconds));
+const batchSlideFrames = await countFrames(path.join(root, "outputs/mcp-batch-slideshow-out/slideshow.mp4"));
+checkOk(batchSlideFrames === 180, "batch slideshow output counts 180 frames on disk (6s @ 30fps)", `got ${batchSlideFrames}`);
+const batchSlideManifest = JSON.parse(await readFile(path.join(root, "outputs/mcp-batch-slideshow-out/batch-manifest.json"), "utf8"));
+checkOk(batchSlideManifest.results.length === 1 && batchSlideManifest.succeeded === 1, "batch slideshow writes batch-manifest.json with the single row", `got ${batchSlideManifest.results?.length} rows`);
+const batchSlideOneText = await callExpectThrow("batch", { operation: "slideshow", pattern: "a-logo.png", input_dir: path.join(root, "outputs/mcp-batch-slideshow-in"), output_dir: path.join(root, "outputs/mcp-batch-slideshow-one") });
+checkOk(/at least 2 images/.test(batchSlideOneText), "batch slideshow refuses a single matched image", batchSlideOneText.slice(0, 160));
+const batchSlideNoImgText = await callExpectThrow("batch", { operation: "slideshow", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-in"), output_dir: path.join(root, "outputs/mcp-batch-slideshow-noimg") });
+checkOk(/only 0 image/.test(batchSlideNoImgText), "batch slideshow refuses a pattern matching no images (and says how many files matched)", batchSlideNoImgText.slice(0, 160));
 
 // qa_report + thumbnail timestamps (lượt 31; idea: github774/claude-video-studio
 // contact_sheet + qa_report — run the gate, plus a contact sheet, on
@@ -3361,6 +3457,40 @@ checkOk(manifestChromaHexJson.steps.every((s) => s.status === "ok") && manifestC
 const manifestChromaHexCachedRes = await client.callTool({ name: "manifest", arguments: { manifest_path: chromaHexManifestPath } });
 const manifestChromaHexCachedJson = JSON.parse(manifestChromaHexCachedRes.content[0].text);
 checkOk(manifestChromaHexCachedJson.cache_hits === 1 && manifestChromaHexCachedJson.steps_run === 0, "manifest chroma_key hex background second run hits the cache", `cache_hits=${manifestChromaHexCachedJson.cache_hits} steps_run=${manifestChromaHexCachedJson.steps_run}`);
+// manifest slideshow (lượt 49, fixture test/manifest-slideshow.json):
+// slideshow may only be step 1 — it builds from images in args,
+// so the manifest input is the first slide image. Slideshow (3 x 2s
+// = 6s) then trim to 4s. A second run serves both steps from cache;
+// editing one slide re-runs the slideshow step (image bytes are in
+// the cache key) and the trim after it.
+await rm(path.join(root, "outputs/mcp-manifest-slideshow.mp4"), { force: true });
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const manifestSlideDryRes = await client.callTool({ name: "manifest", arguments: { manifest_path: path.join(root, "test/manifest-slideshow.json"), dry_run: true } });
+const manifestSlideDryJson = JSON.parse(manifestSlideDryRes.content[0].text);
+checkOk(manifestSlideDryJson.dry_run === true && manifestSlideDryJson.steps.length === 2 && manifestSlideDryJson.steps[0].tool === "slideshow" && manifestSlideDryJson.steps[0].output.endsWith(".mp4"), "manifest slideshow dry-run plans slideshow then trim", JSON.stringify(manifestSlideDryJson.steps.map((s) => s.tool)));
+checkOk(!existsSync(path.join(root, "outputs/mcp-manifest-slideshow.mp4")), "manifest slideshow dry-run writes no output file", "outputs/mcp-manifest-slideshow.mp4 exists");
+const manifestSlideRes = await client.callTool({ name: "manifest", arguments: { manifest_path: path.join(root, "test/manifest-slideshow.json") } });
+const manifestSlideJson = JSON.parse(manifestSlideRes.content[0].text);
+checkOk(manifestSlideJson.steps.every((s) => s.status === "ok") && manifestSlideJson.cache_hits === 0 && manifestSlideJson.steps_run === 2, "manifest slideshow runs slideshow + trim", JSON.stringify(manifestSlideJson.steps.map((s) => `${s.tool}:${s.status}`)));
+checkOk(near(manifestSlideJson.final.duration_seconds, 4, 0.05) && manifestSlideJson.final.dimensions === "1280x720", "manifest slideshow final is 4s 1280x720", JSON.stringify(manifestSlideJson.final));
+const manifestSlideCachedRes = await client.callTool({ name: "manifest", arguments: { manifest_path: path.join(root, "test/manifest-slideshow.json") } });
+const manifestSlideCachedJson = JSON.parse(manifestSlideCachedRes.content[0].text);
+checkOk(manifestSlideCachedJson.cache_hits === 2 && manifestSlideCachedJson.steps_run === 0, "manifest slideshow second run serves both steps from cache", `cache_hits=${manifestSlideCachedJson.cache_hits} steps_run=${manifestSlideCachedJson.steps_run}`);
+// Edit one slide (same path, new bytes): the slideshow step must
+// re-run. A blue slide's corner turns red in the final frame's
+// top-left — the trim step's input changed too, so it re-runs.
+const slideBluePath = path.join(root, "test/slide-blue.png");
+const slideBlueBefore = await readFile(slideBluePath);
+await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=c=0xFF0000:s=640x360", "-frames:v", "1", "-y", slideBluePath]);
+const manifestSlideEditedRes = await client.callTool({ name: "manifest", arguments: { manifest_path: path.join(root, "test/manifest-slideshow.json") } });
+const manifestSlideEditedJson = JSON.parse(manifestSlideEditedRes.content[0].text);
+checkOk(manifestSlideEditedJson.cache_hits === 0 && manifestSlideEditedJson.steps_run === 2, "manifest slideshow re-runs both steps after a slide image changes", `cache_hits=${manifestSlideEditedJson.cache_hits} steps_run=${manifestSlideEditedJson.steps_run}`);
+await writeFile(slideBluePath, slideBlueBefore);
+// slideshow as step 2 is refused at validation, before rendering.
+const manifestSlideStep2Path = path.join(root, "outputs/mcp-manifest-slideshow-step2.json");
+await writeFile(manifestSlideStep2Path, JSON.stringify({ version: 1, input: path.join(root, "test/logo.png"), output: path.join(root, "outputs/mcp-manifest-slideshow-step2.mp4"), steps: [{ tool: "trim", args: { start: 0, end: 1 } }, { tool: "slideshow", args: { images: [path.join(root, "test/logo.png"), path.join(root, "test/kenburns.png")], duration: 2 } }] }), "utf8");
+const manifestSlideStep2Text = await callExpectThrow("manifest", { manifest_path: manifestSlideStep2Path });
+checkOk(/must be the first step/.test(manifestSlideStep2Text), "manifest refuses slideshow as step 2", manifestSlideStep2Text.slice(0, 160));
 
 // Stage a film manifest into a fresh per-run directory
 // (pid-suffixed) with absolute asset paths, so two suite runs
