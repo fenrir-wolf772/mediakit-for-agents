@@ -585,6 +585,17 @@ const COMMANDS = {
       ["-o, --output", "Output directory (required, created if needed)"],
     ],
   },
+  assemble: {
+    usage: "mediakit assemble <film.json> --mode validate|preview|approve|render [-o <output-dir>] [--preview-seconds 20] [--force]",
+    desc: "Film assembler: build a finished video from one declarative film manifest (shots on a voice-led timeline, mixed audio, burned captions, QA + receipt). The voice is the master clock — total = lead + measured voice + tail, and shots must cover it exactly in frames. validate checks the math and writes nothing; preview renders the first N seconds at half size; approve records the fingerprint of the previewed files (a human must have seen the preview); render needs a matching approval unless --force. Shot segments are cached by content hash. Schema: skills/shorts-video/references/assemble-manifest.md.",
+    args: [{ name: "manifest", required: true }],
+    options: [
+      ["--mode", "validate (default) | preview | approve | render"],
+      ["--preview-seconds", "Preview length in seconds, 1-60 (default 20, preview mode only)"],
+      ["--force", "Render without approval (recorded as approval:'forced' in the receipt)"],
+      ["-o, --output", "Output directory (required for preview/approve/render)"],
+    ],
+  },
   manifest: {
     usage: "mediakit manifest <manifest.json> [-o <output.mp4>] [--dry-run] [--no-cache] [--keep-intermediates]",
     desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (trim|resize|reframe|compress|convert|extract-audio|reverse|grade|fit|silence|denoise|interpolate|burn-captions|overlay|chroma-key|cut-words), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file.",
@@ -1256,6 +1267,17 @@ async function main() {
           timeoutSeconds: numOpt(opts, "timeout") ?? 1800,
           maxFiles: numOpt(opts, "max_files") ?? 200,
           dryRun: opts.dry_run === true,
+        });
+        break;
+      }
+      case "assemble": {
+        if (!positional[0]) fail("missing manifest file: mediakit assemble <film.json> --mode validate|preview|approve|render [-o <output-dir>]");
+        result = await core.assemble({
+          manifestPath: positional[0],
+          mode: opts.mode ?? "validate",
+          outputDir: opts.output ?? null,
+          previewSeconds: numOpt(opts, "preview_seconds") ?? 20,
+          force: opts.force === true,
         });
         break;
       }

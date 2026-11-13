@@ -779,6 +779,37 @@ hashed. If a step mysteriously re-runs every time, check whether a
 sidecar path moved; if a step mysteriously never re-runs, check
 whether the sidecar bytes changed but the key did not.
 
+### 47. Assemble a film from a manifest — voice first, preview, approve, render
+`assemble` is the film builder: one declarative JSON manifest
+(`skills/shorts-video/references/assemble-manifest.md` for the
+schema) becomes a finished video. The voice is the master clock —
+`total = lead + measured voice duration + tail`, and shot
+durations are converted to frames and must cover the total
+exactly; a gap or an overlap fails validation with the difference
+in frames and seconds, never a silent trim or pad. Shot kinds:
+`image` (with `zoom` → `zoom_pan`, without → a still hold),
+`video` (trimmed + reframed to the manifest size), `color`
+(a solid card). A still image without zoom, and a color card, may
+last at most 2.5s (the motion gate — split the shot or add a
+zoom). The four modes are a pipeline, in order: `validate`
+(writes nothing), `preview` (first N seconds at half size —
+show it to the user), `approve` (records the fingerprint of the
+exact manifest + voice + assets + captions the preview showed),
+`render` (needs a matching approval; `force:true` bypasses it
+and is recorded as `approval:'forced'`). Any change to the
+manifest, voice, assets or captions invalidates the approval,
+and the render error names what changed. Shot segments are
+cached by content hash next to the manifest, so a re-render
+rebuilds only changed shots; the receipt records the
+fingerprint, the approval status, cache hits, the measured
+final duration/dimensions/loudness, and the `qa_report` result.
+Captions burn with the locked style's values from `styles.json`
+(read from the file at render time, with embedded fallback
+values if the file is missing). v1 limits, stated not hidden:
+plain cuts (no transitions), no per-shot text layers, one
+aspect per manifest. This is not the `manifest` tool — that one
+runs a linear edit pipeline (input → steps → output).
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

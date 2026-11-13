@@ -37,6 +37,19 @@ async function probeStreams(file) {
   }
 }
 
+// Independent frame count: ffprobe -count_frames on disk (not the
+// tool's own report) — a film that is a frame short has shifted
+// every shot after the gap, so the count is the assertion.
+async function countFrames(file) {
+  try {
+    const { stdout } = await execFileAsync("ffprobe", ["-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", file]);
+    const n = parseInt(stdout.trim(), 10);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
 // Independent mean-volume helper: ffmpeg volumedetect on a window
 // (not through the tool under test), so an SFX claim is measured
 // from the file on disk, not from the tool's own report.
@@ -101,10 +114,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 49 tools present");
-checkOk(missing.length === 0, "tools/list has all 49 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 50 tools present");
+checkOk(missing.length === 0, "tools/list has all 50 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -2620,7 +2633,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 49 && infoJson.tools_available >= 47 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 49 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 50 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 50 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -3016,6 +3029,11 @@ checkOk(manifestCwCachedJson.cache_hits === 2 && manifestCwCachedJson.steps_run 
 // composite is the background itself, so swapping red -> blue must
 // move the corner B mean from ~0 to ~255.
 const chromaDir = path.join(root, "outputs/mcp-manifest-chroma");
+// Hermetic: the manifest cache lives under this dir and survives
+// across suite runs — without the wipe, the first run is served
+// from the previous run's cache and the "runs the step" assert
+// fails (same trap as the batch cache fix in lượt 29).
+await rm(chromaDir, { recursive: true, force: true });
 await mkdir(chromaDir, { recursive: true });
 const chromaManifestPath = path.join(chromaDir, "manifest.json");
 await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=c=0xFF0000:s=1280x720", "-frames:v", "1", "-y", path.join(chromaDir, "bg.png")]);
@@ -3046,6 +3064,91 @@ checkOk(manifestChromaHexJson.steps.every((s) => s.status === "ok") && manifestC
 const manifestChromaHexCachedRes = await client.callTool({ name: "manifest", arguments: { manifest_path: chromaHexManifestPath } });
 const manifestChromaHexCachedJson = JSON.parse(manifestChromaHexCachedRes.content[0].text);
 checkOk(manifestChromaHexCachedJson.cache_hits === 1 && manifestChromaHexCachedJson.steps_run === 0, "manifest chroma_key hex background second run hits the cache", `cache_hits=${manifestChromaHexCachedJson.cache_hits} steps_run=${manifestChromaHexCachedJson.steps_run}`);
+
+// assemble: film manifest — validate/preview/approve/render.
+// Fixture: test/assemble-film.json (voice 9s + lead/tail 0.5 = 10s,
+// 300 frames @30fps; image zoom 4s + video 4s + image static 1s +
+// color 1s; clean-bold captions). Start hermetic: wipe the per-shot
+// cache and the approval file left by earlier runs.
+const assembleOut = path.join(root, "outputs/mcp-assemble");
+const assembleApprovalPath = path.join(root, "test/assemble-film.assemble-approval.json");
+await rm(path.join(root, "test/.mediakit-assemble-cache"), { recursive: true, force: true });
+await rm(assembleApprovalPath, { force: true });
+await rm(assembleOut, { recursive: true, force: true });
+const assembleValidateRes = await client.callTool({ name: "assemble", arguments: { manifest_path: path.join(root, "test/assemble-film.json"), mode: "validate" } });
+const assembleValidateJson = JSON.parse(assembleValidateRes.content[0].text);
+checkOk(assembleValidateJson.total_seconds === 10 && assembleValidateJson.total_frames === 300 && assembleValidateJson.shots?.length === 4 && assembleValidateJson.voice?.duration_seconds === 9 && /^[0-9a-f]{64}$/.test(assembleValidateJson.fingerprint ?? ""), "assemble validate reports 10s / 300 frames / 4 shots / 9s voice + fingerprint", JSON.stringify(assembleValidateJson).slice(0, 200));
+const assembleGapText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-gap.json"), mode: "validate" });
+checkOk(/short by 15 frames/.test(assembleGapText ?? ""), "assemble validate refuses shots 15 frames short of the voice timeline", assembleGapText ?? "");
+const assembleStaticText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-static.json"), mode: "validate" });
+checkOk(/motion-gate/.test(assembleStaticText ?? ""), "assemble validate refuses a 4s still image without zoom (motion gate)", assembleStaticText ?? "");
+const assembleStyleText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-style.json"), mode: "validate" });
+checkOk(/must be one of clean-bold, minimal-line, warm-story/.test(assembleStyleText ?? ""), "assemble validate refuses an unknown style id", assembleStyleText ?? "");
+const assembleMissingText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-missing.json"), mode: "validate" });
+checkOk(/nope\.png/.test(assembleMissingText ?? ""), "assemble validate refuses a missing shot asset", assembleMissingText ?? "");
+const assembleApproveEarlyText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-film.json"), mode: "approve", output_dir: assembleOut });
+checkOk(/needs a preview/.test(assembleApproveEarlyText ?? ""), "assemble approve refuses without a preview", assembleApproveEarlyText ?? "");
+const assembleRenderEarlyText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-film.json"), mode: "render", output_dir: assembleOut });
+checkOk(/needs approval/.test(assembleRenderEarlyText ?? ""), "assemble render refuses without approval", assembleRenderEarlyText ?? "");
+const assemblePreviewRes = await client.callTool({ name: "assemble", arguments: { manifest_path: path.join(root, "test/assemble-film.json"), mode: "preview", output_dir: assembleOut, preview_seconds: 3 } });
+const assemblePreviewJson = JSON.parse(assemblePreviewRes.content[0].text);
+const assemblePreviewPath = path.join(assembleOut, "preview.mp4");
+const assemblePreviewProbe = await probeStreams(assemblePreviewPath);
+checkOk(assemblePreviewJson.fingerprint === assembleValidateJson.fingerprint && assemblePreviewJson.preview_seconds === 3 && assemblePreviewJson.dimensions === "540x960" && near(parseFloat(assemblePreviewProbe?.format?.duration), 3, 0.15), "assemble preview renders 3s at 540x960 with the validate fingerprint", JSON.stringify(assemblePreviewJson).slice(0, 200));
+const assemblePreviewFrames = await countFrames(assemblePreviewPath);
+checkOk(assemblePreviewFrames === 90, "assemble preview has exactly 90 frames (3s x 30fps)", `frames=${assemblePreviewFrames}`);
+const assemblePreviewDoc = JSON.parse(await readFile(path.join(assembleOut, "preview.json"), "utf8"));
+checkOk(assemblePreviewDoc.fingerprint === assembleValidateJson.fingerprint, "assemble preview.json on disk carries the fingerprint", assemblePreviewDoc.fingerprint ?? "");
+const assembleApproveRes = await client.callTool({ name: "assemble", arguments: { manifest_path: path.join(root, "test/assemble-film.json"), mode: "approve", output_dir: assembleOut } });
+const assembleApproveJson = JSON.parse(assembleApproveRes.content[0].text);
+const assembleApprovalDoc = JSON.parse(await readFile(assembleApprovalPath, "utf8"));
+checkOk(assembleApproveJson.fingerprint === assembleValidateJson.fingerprint && assembleApprovalDoc.fingerprint === assembleValidateJson.fingerprint, "assemble approve records the matching fingerprint on disk", assembleApproveJson.fingerprint ?? "");
+const assembleRenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: path.join(root, "test/assemble-film.json"), mode: "render", output_dir: assembleOut } });
+const assembleRenderJson = JSON.parse(assembleRenderRes.content[0].text);
+const assembleFinalPath = path.join(assembleOut, "final.mp4");
+const assembleFinalProbe = await probeStreams(assembleFinalPath);
+const assembleFinalFrames = await countFrames(assembleFinalPath);
+const assembleFinalLufs = await measureLufs(assembleFinalPath);
+checkOk(assembleRenderJson.approval === "approved" && assembleRenderJson.fingerprint === assembleValidateJson.fingerprint, "assemble render is approved with the matching fingerprint", JSON.stringify(assembleRenderJson.approval));
+checkOk(assembleFinalProbe?.streams?.find((s) => s.codec_type === "video")?.width === 1080 && near(parseFloat(assembleFinalProbe?.format?.duration), 10, 0.15) && assembleFinalFrames === 300, "assemble final is 1080x1920, 10s, exactly 300 frames", `duration=${assembleFinalProbe?.format?.duration} frames=${assembleFinalFrames}`);
+checkOk(assembleFinalLufs !== null && near(assembleFinalLufs, -14, 0.5), "assemble final measures -14 LUFS independently", `LUFS=${assembleFinalLufs}`);
+const assembleReceipt = JSON.parse(await readFile(path.join(assembleOut, "assemble-receipt.json"), "utf8"));
+checkOk(assembleReceipt.approval === "approved" && assembleReceipt.final?.sha256?.length === 64 && assembleReceipt.qa?.checks?.every((c) => c.status === "pass"), "assemble receipt records approval + SHA-256 + an all-pass qa_report", JSON.stringify(assembleReceipt.qa?.checks?.map((c) => `${c.check}:${c.status}`)));
+const assembleRender2Res = await client.callTool({ name: "assemble", arguments: { manifest_path: path.join(root, "test/assemble-film.json"), mode: "render", output_dir: assembleOut } });
+const assembleRender2Json = JSON.parse(assembleRender2Res.content[0].text);
+checkOk(assembleRender2Json.cache_hits === 4, "assemble second render reuses all 4 shot segments from the cache", `cache_hits=${assembleRender2Json.cache_hits}`);
+// Fingerprint sensitivity + force: a copy with a different title
+// (absolute paths, so it can live under outputs/) has a different
+// fingerprint, renders without approval only with force:true, and
+// the receipt says so.
+const assembleEditDir = path.join(root, "outputs/mcp-assemble-edit");
+await rm(assembleEditDir, { recursive: true, force: true });
+await mkdir(assembleEditDir, { recursive: true });
+const assembleEditDoc = JSON.parse(await readFile(path.join(root, "test/assemble-film.json"), "utf8"));
+assembleEditDoc.title = "A different title";
+for (const p of ["voice", "music"]) assembleEditDoc[p].path = path.join(root, "test", assembleEditDoc[p].path);
+assembleEditDoc.sfx = assembleEditDoc.sfx.map((s) => ({ ...s, file: path.join(root, "test", s.file) }));
+assembleEditDoc.captions = path.join(root, "test", assembleEditDoc.captions);
+assembleEditDoc.shots = assembleEditDoc.shots.map((s) => (s.source ? { ...s, source: path.join(root, "test", s.source) } : s));
+const assembleEditPath = path.join(assembleEditDir, "film.json");
+await writeFile(assembleEditPath, JSON.stringify(assembleEditDoc), "utf8");
+const assembleEditValidateRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleEditPath, mode: "validate" } });
+const assembleEditValidateJson = JSON.parse(assembleEditValidateRes.content[0].text);
+checkOk(assembleEditValidateJson.fingerprint !== assembleValidateJson.fingerprint, "assemble fingerprint changes when the manifest changes (title only)", assembleEditValidateJson.fingerprint ?? "");
+const assembleEditRenderText = await callExpectThrow("assemble", { manifest_path: assembleEditPath, mode: "render", output_dir: assembleEditDir });
+checkOk(/needs approval/.test(assembleEditRenderText ?? ""), "assemble edited copy refuses render without approval", assembleEditRenderText ?? "");
+const assembleEditForceRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleEditPath, mode: "render", output_dir: assembleEditDir, force: true } });
+const assembleEditForceJson = JSON.parse(assembleEditForceRes.content[0].text);
+checkOk(assembleEditForceJson.approval === "forced" && existsSync(path.join(assembleEditDir, "final.mp4")), "assemble force render succeeds and records approval:'forced'", JSON.stringify(assembleEditForceJson.approval));
+// No-music path: the same film without a bed must still render —
+// the padded voice goes through loudness instead of mix. Preview
+// only (3s) is enough to exercise the branch end to end.
+const assembleNoMusicOut = path.join(root, "outputs/mcp-assemble-nomusic");
+await rm(assembleNoMusicOut, { recursive: true, force: true });
+const assembleNoMusicRes = await client.callTool({ name: "assemble", arguments: { manifest_path: path.join(root, "test/assemble-nomusic.json"), mode: "preview", output_dir: assembleNoMusicOut, preview_seconds: 3 } });
+const assembleNoMusicJson = JSON.parse(assembleNoMusicRes.content[0].text);
+const assembleNoMusicProbe = await probeStreams(path.join(assembleNoMusicOut, "preview.mp4"));
+checkOk(assembleNoMusicJson.preview_seconds === 3 && assembleNoMusicProbe?.streams?.some((s) => s.codec_type === "audio") && near(parseFloat(assembleNoMusicProbe?.format?.duration), 3, 0.15), "assemble preview without music renders 3s with an audio track (loudness path)", JSON.stringify(assembleNoMusicJson).slice(0, 150));
 
 await client.close();
 if (failures.length) {

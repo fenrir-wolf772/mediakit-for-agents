@@ -720,7 +720,7 @@ export async function resize({ input, output, width = null, height = null, keepA
 
 // ---------------------------------------------------------------- extract_audio
 
-const AUDIO_FORMATS = { mp3: "libmp3lame", aac: "aac", wav: "pcm_s16le", ogg: "libvorbis", opus: "libopus", flac: "flac" };
+const AUDIO_FORMATS = { mp3: "libmp3lame", aac: "aac", m4a: "aac", wav: "pcm_s16le", ogg: "libvorbis", opus: "libopus", flac: "flac" };
 
 export async function extractAudio({ input, output, format = null, whisper = false, channel = null }) {
   const inPath = await requireInput(input);
@@ -4844,7 +4844,7 @@ const DOCTOR_FILTERS = [
   "drawtext", "volume", "sidechaincompress", "amix", "aresample",
   "xfade", "acrossfade", "fps", "anullsrc", "setpts", "asetpts",
   "format", "colorchannelmixer", "atempo", "aloop", "geq", "color",
-  "palettegen", "paletteuse", "adelay", "pan",
+  "palettegen", "paletteuse", "adelay", "apad", "pan",
   "astats", "ametadata", "eq", "hue", "colorbalance", "lutrgb",
   "reverse", "areverse",
   "minterpolate", "hqdn3d", "nlmeans",
@@ -4889,6 +4889,10 @@ const TOOL_REQUIREMENTS = {
   cropdetect: { filters: ["cropdetect"] },
   package: {},
   publish_kit: {},
+  assemble: {
+    filters: ["zoompan", "scale", "crop", "fps", "trim", "setpts", "format", "subtitles", "sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay", "apad"],
+    encoders: ["libx264", "aac"],
+  },
   mix: { filters: ["sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay"], encoders: ["aac", "libmp3lame"] },
   overlay: { filters: ["overlay", "format", "scale", "colorchannelmixer"], encoders: ["libx264"] },
   scenes: { filters: ["select"] },
@@ -6602,4 +6606,642 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
     qa_result: qaResult,
     ...(keepIntermediates ? { intermediates_dir: tmpDir } : {}),
   };
+}
+
+// ---------------------------------------------------------------- assemble
+// Film assembler (Autopilot-style, MediaKit tools underneath): one
+// declarative film manifest -> a finished video. Voice is the master
+// clock: total = lead + measured voice duration + tail, shots are
+// converted to frames and must cover the total EXACTLY (no silent
+// trim/pad/speed change). Four modes: validate (no writes), preview
+// (first N seconds, half size), approve (fingerprint-bound, needs a
+// matching preview), render (needs approval unless force:true).
+// Shot segments are cached per shot (content hash, like the manifest
+// tool) and verified by size + SHA-256 on reuse. v1 limits (stated,
+// not hidden): plain cuts, no per-shot text layers, one aspect per
+// manifest, video shots are assumed to move.
+const ASSEMBLE_VERSION = "assemble-v1";
+const ASSEMBLE_MAX_SHOTS = 64;
+const ASSEMBLE_MOTION_GATE_SECONDS = 2.5;
+const ASSEMBLE_CACHE_DIRNAME = ".mediakit-assemble-cache";
+
+// Locked style values, read from skills/shorts-video/styles.json (the
+// single source of truth, shipped in the npm package under "files").
+// If the file is missing or corrupt, fall back to these embedded
+// values (identical numbers) and flag it — the render never blocks
+// on a docs file, but the result says which source was used.
+const SHORTS_STYLE_FALLBACK_BURN = {
+  "clean-bold": { font_size: 60, margin_v: 500, style: "background" },
+  "minimal-line": { font_size: 56, margin_v: 500, style: "outline" },
+  "warm-story": { font_size: 56, margin_v: 500, style: "background" },
+};
+const SHORTS_STYLES_PATH = fileURLToPath(new URL("../skills/shorts-video/styles.json", import.meta.url));
+let cachedShortsStyles = null;
+export async function loadShortsStyles() {
+  if (cachedShortsStyles) return cachedShortsStyles;
+  try {
+    const doc = JSON.parse(await readFile(SHORTS_STYLES_PATH, "utf8"));
+    const ids = (doc.styles ?? []).map((s) => s.id);
+    if (JSON.stringify([...ids].sort()) !== JSON.stringify([...SHORTS_STYLE_IDS].sort())) {
+      throw new Error("styles.json ids do not match SHORTS_STYLE_IDS");
+    }
+    for (const s of doc.styles) {
+      if (!s.locked?.burn_captions) throw new Error(`style ${s.id} has no locked burn_captions`);
+    }
+    cachedShortsStyles = { ...doc, fallback: false };
+    return cachedShortsStyles;
+  } catch {
+    cachedShortsStyles = {
+      version: 1, fallback: true,
+      styles: SHORTS_STYLE_IDS.map((id) => ({ id, locked: { burn_captions: SHORTS_STYLE_FALLBACK_BURN[id] } })),
+    };
+    return cachedShortsStyles;
+  }
+}
+
+async function assembleStyleValues(style) {
+  if (!style) return null;
+  const doc = await loadShortsStyles();
+  const entry = doc.styles.find((s) => s.id === style);
+  if (!entry) throw new MediaKitError(`assemble style must be one of ${SHORTS_STYLE_IDS.join(", ")}, got: ${style}`, "INVALID_ARG");
+  return { burn_captions: { ...entry.locked.burn_captions }, from_fallback: Boolean(doc.fallback) };
+}
+
+function assembleOptNum(v, def, label, opts = {}) {
+  if (v === null || v === undefined) return def;
+  return num(v, label, opts);
+}
+
+function assembleEvenDown(n) { return n % 2 ? n - 1 : n; }
+
+// Validate a parsed film manifest against the files on disk and
+// return the build plan (frame-exact). Probes the voice and every
+// asset; nothing is written. Throws MediaKitError on the first
+// problem, naming the shot/field.
+async function validateAssembleManifest(doc, manifestAbs) {
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
+    throw new MediaKitError("assemble manifest must be a JSON object", "INVALID_ARG");
+  }
+  if (doc.version !== 1) {
+    throw new MediaKitError(`assemble manifest version must be 1, got: ${doc.version}`, "INVALID_ARG");
+  }
+  const manifestDir = path.dirname(manifestAbs);
+  const resolveRel = (p) => (path.isAbsolute(p) ? p : path.join(manifestDir, p));
+  const title = doc.title === undefined || doc.title === null ? path.basename(manifestAbs, path.extname(manifestAbs)) : String(doc.title);
+  const width = num(doc.width, "width", { min: 2, max: 7680, integer: true });
+  const height = num(doc.height, "height", { min: 2, max: 4320, integer: true });
+  if (width % 2 || height % 2) {
+    throw new MediaKitError(`assemble width/height must be even (got ${width}x${height})`, "INVALID_ARG");
+  }
+  const fps = assembleOptNum(doc.fps, 30, "fps", { min: 1, max: 120, integer: true });
+  const style = doc.style === undefined || doc.style === null ? null : String(doc.style);
+  if (style !== null && !SHORTS_STYLE_IDS.includes(style)) {
+    throw new MediaKitError(`assemble style must be one of ${SHORTS_STYLE_IDS.join(", ")}, got: ${style}`, "INVALID_ARG");
+  }
+  const styleValues = await assembleStyleValues(style);
+  if (!doc.voice || typeof doc.voice !== "object" || Array.isArray(doc.voice)) {
+    throw new MediaKitError("assemble manifest needs a voice {path, lead?, tail?} — the voice is the master clock", "INVALID_ARG");
+  }
+  if (typeof doc.voice.path !== "string" || !doc.voice.path.trim()) {
+    throw new MediaKitError("assemble voice needs a path", "INVALID_ARG");
+  }
+  const voicePath = await requireInput(resolveRel(doc.voice.path), "voice file");
+  const voiceMeta = await probe(voicePath);
+  if (!voiceMeta.audio) throw new MediaKitError(`assemble voice ${doc.voice.path} has no audio stream`, "INVALID_ARG");
+  if (!Number.isFinite(voiceMeta.duration_seconds)) throw new MediaKitError("assemble could not measure the voice duration", "PROBE_FAILED");
+  const lead = assembleOptNum(doc.voice.lead, 0, "voice.lead", { min: 0, max: 600 });
+  const tail = assembleOptNum(doc.voice.tail, 0, "voice.tail", { min: 0, max: 600 });
+  const voiceDuration = voiceMeta.duration_seconds;
+  const totalSeconds = +(lead + voiceDuration + tail).toFixed(3);
+  const totalFrames = Math.round(totalSeconds * fps);
+  if (totalFrames < 1) throw new MediaKitError("assemble total duration is too short (lead + voice + tail must cover at least 1 frame)", "INVALID_ARG");
+
+  let music = null;
+  if (doc.music !== undefined && doc.music !== null) {
+    if (typeof doc.music !== "object" || Array.isArray(doc.music) || typeof doc.music.path !== "string" || !doc.music.path.trim()) {
+      throw new MediaKitError("assemble music must be an object {path, volume?, duck_db?}", "INVALID_ARG");
+    }
+    const musicPath = await requireInput(resolveRel(doc.music.path), "music file");
+    const musicMeta = await probe(musicPath);
+    if (!musicMeta.audio) throw new MediaKitError(`assemble music ${doc.music.path} has no audio stream`, "INVALID_ARG");
+    music = {
+      path: musicPath,
+      volume: assembleOptNum(doc.music.volume, 0.3, "music.volume", { min: 0, max: 1 }),
+      duck_db: assembleOptNum(doc.music.duck_db, 12, "music.duck_db", { min: 0, max: 24 }),
+    };
+  }
+  let sfx = [];
+  if (doc.sfx !== undefined && doc.sfx !== null) {
+    if (!Array.isArray(doc.sfx) || doc.sfx.length > 16) {
+      throw new MediaKitError(`assemble sfx must be an array of at most 16 entries, got: ${Array.isArray(doc.sfx) ? doc.sfx.length : "not an array"}`, "INVALID_ARG");
+    }
+    for (const [i, entry] of doc.sfx.entries()) {
+      if (!entry || typeof entry !== "object" || typeof entry.file !== "string" || !entry.file.trim()) {
+        throw new MediaKitError(`sfx[${i}] must be an object {file, at, volume?}`, "INVALID_ARG");
+      }
+      const sfxPath = await requireInput(resolveRel(entry.file), `sfx[${i}] file`);
+      const sfxMeta = await probe(sfxPath);
+      if (!sfxMeta.audio) throw new MediaKitError(`sfx[${i}] ${entry.file} has no audio stream`, "INVALID_ARG");
+      const at = parseTime(entry.at ?? entry.at_seconds, `sfx[${i}] at`);
+      if (!(at >= 0 && at < totalSeconds)) {
+        throw new MediaKitError(`sfx[${i}] at ${at}s is outside the film (0..${totalSeconds}s)`, "INVALID_ARG");
+      }
+      sfx.push({ file: sfxPath, at_seconds: +at.toFixed(3), volume: assembleOptNum(entry.volume, 1, `sfx[${i}] volume`, { min: 0, max: 1 }) });
+    }
+  }
+  let captions = null;
+  if (doc.captions !== undefined && doc.captions !== null) {
+    if (typeof doc.captions !== "string" || !doc.captions.trim()) {
+      throw new MediaKitError("assemble captions must be a file path (.srt/.ass/.vtt)", "INVALID_ARG");
+    }
+    const capPath = await requireInput(resolveRel(doc.captions), "captions file");
+    const capExt = path.extname(capPath).toLowerCase();
+    if (![".srt", ".ass", ".vtt"].includes(capExt)) {
+      throw new MediaKitError(`assemble captions must be .srt/.ass/.vtt, got ${capExt}`, "INVALID_ARG");
+    }
+    let cueCount = null;
+    if (capExt !== ".ass") {
+      const { cues } = parseCaptions(await readFile(capPath, "utf8"), capExt.slice(1));
+      cueCount = cues.length;
+      for (const c of cues) {
+        if (c.endMs / 1000 > totalSeconds + 0.05) {
+          throw new MediaKitError(`captions cue "${c.text.split("\n")[0]}" ends at ${(c.endMs / 1000).toFixed(3)}s, past the film end (${totalSeconds}s)`, "INVALID_ARG");
+        }
+      }
+    }
+    captions = { path: capPath, cue_count: cueCount };
+  }
+  if (!Array.isArray(doc.shots) || doc.shots.length < 1 || doc.shots.length > ASSEMBLE_MAX_SHOTS) {
+    throw new MediaKitError(`assemble needs 1-${ASSEMBLE_MAX_SHOTS} shots, got: ${Array.isArray(doc.shots) ? doc.shots.length : "not an array"}`, "INVALID_ARG");
+  }
+  const seenIds = new Set();
+  const shots = [];
+  let framesSum = 0;
+  const warnings = [];
+  if (voiceMeta.video) warnings.push("voice file has a video stream — only its audio is used");
+  for (const [i, raw] of doc.shots.entries()) {
+    const label = `shot ${i + 1}`;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new MediaKitError(`${label} must be an object {id, kind, duration, ...}`, "INVALID_ARG");
+    }
+    if (typeof raw.id !== "string" || !raw.id.trim() || raw.id.length > 64) {
+      throw new MediaKitError(`${label} needs an id (1-64 characters)`, "INVALID_ARG");
+    }
+    const id = raw.id.trim();
+    if (seenIds.has(id)) throw new MediaKitError(`duplicate shot id "${id}"`, "INVALID_ARG");
+    seenIds.add(id);
+    const kind = raw.kind;
+    if (!["image", "video", "color"].includes(kind)) {
+      throw new MediaKitError(`${label} (${id}): kind must be image, video or color, got: ${kind}`, "INVALID_ARG");
+    }
+    const duration = num(raw.duration, `${label} (${id}) duration`, { min: 0.5, max: 600 });
+    const frames = Math.round(duration * fps);
+    if (Math.abs(frames / fps - duration) > 0.005) {
+      warnings.push(`${label} (${id}): duration ${duration}s does not land on a frame boundary at ${fps}fps — built as ${frames} frames (${(frames / fps).toFixed(3)}s)`);
+    }
+    framesSum += frames;
+    const shot = { id, kind, duration, frames };
+    if (kind === "image") {
+      if (typeof raw.source !== "string" || !raw.source.trim()) throw new MediaKitError(`${label} (${id}): image shot needs a source`, "INVALID_ARG");
+      const srcPath = await requireInput(resolveRel(raw.source), `${label} (${id}) source`);
+      const meta = await probe(srcPath);
+      if (!meta.video) throw new MediaKitError(`${label} (${id}): image source ${raw.source} has no video stream`, "INVALID_ARG");
+      if (meta.audio || meta.duration_seconds !== null) {
+        throw new MediaKitError(`${label} (${id}): image source must be a still image, not a video (extract a frame first)`, "INVALID_ARG");
+      }
+      shot.source = srcPath;
+      shot.assetHash = await hashFile(srcPath);
+      if (raw.zoom !== undefined && raw.zoom !== null) {
+        if (typeof raw.zoom !== "object" || Array.isArray(raw.zoom)) {
+          throw new MediaKitError(`${label} (${id}): zoom must be an object {from, to, focus?, focus_end?}`, "INVALID_ARG");
+        }
+        const focus = raw.zoom.focus ?? [0.5, 0.5];
+        const focusEnd = raw.zoom.focus_end ?? focus;
+        for (const [name, v] of [["focus", focus], ["focus_end", focusEnd]]) {
+          if (!Array.isArray(v) || v.length !== 2 || v.some((x) => typeof x !== "number" || x < 0 || x > 1)) {
+            throw new MediaKitError(`${label} (${id}): zoom.${name} must be [x, y] with each 0-1`, "INVALID_ARG");
+          }
+        }
+        shot.zoom = {
+          from: assembleOptNum(raw.zoom.from, 1, `${label} (${id}) zoom.from`, { min: 1, max: 10 }),
+          to: assembleOptNum(raw.zoom.to, 1.15, `${label} (${id}) zoom.to`, { min: 1, max: 10 }),
+          focus, focus_end: focusEnd,
+        };
+      } else if (duration > ASSEMBLE_MOTION_GATE_SECONDS) {
+        throw new MediaKitError(
+          `${label} (${id}): motion-gate — a still image without zoom may last at most ${ASSEMBLE_MOTION_GATE_SECONDS}s, got ${duration}s (add a zoom, or split the shot)`,
+          "INVALID_ARG",
+        );
+      }
+    } else if (kind === "video") {
+      if (typeof raw.source !== "string" || !raw.source.trim()) throw new MediaKitError(`${label} (${id}): video shot needs a source`, "INVALID_ARG");
+      const srcPath = await requireInput(resolveRel(raw.source), `${label} (${id}) source`);
+      const meta = await probe(srcPath);
+      if (!meta.video) throw new MediaKitError(`${label} (${id}): video source ${raw.source} has no video stream`, "INVALID_ARG");
+      if (!Number.isFinite(meta.duration_seconds)) throw new MediaKitError(`${label} (${id}): could not measure the video source duration`, "PROBE_FAILED");
+      const start = assembleOptNum(raw.start, 0, `${label} (${id}) start`, { min: 0 });
+      if (start + duration > meta.duration_seconds + 0.05) {
+        throw new MediaKitError(`${label} (${id}): start ${start}s + duration ${duration}s passes the source end (${meta.duration_seconds}s)`, "INVALID_ARG");
+      }
+      shot.source = srcPath;
+      shot.start = start;
+      shot.assetHash = await hashFile(srcPath);
+    } else {
+      if (typeof raw.color !== "string" || !/^[0-9a-fA-F]{6}$/.test(raw.color.trim())) {
+        throw new MediaKitError(`${label} (${id}): color shot needs a 6-digit hex color (RRGGBB), got: ${raw.color}`, "INVALID_ARG");
+      }
+      shot.color = raw.color.trim().toUpperCase();
+      if (duration > ASSEMBLE_MOTION_GATE_SECONDS) {
+        throw new MediaKitError(
+          `${label} (${id}): motion-gate — a solid color card may last at most ${ASSEMBLE_MOTION_GATE_SECONDS}s, got ${duration}s (split the shot)`,
+          "INVALID_ARG",
+        );
+      }
+    }
+    shots.push(shot);
+  }
+  if (framesSum !== totalFrames) {
+    const diffFrames = framesSum - totalFrames;
+    const diffSeconds = diffFrames / fps;
+    throw new MediaKitError(
+      `assemble shots cover ${framesSum} frames (${(framesSum / fps).toFixed(3)}s) but the voice timeline is ${totalFrames} frames (${totalSeconds}s) — ${diffFrames > 0 ? "over by" : "short by"} ${Math.abs(diffFrames)} frames (${Math.abs(diffSeconds).toFixed(3)}s). Shots must fit the voice exactly: adjust shot durations (lead ${lead}s + voice ${voiceDuration}s + tail ${tail}s).`,
+      "INVALID_ARG",
+    );
+  }
+  const manifestHash = await hashFile(manifestAbs);
+  const voiceHash = await hashFile(voicePath);
+  const musicHash = music ? await hashFile(music.path) : null;
+  const sfxHashes = [];
+  for (const s of sfx) sfxHashes.push(await hashFile(s.file));
+  const captionsHash = captions ? await hashFile(captions.path) : null;
+  const assetHashes = {};
+  for (const s of shots) if (s.assetHash) assetHashes[s.id] = s.assetHash;
+  const fingerprint = createHash("sha256").update(stableStringify({
+    renderer: ASSEMBLE_VERSION,
+    manifest: manifestHash,
+    voice: voiceHash,
+    music: musicHash,
+    sfx: sfxHashes,
+    captions: captionsHash,
+    assets: assetHashes,
+    style: styleValues ? stableStringify(styleValues.burn_captions) : null,
+    width, height, fps,
+  })).digest("hex");
+  return {
+    manifest: manifestAbs, manifestDir, title, width, height, fps, style, styleValues,
+    voice: { path: voicePath, lead, tail, duration_seconds: voiceDuration },
+    total_seconds: totalSeconds, total_frames: totalFrames,
+    music, sfx, captions, shots, warnings, fingerprint,
+    fingerprint_parts: { manifest: manifestHash, voice: voiceHash, music: musicHash, sfx: sfxHashes, captions: captionsHash, assets: assetHashes },
+  };
+}
+
+// One shot -> one uniform segment (libx264/yuv420p, target size/fps,
+// no audio, exactly shot.frames frames — counted on disk, not
+// assumed). Image shots go through zoomPan (a fixed 1.0 zoom fills
+// the frame for a still hold); video shots are trimmed + reframed
+// (crop) in one encode; color shots come from the lavfi color
+// source. Any frame-count mismatch throws — a segment that is a
+// frame short would silently shift every shot after it.
+async function buildAssembleShot(plan, shot, opts, outPath) {
+  const { width, height, fps, crf, preset } = opts;
+  if (shot.kind === "image") {
+    const z = shot.zoom ?? { from: 1, to: 1, focus: [0.5, 0.5], focus_end: [0.5, 0.5] };
+    const r = await zoomPan({
+      input: shot.source, output: outPath, duration: shot.duration, fps,
+      zoomFrom: z.from, zoomTo: z.to,
+      focusX: z.focus[0], focusY: z.focus[1],
+      focusEndX: z.focus_end[0], focusEndY: z.focus_end[1],
+      width, height, crf,
+    });
+    if (r.frames !== shot.frames) {
+      throw new MediaKitError(`assemble shot ${shot.id}: built ${r.frames} frames, expected ${shot.frames}`, "ASSEMBLE_FRAME_MISMATCH");
+    }
+    return outPath;
+  }
+  if (shot.kind === "video") {
+    const vf = `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},setpts=PTS-STARTPTS,fps=${fps},format=yuv420p`;
+    await run(FFMPEG, [
+      "-y", "-ss", String(shot.start), "-t", String(shot.duration), "-i", shot.source,
+      "-vf", vf, "-frames:v", String(shot.frames),
+      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", String(crf), "-preset", preset, "-an", outPath,
+    ]);
+  } else {
+    await run(FFMPEG, [
+      "-y", "-f", "lavfi", "-i", `color=c=0x${shot.color}:s=${width}x${height}:r=${fps}`,
+      "-frames:v", String(shot.frames),
+      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", String(crf), "-preset", preset, "-an", outPath,
+    ]);
+  }
+  const counted = await countVideoFrames(outPath);
+  if (counted !== shot.frames) {
+    throw new MediaKitError(`assemble shot ${shot.id}: built ${counted} frames, expected ${shot.frames}`, "ASSEMBLE_FRAME_MISMATCH");
+  }
+  return outPath;
+}
+
+// Per-shot segment cache, same shape as the manifest tool's cache:
+// <manifestDir>/.mediakit-assemble-cache/<sha256>.mp4 + index.json
+// {key: {output_size_bytes, output_sha256}}. A hit is verified by
+// size + SHA-256, never trusted on filename alone.
+async function assembleCachedShot(plan, shot, opts, tmpDir) {
+  const cacheDir = path.join(plan.manifestDir, ASSEMBLE_CACHE_DIRNAME);
+  const indexPath = path.join(cacheDir, "index.json");
+  const key = createHash("sha256").update(stableStringify({
+    renderer: ASSEMBLE_VERSION,
+    kind: shot.kind,
+    asset: shot.assetHash ?? shot.color,
+    start: shot.start ?? null,
+    duration: shot.duration,
+    frames: shot.frames,
+    zoom: shot.zoom ?? null,
+    width: opts.width, height: opts.height, fps: opts.fps, crf: opts.crf, preset: opts.preset,
+  })).digest("hex");
+  const cacheFile = path.join(cacheDir, `${key}.mp4`);
+  const segPath = path.join(tmpDir, `shot-${shot.id}.mp4`);
+  let cacheIndex = {};
+  try {
+    const parsed = JSON.parse(await readFile(indexPath, "utf8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) cacheIndex = parsed;
+  } catch { /* missing or corrupt cache index starts fresh */ }
+  if (cacheIndex[key]) {
+    try {
+      const st = await stat(cacheFile);
+      if (st.size === cacheIndex[key].output_size_bytes && (await hashFile(cacheFile)) === cacheIndex[key].output_sha256) {
+        await copyFile(cacheFile, segPath);
+        return { path: segPath, cached: true };
+      }
+    } catch { /* cached segment gone or changed: rebuild */ }
+  }
+  await mkdir(cacheDir, { recursive: true });
+  await buildAssembleShot(plan, shot, opts, segPath);
+  try {
+    await copyFile(segPath, cacheFile);
+    const st = await stat(cacheFile);
+    cacheIndex[key] = { output_size_bytes: st.size, output_sha256: await hashFile(cacheFile) };
+    await writeFile(indexPath, JSON.stringify(cacheIndex, null, 2), "utf8");
+  } catch { /* cache write is best-effort; the segment itself is built */ }
+  return { path: segPath, cached: false };
+}
+
+// Voice padded to the film timeline: adelay by lead, apad to the
+// total duration. The padded voice IS the final timeline, so mix()
+// SFX timestamps and the music loop both land in absolute time.
+async function buildPaddedVoice(plan, totalSeconds, outPath) {
+  const leadMs = Math.round(plan.voice.lead * 1000);
+  const af = leadMs > 0
+    ? `adelay=${leadMs}:all=1,apad=whole_dur=${totalSeconds}`
+    : `apad=whole_dur=${totalSeconds}`;
+  await run(FFMPEG, [
+    "-y", "-i", plan.voice.path, "-af", af,
+    "-c:a", "aac", "-b:a", "192k", "-t", String(totalSeconds), outPath,
+  ]);
+  const meta = await probe(outPath);
+  if (!meta.audio) throw new MediaKitError("assemble could not build the padded voice track", "PROBE_FAILED");
+  return outPath;
+}
+
+function assembleApprovalPath(plan) {
+  const stem = path.basename(plan.manifest, path.extname(plan.manifest));
+  return path.join(plan.manifestDir, `${stem}.assemble-approval.json`);
+}
+
+export async function assemble({ manifestPath, mode = "validate", outputDir = null, previewSeconds = 20, force = false }) {
+  const manifestAbs = await requireInput(manifestPath, "manifest");
+  let raw;
+  try {
+    raw = await readFile(manifestAbs, "utf8");
+  } catch (e) {
+    throw new MediaKitError(`cannot read manifest ${manifestPath}: ${e.message}`, "INVALID_INPUT");
+  }
+  let doc;
+  try {
+    doc = JSON.parse(raw);
+  } catch (e) {
+    throw new MediaKitError(`assemble manifest is not valid JSON: ${e.message}`, "INVALID_ARG");
+  }
+  const plan = await validateAssembleManifest(doc, manifestAbs);
+  const startedAt = Date.now();
+  const base = {
+    operation: "assemble",
+    mode,
+    manifest: manifestAbs,
+    title: plan.title,
+    width: plan.width,
+    height: plan.height,
+    fps: plan.fps,
+    style: plan.style,
+    total_seconds: plan.total_seconds,
+    total_frames: plan.total_frames,
+    fingerprint: plan.fingerprint,
+    warnings: plan.warnings,
+  };
+  if (mode === "validate") {
+    return {
+      ...base,
+      voice: plan.voice,
+      music: plan.music ? { volume: plan.music.volume, duck_db: plan.music.duck_db } : null,
+      sfx_count: plan.sfx.length,
+      captions: plan.captions,
+      shots: plan.shots.map((s) => ({ id: s.id, kind: s.kind, duration: s.duration, frames: s.frames })),
+    };
+  }
+  if (!["preview", "approve", "render"].includes(mode)) {
+    throw new MediaKitError(`assemble mode must be validate, preview, approve or render, got: ${mode}`, "INVALID_ARG");
+  }
+  if (typeof outputDir !== "string" || !outputDir.trim()) {
+    throw new MediaKitError(`assemble --mode ${mode} needs an output directory`, "INVALID_ARG");
+  }
+  const outDirAbs = await prepareOutputDir(outputDir);
+
+  if (mode === "approve") {
+    const previewPath = path.join(outDirAbs, "preview.json");
+    let previewDoc;
+    try {
+      previewDoc = JSON.parse(await readFile(previewPath, "utf8"));
+    } catch {
+      throw new MediaKitError(`assemble approve needs a preview first: no preview.json in ${outputDir} — run --mode preview, show it to the user, then approve`, "INVALID_ARG");
+    }
+    if (previewDoc.fingerprint !== plan.fingerprint) {
+      throw new MediaKitError("assemble approve refused: the preview is stale — the manifest, voice, assets or captions changed since the preview was rendered. Re-render the preview first.", "INVALID_ARG");
+    }
+    const approvalPath = assembleApprovalPath(plan);
+    const approval = {
+      fingerprint: plan.fingerprint,
+      fingerprint_parts: plan.fingerprint_parts,
+      manifest: manifestAbs,
+      preview: previewPath,
+      approved_at: new Date().toISOString(),
+    };
+    await writeFile(approvalPath, JSON.stringify(approval, null, 2) + "\n", "utf8");
+    return { ...base, approval_file: approvalPath, preview: previewPath, approved_at: approval.approved_at };
+  }
+
+  const isPreview = mode === "preview";
+  const previewTotal = isPreview ? Math.min(num(previewSeconds, "preview_seconds", { min: 1, max: 60 }), plan.total_seconds) : plan.total_seconds;
+  const previewFrames = Math.round(previewTotal * plan.fps);
+  const outW = isPreview ? assembleEvenDown(Math.floor(plan.width / 2)) : plan.width;
+  const outH = isPreview ? assembleEvenDown(Math.floor(plan.height / 2)) : plan.height;
+  const crf = isPreview ? 28 : 23;
+  const preset = isPreview ? "ultrafast" : "medium";
+  const opts = { width: outW, height: outH, fps: plan.fps, crf, preset };
+
+  // Approval gate for full renders (preview never needs approval).
+  let approvalStatus = null;
+  if (!isPreview) {
+    if (force) {
+      approvalStatus = "forced";
+    } else {
+      let approval = null;
+      try {
+        approval = JSON.parse(await readFile(assembleApprovalPath(plan), "utf8"));
+      } catch { /* no approval file */ }
+      if (!approval) {
+        throw new MediaKitError("assemble render needs approval: run --mode preview, show it to the user, then --mode approve (or pass force:true to render without approval)", "INVALID_ARG");
+      }
+      if (approval.fingerprint !== plan.fingerprint) {
+        const changed = [];
+        const parts = approval.fingerprint_parts ?? {};
+        for (const k of ["manifest", "voice", "music", "captions"]) {
+          if (JSON.stringify(parts[k] ?? null) !== JSON.stringify(plan.fingerprint_parts[k] ?? null)) changed.push(k);
+        }
+        if (JSON.stringify(parts.assets ?? {}) !== JSON.stringify(plan.fingerprint_parts.assets ?? {})) changed.push("assets");
+        if (JSON.stringify(parts.sfx ?? []) !== JSON.stringify(plan.fingerprint_parts.sfx ?? [])) changed.push("sfx");
+        throw new MediaKitError(
+          `assemble approval is stale — changed since approval: ${changed.length ? changed.join(", ") : "unknown"}. Re-render the preview and approve again (or pass force:true).`,
+          "INVALID_ARG",
+        );
+      }
+      approvalStatus = "approved";
+    }
+  }
+
+  // Clip shots to the preview window (preview only): the last
+  // intersecting shot is cut to the exact preview frame count.
+  let renderShots = plan.shots;
+  let renderTotalSeconds = plan.total_seconds;
+  let renderTotalFrames = plan.total_frames;
+  if (isPreview) {
+    renderShots = [];
+    let used = 0;
+    for (const s of plan.shots) {
+      if (used >= previewFrames) break;
+      const take = Math.min(s.frames, previewFrames - used);
+      renderShots.push({ ...s, frames: take, duration: take / plan.fps });
+      used += take;
+    }
+    renderTotalSeconds = previewTotal;
+    renderTotalFrames = previewFrames;
+  }
+
+  const tmpDir = path.join(outDirAbs, `.mediakit-assemble-tmp-${process.pid}`);
+  await mkdir(tmpDir, { recursive: true });
+  let cacheHits = 0;
+  let completed = false;
+  const segmentPaths = [];
+  try {
+    for (const shot of renderShots) {
+      const r = await assembleCachedShot(plan, shot, opts, tmpDir);
+      if (r.cached) cacheHits++;
+      segmentPaths.push(r.path);
+    }
+    const videoOnlyPath = path.join(tmpDir, "video-only.mp4");
+    const listPath = path.join(tmpDir, "concat.txt");
+    await writeFile(listPath, segmentPaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join("\n") + "\n", "utf8");
+    await run(FFMPEG, ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-movflags", "+faststart", videoOnlyPath]);
+    const concatFrames = await countVideoFrames(videoOnlyPath);
+    if (concatFrames !== renderTotalFrames) {
+      throw new MediaKitError(`assemble concat produced ${concatFrames} frames, expected ${renderTotalFrames}`, "ASSEMBLE_FRAME_MISMATCH");
+    }
+    // Audio: padded voice (the final timeline) + music bed + SFX.
+    const paddedPath = path.join(tmpDir, "voice-padded.m4a");
+    await buildPaddedVoice(plan, renderTotalSeconds, paddedPath);
+    const previewSfx = isPreview ? plan.sfx.filter((s) => s.at_seconds < renderTotalSeconds) : plan.sfx;
+    const mixedPath = path.join(tmpDir, "mixed.m4a");
+    if (plan.music) {
+      await mix({
+        voice: paddedPath, music: plan.music.path, output: mixedPath,
+        musicVolume: plan.music.volume, duckDb: plan.music.duck_db,
+        sfx: previewSfx.map((s) => ({ file: s.file, at: s.at_seconds, volume: s.volume })),
+      });
+    } else {
+      await loudness({ input: paddedPath, output: mixedPath, targetLufs: -14 });
+    }
+    const muxedPath = path.join(tmpDir, "muxed.mp4");
+    await run(FFMPEG, [
+      "-y", "-i", videoOnlyPath, "-i", mixedPath,
+      "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "copy",
+      "-t", String(renderTotalSeconds), "-movflags", "+faststart", muxedPath,
+    ]);
+    const finalName = isPreview ? "preview.mp4" : "final.mp4";
+    const finalPath = path.join(outDirAbs, finalName);
+    if (plan.captions) {
+      const bv = plan.styleValues?.burn_captions ?? { font_size: null, margin_v: null, style: "background" };
+      await burnCaptions({
+        input: muxedPath, output: finalPath, captions: plan.captions.path,
+        fontSize: bv.font_size ?? null, marginV: bv.margin_v ?? null, style: bv.style ?? "background",
+      });
+    } else {
+      await copyFile(muxedPath, finalPath);
+    }
+    const finalProbe = await probe(finalPath);
+    const finalFrames = await countVideoFrames(finalPath);
+    if (finalFrames !== renderTotalFrames) {
+      throw new MediaKitError(`assemble ${finalName} has ${finalFrames} frames, expected ${renderTotalFrames}`, "ASSEMBLE_FRAME_MISMATCH");
+    }
+    const finalLufs = finalProbe.audio ? await measureLoudness(finalPath) : null;
+    const elapsed = +((Date.now() - startedAt) / 1000).toFixed(1);
+    if (isPreview) {
+      const previewDoc = {
+        ...base,
+        preview_seconds: renderTotalSeconds,
+        preview_frames: renderTotalFrames,
+        output: finalPath,
+        dimensions: `${outW}x${outH}`,
+        cache_hits: cacheHits,
+        elapsed_seconds: elapsed,
+      };
+      await writeFile(path.join(outDirAbs, "preview.json"), JSON.stringify(previewDoc, null, 2) + "\n", "utf8");
+      completed = true;
+      return {
+        ...previewDoc,
+        final: { duration_seconds: finalProbe.duration_seconds, dimensions: `${finalProbe.video?.width}x${finalProbe.video?.height}`, loudness_lufs: finalLufs },
+      };
+    }
+    const qa = await qaReport({ input: finalPath, target: "any", expectedDuration: plan.total_seconds });
+    const finalSha = await hashFile(finalPath);
+    const receipt = {
+      ...base,
+      approval: approvalStatus,
+      output: finalPath,
+      cache_hits: cacheHits,
+      shots_run: renderShots.length,
+      elapsed_seconds: elapsed,
+      final: {
+        duration_seconds: finalProbe.duration_seconds,
+        dimensions: finalProbe.video ? `${finalProbe.video.width}x${finalProbe.video.height}` : null,
+        frames: finalFrames,
+        loudness_lufs: finalLufs,
+        sha256: finalSha,
+        ...(await fileInfo(finalPath)),
+      },
+      qa,
+    };
+    await writeFile(path.join(outDirAbs, "assemble-receipt.json"), JSON.stringify(receipt, null, 2) + "\n", "utf8");
+    completed = true;
+    return receipt;
+  } catch (e) {
+    // Intermediates are kept on failure so the broken shot can be
+    // inspected and re-run by hand; the error names the directory.
+    if (e instanceof MediaKitError && !e.message.includes(tmpDir)) {
+      throw new MediaKitError(`${e.message} — intermediates kept in ${tmpDir}`, e.code);
+    }
+    throw e;
+  } finally {
+    // The tmp dir is removed on success; on failure it stays, so the
+    // broken shot can be inspected (the error names its path).
+    if (completed) {
+      try { await rm(tmpDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+    }
+  }
 }

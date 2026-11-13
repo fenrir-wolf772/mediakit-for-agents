@@ -124,6 +124,19 @@ once to build a publishing kit with `publish_kit` — see
 repeat the offer. A sample approval or a successful render is not
 final-video approval.
 
+## Assemble a film from a manifest (multi-shot)
+When the video is several shots on one voice track, don't run the
+steps above shot by shot — write a film manifest and use `assemble`
+(schema + rules in `references/assemble-manifest.md`). The voice is
+the master clock: shots must cover `lead + voice + tail` exactly
+in frames, a still without zoom (and a color card) may last at
+most 2.5s, and captions burn with the locked style's values.
+The modes run in order: `validate` → `preview` (show it to the
+user) → `approve` → `render`. Never approve your own technical
+checks — approval means the user saw the preview and said yes.
+A render without approval fails loudly unless the user
+explicitly asks for `--force`.
+
 ## Common failures
 
 | Symptom | Cause | Fix |
@@ -131,7 +144,7 @@ final-video approval.
 | Captions tiny | font-size 24 on a 1080-wide frame | Use 48–64px for vertical |
 | Captions cut off at the sides | Lines too long | ≤ 42 chars/line, split cues |
 | Subject's head cropped | Center crop on an off-center subject | Shift crop `x` toward subject |
-| Blurry vertical | Upscaled from a 405px-wide crop | Start from 1080p/4K source |
+| Blurry vertical | Upscaled from a 404px-wide crop | Start from 1080p/4K source |
 | Audio much quieter than other Shorts | Not normalized | `loudness` to −14 LUFS |
 | Captions missing on some lines | SRT cue gap or bad timestamp format | Check `HH:MM:SS,mmm`, no overlaps |
 

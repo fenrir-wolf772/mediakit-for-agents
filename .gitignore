@@ -1,5 +1,7 @@
 node_modules/
 outputs/
+.mediakit-assemble-cache/
+*.assemble-approval.json
 test/media/
 *.log
 .DS_Store
