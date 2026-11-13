@@ -80,7 +80,7 @@ Then ask your agent things like:
 | `chroma_key` | Remove a green/blue screen: keys out one hex color (`--color 00FF00`, `--similarity` 0–1, `--blend` 0–1). Without `--background` the output keeps transparency and must be `.mov` (ProRes 4444 — `.mp4` has no alpha, and this ffmpeg build drops VP9 alpha in `.webm`). With `--background <image\|hex-color>` the subject is composited onto it and the output is a flat `.mp4`/`.webm`. Reports the alpha measured on disk (middle frame): full-frame mean, corner (~0 for a full-screen key) and center (~255 on the subject) | `mediakit chroma-key greenscreen.mp4 -o keyed.mov` |
 | `zoom_pan` | Ken Burns effect: turn a still image into a moving clip. Zooms linearly from `--zoom-from` to `--zoom-to` while the focus point moves from (`--focus-x`, `--focus-y`) to (`--focus-end-x`, `--focus-end-y`), 0–1 fractions of the frame. The input is pre-scaled 1.25x before zooming to avoid zoompan's integer-crop jitter. Input must be a still image, not a video. Reports frame count measured on the output file | `mediakit zoom-pan photo.png --duration 5 --zoom-to 1.5 -o kenburns.mp4` |
 | `image_to_video` | Turn one still image into a fixed-duration video that holds still (no motion — use `zoom_pan` for Ken Burns). Dimensions default to the image itself; `--width`/`--height` fit the image inside the box and pad black to the exact size. `--audio` loops an audio file to the same duration (a short bed loops, a long one is trimmed). Output `.mp4` (H.264) or `.webm` (VP9). Reports frame count measured on the output file — exactly round(duration×fps) | `mediakit image-to-video cover.png --duration 5 --audio song.mp3 -o still.mp4` |
-| `slideshow` | Turn 2–32 still images into one video with an xfade transition between every pair (one transition type for all pairs in v1 — any of the 49 names `concat` accepts, `fade` by default). Each image is visible for its own duration (`--duration`, `--durations 3,5,2`, or `{file, duration}` per image), so the total is exactly the sum of the durations — the transition eats a handle, not slide time. Images are rendered to clips in parallel first, then joined with the `concat` xfade chain. `--audio` loops a bed under the whole slideshow. Output `.mp4` only in v1; the output always carries an audio track (silent unless `--audio` is given, because the xfade join needs one for `acrossfade`). Reports frame count measured on the output file | `mediakit slideshow a.png b.png c.png -o show.mp4 --durations 3,5,2 --transition wipeleft` |
+| `slideshow` | Turn 2–32 still images into one video with an xfade transition between every pair (one transition type for all pairs, or a different one per join with `--transitions fade,wipeleft` + `--transition-durations 1,0.5` — one entry per join, each duration shorter than both slides it joins). Each image is visible for its own duration (`--duration`, `--durations 3,5,2`, or `{file, duration}` per image), so the total is exactly the sum of the durations — the transition eats a handle, not slide time. Images are rendered to clips in parallel first, then joined with the `concat` xfade chain. `--audio` loops a bed under the whole slideshow. Output `.mp4` only in v1; the output always carries an audio track (silent unless `--audio` is given, because the xfade join needs one for `acrossfade`). Reports frame count measured on the output file | `mediakit slideshow a.png b.png c.png -o show.mp4 --durations 3,5,2 --transition wipeleft` |
 | `cut_words` | Cut words out of a talking-head clip by transcript: filler words (um/uh), false starts and restarts, using word timings from `transcribe --word-timestamps` (save its printed JSON and pass it as `--words-file`). Select by word text (`--remove um,uh`), the built-in filler set (`--fillers`: um, umm, uh, uhh, uhm, erm, er, hmm, mm, mhm, ah, eh), or 0-based word-index ranges (`--indices 0-5,96-98`); `--keep` rescues indices even when matched. Keep runs are padded 0.06s before / 0.12s after, clamped so a cut never keeps a fragment of the word it removed, and kept words that end up mostly cut out are reported in `cut_check.swallowed`. `--dry-run` prints the plan and writes nothing; no match stream-copies the input unchanged. "like" / "you know" are not fillers — cut them only via `--remove` | `mediakit cut-words take.mp4 --words-file words.json --fillers -o clean.mp4` |
 | `segment` | Cut a video into an HLS VOD playlist (`index.m3u8` + `.ts` segments) in a directory, ready to serve statically. Stream-copy by default (fast, lossless) — but segments can only start on keyframes, so actual lengths follow the source GOP; `--reencode` re-encodes to libx264/aac with forced keyframes for exact segment boundaries. Reports the segment count and durations parsed back from the playlist on disk | `mediakit segment in.mp4 --segment-time 6 -o hls/` |
 | `batch` | Apply one operation to every file matching a glob under a folder — `loudness`, `resize`, `reframe`, `compress`, `convert`, `extract_audio`, `reverse`, `grade`, `fit`, `trim`, `silence`, `chroma_key` or `cut_words`, same args for all. Outputs are `<stem>-<operation>.<ext>` under the output dir, mirroring the input tree; `batch-manifest.json` records one row per file (`ok`/`error`/`cached`/`skipped`, in input order). Unchanged files are skipped via a content-hash cache (verified against the cached output's size + sha256); `--jobs N` runs files in parallel under one shared `--timeout`; `--dry-run` lists the planned outputs and writes nothing. `cut_words` finds each clip's words file by convention — `<words_dir>/<stem>.words.json`, default the input's own folder — and a clip with no words file fails its own row only | `mediakit batch loudness --pattern '**/*.mp4' --input-dir clips/ -o out/ --args-json '{"target_lufs": -14}'` |
@@ -91,7 +91,7 @@ Then ask your agent things like:
 | `package` | Bundle a finished file for delivery: media + spec.json receipt + checksums.sha256 (+ captions) | `mediakit package out.mp4 -o delivery.zip --platform tiktok` |
 | `receipt` | Write a provenance receipt (JSON sidecar) for a finished file: probe, SHA-256, size, measured loudness, optional platform check, ffmpeg versions — re-run `sha256sum` against it any time to prove the media has not changed | `mediakit receipt out.mp4 -o out.receipt.json --platform tiktok` |
 | `mux` | Replace a video's audio track with an external audio file, stream-copying both (no re-encode: fast, lossless); `--audio-offset` shifts the new audio against the video (positive = audio later, negative = video later); `--shortest` stops at the shorter stream; `--dry-run` prints the ffmpeg command and writes no file | `mediakit mux video.mp4 voice.mp3 -o out.mp4 --audio-offset 0.5` |
-| `mix` | Mix voice over a music bed with sidechain ducking (bed drops under speech), then master to target LUFS; reports the ducking actually measured. `--sfx <file>@<s>` drops a short sound at an exact timestamp (repeatable, mixed after ducking). `--dry-run` prints the exact ffmpeg command and writes no file | `mediakit mix voice.mp3 --music bed.mp3 -o mixed.mp3 --sfx ding.mp3@3` |
+| `mix` | Mix voice over a music bed with sidechain ducking (bed drops under speech), then master to target LUFS with two-pass loudnorm (render unmastered, measure, normalise with measured values); reports the ducking actually measured and warns when peak-limited. `--sfx <file>@<s>` drops a short sound at an exact timestamp (repeatable, mixed after ducking). `--dry-run` prints both ffmpeg commands (render + master) and writes no file | `mediakit mix voice.mp3 --music bed.mp3 -o mixed.mp3 --sfx ding.mp3@3` |
 | `overlay` | Overlay a logo/watermark image (named position, margin, scale, opacity, optional timing) | `mediakit overlay in.mp4 --image logo.png -o out.mp4 --position top-right` |
 | `pip` | Picture-in-picture: a second video over the main one (9 positions, size by width or scale, opacity, optional timing, audio main/pip/mix) | `mediakit pip main.mp4 --pip facecam.mp4 -o out.mp4 --position bottom-right` |
 | `titlecard` | Render a title card PNG: big bold hook (3-6 words) on a coloured box, transparent canvas — overlay it onto frame 1 or use it as the opening card. `--style clean-bold\|minimal-line\|warm-story` uses that style's locked palette from `skills/shorts-video/styles.json` (text/box/font); an explicit colour/font overrides just that one locked value and is reported in `style_overrides` | `mediakit titlecard "The Moon Is Leaving Us" -o title.png --style clean-bold` |
@@ -184,11 +184,20 @@ captions sidecar when given — the bundle proves what was delivered, and
 music bed: the voice is levelled to `--voice-lufs` (−16) first, the bed is
 ducked under the voice with `sidechaincompress` (`--duck-db` 12,
 `--attack-ms` 100, `--release-ms` 400), the music loops to the voice
-length, and the mix is mastered to `--target-lufs` (−14) — if the voice
+length, and the mix is mastered to `--target-lufs` (−14) with two-pass
+loudnorm — the mix is rendered unmastered first (to a
+`<output>.unmastered<ext>` temp file, deleted afterwards), measured,
+then normalised with the measured values, because a single-pass
+loudnorm chained onto the graph undershoots on quiet voices with long
+gaps under a bed (measured −14.7/−14.8 LUFS vs −14 target; two-pass
+lands at −14.0 on m4a, −14.2 on mp3) — if the voice
 file is a video its video stream is copied through. It reports the
 ducking it actually achieved (`ducking_measured_db`, measured on the
 ducked bed alone in a speech window vs a silence window), so tune
-`--duck-db` from a measured number, not a guess. `concat --transition
+`--duck-db` from a measured number, not a guess, and warns when the
+mix is peak-limited and cannot reach the target. MP3 masters are
+encoded at 192k (ffmpeg's 64k default loses ~0.5 LU in the re-measured
+output). `concat --transition
 fade|wipeleft|dissolve|...` joins clips with a real crossfade instead of
 a hard cut: every clip is normalized to the first clip's size/fps first
 (in one filter graph, no intermediate files), then chained with `xfade`
@@ -292,11 +301,15 @@ audio. The frame count is exactly round(duration×fps) and the first
 frame is the source image itself; `--width`/`--height` fit the image
 inside the box and pad black to the exact size, and `--audio` loops a
 bed to the same duration. `slideshow` is the multi-image version: 2–32
-stills joined with one xfade transition type between every pair
-(`fade` by default, any of the 49 names `concat` accepts). Each image
+stills joined with an xfade transition between every pair (`fade` by
+default, any of the 49 names `concat` accepts) — one type for all
+pairs, or a different one per join with `--transitions fade,wipeleft`
+and `--transition-durations 1,0.5` (one entry per join; each duration
+must be shorter than both slides it joins). Each image
 is visible for its own duration — `--duration`, `--durations 3,5,2`,
 or `{file, duration}` per image in MCP — so the total is exactly the
-sum of the durations: internally each clip is duration + transition
+sum of the durations: internally each clip is duration + its outgoing
+transition
 (except the last), so the transition eats a handle, not slide time.
 The output always carries an audio track, silent unless `--audio`
 loops a bed under the whole show (the xfade join needs an audio

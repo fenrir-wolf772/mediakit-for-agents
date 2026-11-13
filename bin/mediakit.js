@@ -307,14 +307,16 @@ const COMMANDS = {
     ],
   },
   slideshow: {
-    usage: "mediakit slideshow <img1> <img2> [img3...] -o <output.mp4> [--duration 3] [--durations 3,5,2] [--transition fade] [--transition-duration 1] [--fps 30] [--width 1280] [--height 720] [--audio <file>] [--crf 23]",
-    desc: "Turn 2-32 still images into one video with an xfade transition between every pair. Each image is visible for its own duration (total = sum of durations); the transition eats a handle, not slide time. One transition type for all pairs in v1. --audio loops a bed under the whole slideshow. Output .mp4 only in v1.",
+    usage: "mediakit slideshow <img1> <img2> [img3...] -o <output.mp4> [--duration 3] [--durations 3,5,2] [--transition fade] [--transition-duration 1] [--transitions fade,wipeleft] [--transition-durations 1,0.5] [--fps 30] [--width 1280] [--height 720] [--audio <file>] [--crf 23]",
+    desc: "Turn 2-32 still images into one video with an xfade transition between every pair. Each image is visible for its own duration (total = sum of durations); the transition eats a handle, not slide time. --transitions/--transition-durations give a different transition per join (n-1 comma entries); otherwise one type applies to all pairs. --audio loops a bed under the whole slideshow. Output .mp4 only in v1.",
     args: [{ name: "images", required: true, variadic: true }],
     options: [
       ["--duration", "Visible seconds per image (default 3)"],
       ["--durations", "Comma list, one visible duration per image, in order (overrides --duration)"],
       ["--transition", "xfade transition between every pair: fade (default), wipeleft, dissolve, circlecrop, ..."],
       ["--transition-duration", "Transition length in seconds (default 1, must be shorter than the shortest slide)"],
+      ["--transitions", "Comma list, one xfade transition per join, in order (n-1 entries; overrides --transition)"],
+      ["--transition-durations", "Comma list, one transition length per join, in order (n-1 entries; each shorter than both slides it joins; overrides --transition-duration)"],
       ["--fps", "Output frame rate (default 30)"],
       ["--width", "Output width in pixels (default 1280)"],
       ["--height", "Output height in pixels (default 720)"],
@@ -989,12 +991,24 @@ async function main() {
           if (!Number.isFinite(n)) fail(`--durations has a non-number entry: ${s}`);
           return n;
         }) : null;
+        const transitions = opts.transitions ? String(opts.transitions).split(",").map((s) => {
+          const name = s.trim();
+          if (!name) fail("--transitions has an empty entry");
+          return name;
+        }) : null;
+        const transitionDurations = opts.transition_durations ? String(opts.transition_durations).split(",").map((s) => {
+          const n = Number(s.trim());
+          if (!Number.isFinite(n)) fail(`--transition-durations has a non-number entry: ${s}`);
+          return n;
+        }) : null;
         result = await core.slideshow({
           images: positional, output: needOutput(opts),
           duration: numOpt(opts, "duration") ?? 3,
           durations,
           transition: opts.transition ?? "fade",
           transitionDuration: numOpt(opts, "transition_duration") ?? 1,
+          transitions,
+          transitionDurations,
           fps: numOpt(opts, "fps") ?? 30,
           width: numOpt(opts, "width") ?? 1280,
           height: numOpt(opts, "height") ?? 720,

@@ -296,11 +296,23 @@ concat it in front of the main clip. Silent video, no audio track.
 between SRT and VTT — cue text is carried verbatim, never rewritten;
 VTT cue settings (`line:`/`position:`/`align:`) are dropped on the way
 to SRT and counted in `settings_dropped`. Converting a file to its own
-format is refused. `mix ... --dry-run` prints the exact ffmpeg command
-that would run (with the real voice gain measured from the files) and
-writes no file — read the command before a long render, then run the
-same call without `--dry-run`. The probe and loudnorm measurement still
-run in dry-run mode, but they are read-only.
+format is refused. `mix ... --dry-run` prints both ffmpeg commands
+that would run (render the unmastered mix, then master it with the
+measured values — the master command is shown without `measured_*`
+values, which the real run fills in after measuring) and writes no
+file — read the commands before a long render, then run the same call
+without `--dry-run`. The probe and loudnorm measurement still run in
+dry-run mode, but they are read-only. Mastering is two-pass: a
+single-pass loudnorm chained onto the mix graph undershoots on quiet
+voices with long gaps under a bed, so `mix` renders unmastered, measures
+the render, and normalises with the measured values; if the result is
+still off-target by more than 0.5 LUFS it warns that the mix is
+peak-limited instead of pretending the target was hit. The voice is
+compressed before levelling (threshold −18 dB, ratio 4:1, attack 1 ms,
+peak detection): real speech has ~19 dB crest, so an uncompressed
+voice gained to −16 LUFS peaks at +3 dBTP and the master cannot reach
+−14 under the −1.5 dBTP cap — it lands ~0.5 LU short. A 20 ms attack
+lets plosive transients slip through, so the attack must stay at 1 ms.
 
 ### 21. Find the file before you probe it; content-check the final render
 Don't guess paths: `find clips/ --name moon` searches a folder tree
@@ -771,10 +783,15 @@ video input is refused (extract a frame first); motion is
 `zoom_pan`'s job, not this tool's.
 
 ### 47. A slideshow shows each image for its own time — the transition eats a handle, not slide time
-`slideshow` takes 2–32 stills and joins them with one xfade
-transition type between every pair (`fade` by default, any of the
-49 names `concat` accepts). The duration you give an image is its
-VISIBLE time: internally each clip is duration + transition
+`slideshow` takes 2–32 stills and joins them with an xfade
+transition between every pair (`fade` by default, any of the
+49 names `concat` accepts). A different transition per join:
+`--transitions fade,wipeleft` with `--transition-durations 1,0.5`
+(one entry per join, in order; each duration shorter than both
+slides it joins) — in MCP `transitions` / `transition_durations`
+arrays. The duration you give an image is its
+VISIBLE time: internally each clip is duration + its outgoing
+transition
 (except the last), so the total is exactly the sum of the
 durations — a 3+3+3 show with 1s fades is 9s, 270 frames at 30fps,
 measured on disk. Give durations with `--duration` (uniform),
@@ -785,8 +802,7 @@ visible — the tool refuses it. The output always carries an audio
 track, silent unless `--audio` loops a bed under the whole show.
 Verify a slideshow by its frames, not its log: the frame mid-slide
 must match its image (PSNR > 40 dB) and the frame mid-transition
-must match NEITHER neighbour (a blend). Per-pair transition types
-are a follow-up, not v1.
+must match NEITHER neighbour (a blend).
 In a manifest, a `chroma_key` background is either an image file
 or a hex color — and the cache treats them differently. An image
 background resolves relative to the manifest and its bytes are

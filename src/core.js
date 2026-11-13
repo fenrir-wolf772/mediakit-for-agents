@@ -968,6 +968,13 @@ export async function exportGif({ input, output, start = null, end = null, fps =
 // stream-copied (see loudness()).
 const VIDEO_CONTAINER_AUDIO = { mp4: "aac", mov: "aac", m4v: "aac", mkv: "aac", webm: "libopus" };
 
+// ffmpeg's default libmp3lame bitrate is 64k — low enough to lose ~0.5 LU
+// in a re-measured master (measured: -14.5 at 64k vs -14.28 at 192k vs
+// -14.0 lossless, same two-pass gain). Pin mp3 encodes to 192k in the
+// mastering paths (loudness, mix) so the measured output stays inside
+// the ±0.5 LUFS tolerance instead of sitting on its edge.
+const mp3BitrateArgs = (codec) => (codec === "libmp3lame" ? ["-b:a", "192k"] : []);
+
 export async function loudness({ input, output, targetLufs = -14, format = null }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
@@ -981,21 +988,26 @@ export async function loudness({ input, output, targetLufs = -14, format = null 
   // true peak, LRA, threshold, target offset); pass 2 applies the exact
   // linear gain. Single-pass cannot hit the target when the input is far
   // from it — a -26 LUFS music bed only reached -21.6 in one pass.
+  // TP is -2, not the usual -1.5: the AAC/MP3 encode after loudnorm
+  // adds ~1-1.5 dB of inter-sample overshoot (measured 2026-11-13:
+  // speech mastered at TP -1.5 measured -0.55 on disk, a film final
+  // -0.04), so the in-graph target sits 0.5 dB below the -1.5 on-disk
+  // goal and the file passes the qa true-peak max of -0.3 dBTP.
   const measured = await measureLoudnessFull(inPath);
   let twoPass = false;
   if (measured) {
     await run(FFMPEG, [
       "-y", "-i", inPath,
-      "-af", `loudnorm=I=${target}:TP=-1.5:LRA=11:measured_I=${measured.i}:measured_TP=${measured.tp}:measured_LRA=${measured.lra}:measured_thresh=${measured.thresh}:offset=${measured.offset}:linear=true`,
-      "-ar", "48000", "-c:v", "copy", "-c:a", codec, outPath,
+      "-af", `loudnorm=I=${target}:TP=-2:LRA=11:measured_I=${measured.i}:measured_TP=${measured.tp}:measured_LRA=${measured.lra}:measured_thresh=${measured.thresh}:offset=${measured.offset}:linear=true`,
+      "-ar", "48000", "-c:v", "copy", "-c:a", codec, ...mp3BitrateArgs(codec), outPath,
     ]);
     twoPass = true;
   } else {
     // Measurement failed (unusual input): fall back to single-pass.
     await run(FFMPEG, [
       "-y", "-i", inPath,
-      "-af", `loudnorm=I=${target}:TP=-1.5:LRA=11`,
-      "-ar", "48000", "-c:v", "copy", "-c:a", codec, outPath,
+      "-af", `loudnorm=I=${target}:TP=-2:LRA=11`,
+      "-ar", "48000", "-c:v", "copy", "-c:a", codec, ...mp3BitrateArgs(codec), outPath,
     ]);
   }
   const info = await fileInfo(outPath);
@@ -1109,7 +1121,7 @@ function concatParts(clips) {
   }));
 }
 
-export async function concat({ inputs, output, videoCodec = "libx264", audioCodec = "aac", transition = null, transitionDuration = 1, fast = null }) {
+export async function concat({ inputs, output, videoCodec = "libx264", audioCodec = "aac", transition = null, transitionDuration = 1, transitions = null, transitionDurations = null, fast = null }) {
   if (!Array.isArray(inputs) || inputs.length < 2) {
     throw new MediaKitError("concat needs at least 2 input files", "INVALID_ARG");
   }
@@ -1130,11 +1142,11 @@ export async function concat({ inputs, output, videoCodec = "libx264", audioCode
     // Accurate trims need the filter graph, so they always re-encode.
     throw new MediaKitError("concat --fast (stream copy) cannot trim clips — stream-copy cuts snap to keyframes (measured: inpoint/outpoint 2–5s + 1–4s copied 8.09s instead of 6s); omit --fast to re-encode with exact trims", "INVALID_ARG");
   }
-  if (transition !== null && transition !== undefined) {
+  if (transition !== null && transition !== undefined || transitions !== null && transitions !== undefined) {
     if (fast === true) {
       throw new MediaKitError("concat --fast (stream copy) cannot be combined with --transition — transitions need re-encoding", "INVALID_ARG");
     }
-    return concatTransition({ inPaths, outPath, videoCodec, audioCodec, transition, transitionDuration, clips, metas });
+    return concatTransition({ inPaths, outPath, videoCodec, audioCodec, transition, transitionDuration, transitions, transitionDurations, clips, metas });
   }
   if (hasTrim) {
     return concatTrimmed({ inPaths, outPath, videoCodec, audioCodec, clips, metas });
@@ -1275,12 +1287,33 @@ function checkConcatCompat(metas) {
   return { ok: reasons.length === 0, reasons };
 }
 
-/** concat with an xfade transition between every pair of clips. */
-async function concatTransition({ inPaths, outPath, videoCodec, audioCodec, transition, transitionDuration, clips, metas }) {
-  if (!XFADE_TRANSITIONS.includes(transition)) {
-    throw new MediaKitError(`unknown transition: ${transition} (supported: ${XFADE_TRANSITIONS.join(", ")})`, "INVALID_ARG");
+/** concat with an xfade transition between every pair of clips.
+ * One transition type/duration for all joins (transition /
+ * transitionDuration), or a different one per join (transitions /
+ * transitionDurations, one entry per join — the slideshow tool's
+ * per-pair form). Per-join durations change the handle math: each
+ * join consumes its own duration, so the running total subtracts
+ * that join's t, not a shared one. */
+async function concatTransition({ inPaths, outPath, videoCodec, audioCodec, transition, transitionDuration, transitions = null, transitionDurations = null, clips, metas }) {
+  const joins = metas.length - 1;
+  const ts = transitions !== null && transitions !== undefined
+    ? transitions
+    : Array.from({ length: joins }, () => transition);
+  if (!Array.isArray(ts) || ts.length !== joins) {
+    throw new MediaKitError(`transitions must have one entry per join (${joins}), got ${Array.isArray(ts) ? ts.length : typeof ts}`, "INVALID_ARG");
   }
-  const t = num(transitionDuration, "transition_duration", { min: 0.1, max: 10 });
+  for (const [i, name] of ts.entries()) {
+    if (!XFADE_TRANSITIONS.includes(name)) {
+      throw new MediaKitError(`unknown transition: ${name} (supported: ${XFADE_TRANSITIONS.join(", ")})`, "INVALID_ARG");
+    }
+  }
+  const tds = transitionDurations !== null && transitionDurations !== undefined
+    ? transitionDurations
+    : Array.from({ length: joins }, () => transitionDuration);
+  if (!Array.isArray(tds) || tds.length !== joins) {
+    throw new MediaKitError(`transition_durations must have one entry per join (${joins}), got ${Array.isArray(tds) ? tds.length : typeof tds}`, "INVALID_ARG");
+  }
+  const tNums = tds.map((d, i) => num(d, `transition_durations[${i}]`, { min: 0.1, max: 10 }));
   if (metas.some((m) => !m.video)) {
     throw new MediaKitError("concat with a transition needs video in every input", "INVALID_ARG");
   }
@@ -1290,9 +1323,11 @@ async function concatTransition({ inPaths, outPath, videoCodec, audioCodec, tran
   if (durations.some((d) => d === null)) {
     throw new MediaKitError("could not read input durations for transition concat", "PROBE_FAILED");
   }
-  const minDur = Math.min(...durations);
-  if (t >= minDur) {
-    throw new MediaKitError(`transition_duration (${t}s) must be shorter than the shortest clip (${minDur}s)`, "INVALID_ARG");
+  for (let k = 1; k < metas.length; k++) {
+    const t = tNums[k - 1];
+    if (t >= Math.min(durations[k - 1], durations[k])) {
+      throw new MediaKitError(`transition ${k} duration (${t}s) must be shorter than the clips it joins (${durations[k - 1]}s and ${durations[k]}s)`, "INVALID_ARG");
+    }
   }
   // Normalize to the first clip's size/fps (xfade needs identical
   // dimensions and frame rates on both inputs). A trimmed clip is cut
@@ -1315,16 +1350,17 @@ async function concatTransition({ inPaths, outPath, videoCodec, audioCodec, tran
     }
   });
   // Chain xfade pairwise. After joining clips 0..k-1 the running total
-  // is sum(d_0..d_{k-1}) - (k-1)*t, and the next transition starts
-  // t seconds before its end.
+  // is sum(d_0..d_{k-1}) - sum(t_0..t_{k-2}), and the next transition
+  // starts t_{k-1} seconds before its end.
   let vLabel = "v0";
   let aLabel = "a0";
   let running = durations[0];
   for (let k = 1; k < metas.length; k++) {
+    const t = tNums[k - 1];
     const offset = +(running - t).toFixed(3);
     const vOut = `x${k}`;
     const aOut = `c${k}`;
-    graph.push(`[${vLabel}][v${k}]xfade=transition=${transition}:duration=${t}:offset=${offset}[${vOut}]`);
+    graph.push(`[${vLabel}][v${k}]xfade=transition=${ts[k - 1]}:duration=${t}:offset=${offset}[${vOut}]`);
     graph.push(`[${aLabel}][a${k}]acrossfade=d=${t}[${aOut}]`);
     vLabel = vOut;
     aLabel = aOut;
@@ -1343,7 +1379,13 @@ async function concatTransition({ inPaths, outPath, videoCodec, audioCodec, tran
   const out = await probe(outPath);
   return {
     operation: "concat", inputs: inPaths, output: outPath, parts: concatParts(clips),
-    transition, transition_duration: t,
+    // transition / transition_duration keep the old shape when every
+    // join uses the same type and length, and are null otherwise —
+    // transitions / transition_durations always carry the full list.
+    transition: ts.every((x) => x === ts[0]) ? ts[0] : null,
+    transition_duration: tNums.every((x) => x === tNums[0]) ? tNums[0] : null,
+    transitions: ts,
+    transition_durations: tNums,
     expected_duration_seconds: running,
     ...info, duration_seconds: out.duration_seconds,
     dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
@@ -3939,8 +3981,11 @@ export async function imageToVideo({ input, output, duration = 5, fps = 30, widt
 // (image_to_video, up to 4 in parallel), then the clips are joined
 // with concat's xfade chain. Semantics follow Twinklebear: each
 // image is VISIBLE for its duration — the internal clip is
-// duration + transition (except the last, duration), so the
-// transition eats a handle, not slide time, and the total is exactly
+// duration + its OUTGOING transition (except the last, duration), so
+// the transition eats a handle, not slide time, and the total is exactly
+// the sum of the durations. One transition type/duration for all joins
+// (transition / transitionDuration), or a different one per join
+// (transitions / transitionDurations, one entry per join).
 // sum(durations). One transition type for all pairs in v1 (a per-pair
 // list is a follow-up — concat's xfade chain takes one type). Output
 // is .mp4 only in v1: the concat transition path appends
@@ -3975,7 +4020,7 @@ async function runPool(items, limit, fn) {
   return results;
 }
 
-export async function slideshow({ images, output, duration = 3, durations = null, transition = "fade", transitionDuration = 1, fps = 30, width = 1280, height = 720, audio = null, crf = 23 }) {
+export async function slideshow({ images, output, duration = 3, durations = null, transition = "fade", transitionDuration = 1, transitions = null, transitionDurations = null, fps = 30, width = 1280, height = 720, audio = null, crf = 23 }) {
   if (!Array.isArray(images) || images.length < 2) {
     throw new MediaKitError("slideshow needs at least 2 images", "INVALID_ARG");
   }
@@ -3999,22 +4044,47 @@ export async function slideshow({ images, output, duration = 3, durations = null
     perSlide = durations.map((d, i) => num(d, `durations[${i}]`, { min: 0.5, max: 600 }));
   }
   const durs = slides.map((s, i) => (s.duration !== null ? num(s.duration, `image ${i + 1} duration`, { min: 0.5, max: 600 }) : (perSlide !== null ? perSlide[i] : defaultDur)));
-  if (!XFADE_TRANSITIONS.includes(transition)) {
-    throw new MediaKitError(`unknown transition: ${transition} (supported: ${XFADE_TRANSITIONS.join(", ")})`, "INVALID_ARG");
+  const joins = slides.length - 1;
+  // Per-pair transitions: one type/duration per join. The arrays win
+  // over the single values when given; each name must be a known xfade
+  // type, each duration must be shorter than both slides it joins, so
+  // a slide is always fully visible at least briefly. The single-value
+  // path keeps its original error wording (and its stricter rule:
+  // shorter than the SHORTEST slide overall).
+  const ts = transitions !== null && transitions !== undefined ? transitions : Array.from({ length: joins }, () => transition);
+  if (!Array.isArray(ts) || ts.length !== joins) {
+    throw new MediaKitError(`slideshow transitions must have one entry per join (${joins}), got ${Array.isArray(ts) ? ts.length : typeof ts}`, "INVALID_ARG");
   }
-  const t = num(transitionDuration, "transition_duration", { min: 0.1, max: 10 });
-  const minDur = Math.min(...durs);
-  if (t >= minDur) {
-    throw new MediaKitError(`transition_duration (${t}s) must be shorter than the shortest slide (${minDur}s) — a slide needs to be fully visible at least briefly`, "INVALID_ARG");
+  for (const name of ts) {
+    if (!XFADE_TRANSITIONS.includes(name)) {
+      throw new MediaKitError(`unknown transition: ${name} (supported: ${XFADE_TRANSITIONS.join(", ")})`, "INVALID_ARG");
+    }
+  }
+  const tds = transitionDurations !== null && transitionDurations !== undefined ? transitionDurations : Array.from({ length: joins }, () => transitionDuration);
+  if (!Array.isArray(tds) || tds.length !== joins) {
+    throw new MediaKitError(`slideshow transition_durations must have one entry per join (${joins}), got ${Array.isArray(tds) ? tds.length : typeof tds}`, "INVALID_ARG");
+  }
+  const tNums = tds.map((d, i) => num(d, `transition_durations[${i}]`, { min: 0.1, max: 10 }));
+  if (transitions == null && transitionDurations == null) {
+    const minDur = Math.min(...durs);
+    if (tNums[0] >= minDur) {
+      throw new MediaKitError(`transition_duration (${tNums[0]}s) must be shorter than the shortest slide (${minDur}s) — a slide needs to be fully visible at least briefly`, "INVALID_ARG");
+    }
+  } else {
+    for (let i = 0; i < joins; i++) {
+      if (tNums[i] >= durs[i] || tNums[i] >= durs[i + 1]) {
+        throw new MediaKitError(`transition_durations[${i}] (${tNums[i]}s) must be shorter than the slides it joins (${durs[i]}s and ${durs[i + 1]}s) — a slide needs to be fully visible at least briefly`, "INVALID_ARG");
+      }
+    }
   }
   const f = num(fps, "fps", { min: 1, max: 120, integer: true });
   const w = num(width, "width", { min: 2, max: 7680, integer: true });
   const h = num(height, "height", { min: 2, max: 4320, integer: true });
   const c = num(crf, "crf", { min: 0, max: 51, integer: true });
-  // Each internal clip is duration + t (a handle for the xfade) except
-  // the last slide, which is exactly its duration. image_to_video caps
-  // a clip at 600s, so a long slide + handle can exceed it.
-  const clipDurs = durs.map((d, i) => (i < durs.length - 1 ? d + t : d));
+  // Each internal clip is duration + its OUTGOING transition (a handle
+  // for the xfade) except the last slide, which is exactly its duration.
+  // image_to_video caps a clip at 600s, so a long slide + handle can exceed it.
+  const clipDurs = durs.map((d, i) => (i < durs.length - 1 ? d + tNums[i] : d));
   if (clipDurs.some((d) => d > 600)) {
     throw new MediaKitError(`slideshow slide duration + transition exceeds the 600s clip cap (longest clip would be ${Math.max(...clipDurs)}s)`, "INVALID_ARG");
   }
@@ -4036,9 +4106,9 @@ export async function slideshow({ images, output, duration = 3, durations = null
       return clipPath;
     });
     // Stage 2: join with the same xfade chain concat --transition uses.
-    // Its expected total is sum(clipDurs) - (n-1)*t = sum(durations).
+    // Its expected total is sum(clipDurs) - sum(tNums) = sum(durations).
     const joinPath = path.join(tmpDir, "joined.mp4");
-    const joined = await concat({ inputs: clips, output: joinPath, transition, transitionDuration: t });
+    const joined = await concat({ inputs: clips, output: joinPath, transitions: ts, transitionDurations: tNums });
     if (Math.abs(joined.expected_duration_seconds - total) > 0.01) {
       throw new MediaKitError(`slideshow join total mismatch: expected ${total}s, concat reported ${joined.expected_duration_seconds}s`, "VERIFY_FAILED");
     }
@@ -4065,7 +4135,13 @@ export async function slideshow({ images, output, duration = 3, durations = null
   return {
     operation: "slideshow", images: inPaths, output: outPath,
     slides: durs.map((d, i) => ({ file: inPaths[i], duration_seconds: d })),
-    transition, transition_duration: t,
+    // transition / transition_duration keep the old shape when every
+    // join is the same, and are null otherwise — transitions /
+    // transition_durations always carry the full per-join list.
+    transition: ts.every((x) => x === ts[0]) ? ts[0] : null,
+    transition_duration: tNums.every((x) => x === tNums[0]) ? tNums[0] : null,
+    transitions: ts,
+    transition_durations: tNums,
     expected_duration_seconds: total,
     duration_seconds: out.duration_seconds,
     dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
@@ -5477,7 +5553,7 @@ export async function receipt({ input, output, platform = null }) {
 /** Mean volume (dB) of the ducked music bed alone in [start, end). */
 async function duckedBedVolume(voicePath, musicPath, voiceGainDb, musicVolume, duck, start, end) {
   const graph = [
-    `[0:a]aresample=48000,volume=${voiceGainDb}dB[voice]`,
+    `[0:a]aresample=48000,acompressor=threshold=0.125:ratio=4:attack=1:release=250:detection=peak,volume=${voiceGainDb}dB[voice]`,
     `[1:a]aresample=48000,volume=${musicVolume}[bed]`,
     `[bed][voice]sidechaincompress=threshold=0.0316:ratio=${duck.ratio}:attack=${duck.attack}:release=${duck.release}[ducked]`,
     `[ducked]atrim=start=${start}:end=${end},volumedetect`,
@@ -5555,10 +5631,31 @@ export async function mix({
     : (AUDIO_FORMATS[ext] ?? VIDEO_CONTAINER_AUDIO[ext]);
   if (!audioCodec) throw new MediaKitError(`unsupported mix output format: .${ext || "(none)"}`, "INVALID_ARG");
 
+  // The voice feeds TWO filters (sidechaincompress's sidechain AND the
+  // final amix), so it MUST be split explicitly. A reused label is NOT
+  // split by ffmpeg: the second reference silently binds to the raw
+  // input instead — measured 2026-11-13: the amix branch got the
+  // UNGAINED voice, so the mix measured -25.8 LUFS instead of -16.0
+  // (the -9.6 dB voice gain never reached the mix). The bug lived
+  // since the tool was written and stayed hidden because the old
+  // single-pass loudnorm at the end of the graph re-levelled the total
+  // to -14 anyway; two-pass mastering exposed it (the unmastered mix
+  // is measured first, and a 10 dB-quiet mix cannot be lifted to -14
+  // under the true-peak cap). Never reuse a filter label — asplit.
+  // The voice is also compressed before levelling (threshold -18 dB,
+  // ratio 4:1, attack 1 ms, peak detection): real speech has ~19 dB
+  // crest, so a plain gain to -16 puts peaks at +3 dBTP and the master
+  // cannot reach -14 under the -1.5 dBTP cap (measured: -14.5, on the
+  // tolerance edge). Attack must be 1 ms: a 20 ms attack lets plosive
+  // transients slip through (measured: only 2.6 dB peak reduction vs
+  // 8.9 dB at 1 ms). With the fast compressor the mix crest drops to
+  // ~15 dB and the master lands on -14.0. The master measures the
+  // finished mix, so the small level shift from compression is
+  // corrected there, not here.
   const graphParts = [
-    `[0:a]aresample=48000,volume=${voiceGainDb}dB[voice]`,
+    `[0:a]aresample=48000,acompressor=threshold=0.125:ratio=4:attack=1:release=250:detection=peak,volume=${voiceGainDb}dB,asplit=2[voice][voice_sc]`,
     `[1:a]aresample=48000,volume=${bedVol}[bed]`,
-    `[bed][voice]sidechaincompress=threshold=0.0316:ratio=${ratio}:attack=${attack}:release=${release}[ducked]`,
+    `[bed][voice_sc]sidechaincompress=threshold=0.0316:ratio=${ratio}:attack=${attack}:release=${release}[ducked]`,
     `[ducked][voice]amix=inputs=2:duration=first:normalize=0[mix]`,
   ];
   // SFX inputs are 2..N+1; each is delayed to its timestamp, then all
@@ -5575,24 +5672,55 @@ export async function mix({
     graphParts.push(`[mix]${sfxLabels.join("")}amix=inputs=${1 + sfxLabels.length}:duration=first:normalize=0[final]`);
     finalLabel = "[final]";
   }
-  if (mTarget !== null) graphParts.push(`${finalLabel}loudnorm=I=${mTarget}:TP=-1.5:LRA=11[out]`);
+  // Mastering is two-pass (the loudness() tool's approach): the mix is
+  // rendered unmastered first, measured, then normalised with the
+  // measured values + linear=true. A single-pass loudnorm chained onto
+  // the mix graph systematically undershoots on quiet voices with long
+  // gaps under a bed — measured -14.7/-14.8 LUFS against a -14 target
+  // on a -34.6 LUFS voice, while two-pass lands on target (VERIFY
+  // lượt 44). master=false (--no-master) keeps the old one-render path.
   const graph = graphParts.join(";");
-  const mixLabel = mTarget !== null ? "[out]" : finalLabel;
-  const args = ["-y", "-i", voicePath, "-stream_loop", "-1", "-i", musicPath];
-  for (const s of sfxList) args.push("-i", s.file);
-  args.push("-filter_complex", graph);
+  const mixLabel = finalLabel;
+  const renderArgs = ["-y", "-i", voicePath, "-stream_loop", "-1", "-i", musicPath];
+  for (const s of sfxList) renderArgs.push("-i", s.file);
+  renderArgs.push("-filter_complex", graph);
   if (voiceMeta.video) {
-    args.push("-map", "0:v", "-map", mixLabel, "-c:v", "copy", "-c:a", audioCodec, "-shortest");
-    if (["mp4", "mov", "m4v"].includes(ext)) args.push("-movflags", "+faststart");
+    renderArgs.push("-map", "0:v", "-map", mixLabel, "-c:v", "copy", "-c:a", audioCodec, ...mp3BitrateArgs(audioCodec), "-shortest");
   } else {
-    args.push("-map", mixLabel, "-c:a", audioCodec);
+    renderArgs.push("-map", mixLabel, "-c:a", audioCodec, ...mp3BitrateArgs(audioCodec));
   }
-  args.push(outPath);
+  // The unmastered render lives next to the output so the plan can name
+  // it exactly (dry-run prints real paths); it is deleted after the
+  // master pass, even when the master fails.
+  const unmasteredPath = mTarget !== null
+    ? path.join(path.dirname(outPath), `${path.basename(outPath, path.extname(outPath))}.unmastered${path.extname(outPath)}`)
+    : null;
+  const renderCmd = [...renderArgs, mTarget !== null ? unmasteredPath : outPath];
+  // Master pass: same shape as loudness() pass 2 — measured values when
+  // the render could be measured, single-pass loudnorm as fallback.
+  // TP -2 (see loudness()): the encode after loudnorm overshoots ~1 dB.
+  const masterArgsFor = (measured) => {
+    const af = measured
+      ? `loudnorm=I=${mTarget}:TP=-2:LRA=11:measured_I=${measured.i}:measured_TP=${measured.tp}:measured_LRA=${measured.lra}:measured_thresh=${measured.thresh}:offset=${measured.offset}:linear=true`
+      : `loudnorm=I=${mTarget}:TP=-2:LRA=11`;
+    const a = ["-y", "-i", unmasteredPath, "-af", af, "-ar", "48000"];
+    if (voiceMeta.video) a.push("-map", "0:v", "-map", "0:a", "-c:v", "copy", "-c:a", audioCodec, ...mp3BitrateArgs(audioCodec));
+    else a.push("-c:a", audioCodec, ...mp3BitrateArgs(audioCodec));
+    if (voiceMeta.video && ["mp4", "mov", "m4v"].includes(ext)) a.push("-movflags", "+faststart");
+    a.push(outPath);
+    return a;
+  };
   if (dryRun) {
     // Plan before render (ffmpeg-skill's --dry-run idea): the probe and
     // the loudnorm measurement above are read-only — they ran so the
-    // gain in the plan is the real one — but no file is written.
+    // gain in the plan is the real one — but no file is written. With
+    // mastering on, the plan lists both passes; the master command is
+    // shown without measured_* values because the real run measures the
+    // unmastered render first and substitutes them (two-pass).
     const quote = (s) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
+    const commands = mTarget !== null
+      ? [`${FFMPEG} ${renderCmd.map(quote).join(" ")}`, `${FFMPEG} ${masterArgsFor(null).map(quote).join(" ")}`]
+      : [`${FFMPEG} ${renderCmd.map(quote).join(" ")}`];
     return {
       operation: "mix",
       dry_run: true,
@@ -5608,21 +5736,40 @@ export async function mix({
       voice_lufs_target: vTarget,
       voice_gain_db: voiceGainDb,
       mastered_to_lufs: mTarget,
+      mastering: mTarget !== null ? "two-pass" : "none",
       output_lufs: null,
       ducking_measured_db: null,
       sfx: sfxList,
       sfx_count: sfxList.length,
       duration_seconds: voiceDuration,
       has_video: Boolean(voiceMeta.video),
-      commands: [`${FFMPEG} ${args.map(quote).join(" ")}`],
-      note: "Dry run: no file written. Probes and the loudnorm measurement are read-only; they ran to compute voice_gain_db.",
+      commands,
+      note: "Dry run: no file written. Probes and the loudnorm measurement are read-only; they ran to compute voice_gain_db. With mastering on, the real run renders to <output>.unmastered<ext>, measures it, then masters with the measured values — the master command above is shown without measured_* values.",
     };
   }
-  await run(FFMPEG, args);
+  let twoPass = false;
+  if (mTarget !== null) {
+    try {
+      await run(FFMPEG, renderCmd);
+      const measured = await measureLoudnessFull(unmasteredPath);
+      await run(FFMPEG, masterArgsFor(measured));
+      twoPass = measured !== null;
+    } finally {
+      await rm(unmasteredPath, { force: true }).catch(() => {});
+    }
+  } else {
+    await run(FFMPEG, renderCmd);
+  }
 
   const info = await fileInfo(outPath);
   const outMeta = await probe(outPath);
   const outputLufs = outMeta.audio ? await measureLoudness(outPath) : null;
+  // Honest reporting (same rule as loudness()): when the render is
+  // peak-limited, even two-pass cannot reach the target — say so.
+  const offTarget = mTarget !== null && outputLufs !== null ? +(outputLufs - mTarget).toFixed(1) : null;
+  const warning = offTarget !== null && Math.abs(offTarget) > 0.5
+    ? `reached ${outputLufs} LUFS, ${Math.abs(offTarget)} LUFS ${offTarget < 0 ? "below" : "above"} target — input is peak-limited (true peak caps the gain); high-pass sub-bass or compress first, then normalize again`
+    : null;
 
   // Measure the ducking actually achieved: a speech window vs a silence
   // window on the ducked bed alone. Speech windows sit 0.1s into a
@@ -5669,7 +5816,10 @@ export async function mix({
     voice_lufs_target: vTarget,
     voice_gain_db: voiceGainDb,
     mastered_to_lufs: mTarget,
+    mastering: mTarget !== null ? "two-pass" : "none",
+    two_pass: twoPass,
     output_lufs: outputLufs,
+    ...(warning ? { warning } : {}),
     ducking_measured_db: duckingMeasuredDb,
     sfx: sfxList,
     sfx_count: sfxList.length,

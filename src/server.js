@@ -431,7 +431,7 @@ server.tool(
 
 server.tool(
   "slideshow",
-  "Turn 2-32 still images into one video with an xfade transition between every pair (one transition type for all pairs in v1). Each image is visible for its own duration — the transition eats a handle, not slide time — so the total is exactly the sum of the durations. Images are rendered to clips in parallel first, then joined with the concat xfade chain. audio loops a bed under the whole slideshow. Output .mp4 only in v1. The result counts frames on the output file, so the duration is measured, not assumed.",
+  "Turn 2-32 still images into one video with an xfade transition between every pair. Each image is visible for its own duration — the transition eats a handle, not slide time — so the total is exactly the sum of the durations. One transition type for all pairs (transition/transition_duration), or a different one per join: transitions (one xfade name per join, n-1 entries) and transition_durations (one length per join, each shorter than both slides it joins). Images are rendered to clips in parallel first, then joined with the concat xfade chain. audio loops a bed under the whole slideshow. Output .mp4 only in v1. The result counts frames on the output file, so the duration is measured, not assumed.",
   {
     images: z.array(z.union([
       z.string().describe("Image file path"),
@@ -445,6 +445,8 @@ server.tool(
     durations: z.array(z.number().min(0.5).max(600)).min(2).max(32).optional().describe("One visible duration per image, in order (overrides duration; a per-image duration in images wins over this)"),
     transition: z.string().default("fade").describe("xfade transition between every pair: fade (default), fadeblack, wipeleft, dissolve, circlecrop, ... (one of the 49 names concat accepts)"),
     transition_duration: z.number().min(0.1).max(10).default(1).describe("Transition length in seconds (default 1, must be shorter than the shortest slide)"),
+    transitions: z.array(z.string()).min(1).max(31).optional().describe("One xfade transition name per join, in order (n-1 entries for n images) — overrides transition when given"),
+    transition_durations: z.array(z.number().min(0.1).max(10)).min(1).max(31).optional().describe("One transition length per join, in order (n-1 entries) — each must be shorter than both slides it joins; overrides transition_duration when given"),
     fps: z.number().int().min(1).max(120).default(30).describe("Output frame rate (default 30)"),
     width: z.number().int().min(2).max(7680).default(1280).describe("Output width in pixels (default 1280)"),
     height: z.number().int().min(2).max(4320).default(720).describe("Output height in pixels (default 720)"),
@@ -458,6 +460,8 @@ server.tool(
     durations: a.durations ?? null,
     transition: a.transition,
     transitionDuration: a.transition_duration,
+    transitions: a.transitions ?? null,
+    transitionDurations: a.transition_durations ?? null,
     fps: a.fps,
     width: a.width,
     height: a.height,
@@ -796,7 +800,7 @@ server.tool(
 
 server.tool(
   "mix",
-  "Mix voice over a music bed with sidechain ducking: the bed drops by duck_db whenever the voice speaks (attack/release in ms), the voice is levelled to voice_lufs first, the music loops to the voice length, and the mix is mastered to target_lufs. Returns the ducking actually measured (ducking_measured_db, speech vs silence window on the ducked bed). sfx drops short sounds at exact timestamps (each {file, at_seconds, volume 0-1}, max 16) — they are mixed in after the ducking, so a sting punches through; a timestamp past the voice end is refused. If the voice file is a video, its video stream is copied through. Set dry_run=true to print the exact ffmpeg command that would run and write no file (probes and the loudnorm measurement still run, read-only, to compute the voice gain).",
+  "Mix voice over a music bed with sidechain ducking: the bed drops by duck_db whenever the voice speaks (attack/release in ms), the voice is levelled to voice_lufs first, the music loops to the voice length, and the mix is mastered to target_lufs with two-pass loudnorm (render unmastered, measure it, then normalise with the measured values — single-pass undershoots on quiet voices with long gaps under a bed). Returns the ducking actually measured (ducking_measured_db, speech vs silence window on the ducked bed) and a warning when the mix is peak-limited and cannot reach the target. sfx drops short sounds at exact timestamps (each {file, at_seconds, volume 0-1}, max 16) — they are mixed in after the ducking, so a sting punches through; a timestamp past the voice end is refused. If the voice file is a video, its video stream is copied through. Set dry_run=true to print the exact ffmpeg commands that would run (render + master) and write no file (probes and the loudnorm measurement still run, read-only, to compute the voice gain).",
   {
     voice: pathSchema.describe("Voice/speech file (audio or video with an audio track)"),
     music: pathSchema.describe("Music bed audio file (looped to the voice length)"),
@@ -808,7 +812,7 @@ server.tool(
     voice_lufs: z.number().min(-70).max(0).default(-16).describe("Voice level target before mixing"),
     target_lufs: z.number().min(-70).max(0).default(-14).describe("Master the mix to this LUFS"),
     master: z.boolean().default(true).describe("Master the mix (false = leave the raw mix levels)"),
-    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command that would run, write no file"),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg commands that would run (render + master), write no file"),
     sfx: z.array(z.object({
       file: pathSchema.describe("Short sound file with an audio track"),
       at_seconds: z.number().min(0).max(3600).describe("Timestamp in the voice where the sound lands (must be before the voice ends)"),

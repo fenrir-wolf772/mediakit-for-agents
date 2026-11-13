@@ -628,6 +628,29 @@ const slideVideo = await callExpectThrow("slideshow", { images: [path.join(root,
 checkOk(/still image/.test(slideVideo), "slideshow refuses a video as a slide", slideVideo.slice(0, 200));
 const slideMov = await callExpectThrow("slideshow", { images: [path.join(root, "test/kenburns.png"), path.join(root, "test/logo.png")], output: path.join(root, "outputs/mcp-slideshow-bad5.mov") });
 checkOk(/mp4 only/.test(slideMov), "slideshow refuses a .mov output (mp4 only in v1)", slideMov.slice(0, 200));
+// Per-pair transitions (lượt 44): fade 1s into slide 2, wipeleft 0.5s
+// into slide 3. Join 1 spans [3,4], join 2 spans [6,6.5]; total stays
+// 9s / 270 frames, and the result echoes the per-join lists.
+const slidePairsRes = await client.callTool({
+  name: "slideshow",
+  arguments: { images: [path.join(root, "test/kenburns.png"), path.join(root, "test/logo.png"), path.join(root, "outputs/mcp-slideshow-green.png")], output: path.join(root, "outputs/mcp-slideshow-pairs.mp4"), durations: [3, 3, 3], transitions: ["fade", "wipeleft"], transition_durations: [1, 0.5], fps: 30, width: 640, height: 360 },
+});
+const slidePairsJson = JSON.parse(slidePairsRes.content[0].text);
+console.log("slideshow per-pair:", JSON.stringify(slidePairsJson.transitions), JSON.stringify(slidePairsJson.transition_durations), "| frames", slidePairsJson.frames, "| dur", slidePairsJson.duration_seconds);
+checkOk(slidePairsJson.frames === 270 && near(slidePairsJson.duration_seconds, 9, 0.1) && JSON.stringify(slidePairsJson.transitions) === '["fade","wipeleft"]' && JSON.stringify(slidePairsJson.transition_durations) === "[1,0.5]" && slidePairsJson.transition === null && slidePairsJson.transition_duration === null, "slideshow per-pair transitions echo the per-join list (fade 1s, wipeleft 0.5s) and total 9s / 270 frames", JSON.stringify(slidePairsJson));
+await frameMp4(path.join(root, "outputs/mcp-slideshow-pairs.mp4"), 187, path.join(root, "outputs/mcp-slideshow-pairs-f187.mp4"));
+const pairsF187Vs2 = await psnrY(path.join(root, "outputs/mcp-slideshow-exp-logo.mp4"), path.join(root, "outputs/mcp-slideshow-pairs-f187.mp4"));
+const pairsF187Vs3 = await psnrY(path.join(root, "outputs/mcp-slideshow-exp-green.mp4"), path.join(root, "outputs/mcp-slideshow-pairs-f187.mp4"));
+console.log("slideshow pairs f187 (mid wipeleft) vs slide2 =", pairsF187Vs2, "| vs slide3 =", pairsF187Vs3);
+checkOk(pairsF187Vs2 !== null && pairsF187Vs2 < 30 && pairsF187Vs3 !== null && pairsF187Vs3 < 30, "slideshow mid-wipeleft frame is a blend of slides 2 and 3 (neither pure slide)", `vs slide2 ${pairsF187Vs2}, vs slide3 ${pairsF187Vs3}`);
+const slidePairsBadLen = await callExpectThrow("slideshow", { images: [path.join(root, "test/kenburns.png"), path.join(root, "test/logo.png"), path.join(root, "outputs/mcp-slideshow-green.png")], output: path.join(root, "outputs/mcp-slideshow-bad6.mp4"), transitions: ["fade"] });
+checkOk(/one entry per join/.test(slidePairsBadLen), "slideshow refuses a transitions list with the wrong length", slidePairsBadLen.slice(0, 200));
+const slidePairsBadName = await callExpectThrow("slideshow", { images: [path.join(root, "test/kenburns.png"), path.join(root, "test/logo.png"), path.join(root, "outputs/mcp-slideshow-green.png")], output: path.join(root, "outputs/mcp-slideshow-bad7.mp4"), transitions: ["fade", "swirl"] });
+checkOk(/unknown transition/.test(slidePairsBadName), "slideshow refuses an unknown name inside transitions", slidePairsBadName.slice(0, 200));
+const slidePairsBadDurLen = await callExpectThrow("slideshow", { images: [path.join(root, "test/kenburns.png"), path.join(root, "test/logo.png"), path.join(root, "outputs/mcp-slideshow-green.png")], output: path.join(root, "outputs/mcp-slideshow-bad8.mp4"), transitions: ["fade", "wipeleft"], transition_durations: [1] });
+checkOk(/one entry per join/.test(slidePairsBadDurLen), "slideshow refuses a transition_durations list with the wrong length", slidePairsBadDurLen.slice(0, 200));
+const slidePairsBadDur = await callExpectThrow("slideshow", { images: [path.join(root, "test/kenburns.png"), path.join(root, "test/logo.png"), path.join(root, "outputs/mcp-slideshow-green.png")], output: path.join(root, "outputs/mcp-slideshow-bad9.mp4"), transitions: ["fade", "wipeleft"], transition_durations: [1, 3] });
+checkOk(/shorter than the slides it joins/.test(slidePairsBadDur), "slideshow refuses a per-join duration longer than its slides", slidePairsBadDur.slice(0, 200));
 
 // interpolate: 30fps -> 60fps with blend (fast mode). The frame count
 // is asserted on the output file, not just r_frame_rate.
@@ -883,6 +906,67 @@ const mixSfxBadRes = await client.callTool({
 });
 const mixSfxBadJson = JSON.parse(mixSfxBadRes.content[0].text);
 checkOk(mixSfxBadRes.isError === true && /past the voice end/.test(mixSfxBadJson.error ?? ""), "mix sfx past the voice end is refused", JSON.stringify(mixSfxBadJson));
+
+// mix two-pass mastering (lượt 44): a quiet voice (-34.6 LUFS, long
+// gaps) under a loud bed made single-pass loudnorm undershoot (-14.8
+// LUFS vs -14 target). Two-pass must land on target — m4a hits it
+// exactly, mp3 within tolerance — and report two_pass + no warning,
+// with the unmastered temp file cleaned up.
+const mixQuietM4a = path.join(root, "outputs/mcp-mix-quiet.m4a");
+const mixQuietRes = await client.callTool({
+  name: "mix",
+  arguments: {
+    voice: path.join(root, "test/quiet-voice.mp3"),
+    music: path.join(root, "test/mix-music.mp3"),
+    output: mixQuietM4a,
+    music_volume: 1,
+    duck_db: 18,
+  },
+});
+const mixQuietJson = JSON.parse(mixQuietRes.content[0].text);
+console.log("mix quiet voice: output LUFS", mixQuietJson.output_lufs, "| two_pass", mixQuietJson.two_pass, "| warning", mixQuietJson.warning ?? "(none)");
+checkOk(mixQuietJson.two_pass === true, "mix masters two-pass (measured values applied)", JSON.stringify(mixQuietJson).slice(0, 200));
+checkOk(near(mixQuietJson.output_lufs, -14, 0.5), "mix quiet voice + loud bed masters to -14 LUFS", `got ${mixQuietJson.output_lufs}`);
+checkOk(mixQuietJson.warning === undefined, "mix quiet voice reports no off-target warning", JSON.stringify(mixQuietJson.warning));
+checkOk(existsSync(path.join(root, "outputs/mcp-mix-quiet.unmastered.m4a")) === false, "mix deletes its unmastered temp file", "unmastered file left behind");
+const mixQuietMp3Res = await client.callTool({
+  name: "mix",
+  arguments: {
+    voice: path.join(root, "test/quiet-voice.mp3"),
+    music: path.join(root, "test/mix-music.mp3"),
+    output: path.join(root, "outputs/mcp-mix-quiet.mp3"),
+    music_volume: 1,
+    duck_db: 18,
+  },
+});
+const mixQuietMp3Json = JSON.parse(mixQuietMp3Res.content[0].text);
+console.log("mix quiet voice mp3: output LUFS", mixQuietMp3Json.output_lufs);
+checkOk(near(mixQuietMp3Json.output_lufs, -14, 0.5), "mix quiet voice + loud bed masters to -14 LUFS as mp3", `got ${mixQuietMp3Json.output_lufs}`);
+
+// mix real speech (lượt 44, label-reuse bug): Kokoro voice has ~19 dB
+// crest (-25.6 LUFS, TP -6.28). The old graph reused the [voice]
+// label for both the sidechain and the amix, so the amix branch
+// silently got the UNGAINED voice and the mix measured -25.8 LUFS;
+// the master then could not lift it to -14 under the true-peak cap
+// (landed -15.0). A tone fixture cannot catch this — its tiny crest
+// lets the master lift it anyway — so this real-speech fixture is
+// the regression guard: with the bug it measures -15.0 (fail), fixed
+// it lands -14.1.
+const mixKokoroRes = await client.callTool({
+  name: "mix",
+  arguments: {
+    voice: path.join(root, "test/kokoro-voice.wav"),
+    music: path.join(root, "test/mix-music.mp3"),
+    output: path.join(root, "outputs/mcp-mix-kokoro.m4a"),
+    music_volume: 0.3,
+    duck_db: 12,
+  },
+});
+const mixKokoroJson = JSON.parse(mixKokoroRes.content[0].text);
+console.log("mix kokoro voice: output LUFS", mixKokoroJson.output_lufs, "| two_pass", mixKokoroJson.two_pass, "| warning", mixKokoroJson.warning ?? "(none)");
+checkOk(mixKokoroJson.two_pass === true, "mix kokoro voice masters two-pass", JSON.stringify(mixKokoroJson).slice(0, 200));
+checkOk(near(mixKokoroJson.output_lufs, -14, 0.5), "mix real speech masters to -14 LUFS (label-reuse regression)", `got ${mixKokoroJson.output_lufs}`);
+checkOk(mixKokoroJson.warning === undefined, "mix kokoro voice reports no off-target warning", JSON.stringify(mixKokoroJson.warning));
 
 // convert --gop-seconds: 10s source at 30fps, GOP 2s -> keyframes at
 // 0,2,4,6,8, measured twice (the tool's own report + the keyframes
@@ -1652,9 +1736,9 @@ const capsSameRes = await client.callTool({
 const capsSameJson = JSON.parse(capsSameRes.content[0].text);
 checkOk(capsSameRes.isError === true && /already srt/.test(capsSameJson.error ?? ""), "convert_captions refuses same-format conversion", JSON.stringify(capsSameJson));
 
-// mix --dry-run: plan mode must print the exact ffmpeg command
-// (sidechaincompress + loudnorm, real measured voice gain) and write
-// no file.
+// mix --dry-run: plan mode must print both ffmpeg commands (render
+// with sidechaincompress, master with loudnorm on the unmastered
+// render; real measured voice gain) and write no file.
 const mixDryPath = path.join(root, "outputs/mcp-mix-dry.mp3");
 const mixDryRes = await client.callTool({
   name: "mix",
@@ -1670,9 +1754,11 @@ const mixDryRes = await client.callTool({
 const mixDryJson = JSON.parse(mixDryRes.content[0].text);
 console.log("mix dry-run:", "gain", mixDryJson.voice_gain_db, "dB | ratio", mixDryJson.sidechain_ratio, "|", mixDryJson.commands?.[0]?.slice(0, 120), "...");
 checkOk(mixDryJson.dry_run === true, "mix dry_run=true reports dry_run", JSON.stringify(mixDryJson).slice(0, 120));
-checkOk(Array.isArray(mixDryJson.commands) && mixDryJson.commands.length === 1 && mixDryJson.commands[0].includes("sidechaincompress") && mixDryJson.commands[0].includes("loudnorm"), "mix dry-run prints the exact ffmpeg command (sidechain + loudnorm)", JSON.stringify(mixDryJson.commands));
+checkOk(Array.isArray(mixDryJson.commands) && mixDryJson.commands.length === 2 && mixDryJson.commands[0].includes("sidechaincompress") && !mixDryJson.commands[0].includes("loudnorm") && mixDryJson.commands[1].includes("loudnorm") && mixDryJson.commands[1].includes(".unmastered."), "mix dry-run prints both passes (render sidechain, master loudnorm on the unmastered render)", JSON.stringify(mixDryJson.commands));
+checkOk(mixDryJson.mastering === "two-pass", "mix dry-run reports two-pass mastering", JSON.stringify(mixDryJson.mastering));
 checkOk(typeof mixDryJson.voice_gain_db === "number" && mixDryJson.voice_gain_db !== 0, "mix dry-run computes a real voice gain from measurement", `got ${mixDryJson.voice_gain_db}`);
 checkOk(existsSync(mixDryPath) === false, "mix dry-run writes no file", mixDryPath);
+checkOk(existsSync(path.join(root, "outputs/mcp-mix-dry.unmastered.mp3")) === false, "mix dry-run writes no unmastered temp file", "unmastered file exists");
 
 // find: recursive substring search with probe info per match.
 const findContentRes = await client.callTool({
