@@ -51,6 +51,7 @@ pictures — pictures fit the voice:
 {
   "version": 1,
   "title": "Why the Moon Is Leaving Us",
+  "preset": "vertical",
   "width": 1080,
   "height": 1920,
   "fps": 30,
@@ -77,6 +78,17 @@ pictures — pictures fit the voice:
 
 - Paths resolve relative to the manifest file (same as the `manifest`
   tool). `width`/`height` must be even. `fps` 1–120.
+- `preset` is optional: one of `vertical` (1080×1920, 30fps,
+  `clean-bold`), `horizontal` (1920×1080, 30fps, no style),
+  `square` (1080×1080, 30fps, `minimal-line`), `cinematic`
+  (1920×1080, 24fps, `warm-story`), `vertical-60` (1080×1920,
+  60fps, `clean-bold`) — the full table lives in
+  `skills/shorts-video/assemble-presets.json`. A preset fills any
+  of `width`/`height`/`fps`/`style` the manifest leaves out
+  (reported in `preset_applied`); an explicit field always wins
+  and is reported in `preset_overrides`. Unknown preset ids fail
+  validation. Without a preset, `width`/`height` are required —
+  the aspect ratio is never silently defaulted.
 - `style` is optional; when given it must be one of the locked ids
   in `styles.json` and it sets the caption burn values.
 - `voice` is required: `path` plus `lead`/`tail` in seconds (default

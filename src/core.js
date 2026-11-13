@@ -7241,6 +7241,65 @@ function assembleOptNum(v, def, label, opts = {}) {
   return num(v, label, opts);
 }
 
+// Named assemble presets, read from skills/shorts-video/
+// assemble-presets.json (the single source of truth, shipped in
+// the npm package under "files"). One id picks the film geometry
+// + fps + caption style for the whole manifest, so a manifest can
+// say `"preset": "vertical"` instead of retyping width/height/fps/
+// style — the setup-gate idea from kaomei/stickman-video-director:
+// aspect ratio + style are one explicit named choice, never
+// silently defaulted. An explicit field in the manifest always
+// wins over the preset and is reported in preset_overrides; fields
+// the preset filled are listed in preset_applied. Unlike
+// styles.json there is no embedded fallback — a missing or corrupt
+// presets file fails loudly, because a preset that silently
+// resolved to different geometry would ship the wrong aspect ratio.
+export const ASSEMBLE_PRESET_IDS = ["vertical", "horizontal", "square", "cinematic", "vertical-60"];
+const ASSEMBLE_PRESETS_PATH = fileURLToPath(new URL("../skills/shorts-video/assemble-presets.json", import.meta.url));
+let cachedAssemblePresets = null;
+export async function getAssemblePresets() {
+  if (cachedAssemblePresets) return cachedAssemblePresets;
+  let doc;
+  try {
+    doc = JSON.parse(await readFile(ASSEMBLE_PRESETS_PATH, "utf8"));
+  } catch {
+    throw new MediaKitError("assemble preset library missing: skills/shorts-video/assemble-presets.json not found next to the package", "PRESET_LIBRARY_MISSING");
+  }
+  if (!doc || !Array.isArray(doc.presets) || doc.presets.length === 0) {
+    throw new MediaKitError("assemble preset library has no presets: skills/shorts-video/assemble-presets.json", "PRESET_LIBRARY_INVALID");
+  }
+  const byId = {};
+  for (const p of doc.presets) {
+    if (typeof p?.id !== "string" || !p.id) throw new MediaKitError("assemble preset library: preset without an id", "PRESET_LIBRARY_INVALID");
+    if (byId[p.id]) throw new MediaKitError(`assemble preset library: duplicate preset id "${p.id}"`, "PRESET_LIBRARY_INVALID");
+    const width = Number(p.width), height = Number(p.height), fps = Number(p.fps);
+    if (!Number.isInteger(width) || width < 2 || width > 7680 || width % 2) throw new MediaKitError(`assemble preset library: preset "${p.id}" has bad width ${p.width}`, "PRESET_LIBRARY_INVALID");
+    if (!Number.isInteger(height) || height < 2 || height > 4320 || height % 2) throw new MediaKitError(`assemble preset library: preset "${p.id}" has bad height ${p.height}`, "PRESET_LIBRARY_INVALID");
+    if (!Number.isInteger(fps) || fps < 1 || fps > 120) throw new MediaKitError(`assemble preset library: preset "${p.id}" has bad fps ${p.fps}`, "PRESET_LIBRARY_INVALID");
+    if (p.style !== null && p.style !== undefined && !SHORTS_STYLE_IDS.includes(p.style)) throw new MediaKitError(`assemble preset library: preset "${p.id}" has unknown style ${JSON.stringify(p.style)}`, "PRESET_LIBRARY_INVALID");
+    byId[p.id] = { id: p.id, name: p.name ?? p.id, description: p.description ?? "", width, height, fps, style: p.style ?? null };
+  }
+  const ids = Object.keys(byId).sort();
+  if (JSON.stringify(ids) !== JSON.stringify([...ASSEMBLE_PRESET_IDS].sort())) {
+    throw new MediaKitError(`assemble preset library ids (${ids.join(", ")}) do not match ASSEMBLE_PRESET_IDS (${ASSEMBLE_PRESET_IDS.join(", ")}); update both together`, "PRESET_LIBRARY_INVALID");
+  }
+  cachedAssemblePresets = byId;
+  return byId;
+}
+
+export async function resolveAssemblePreset(preset) {
+  if (preset === null || preset === undefined) return null;
+  if (typeof preset !== "string" || !preset.trim()) {
+    throw new MediaKitError(`assemble preset must be one of ${ASSEMBLE_PRESET_IDS.join(", ")}, got: ${JSON.stringify(preset)}`, "INVALID_ARG");
+  }
+  const presets = await getAssemblePresets();
+  const found = presets[preset];
+  if (!found) {
+    throw new MediaKitError(`assemble preset must be one of ${ASSEMBLE_PRESET_IDS.join(", ")}, got: ${preset}`, "INVALID_ARG");
+  }
+  return found;
+}
+
 function assembleEvenDown(n) { return n % 2 ? n - 1 : n; }
 
 // Transition handles, in frames. A transition of F frames is
@@ -7384,13 +7443,32 @@ async function validateAssembleManifest(doc, manifestAbs) {
   const manifestDir = path.dirname(manifestAbs);
   const resolveRel = (p) => (path.isAbsolute(p) ? p : path.join(manifestDir, p));
   const title = doc.title === undefined || doc.title === null ? path.basename(manifestAbs, path.extname(manifestAbs)) : String(doc.title);
-  const width = num(doc.width, "width", { min: 2, max: 7680, integer: true });
-  const height = num(doc.height, "height", { min: 2, max: 4320, integer: true });
+  // Named preset (optional): one id picks width/height/fps/style
+  // for the whole film. An explicit field in the manifest always
+  // wins over the preset; without a preset, width/height stay
+  // required (num() throws on undefined) — the aspect ratio is
+  // never silently defaulted.
+  const preset = await resolveAssemblePreset(doc.preset ?? null);
+  const presetApplied = [];
+  const presetOverrides = [];
+  const pickPresetField = (field, raw, fallback) => {
+    if (raw !== undefined && raw !== null) {
+      if (preset && preset[field] !== null && preset[field] !== undefined && raw !== preset[field]) presetOverrides.push(field);
+      return raw;
+    }
+    if (preset && preset[field] !== null && preset[field] !== undefined) {
+      presetApplied.push(field);
+      return preset[field];
+    }
+    return fallback;
+  };
+  const width = num(pickPresetField("width", doc.width, undefined), "width", { min: 2, max: 7680, integer: true });
+  const height = num(pickPresetField("height", doc.height, undefined), "height", { min: 2, max: 4320, integer: true });
   if (width % 2 || height % 2) {
     throw new MediaKitError(`assemble width/height must be even (got ${width}x${height})`, "INVALID_ARG");
   }
-  const fps = assembleOptNum(doc.fps, 30, "fps", { min: 1, max: 120, integer: true });
-  const style = doc.style === undefined || doc.style === null ? null : String(doc.style);
+  const fps = assembleOptNum(pickPresetField("fps", doc.fps, 30), 30, "fps", { min: 1, max: 120, integer: true });
+  const style = pickPresetField("style", doc.style === undefined || doc.style === null ? null : String(doc.style), null);
   if (style !== null && !SHORTS_STYLE_IDS.includes(style)) {
     throw new MediaKitError(`assemble style must be one of ${SHORTS_STYLE_IDS.join(", ")}, got: ${style}`, "INVALID_ARG");
   }
@@ -7710,9 +7788,11 @@ async function validateAssembleManifest(doc, manifestAbs) {
     assets: assetHashes,
     style: styleValues ? stableStringify(styleValues.burn_captions) : null,
     width, height, fps,
+    preset: preset ? preset.id : null,
   })).digest("hex");
   return {
     manifest: manifestAbs, manifestDir, title, width, height, fps, style, styleValues,
+    preset: preset ? preset.id : null, preset_applied: presetApplied, preset_overrides: presetOverrides,
     voice: { path: voicePath, lead, tail, duration_seconds: voiceDuration },
     total_seconds: totalSeconds, total_frames: totalFrames,
     music, sfx, captions, shots, chapters, warnings, fingerprint,
@@ -8064,6 +8144,9 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
     height: plan.height,
     fps: plan.fps,
     style: plan.style,
+    preset: plan.preset,
+    preset_applied: plan.preset_applied,
+    preset_overrides: plan.preset_overrides,
     total_seconds: plan.total_seconds,
     total_frames: plan.total_frames,
     fingerprint: plan.fingerprint,

@@ -140,6 +140,8 @@ jobs:
           node bin/mediakit.js assemble test/assemble-film-transitions.json --mode preview -o outputs/ci-assemble-trans --preview-seconds 5 | grep '"preview_seconds": 5'
           node bin/mediakit.js loudness test/kokoro-voice.wav -o outputs/ci-loud-comp.wav --compressor | grep '"compressed_lufs"'
           node bin/mediakit.js assemble test/assemble-text.json --mode validate | grep 'TITLE CARD'
+          node bin/mediakit.js assemble test/assemble-preset.json --mode validate | grep '"preset": "vertical"'
+          node bin/mediakit.js assemble test/assemble-preset-override.json --mode validate | grep '"width": 720'
           JOBID=$(node bin/mediakit.js assemble test/assemble-chapters.json --mode render --force --async -o outputs/ci-assemble-async | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).job_id))")
           for i in $(seq 1 60); do node bin/mediakit.js job $JOBID | grep -q '"status": "done"' && break; sleep 5; done
           node bin/mediakit.js job $JOBID | grep '"status": "done"'

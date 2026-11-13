@@ -3411,6 +3411,26 @@ const assembleStyleText = await callExpectThrow("assemble", { manifest_path: pat
 checkOk(/must be one of clean-bold, minimal-line, warm-story/.test(assembleStyleText ?? ""), "assemble validate refuses an unknown style id", assembleStyleText ?? "");
 const assembleMissingText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-missing.json"), mode: "validate" });
 checkOk(/nope\.png/.test(assembleMissingText ?? ""), "assemble validate refuses a missing shot asset", assembleMissingText ?? "");
+// assemble presets: one named id picks width/height/fps/style.
+// Fixture test/assemble-preset.json is assemble-film.json with the
+// four fields replaced by "preset": "vertical".
+const presetStage = await stageAssembleManifest("assemble-preset.json");
+const presetValidateRes = await client.callTool({ name: "assemble", arguments: { manifest_path: presetStage.manifestPath, mode: "validate" } });
+const presetValidateJson = JSON.parse(presetValidateRes.content[0].text);
+checkOk(presetValidateJson.preset === "vertical" && presetValidateJson.width === 1080 && presetValidateJson.height === 1920 && presetValidateJson.fps === 30 && presetValidateJson.style === "clean-bold" && JSON.stringify(presetValidateJson.preset_applied) === JSON.stringify(["width", "height", "fps", "style"]) && presetValidateJson.preset_overrides.length === 0 && presetValidateJson.total_frames === 300, "assemble preset vertical resolves to 1080x1920/30fps/clean-bold with all four fields preset_applied", JSON.stringify({ preset: presetValidateJson.preset, w: presetValidateJson.width, h: presetValidateJson.height, fps: presetValidateJson.fps, style: presetValidateJson.style, applied: presetValidateJson.preset_applied }));
+const presetOverrideStage = await stageAssembleManifest("assemble-preset-override.json");
+const presetOverrideRes = await client.callTool({ name: "assemble", arguments: { manifest_path: presetOverrideStage.manifestPath, mode: "validate" } });
+const presetOverrideJson = JSON.parse(presetOverrideRes.content[0].text);
+checkOk(presetOverrideJson.preset === "vertical" && presetOverrideJson.width === 720 && presetOverrideJson.height === 1280 && presetOverrideJson.fps === 24 && presetOverrideJson.style === "warm-story" && presetOverrideJson.preset_applied.length === 0 && JSON.stringify(presetOverrideJson.preset_overrides) === JSON.stringify(["width", "height", "fps", "style"]), "assemble explicit fields win over the preset and are reported in preset_overrides", JSON.stringify({ w: presetOverrideJson.width, h: presetOverrideJson.height, fps: presetOverrideJson.fps, style: presetOverrideJson.style, overrides: presetOverrideJson.preset_overrides }));
+const presetBadText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-preset.json"), mode: "validate" });
+checkOk(/must be one of vertical, horizontal, square, cinematic, vertical-60/.test(presetBadText ?? ""), "assemble validate refuses an unknown preset id", presetBadText ?? "");
+// The preset film renders at the preset geometry: force-render the
+// staged preset manifest and measure final.mp4 on disk.
+const presetOut = path.join(presetStage.dir, "out");
+const presetRenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: presetStage.manifestPath, mode: "render", output_dir: presetOut, force: true } }, undefined, { timeout: 300000 });
+const presetRenderJson = JSON.parse(presetRenderRes.content[0].text);
+const presetFinalProbe = await probeStreams(path.join(presetOut, "final.mp4"));
+checkOk(presetRenderJson.final?.dimensions === "1080x1920" && presetRenderJson.preset === "vertical" && presetRenderJson.final?.frames === 300 && near(parseFloat(presetFinalProbe?.format?.duration), 10, 0.15), "assemble preset film renders 1080x1920 / 300 frames / 10s with preset echoed in the receipt", JSON.stringify(presetRenderJson.final));
 const assembleApproveEarlyText = await callExpectThrow("assemble", { manifest_path: assembleStage.manifestPath, mode: "approve", output_dir: assembleOut });
 checkOk(/needs a preview/.test(assembleApproveEarlyText ?? ""), "assemble approve refuses without a preview", assembleApproveEarlyText ?? "");
 const assembleRenderEarlyText = await callExpectThrow("assemble", { manifest_path: assembleStage.manifestPath, mode: "render", output_dir: assembleOut });
