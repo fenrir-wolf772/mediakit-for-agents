@@ -98,10 +98,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "cut_words"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 47 tools present");
-checkOk(missing.length === 0, "tools/list has all 47 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 48 tools present");
+checkOk(missing.length === 0, "tools/list has all 48 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -2208,7 +2208,82 @@ const trChunkJson = JSON.parse(trChunkRes.content[0].text);
 checkOk(trChunkRes.isError !== true && trChunkJson.chunks === 3 && trChunkJson.chunk_seconds === 5 && trChunkJson.chunk_overlap_seconds === 2, "transcribe --chunk-seconds 5 splits 11s into 3 chunks with 2s overlap", JSON.stringify(trChunkJson).slice(0, 300));
 checkOk(trChunkJson.segment_count === 3 && near(trChunkJson.segments?.[0]?.start, 0, 0.01) && near(trChunkJson.segments?.[1]?.start, 5, 0.01) && near(trChunkJson.segments?.[2]?.start, 10, 0.01), "chunked segments are re-offset to start at 0/5/10", JSON.stringify(trChunkJson.segments));
 checkOk(near(trChunkJson.segments?.[0]?.end, 7, 0.01) && near(trChunkJson.segments?.[1]?.end, 11, 0.01) && near(trChunkJson.segments?.[2]?.end, 11, 0.01), "chunked segments are clamped to their chunk ends", JSON.stringify(trChunkJson.segments));
+
+// transcribe --word-timestamps through the same stub: the canned JSON
+// now carries the real 28 tokens from whisper-cli b5454 + ggml-tiny,
+// so the token -> word grouping is exercised ungated.
+const trWordsRes = await stubClient.callTool({
+  name: "transcribe",
+  arguments: { input: path.join(root, "test/speech-jfk.flac"), output: path.join(root, "outputs/mcp-jfk-words-stub.srt"), model: "tiny", language: "en", engine: "whisper", word_timestamps: true },
+});
+const trWordsJson = JSON.parse(trWordsRes.content[0].text);
+checkOk(trWordsRes.isError !== true && trWordsJson.word_count === 22 && trWordsJson.words?.length === 22, "transcribe --word-timestamps (stub) returns 22 words", JSON.stringify(trWordsJson.words?.slice(0, 3)));
+checkOk(trWordsJson.words?.[3]?.word === "fellow" && near(trWordsJson.words?.[3]?.start, 0.95, 0.01) && near(trWordsJson.words?.[3]?.end, 1.59, 0.01), "word #3 is 'fellow' [0.95, 1.59] from the token timings", JSON.stringify(trWordsJson.words?.[3]));
+checkOk(trWordsJson.words?.[21]?.word === "country." && near(trWordsJson.words?.[21]?.end, 10.5, 0.01), "last word is 'country.' — the [_TT_525] timestamp token is skipped, not glued on", JSON.stringify(trWordsJson.words?.[21]));
+checkOk(trWordsJson.words?.every((w, i, a) => i === 0 || w.start >= a[i - 1].start) && trWordsJson.words?.every((w, i) => w.end > w.start && w.index === i), "words are sorted, non-empty and 0-based indexed", JSON.stringify(trWordsJson.words?.slice(-2)));
+checkOk(!("words" in trStubJson) && !("word_count" in trStubJson), "transcribe without --word-timestamps returns no words key", Object.keys(trStubJson).join(","));
+// Chunked + word timestamps through the stub: 20 words (the stub
+// repeats its canned words per chunk; ownership keeps each once per
+// owned window, the boundary repeat lands in chunk 2 as 'fellow'
+// [10.95, 11] — the same documented boundary behaviour as segments).
+const trChunkWordsRes = await stubClient.callTool({
+  name: "transcribe",
+  arguments: { input: path.join(root, "test/speech-jfk.flac"), output: path.join(root, "outputs/mcp-jfk-chunk-words-stub.srt"), model: "tiny", language: "en", engine: "whisper", chunk_seconds: 5, word_timestamps: true },
+});
+const trChunkWordsJson = JSON.parse(trChunkWordsRes.content[0].text);
+checkOk(trChunkWordsRes.isError !== true && trChunkWordsJson.chunks === 3 && trChunkWordsJson.word_count === 20, "chunked transcribe --word-timestamps returns 20 words over 3 chunks", `chunks=${trChunkWordsJson.chunks} words=${trChunkWordsJson.word_count}`);
+checkOk(trChunkWordsJson.words?.every((w, i, a) => i === 0 || w.start >= a[i - 1].start) && trChunkWordsJson.words?.every((w) => w.start >= 0 && w.end <= 11), "chunked words are sorted and inside the file", JSON.stringify(trChunkWordsJson.words?.slice(-2)));
 await stubClient.close();
+
+// cut_words: edit by transcript on a hand-written words file over
+// test/source.mp4 (10s). Words: hello[0,1] um[2,3] world[4,5]
+// uh[6,7] again[8,9]. Removing um+uh keeps [0,1.12]+[3.94,5.12]+
+// [7.94,9.12] = 3.48s (pads 0.06/0.12 clamped to the 1s gaps).
+const cwWords = path.join(root, "test/cut-words.json");
+const cwRes = await client.callTool({ name: "cut_words", arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-cutwords.mp4"), words_file: cwWords, remove: "um,uh" } });
+const cwJson = JSON.parse(cwRes.content[0].text);
+checkOk(cwRes.isError !== true && cwJson.removed_count === 2 && cwJson.removed_words.map((w) => w.word).join(",") === "um,uh", "cut_words --remove um,uh removes exactly those 2 words", JSON.stringify(cwJson.removed_words));
+checkOk(near(cwJson.duration_after, 3.48, 0.05) && JSON.stringify(cwJson.keep_segments) === JSON.stringify([{ start: 0, end: 1.12, duration: 1.12 }, { start: 3.94, end: 5.12, duration: 1.18 }, { start: 7.94, end: 9.12, duration: 1.18 }]), "cut_words keep segments are [0,1.12]+[3.94,5.12]+[7.94,9.12] (3.48s)", JSON.stringify(cwJson.keep_segments));
+checkOk(cwJson.cut_check?.swallowed?.length === 0, "cut_words cut check: no kept word swallowed", JSON.stringify(cwJson.cut_check));
+// --fillers matches the same two words; --keep rescues one.
+const cwFillRes = await client.callTool({ name: "cut_words", arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-cutwords-fill.mp4"), words_file: cwWords, fillers: true, keep: "1" } });
+const cwFillJson = JSON.parse(cwFillRes.content[0].text);
+checkOk(cwFillRes.isError !== true && cwFillJson.removed_count === 1 && cwFillJson.removed_words[0].word === "uh" && near(cwFillJson.duration_after, 6.3, 0.05), "cut_words --fillers --keep 1 removes only 'uh' (um rescued)", JSON.stringify(cwFillJson.removed_words));
+// --indices cuts by 0-based position, not text.
+const cwIdxRes = await client.callTool({ name: "cut_words", arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-cutwords-idx.mp4"), words_file: cwWords, indices: "2" } });
+const cwIdxJson = JSON.parse(cwIdxRes.content[0].text);
+checkOk(cwIdxRes.isError !== true && cwIdxJson.removed_count === 1 && cwIdxJson.removed_words[0].word === "world" && near(cwIdxJson.duration_after, 6.3, 0.05), "cut_words --indices 2 removes 'world' only", JSON.stringify(cwIdxJson.removed_words));
+// Audio-only input takes the audio-codec branch (.mp3 out).
+const cwAudioRes = await client.callTool({ name: "cut_words", arguments: { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-cutwords-audio.mp3"), words_file: cwWords, remove: "um,uh" } });
+const cwAudioJson = JSON.parse(cwAudioRes.content[0].text);
+checkOk(cwAudioRes.isError !== true && cwAudioJson.removed_count === 2 && near(cwAudioJson.duration_after, 3.36, 0.05), "cut_words on audio-only input cuts to 3.36s", JSON.stringify(cwAudioJson).slice(0, 200));
+// --dry-run plans without writing; no match stream-copies.
+const cwDryRes = await client.callTool({ name: "cut_words", arguments: { input: path.join(root, "test/source.mp4"), words_file: cwWords, remove: "um,uh", dry_run: true } });
+const cwDryJson = JSON.parse(cwDryRes.content[0].text);
+checkOk(cwDryRes.isError !== true && cwDryJson.dry_run === true && !("output" in cwDryJson) && cwDryJson.removed_count === 2, "cut_words --dry-run returns the plan with no output file", JSON.stringify(cwDryJson).slice(0, 200));
+const cwNoRes = await client.callTool({ name: "cut_words", arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-cutwords-nomatch.mp4"), words_file: cwWords, remove: "zzz" } });
+const cwNoJson = JSON.parse(cwNoRes.content[0].text);
+checkOk(cwNoRes.isError !== true && cwNoJson.stream_copy === true && near(cwNoJson.duration_after, 10, 0.05) && /no words matched/.test(cwNoJson.warning ?? ""), "cut_words with no match stream-copies unchanged", JSON.stringify(cwNoJson).slice(0, 200));
+// --min-keep drops the short first run; its word is reported swallowed.
+const cwMinRes = await client.callTool({ name: "cut_words", arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-cutwords-minkeep.mp4"), words_file: cwWords, remove: "um,uh", min_keep: 1.15 } });
+const cwMinJson = JSON.parse(cwMinRes.content[0].text);
+checkOk(cwMinRes.isError !== true && near(cwMinJson.duration_after, 2.36, 0.05) && cwMinJson.cut_check?.swallowed?.length === 1 && cwMinJson.cut_check.swallowed[0].word === "hello", "cut_words --min-keep 1.15 drops the 1.12s run and reports 'hello' swallowed", JSON.stringify(cwMinJson.cut_check));
+// Validation: no selector, out-of-range index, a JSON file with no
+// words array (test/cues.json is a bare cues array).
+const cwNoSelRes = await client.callTool({ name: "cut_words", arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-cutwords-nosel.mp4"), words_file: cwWords } });
+const cwNoSelJson = JSON.parse(cwNoSelRes.content[0].text);
+checkOk(cwNoSelRes.isError === true && /selector/.test(cwNoSelJson.error ?? ""), "cut_words with no selector refuses", JSON.stringify(cwNoSelJson));
+const cwBadIdxRes = await client.callTool({ name: "cut_words", arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-cutwords-badidx.mp4"), words_file: cwWords, indices: "9" } });
+const cwBadIdxJson = JSON.parse(cwBadIdxRes.content[0].text);
+checkOk(cwBadIdxRes.isError === true && /out of range/.test(cwBadIdxJson.error ?? ""), "cut_words --indices 9 (only 5 words) refuses as out of range", JSON.stringify(cwBadIdxJson));
+const cwBadFileRes = await client.callTool({ name: "cut_words", arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-cutwords-badfile.mp4"), words_file: path.join(root, "test/cues.json"), remove: "um" } });
+const cwBadFileJson = JSON.parse(cwBadFileRes.content[0].text);
+checkOk(cwBadFileRes.isError === true && /words/.test(cwBadFileJson.error ?? ""), "cut_words refuses a JSON file with no words array", JSON.stringify(cwBadFileJson));
+// cut_words through the CLI: --dry-run needs no -o; no selector refuses.
+const cwCliDry = await runCli(["cut-words", path.join(root, "test/source.mp4"), "--words-file", path.join(root, "test/cut-words.json"), "--remove", "um,uh", "--dry-run"]);
+checkOk(cwCliDry.code === 0 && /"dry_run": true/.test(cwCliDry.out), "CLI cut-words --dry-run needs no -o and prints the plan", cwCliDry.out.slice(0, 200));
+const cwCliNoSel = await runCli(["cut-words", path.join(root, "test/source.mp4"), "--words-file", path.join(root, "test/cut-words.json"), "-o", path.join(root, "outputs/cli-cutwords-nosel.mp4")]);
+checkOk(cwCliNoSel.code !== 0 && /selector/.test(cwCliNoSel.out), "CLI cut-words with no selector refuses", cwCliNoSel.out.slice(0, 200));
 
 // No engine at all (both disabled): doctor must report engine
 // "none" with a fix carrying BOTH install lines.
@@ -2283,6 +2358,29 @@ if (process.env.MEDIAKIT_TEST_ASR === "1") {
   });
   const trBurnJson = JSON.parse(trBurnRes.content[0].text);
   checkOk(trBurnRes.isError !== true && near(trBurnJson.duration_seconds, 10, 0.05), "transcribe -> burn_captions chain renders a 10s captioned video", JSON.stringify(trBurnJson).slice(0, 200));
+  // Word timestamps from the real faster-whisper engine, then a real
+  // word cut: "fellow" out of the JFK line, re-transcribed to prove
+  // it is gone (filler_cut's residual check).
+  const trWordsRes = await client.callTool({
+    name: "transcribe",
+    arguments: { input: path.join(root, "test/speech-jfk.flac"), output: path.join(root, "outputs/mcp-jfk-words.srt"), model: "tiny", language: "en", word_timestamps: true },
+  });
+  const trWordsJson = JSON.parse(trWordsRes.content[0].text);
+  checkOk(trWordsRes.isError !== true && trWordsJson.word_count >= 10 && trWordsJson.words?.some((w) => String(w.word).toLowerCase().replace(/[^a-z']/g, "") === "fellow"), "transcribe --word-timestamps (faster-whisper) returns words incl. 'fellow'", JSON.stringify(trWordsJson.words?.slice(0, 5)));
+  checkOk(trWordsJson.words?.every((w, i, a) => i === 0 || w.start >= a[i - 1].start) && trWordsJson.words?.every((w) => w.end > w.start), "faster-whisper words are sorted with end > start", JSON.stringify(trWordsJson.words?.slice(-3)));
+  await writeFile(path.join(root, "outputs/mcp-jfk-words.json"), JSON.stringify(trWordsJson), "utf8");
+  const cwJfkRes = await client.callTool({
+    name: "cut_words",
+    arguments: { input: path.join(root, "test/speech-jfk.flac"), output: path.join(root, "outputs/mcp-jfk-cut.flac"), words_file: path.join(root, "outputs/mcp-jfk-words.json"), remove: "fellow" },
+  });
+  const cwJfkJson = JSON.parse(cwJfkRes.content[0].text);
+  checkOk(cwJfkRes.isError !== true && cwJfkJson.removed_count === 1 && cwJfkJson.removed_words[0].word === "fellow" && cwJfkJson.duration_after < cwJfkJson.duration_before, "cut_words removes 'fellow' from the JFK recording", JSON.stringify(cwJfkJson.removed_words));
+  const trCutRes = await client.callTool({
+    name: "transcribe",
+    arguments: { input: path.join(root, "outputs/mcp-jfk-cut.flac"), output: path.join(root, "outputs/mcp-jfk-cut.srt"), model: "tiny", language: "en" },
+  });
+  const trCutJson = JSON.parse(trCutRes.content[0].text);
+  checkOk(trCutRes.isError !== true && !/fellow/i.test(trCutJson.text ?? ""), "re-transcribing the cut proves 'fellow' is gone (residual check)", trCutJson.text ?? "");
 }
 
 // transcribe --engine whisper end-to-end with the REAL whisper.cpp
@@ -2308,6 +2406,16 @@ if (process.env.MEDIAKIT_TEST_WHISPER_CPP === "1") {
   });
   const wToneJson = JSON.parse(wToneRes.content[0].text);
   checkOk(wToneRes.isError !== true && wToneJson.segment_count === 0 && wToneJson.text === "" && wToneJson.size_bytes === 0, "transcribe --engine whisper of a tone (no speech) yields 0 segments and an empty .srt", JSON.stringify(wToneJson).slice(0, 200));
+  // Word timestamps from the real whisper.cpp engine: same sentence,
+  // same word count as the stub (the stub's tokens are this binary's
+  // real output), with 'fellow' at [0.95, 1.59].
+  const wWordsRes = await client.callTool({
+    name: "transcribe",
+    arguments: { input: path.join(root, "test/speech-jfk.flac"), output: path.join(root, "outputs/mcp-jfk-whisper-words.srt"), model: "tiny", language: "en", engine: "whisper", word_timestamps: true },
+  });
+  const wWordsJson = JSON.parse(wWordsRes.content[0].text);
+  checkOk(wWordsRes.isError !== true && wWordsJson.word_count >= 20 && wWordsJson.words?.some((w) => w.word === "fellow" && w.start >= 0.5 && w.start <= 1.5), "transcribe --engine whisper --word-timestamps returns >= 20 words incl. 'fellow' near 1s", JSON.stringify(wWordsJson.words?.slice(2, 5)));
+  checkOk(wWordsJson.words?.every((w) => w.end > w.start && !/\[/.test(w.word)), "whisper.cpp words carry no bracketed special tokens", JSON.stringify(wWordsJson.words?.slice(-2)));
   // Chunked with the real engine: 11s at 5s a chunk -> 3 chunks,
   // segments re-offset onto the full timeline, the JFK line intact
   // (a phrase at a boundary may repeat — the overlap is heard twice
@@ -2402,7 +2510,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 47 && infoJson.tools_available >= 46 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 47 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 48 && infoJson.tools_available >= 46 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 48 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");

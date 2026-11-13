@@ -8,9 +8,14 @@ from av.open), and MediaKit already extracts to 16 kHz mono WAV with
 ffmpeg, so there is nothing for PyAV to do here.
 
 Usage: asr_faster_whisper.py --wav in.wav [--model tiny] [--language en]
+       [--word-timestamps]
 Prints: {"language": "en", "language_probability": 1.0,
 "duration_seconds": 11.0, "segments": [{"start": 0.0, "end": 11.0,
 "text": "..."}]} — segments are speech only; silence yields [].
+With --word-timestamps the output also carries a flat "words" list
+[{"start": 0.32, "end": 0.53, "word": "so", "probability": 0.99}]
+in timeline order — the timings cut_words cuts by. Word timestamps
+come from the model, never from the caller.
 """
 import argparse
 import json
@@ -28,6 +33,8 @@ def main():
                     help="ISO 639-1 code, or omit for auto-detect")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--compute-type", default="int8")
+    ap.add_argument("--word-timestamps", action="store_true",
+                    help="include per-word timings in the output JSON")
     args = ap.parse_args()
 
     with wave.open(args.wav, "rb") as w:
@@ -42,7 +49,9 @@ def main():
     from faster_whisper import WhisperModel
     model = WhisperModel(args.model, device=args.device,
                          compute_type=args.compute_type)
-    segments, info = model.transcribe(audio, language=args.language)
+    segments, info = model.transcribe(audio, language=args.language,
+                                      word_timestamps=args.word_timestamps)
+    seg_list = list(segments)
     out = {
         "language": info.language,
         "language_probability": round(info.language_probability, 4),
@@ -50,9 +59,17 @@ def main():
         "segments": [
             {"start": round(s.start, 3), "end": round(s.end, 3),
              "text": s.text.strip()}
-            for s in segments
+            for s in seg_list
         ],
     }
+    if args.word_timestamps:
+        out["words"] = [
+            {"start": round(w.start, 3), "end": round(w.end, 3),
+             "word": w.word.strip(),
+             "probability": round(w.probability, 4)}
+            for s in seg_list for w in (s.words or [])
+            if w.word.strip()
+        ]
     print(json.dumps(out))
     return 0
 

@@ -424,15 +424,33 @@ const COMMANDS = {
     ],
   },
   transcribe: {
-    usage: "mediakit transcribe <input> -o <output.srt> [--model tiny] [--language auto|en|vi|...] [--engine auto|faster-whisper|whisper] [--chunk-seconds 300]",
-    desc: "Transcribe speech to a .srt with a LOCAL engine (no cloud, audio never uploaded): faster-whisper by default, whisper.cpp with --engine whisper. Needs an engine installed (see doctor); without one the call fails with install lines. Env: MEDIAKIT_ASR_PYTHON picks the python with faster-whisper, MEDIAKIT_ASR_MODEL the default model; MEDIAKIT_WHISPER_CPP_BIN / MEDIAKIT_WHISPER_MODEL point at a whisper.cpp binary + ggml model. --chunk-seconds splits long files into chunks (5–1800s, 2s overlap, segments re-offset onto the full timeline) so hour-long recordings transcribe without one giant ASR run; a file shorter than one chunk runs as a single chunk.",
+    usage: "mediakit transcribe <input> -o <output.srt> [--model tiny] [--language auto|en|vi|...] [--engine auto|faster-whisper|whisper] [--chunk-seconds 300] [--word-timestamps]",
+    desc: "Transcribe speech to a .srt with a LOCAL engine (no cloud, audio never uploaded): faster-whisper by default, whisper.cpp with --engine whisper. Needs an engine installed (see doctor); without one the call fails with install lines. Env: MEDIAKIT_ASR_PYTHON picks the python with faster-whisper, MEDIAKIT_ASR_MODEL the default model; MEDIAKIT_WHISPER_CPP_BIN / MEDIAKIT_WHISPER_MODEL point at a whisper.cpp binary + ggml model. --chunk-seconds splits long files into chunks (5–1800s, 2s overlap, segments re-offset onto the full timeline) so hour-long recordings transcribe without one giant ASR run; a file shorter than one chunk runs as a single chunk. --word-timestamps also returns per-word timings in the printed JSON (words: [{index, start, end, word}]) — the input cut_words cuts by; save the printed JSON to a file and pass it as --words-file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--model", "Whisper model: tiny (default, fast), base, small, medium, large-v3, large-v3-turbo, ..."],
       ["--language", "Language: auto (default, detect) or ISO 639-1 code, e.g. en, vi"],
       ["--engine", "ASR engine: auto (default, faster-whisper then whisper.cpp), faster-whisper, or whisper (whisper.cpp CLI)"],
       ["--chunk-seconds", "Split the audio into N-second chunks (5–1800, default: whole file in one run)"],
+      ["--word-timestamps", "Also return per-word timings in the printed JSON (words: [{index, start, end, word}]) for cut_words"],
       ["-o, --output", "Output .srt file (required)"],
+    ],
+  },
+  "cut-words": {
+    usage: "mediakit cut-words <input> --words-file <words.json> -o <output> [--remove um,uh | --fillers | --indices 0-5,96-98] [--keep 3,7-9] [--pad-before 0.06] [--pad-after 0.12] [--min-keep 0.2] [--dry-run]",
+    desc: "Cut words out of a talking-head clip by transcript: filler words (um/uh), false starts and restarts, using word timings from transcribe --word-timestamps (save its printed JSON and pass it as --words-file). Select by word text (--remove 'um,uh'), the built-in filler set (--fillers: um, umm, uh, uhh, uhm, erm, er, hmm, mm, mhm, ah, eh), or 0-based word-index ranges (--indices '0-5,96-98'); --keep rescues indices even when matched. Keep runs are padded 0.06s before / 0.12s after, clamped so a cut never keeps a fragment of the word it removed; kept words that end up mostly cut out are reported in cut_check.swallowed. --dry-run prints the plan and writes nothing. No match copies the input unchanged.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--words-file", "Transcript JSON with a words array (required) — the stdout of `transcribe --word-timestamps` saved to a file"],
+      ["--remove", "Comma-separated words to cut by text, e.g. 'um,uh' (case-insensitive, punctuation ignored)"],
+      ["--fillers", "Also cut the built-in filler set (um, umm, uh, uhh, uhm, erm, er, hmm, mm, mhm, ah, eh)"],
+      ["--indices", "0-based word-index ranges to cut, e.g. '0-5,96-98' (indices as printed by transcribe)"],
+      ["--keep", "0-based word-index ranges to keep even when matched, e.g. '3,7-9'"],
+      ["--pad-before", "Seconds kept before each kept-word run (default 0.06)"],
+      ["--pad-after", "Seconds kept after each kept-word run (default 0.12)"],
+      ["--min-keep", "Drop keep segments shorter than this many seconds (default 0.2)"],
+      ["--dry-run", "Print the cut plan (removed words, keep segments, cut_check) and write no file"],
+      ["-o, --output", "Output file (required unless --dry-run)"],
     ],
   },
   mix: {
@@ -1033,8 +1051,25 @@ async function main() {
           language: opts.language ?? "auto",
           engine: opts.engine ?? "auto",
           chunk_seconds: numOpt(opts, "chunk_seconds") ?? null,
+          word_timestamps: opts.word_timestamps === true,
         });
         break;
+      case "cut-words": {
+        if (!opts.words_file) fail("missing required option: --words-file <words.json>");
+        result = await core.cutWords({
+          input: needInput(), output: opts.dry_run === true ? null : needOutput(opts),
+          wordsFile: opts.words_file,
+          remove: opts.remove ?? null,
+          fillers: opts.fillers === true,
+          indices: opts.indices ?? null,
+          keep: opts.keep ?? null,
+          padBefore: numOpt(opts, "pad_before") ?? 0.06,
+          padAfter: numOpt(opts, "pad_after") ?? 0.12,
+          minKeep: numOpt(opts, "min_keep") ?? 0.2,
+          dryRun: opts.dry_run === true,
+        });
+        break;
+      }
       case "mix": {
         if (!opts.music) fail("missing required option: --music <file>");
         result = await core.mix({

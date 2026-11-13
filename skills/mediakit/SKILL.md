@@ -697,6 +697,28 @@ the zoomed window cropped by hand — both must match within a few dB
 of PSNR, and the last frame must be clearly closer to the zoomed
 crop than to the full image.
 
+### 43. Cut words by transcript, never by hand-typed times
+`transcribe --word-timestamps` returns the words with 0-based
+indices (`words: [{index, start, end, word}]`) — save that printed
+JSON and pass it to `cut_words --words-file`. Select by word text
+(`--remove um,uh`), the built-in filler set (`--fillers`: um, umm,
+uh, uhh, uhm, erm, er, hmm, mm, mhm, ah, eh), or word-index ranges
+(`--indices 0-5,96-98`); `--keep` rescues indices even when
+auto-flagged. Times always come from the transcript file — a
+hand-typed timestamp is not a cut. "like" and "you know" are
+deliberately NOT fillers: they are ambiguous in context, so they are
+cut only when named in `--remove`. Keep runs are padded 0.06s
+before / 0.12s after the kept words, clamped to the gap to the
+neighbouring cut word, so a cut never keeps a fragment of the word
+it removed. Read `cut_check.swallowed` before trusting the cut: a
+kept word listed there ended up mostly outside the keep segments
+(usually a `--min-keep` sliver) — play it, then pass `--keep` for
+its index. `--dry-run` prints the plan first (removed words, keep
+segments, cut check) and writes nothing; no match at all
+stream-copies the input unchanged. After a real cut, re-transcribe
+the output and check the removed word is gone — Whisper sometimes
+hides a restart inside one long word on the first pass.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

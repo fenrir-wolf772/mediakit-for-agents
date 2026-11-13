@@ -2127,11 +2127,53 @@ export async function detectTranscribe(model = "tiny") {
 // from duplicating the overlapped speech.
 const TRANSCRIBE_CHUNK_OVERLAP_SECONDS = 2;
 
+// whisper.cpp -ojf JSON carries per-token ms offsets. Group tokens
+// into words: a token starting with a space starts a new word, anything
+// else (punctuation, "n't") attaches to the current word; special
+// tokens ([_BEG_], [_END_]) are skipped. A word whose tokens all share
+// one timestamp (the first token of a file often reports from == to)
+// gets a 0.1s floor so end > start. Times come from the engine, never
+// from the caller — the same rule transcriptcut states for its cuts.
+export function wordsFromWhisperCppTokens(tokens) {
+  const words = [];
+  let cur = null;
+  const flush = () => {
+    if (!cur) return;
+    if (cur.end <= cur.start) cur.end = cur.start + 0.1;
+    words.push(cur);
+    cur = null;
+  };
+  for (const t of tokens ?? []) {
+    const text = String(t?.text ?? "");
+    // Any bracketed token is a whisper.cpp special token ([_BEG_],
+    // [_END_], [_TT_525] timestamp markers, ...) — never speech.
+    // Note [_TT_525] ends in "5]", not "_]", so the test must be
+    // "bracketed", not "starts [_ and ends _]".
+    if (!text || /^\[.*\]$/.test(text)) continue;
+    const from = (t?.offsets?.from ?? 0) / 1000;
+    const to = (t?.offsets?.to ?? 0) / 1000;
+    if (text.startsWith(" ")) {
+      flush();
+      cur = { start: from, end: to, word: text.trim() };
+    } else if (cur) {
+      cur.word += text;
+      cur.end = Math.max(cur.end, to);
+    } else {
+      cur = { start: from, end: to, word: text.trim() };
+    }
+  }
+  flush();
+  return words.filter((w) => w.word && w.end > w.start);
+}
+
 // One ASR run over one WAV file, either engine. Returns raw segments
 // in seconds ({start, end, text}), the detected language and its
 // probability — the caller offsets and merges them. Separated out so
 // the chunked path can call it once per chunk with the same code.
-async function runAsrOnWav(selected, wavPath, mdl, lang, tmpDir, tag) {
+// With wantWords, also returns a flat words list [{start, end, word}]
+// in timeline order (faster-whisper word_timestamps, whisper.cpp
+// tokens grouped by wordsFromWhisperCppTokens).
+async function runAsrOnWav(selected, wavPath, mdl, lang, tmpDir, tag, wantWords = false) {
   if (selected.engine === "whisper.cpp") {
     const outBase = path.join(tmpDir, `whisper-${tag}`);
     await runCapture(selected.binary, ["-m", selected.model, "-f", wavPath, "-l", lang, "-ojf", "-of", outBase, "-np"], { timeoutMs: 1_800_000 });
@@ -2148,8 +2190,11 @@ async function runAsrOnWav(selected, wavPath, mdl, lang, tmpDir, tag) {
       throw new MediaKitError(`transcribe: whisper.cpp returned unparseable JSON: ${raw.slice(0, 200)}`, "ASR_FAILED");
     }
     const segs = Array.isArray(parsed.transcription) ? parsed.transcription : [];
+    const tokens = [];
+    if (wantWords) for (const s of segs) if (Array.isArray(s.tokens)) tokens.push(...s.tokens);
     return {
       segments: segs.map((s) => ({ start: (s.offsets?.from ?? 0) / 1000, end: (s.offsets?.to ?? 0) / 1000, text: s.text ?? "" })),
+      words: wantWords ? wordsFromWhisperCppTokens(tokens) : [],
       language: parsed.result?.language ?? null,
       language_probability: null,
     };
@@ -2157,11 +2202,15 @@ async function runAsrOnWav(selected, wavPath, mdl, lang, tmpDir, tag) {
   const helper = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "asr_faster_whisper.py");
   const args = [helper, "--wav", wavPath, "--model", mdl];
   if (lang !== "auto") args.push("--language", lang);
+  if (wantWords) args.push("--word-timestamps");
   const { stdout } = await runCapture(selected.python, args, { timeoutMs: 1_800_000 });
   try {
     const asr = JSON.parse(stdout);
     return {
       segments: Array.isArray(asr.segments) ? asr.segments : [],
+      words: wantWords && Array.isArray(asr.words)
+        ? asr.words.map((w) => ({ start: w.start, end: w.end, word: w.word, probability: w.probability ?? null }))
+        : [],
       language: asr.language ?? null,
       language_probability: asr.language_probability ?? null,
     };
@@ -2170,7 +2219,7 @@ async function runAsrOnWav(selected, wavPath, mdl, lang, tmpDir, tag) {
   }
 }
 
-export async function transcribe({ input, output, model = "tiny", language = "auto", engine = "auto", chunk_seconds = null }) {
+export async function transcribe({ input, output, model = "tiny", language = "auto", engine = "auto", chunk_seconds = null, word_timestamps = false }) {
   const inPath = await requireInput(input);
   const engRaw = String(engine ?? "auto").toLowerCase();
   const eng = engRaw === "whisper.cpp" ? "whisper" : engRaw;
@@ -2188,6 +2237,7 @@ export async function transcribe({ input, output, model = "tiny", language = "au
   const cs = chunk_seconds === null || chunk_seconds === undefined
     ? null
     : num(chunk_seconds, "chunk_seconds", { min: 5, max: 1800, integer: true });
+  const wantWords = word_timestamps === true;
   const outPath = await prepareOutput(output, [inPath]);
   if (path.extname(outPath).toLowerCase() !== ".srt") {
     throw new MediaKitError(`transcribe output must end in .srt, got ${path.extname(outPath) || "(no extension)"}`, "INVALID_ARG");
@@ -2228,11 +2278,13 @@ export async function transcribe({ input, output, model = "tiny", language = "au
     const chunkCount = chunked ? Math.ceil(duration / cs) : 1;
     const overlap = chunked ? TRANSCRIBE_CHUNK_OVERLAP_SECONDS : 0;
     let rawSegments = [];
+    let rawWords = [];
     let language = null;
     let languageProbability = null;
     if (!chunked) {
-      const asr = await runAsrOnWav(selected, wav, mdl, lang, tmpDir, "full");
+      const asr = await runAsrOnWav(selected, wav, mdl, lang, tmpDir, "full", wantWords);
       rawSegments = asr.segments;
+      rawWords = asr.words;
       language = asr.language;
       languageProbability = asr.language_probability;
     } else {
@@ -2241,7 +2293,7 @@ export async function transcribe({ input, output, model = "tiny", language = "au
         const end = Math.min(start + cs + overlap, duration);
         const chunkWav = path.join(tmpDir, `chunk-${i}.wav`);
         await run(FFMPEG, ["-y", "-ss", String(start), "-t", String(+(end - start).toFixed(3)), "-i", wav, "-c:a", "pcm_s16le", "-ar", "16000", "-ac", "1", chunkWav]);
-        const asr = await runAsrOnWav(selected, chunkWav, mdl, lang, tmpDir, `chunk-${i}`);
+        const asr = await runAsrOnWav(selected, chunkWav, mdl, lang, tmpDir, `chunk-${i}`, wantWords);
         // Ownership: a segment belongs to the chunk whose owned
         // window [chunk start, next chunk start) its start falls in,
         // so the 2s overlap is transcribed twice but kept once. The
@@ -2253,6 +2305,15 @@ export async function transcribe({ input, output, model = "tiny", language = "au
           if (st >= ownedEnd) continue;
           if (!(en > st)) continue;
           rawSegments.push({ start: st, end: en, text: s.text });
+        }
+        // Words follow the same ownership rule, so a word straddling
+        // a boundary is kept once, by the chunk that owns its start.
+        for (const w of asr.words ?? []) {
+          const st = w.start + start;
+          const en = Math.min(w.end + start, end);
+          if (st >= ownedEnd) continue;
+          if (!(en > st)) continue;
+          rawWords.push({ start: st, end: en, word: w.word, probability: w.probability ?? null });
         }
         if (language === null && asr.language) {
           language = asr.language;
@@ -2268,6 +2329,22 @@ export async function transcribe({ input, output, model = "tiny", language = "au
       }))
       .filter((s) => s.end > s.start && s.text)
       .sort((a, b) => a.start - b.start);
+    // Words are normalized the same way, then numbered 0-based in
+    // timeline order — those indices are what cut_words --indices
+    // takes, so the transcript JSON is the single source of truth
+    // for which word is which (never a hand-typed timestamp).
+    const words = wantWords
+      ? (rawWords ?? [])
+        .map((w) => ({
+          start: num(w.start, "word start", { min: 0 }),
+          end: num(w.end, "word end", { min: 0 }),
+          word: String(w.word ?? "").trim(),
+          probability: typeof w.probability === "number" ? w.probability : null,
+        }))
+        .filter((w) => w.end > w.start && w.word && !/\s/.test(w.word))
+        .sort((a, b) => a.start - b.start)
+        .map((w, i) => ({ index: i, start: +w.start.toFixed(3), end: +w.end.toFixed(3), word: w.word, ...(w.probability === null ? {} : { probability: w.probability }) }))
+      : [];
     const normalized = segments.map((s) => ({ startMs: Math.round(s.start * 1000), endMs: Math.round(s.end * 1000), text: s.text }));
     await writeFile(outPath, formatSrtBody(normalized), "utf8");
     const info = await fileInfo(outPath);
@@ -2286,6 +2363,7 @@ export async function transcribe({ input, output, model = "tiny", language = "au
       segment_count: segments.length,
       segments: segments.map((s) => ({ start: +s.start.toFixed(3), end: +s.end.toFixed(3), text: s.text })),
       text: segments.map((s) => s.text).join(" "),
+      ...(wantWords ? { word_timestamps: true, word_count: words.length, words } : {}),
       ...info,
     };
   } finally {
@@ -4376,6 +4454,240 @@ export async function silence({ input, output = null, thresholdDb = -40, minDura
   };
 }
 
+// ---------------------------------------------------------------- cut_words
+// Edit by transcript (transcriptcut + kevs-talking-head-editor's
+// filler_cut.py, idea only — no code copied): cut filler words, false
+// starts and restarts out of a talking-head clip, using word timings
+// from `transcribe --word-timestamps`. Times always come from the
+// transcript file — never a hand-typed timestamp (transcriptcut's
+// rule) — and a cut never eats into a kept word: keep-run padding is
+// clamped to the gap to the neighbouring cut word, and kept words that
+// end up mostly outside the keep segments are reported, the same cut
+// check filler_cut calls swallowed().
+//
+// Selection is by word, three ways that OR together: --remove (match
+// the word text, case-insensitive, punctuation ignored — "Um," matches
+// "um"), --fillers (the built-in filler set below), --indices
+// ("0-5,96-98", 0-based word indices as printed by transcribe).
+// --keep rescues indices even when auto-flagged. No match at all
+// stream-copies the input, the same no-op path silence takes.
+
+// filler_cut.py's FILLERS, verbatim as a set — "like" and "you know"
+// are deliberately NOT in it: transcriptcut only classifies those
+// ambiguous words with an LLM in context, and MediaKit has no LLM
+// here, so they are cut only when named explicitly in --remove.
+const CUT_WORDS_FILLERS = new Set(["um", "umm", "uh", "uhh", "uhm", "erm", "er", "hmm", "mm", "mhm", "ah", "eh"]);
+
+export function normalizeWord(w) {
+  return String(w ?? "").toLowerCase().replace(/[^a-z']/g, "");
+}
+
+// "0-5,96-98,137" -> Set of 0-based indices (filler_cut's parse_idx).
+// A reversed range or a negative index is a loud error, not a silent
+// empty set — a typo in the cut list must never silently cut nothing.
+export function parseWordIndices(spec, label = "indices") {
+  const out = new Set();
+  const parts = String(spec ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  if (!parts.length) throw new MediaKitError(`cut_words ${label} is empty — give ranges like "0-5,96-98"`, "INVALID_ARG");
+  for (const part of parts) {
+    if (part.includes("-")) {
+      const [a, b] = part.split("-").map((x) => Number(x));
+      if (!Number.isInteger(a) || !Number.isInteger(b) || a < 0 || b < 0 || b < a) {
+        throw new MediaKitError(`cut_words ${label} has a bad range "${part}" — want "start-end" with start <= end, both >= 0`, "INVALID_ARG");
+      }
+      for (let i = a; i <= b; i++) out.add(i);
+    } else {
+      const n = Number(part);
+      if (!Number.isInteger(n) || n < 0) {
+        throw new MediaKitError(`cut_words ${label} has a bad index "${part}" — want a whole number >= 0`, "INVALID_ARG");
+      }
+      out.add(n);
+    }
+  }
+  return out;
+}
+
+// Validate a words array from a transcript JSON (transcribe's stdout,
+// or a hand-written file): [{start, end, word}], seconds or "MM:SS".
+// Sorted by start; slight overlaps are tolerated (ASR token timings
+// can overlap by a few ms) — overlapping cut intervals merge later.
+export function normalizeTranscriptWords(raw, label = "words file") {
+  const arr = Array.isArray(raw) ? raw : raw?.words;
+  if (!Array.isArray(arr)) {
+    throw new MediaKitError(`cut_words ${label} must be a JSON object with a "words" array (from transcribe --word-timestamps) or a bare words array, got ${typeof raw}`, "INVALID_ARG");
+  }
+  if (arr.length === 0) throw new MediaKitError(`cut_words ${label} has 0 words — nothing to cut from`, "INVALID_ARG");
+  if (arr.length > 20000) throw new MediaKitError(`cut_words ${label} has ${arr.length} words (max 20000)`, "INVALID_ARG");
+  const words = arr.map((w, i) => {
+    const start = parseTime(w?.start, `word ${i} start`);
+    const end = parseTime(w?.end, `word ${i} end`);
+    if (!(end > start)) throw new MediaKitError(`word ${i}: end (${w?.end}) must be after start (${w?.start})`, "INVALID_ARG");
+    if (typeof w?.word !== "string" || !w.word.trim() || /\s/.test(w.word.trim())) {
+      throw new MediaKitError(`word ${i} in the words array must be a single non-empty token {start, end, word}, got: ${JSON.stringify(w?.word)} (a cues file with "text" instead of "word" is not a words file — run transcribe --word-timestamps)`, "INVALID_ARG");
+    }
+    return { start: +start.toFixed(3), end: +end.toFixed(3), word: w.word.trim() };
+  });
+  words.sort((a, b) => a.start - b.start);
+  return words;
+}
+
+// Kept-word runs, padded and merged. A run is a maximal run of kept
+// words; it is padded PRE before its first word and POST after its
+// last (filler_cut: 0.06 / 0.12), but the pad is clamped to the gap to
+// the neighbouring cut word, so a cut never keeps a fragment of the
+// word it removed. Runs shorter than minKeep are dropped, and any
+// kept word that ends up <50% inside the keep segments is reported
+// as swallowed — play it before trusting the cut.
+export function buildKeepSegmentsFromWords(words, cutSet, duration, { padBefore = 0.06, padAfter = 0.12, minKeep = 0.2 } = {}) {
+  const runs = [];
+  let cur = null;
+  words.forEach((w, i) => {
+    if (cutSet.has(i)) {
+      if (cur) { runs.push(cur); cur = null; }
+      return;
+    }
+    cur = cur === null ? { start: w.start, end: w.end, indices: [i] } : { start: cur.start, end: w.end, indices: [...cur.indices, i] };
+  });
+  if (cur) runs.push(cur);
+  // Neighbour boundaries for clamping: the cut word (or file edge)
+  // on each side of the run.
+  const padded = runs.map((r) => {
+    const firstIdx = r.indices[0];
+    const lastIdx = r.indices[r.indices.length - 1];
+    const leftEdge = firstIdx === 0 ? 0 : (cutSet.has(firstIdx - 1) ? words[firstIdx - 1].end : words[firstIdx - 1].end);
+    const rightEdge = lastIdx === words.length - 1 ? duration : (cutSet.has(lastIdx + 1) ? words[lastIdx + 1].start : words[lastIdx + 1].start);
+    const start = Math.max(0, r.start - Math.min(padBefore, Math.max(0, r.start - leftEdge)));
+    const end = Math.min(duration, r.end + Math.min(padAfter, Math.max(0, rightEdge - r.end)));
+    return { start: +start.toFixed(3), end: +end.toFixed(3), duration: +(end - start).toFixed(3), indices: r.indices };
+  }).filter((s) => s.end - s.start >= minKeep);
+  const merged = [];
+  for (const seg of padded) {
+    const last = merged[merged.length - 1];
+    if (last && seg.start <= last.end) {
+      last.end = Math.max(last.end, seg.end);
+      last.duration = +(last.end - last.start).toFixed(3);
+      last.indices.push(...seg.indices);
+    } else merged.push({ ...seg, indices: [...seg.indices] });
+  }
+  const keep = merged.map(({ start, end, duration: d }) => ({ start, end, duration: d }));
+  const swallowed = [];
+  words.forEach((w, i) => {
+    if (cutSet.has(i)) return;
+    const cov = keep.reduce((s, k) => s + Math.max(0, Math.min(w.end, k.end) - Math.max(w.start, k.start)), 0);
+    if (cov / (w.end - w.start) < 0.5) swallowed.push({ index: i, word: w.word, start: w.start });
+  });
+  return { keep, swallowed };
+}
+
+export async function cutWords({ input, output = null, wordsFile, remove = null, fillers = false, indices = null, keep = null, padBefore = 0.06, padAfter = 0.12, minKeep = 0.2, dryRun = false }) {
+  const inPath = await requireInput(input);
+  const wordsPath = await requireInput(wordsFile, "words file");
+  const padB = num(padBefore, "pad_before", { min: 0, max: 1 });
+  const padA = num(padAfter, "pad_after", { min: 0, max: 1 });
+  const minK = num(minKeep, "min_keep", { min: 0.05, max: 5 });
+  let rawWords;
+  try {
+    rawWords = JSON.parse(await readFile(wordsPath, "utf8"));
+  } catch (e) {
+    throw new MediaKitError(`cut_words could not parse the words file as JSON: ${e.message}`, "INVALID_ARG");
+  }
+  const words = normalizeTranscriptWords(rawWords, "words file");
+  // At least one selector is required: cutting "nothing in
+  // particular" is a typo, not a plan.
+  if (!remove && !fillers && !indices) {
+    throw new MediaKitError("cut_words needs a selector: --remove <words>, --fillers, or --indices <ranges>", "INVALID_ARG");
+  }
+  const cut = new Set();
+  if (typeof remove === "string" && remove.trim()) {
+    const targets = new Set(remove.split(",").map((s) => normalizeWord(s)).filter(Boolean));
+    if (!targets.size) throw new MediaKitError('cut_words --remove has no usable words — give comma-separated single words, e.g. "um,uh"', "INVALID_ARG");
+    words.forEach((w, i) => { if (targets.has(normalizeWord(w.word))) cut.add(i); });
+  }
+  if (fillers === true) {
+    words.forEach((w, i) => { if (CUT_WORDS_FILLERS.has(normalizeWord(w.word))) cut.add(i); });
+  }
+  if (typeof indices === "string" && indices.trim()) {
+    for (const i of parseWordIndices(indices, "--indices")) {
+      if (i >= words.length) throw new MediaKitError(`cut_words --indices ${i} is out of range — the transcript has ${words.length} words (indices 0-${words.length - 1})`, "INVALID_ARG");
+      cut.add(i);
+    }
+  }
+  if (typeof keep === "string" && keep.trim()) {
+    for (const i of parseWordIndices(keep, "--keep")) cut.delete(i);
+  }
+  const meta = await probe(inPath);
+  if (!meta.audio) throw new MediaKitError("cut_words needs an input with an audio stream", "INVALID_ARG");
+  const duration = meta.duration_seconds;
+  if (duration === null) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
+  const removedWords = [...cut].sort((a, b) => a - b).map((i) => ({ index: i, word: words[i].word, start: words[i].start, end: words[i].end }));
+  const { keep: kept, swallowed } = buildKeepSegmentsFromWords(words, cut, duration, { padBefore: padB, padAfter: padA, minKeep: minK });
+  const keptTotal = kept.reduce((s, k) => s + k.duration, 0);
+  const base = {
+    operation: "cut_words",
+    input: inPath,
+    words_file: wordsPath,
+    words_total: words.length,
+    removed_words: removedWords,
+    removed_count: removedWords.length,
+    keep_segments: kept,
+    removed_seconds: +(duration - keptTotal).toFixed(3),
+    duration_before: duration,
+    pad_before: padB,
+    pad_after: padA,
+    min_keep: minK,
+    cut_check: { swallowed, warnings: swallowed.map((s) => `kept word #${s.index} '${s.word}' @${s.start}s is mostly cut out — play it, then pass --keep ${s.index}`) },
+  };
+  if (dryRun === true) return { ...base, dry_run: true };
+  if (kept.length === 0) {
+    throw new MediaKitError("cut_words would remove everything — nothing to keep (pass --keep for words to rescue)", "INVALID_ARG");
+  }
+  const outPath = await prepareOutput(output, [inPath, wordsPath]);
+  if (removedWords.length === 0) {
+    // Nothing matched: copy the streams as-is (silence's no-op path).
+    await run(FFMPEG, ["-y", "-i", inPath, "-c", "copy", outPath]);
+    const info = await fileInfo(outPath);
+    return { ...base, output: outPath, duration_after: duration, stream_copy: true, warning: "no words matched — copied unchanged", ...info };
+  }
+  // One filter graph: trim each kept segment (video + audio), then concat —
+  // the same graph silence builds, so a word cut and a silence cut compose.
+  const vParts = [];
+  const aParts = [];
+  const vLabels = [];
+  const aLabels = [];
+  kept.forEach((seg, i) => {
+    if (meta.video) {
+      vParts.push(`[0:v]trim=start=${seg.start}:end=${seg.end},setpts=PTS-STARTPTS[v${i}]`);
+      vLabels.push(`[v${i}]`);
+    }
+    aParts.push(`[0:a]atrim=start=${seg.start}:end=${seg.end},asetpts=PTS-STARTPTS[a${i}]`);
+    aLabels.push(`[a${i}]`);
+  });
+  const graph = [...vParts, ...aParts];
+  if (meta.video) graph.push(`${vLabels.join("")}concat=n=${kept.length}:v=1:a=0[vout]`);
+  graph.push(`${aLabels.join("")}concat=n=${kept.length}:v=0:a=1[aout]`);
+  const args = ["-y", "-i", inPath, "-filter_complex", graph.join(";")];
+  if (meta.video) {
+    args.push("-map", "[vout]", "-map", "[aout]",
+      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "medium",
+      "-c:a", "aac", "-movflags", "+faststart");
+  } else {
+    const ext = path.extname(outPath).slice(1).toLowerCase();
+    const codec = AUDIO_FORMATS[ext];
+    if (!codec) throw new MediaKitError(`audio-only input needs an audio output format (.mp3/.aac/.wav/.ogg/.opus/.flac), got .${ext || "(none)"}`, "INVALID_ARG");
+    args.push("-map", "[aout]", "-c:a", codec);
+  }
+  args.push(outPath);
+  await run(FFMPEG, args);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  return {
+    ...base, output: outPath,
+    duration_after: out.duration_seconds,
+    ...info,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+  };
+}
+
 // ---------------------------------------------------------------- doctor
 // Read-only environment preflight (kinocut's video_doctor idea): what
 // ffmpeg/ffprobe can actually do on this machine, and which mediakit
@@ -4428,6 +4740,7 @@ const TOOL_REQUIREMENTS = {
   compress: { filters: ["scale"], encoders: ["libx264", "aac"] },
   receipt: { filters: ["loudnorm"] },
   silence: { filters: ["silencedetect", "trim", "atrim", "concat"], encoders: ["libx264", "aac"] },
+  cut_words: { filters: ["trim", "atrim", "concat", "setpts", "asetpts"], encoders: ["libx264", "aac"] },
   cropdetect: { filters: ["cropdetect"] },
   package: {},
   publish_kit: {},

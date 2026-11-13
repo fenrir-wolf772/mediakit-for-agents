@@ -637,6 +637,7 @@ server.tool(
     language: z.string().default("auto").describe("\"auto\" (detect) or an ISO 639-1 code, e.g. en, vi"),
     engine: z.enum(["auto", "faster-whisper", "whisper"]).default("auto").describe("ASR engine: auto prefers faster-whisper, then whisper.cpp; \"whisper\" forces the whisper.cpp CLI"),
     chunk_seconds: z.number().int().min(5).max(1800).optional().describe("Split long audio into N-second chunks (5-1800, 2s overlap, segments re-offset onto the full timeline) so hour-long recordings transcribe without one giant ASR run; a file shorter than one chunk runs as a single chunk"),
+    word_timestamps: z.boolean().default(false).describe("Also return per-word timings (words: [{index, start, end, word}], 0-based indices in timeline order) — the input cut_words cuts by. Word times come from the engine, never from the caller"),
   },
   async (a) => safe(() => core.transcribe({
     input: a.input,
@@ -645,6 +646,38 @@ server.tool(
     language: a.language,
     engine: a.engine,
     chunk_seconds: a.chunk_seconds ?? null,
+    word_timestamps: a.word_timestamps ?? false,
+  })),
+);
+
+server.tool(
+  "cut_words",
+  "Cut words out of a talking-head clip by transcript: filler words (um/uh), false starts and restarts, using word timings from transcribe --word-timestamps. Give a words file (the JSON transcribe prints — save its stdout — or a hand-written {words:[{start,end,word}]}), then select by word text (--remove 'um,uh'), the built-in filler set (--fillers), or 0-based word-index ranges (--indices '0-5,96-98', as printed by transcribe); --keep rescues indices even when auto-flagged. Keep runs are padded 0.06s before / 0.12s after, clamped so a cut never keeps a fragment of the word it removed, and kept words that end up mostly cut out are reported in cut_check.swallowed — play them before trusting the cut. --dry-run returns the plan (cut intervals + keep segments) without writing a file. No match stream-copies the input unchanged.",
+  {
+    input: pathSchema.describe("Audio or video file with a speech track"),
+    output: pathSchema.optional().describe("Output media file path (not needed with dry_run=true)"),
+    words_file: pathSchema.describe("Transcript JSON with a words array — the stdout of `transcribe --word-timestamps` saved to a file, or a hand-written {words:[{start,end,word}]}"),
+    remove: z.string().optional().describe("Comma-separated words to cut by text, e.g. 'um,uh' (case-insensitive, punctuation ignored — 'Um,' matches 'um')"),
+    fillers: z.boolean().default(false).describe("Also cut the built-in filler set: um, umm, uh, uhh, uhm, erm, er, hmm, mm, mhm, ah, eh. 'like' / 'you know' are NOT fillers — they are ambiguous, cut them only via --remove"),
+    indices: z.string().optional().describe("0-based word-index ranges to cut, e.g. '0-5,96-98' (indices as printed by transcribe --word-timestamps)"),
+    keep: z.string().optional().describe("0-based word-index ranges to keep even when matched by --remove/--fillers/--indices, e.g. '3,7-9'"),
+    pad_before: z.number().min(0).max(1).default(0.06).describe("Seconds kept before each kept-word run (default 0.06, clamped to the gap to the neighbouring cut word)"),
+    pad_after: z.number().min(0).max(1).default(0.12).describe("Seconds kept after each kept-word run (default 0.12, clamped the same way)"),
+    min_keep: z.number().min(0.05).max(5).default(0.2).describe("Drop keep segments shorter than this many seconds (default 0.2); words lost that way are reported in cut_check.swallowed"),
+    dry_run: z.boolean().default(false).describe("Return the cut plan (removed words, keep segments, cut_check) without writing any file"),
+  },
+  async (a) => safe(() => core.cutWords({
+    input: a.input,
+    output: a.output,
+    wordsFile: a.words_file,
+    remove: a.remove ?? null,
+    fillers: a.fillers ?? false,
+    indices: a.indices ?? null,
+    keep: a.keep ?? null,
+    padBefore: a.pad_before ?? 0.06,
+    padAfter: a.pad_after ?? 0.12,
+    minKeep: a.min_keep ?? 0.2,
+    dryRun: a.dry_run ?? false,
   })),
 );
 
