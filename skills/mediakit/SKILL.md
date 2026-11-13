@@ -740,7 +740,7 @@ hides a restart inside one long word on the first pass.
 ### 44. cut_words in batch and manifest: one words file per clip
 Batch runs one operation over many files with the same args, but a
 words file is per-clip — timings from one clip must never cut
-another. So batch `cut_words` finds each clip's file by convention:
+another. So batch `cut_words` (and `remove_retakes`, rule 49) finds each clip's file by convention:
 `<words_dir>/<stem>.words.json`, default the input's own folder
 (`take.mp4` looks for `take.words.json` next to it; `--words-dir`
 points at a shared folder of per-clip files). A clip with no words
@@ -854,6 +854,29 @@ values if the file is missing). v1 limits, stated not hidden:
 plain cuts (no transitions), no per-shot text layers, one
 aspect per manifest. This is not the `manifest` tool — that one
 runs a linear edit pipeline (input → steps → output).
+
+### 49. A retake is a repeated phrase, not a feeling — detect it, review it, then cut
+`remove_retakes` finds repeated takes on the same words file
+`cut_words` uses (rule 43): a phrase of `--min-words` (default 3)
+identical words, then at most `--max-gap-words` (default 8) words
+and `--max-gap-seconds` (default 5) of restart junk ("okay,
+again", a filler), then the same phrase again — the earlier take
+plus the junk is cut, the fluent take kept whole. A 2-word
+abandoned start ("the quick" — "um" — "the quick brown fox") is
+cut the same way. `--keep last` (default) keeps the later take —
+people warm up, so the later take is usually the better one;
+`--keep first` keeps the earlier one. The cut goes through
+`cut_words`, so pads (0.06/0.12), `--min-keep` and
+`cut_check.swallowed` behave identically. This is deterministic,
+not a judge: an intentional repetition ("I like cats. I like
+cats a lot.") looks exactly like a retake to the detector — the
+gap bounds are the only guard. So always run `--detect-only`
+first and read the `clusters` (kept take + removed indices +
+text) before cutting; a cluster whose kept text is a sentence
+you meant to say twice is a false positive, not a retake. In
+batch and manifest it follows the same words-file convention as
+`cut_words` (rule 44): `<words_dir>/<stem>.words.json` per clip,
+a single `words_file` in a manifest step.
 
 ## Workflow: vertical captioned clip from a landscape source
 

@@ -138,7 +138,10 @@ A render without approval fails loudly unless the user
 explicitly asks for `--force`. A shot after the first may carry
 `transition: {type, duration}` (one of the 49 xfade names,
 centered on the cut, video-only — the audio never moves); a
-video shot needs the handle footage in its source.
+video shot needs the handle footage in its source. For real
+animation (not a still with a zoom), use a `canvas_scene` shot:
+a JS module that draws every frame in code at 30fps — the
+director's path, no AI video account needed.
 
 ## Common failures
 

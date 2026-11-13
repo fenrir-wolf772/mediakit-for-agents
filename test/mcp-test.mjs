@@ -114,10 +114,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 51 tools present");
-checkOk(missing.length === 0, "tools/list has all 51 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 52 tools present");
+checkOk(missing.length === 0, "tools/list has all 52 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -681,7 +681,11 @@ checkOk(near(interpTrimJson.duration_seconds, 2, 0.1), "trim makes the 2s clip f
 const interpMciRes = await client.callTool({
   name: "interpolate",
   arguments: { input: path.join(root, "outputs/mcp-interp-2s.mp4"), output: path.join(root, "outputs/mcp-interp-mci.mp4"), fps: 60, mode: "mci" },
-});
+  // mci is ~9x realtime: the SDK's 60s default timeout kills the
+  // call when the machine is busy even though the tool itself
+  // finishes fine — same trap as the assemble renders (lượt 43),
+  // same 300s override.
+}, undefined, { timeout: 300000 });
 const interpMciJson = JSON.parse(interpMciRes.content[0].text);
 checkOk(interpMciJson.fps_after === 60 && interpMciJson.frames_after >= 115 && interpMciJson.frames_after <= 121, "interpolate mci gives ~120 frames for a 2s 60fps clip", `frames ${interpMciJson.frames_after}`);
 
@@ -2578,6 +2582,38 @@ checkOk(cwCliDry.code === 0 && /"dry_run": true/.test(cwCliDry.out), "CLI cut-wo
 const cwCliNoSel = await runCli(["cut-words", path.join(root, "test/source.mp4"), "--words-file", path.join(root, "test/cut-words.json"), "-o", path.join(root, "outputs/cli-cutwords-nosel.mp4")]);
 checkOk(cwCliNoSel.code !== 0 && /selector/.test(cwCliNoSel.out), "CLI cut-words with no selector refuses", cwCliNoSel.out.slice(0, 200));
 
+// remove_retakes: repeated takes on the word timings — fixture
+// test/retakes-words.json plants a 5-word repeat ("we shipped in
+// three weeks", restart junk "okay again") plus a 2-word abandoned
+// start ("the quick" — "um" — "the quick brown fox") over
+// test/source.mp4 (10s). keep=last cuts 10 words to 5.74s;
+// keep=first cuts the later takes to 5.76s; a 3-take chain
+// (test/retakes-3x-words.json) keeps only the last take (1.98s).
+const rtWords = path.join(root, "test/retakes-words.json");
+const rtDetectRes = await client.callTool({ name: "remove_retakes", arguments: { input: path.join(root, "test/source.mp4"), words_file: rtWords, detect_only: true } });
+const rtDetectJson = JSON.parse(rtDetectRes.content[0].text);
+checkOk(rtDetectRes.isError !== true && rtDetectJson.detect_only === true && !("output" in rtDetectJson) && rtDetectJson.clusters.length === 2 && rtDetectJson.removed_count === 10, "remove_retakes detect-only finds 2 clusters, 10 words to cut", JSON.stringify(rtDetectJson.clusters.map((c) => c.removed_text)));
+checkOk(JSON.stringify(rtDetectJson.clusters[0].removed_indices) === JSON.stringify([0, 1, 2, 3, 4, 5, 6]) && rtDetectJson.clusters[0].kept_start_index === 7 && rtDetectJson.clusters[0].kept_text === "we shipped in three weeks" && rtDetectJson.clusters[0].repeat_words === 5, "remove_retakes cluster 1: repeat 'we shipped in three weeks', kept take starts at word 7", JSON.stringify(rtDetectJson.clusters[0]));
+checkOk(JSON.stringify(rtDetectJson.clusters[1].removed_indices) === JSON.stringify([16, 17, 18]) && rtDetectJson.clusters[1].kept_start_index === 19 && rtDetectJson.clusters[1].repeat_words === 2, "remove_retakes cluster 2: abandoned start 'the quick' + 'um', kept take starts at word 19", JSON.stringify(rtDetectJson.clusters[1]));
+checkOk(near(rtDetectJson.removed_seconds, 4.26, 0.05) && JSON.stringify(rtDetectJson.keep_segments) === JSON.stringify([{ start: 2.94, end: 7, duration: 4.06 }, { start: 7.94, end: 9.62, duration: 1.68 }]), "remove_retakes detect-only plans 5.74s kept in 2 segments", JSON.stringify(rtDetectJson.keep_segments));
+const rtRes = await client.callTool({ name: "remove_retakes", arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-retakes.mp4"), words_file: rtWords } });
+const rtJson = JSON.parse(rtRes.content[0].text);
+checkOk(rtRes.isError !== true && rtJson.removed_count === 10 && near(rtJson.duration_after, 5.74, 0.05) && JSON.stringify(rtJson.keep_segments) === JSON.stringify([{ start: 2.94, end: 7, duration: 4.06 }, { start: 7.94, end: 9.62, duration: 1.68 }]), "remove_retakes keep=last cuts to 5.74s on disk", JSON.stringify({ removed: rtJson.removed_count, after: rtJson.duration_after }));
+const rtFirstRes = await client.callTool({ name: "remove_retakes", arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-retakes-first.mp4"), words_file: rtWords, keep: "first" } });
+const rtFirstJson = JSON.parse(rtFirstRes.content[0].text);
+checkOk(rtFirstRes.isError !== true && rtFirstJson.removed_count === 10 && near(rtFirstJson.duration_after, 5.76, 0.05) && JSON.stringify(rtFirstJson.keep_segments) === JSON.stringify([{ start: 0, end: 2.12, duration: 2.12 }, { start: 5.04, end: 7.7, duration: 2.66 }, { start: 8.64, end: 9.62, duration: 0.98 }]), "remove_retakes keep=first cuts the later takes to 5.76s in 3 segments", JSON.stringify(rtFirstJson.keep_segments));
+const rt3xRes = await client.callTool({ name: "remove_retakes", arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-retakes-3x.mp4"), words_file: path.join(root, "test/retakes-3x-words.json") } });
+const rt3xJson = JSON.parse(rt3xRes.content[0].text);
+checkOk(rt3xRes.isError !== true && rt3xJson.clusters.length === 2 && rt3xJson.removed_count === 8 && near(rt3xJson.duration_after, 1.98, 0.05), "remove_retakes 3-take chain keeps only the last take (1.98s)", JSON.stringify(rt3xJson.clusters.map((c) => c.removed_indices)));
+const rtNoneRes = await client.callTool({ name: "remove_retakes", arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-retakes-none.mp4"), words_file: cwWords } });
+const rtNoneJson = JSON.parse(rtNoneRes.content[0].text);
+checkOk(rtNoneRes.isError !== true && rtNoneJson.removed_count === 0 && rtNoneJson.stream_copy === true && near(rtNoneJson.duration_after, 10, 0.05), "remove_retakes with no repeat stream-copies unchanged", JSON.stringify(rtNoneJson).slice(0, 200));
+const rtBadKeepRes = await client.callTool({ name: "remove_retakes", arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-retakes-badkeep.mp4"), words_file: rtWords, keep: "middle" } });
+checkOk(rtBadKeepRes.isError === true && /keep/.test(rtBadKeepRes.content[0].text), "remove_retakes refuses keep='middle'", rtBadKeepRes.content[0].text.slice(0, 200));
+// remove_retakes through the CLI: --detect-only needs no -o.
+const rtCliDetect = await runCli(["remove-retakes", path.join(root, "test/source.mp4"), "--words-file", path.join(root, "test/retakes-words.json"), "--detect-only"]);
+checkOk(rtCliDetect.code === 0 && /"detect_only": true/.test(rtCliDetect.out) && /"removed_count": 10/.test(rtCliDetect.out), "CLI remove-retakes --detect-only needs no -o and reports 10 words", rtCliDetect.out.slice(0, 200));
+
 // No engine at all (both disabled): doctor must report engine
 // "none" with a fix carrying BOTH install lines.
 const noEngTransport = new StdioClientTransport({
@@ -2803,7 +2839,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 51 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 51 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 52 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 52 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -2945,6 +2981,24 @@ const { stdout: batchCwDurOut } = await execFileAsync("ffprobe", ["-v", "error",
 checkOk(near(parseFloat(batchCwDurOut.trim()), 3.48, 0.05), "batch cut_words output measures 3.48s independently (ffprobe)", `got ${batchCwDurOut.trim()}`);
 const { stdout: batchCwDurDOut } = await execFileAsync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path.join(root, "outputs/mcp-batch-cw-out/take-d-cut_words.mp4")]);
 checkOk(near(parseFloat(batchCwDurDOut.trim()), 3.48, 0.05), "batch cached twin output measures 3.48s independently (ffprobe)", `got ${batchCwDurDOut.trim()}`);
+// batch remove_retakes: same per-clip words-file convention as
+// cut_words. take-a carries the retakes fixture (10 words cut,
+// 5.74s after); take-b has no words file and fails its own row.
+await mkdir(path.join(root, "outputs/mcp-batch-rt-in"), { recursive: true });
+await copyFile(path.join(root, "test/source.mp4"), path.join(root, "outputs/mcp-batch-rt-in/take-a.mp4"));
+await copyFile(path.join(root, "test/source.mp4"), path.join(root, "outputs/mcp-batch-rt-in/take-b.mp4"));
+await copyFile(path.join(root, "test/retakes-words.json"), path.join(root, "outputs/mcp-batch-rt-in/take-a.words.json"));
+await rm(path.join(root, "outputs/mcp-batch-rt-out"), { recursive: true, force: true });
+const batchRtRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "remove_retakes", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-rt-in"), output_dir: path.join(root, "outputs/mcp-batch-rt-out"), args: {} },
+});
+const batchRtJson = JSON.parse(batchRtRes.content[0].text);
+checkOk(batchRtJson.succeeded === 1 && batchRtJson.failed === 1, "batch remove_retakes cuts the clip with a words file, fails the one without", `succeeded=${batchRtJson.succeeded} failed=${batchRtJson.failed}`);
+const batchRtRowA = batchRtJson.results.find((r) => r.input.endsWith("take-a.mp4"));
+const batchRtRowB = batchRtJson.results.find((r) => r.input.endsWith("take-b.mp4"));
+checkOk(batchRtRowA?.status === "ok" && batchRtRowA?.result?.removed_count === 10 && near(batchRtRowA?.result?.duration_after, 5.74, 0.05), "batch remove_retakes take-a: 10 words cut, 5.74s after", JSON.stringify(batchRtRowA?.result));
+checkOk(batchRtRowB?.status === "error" && /take-b\.words\.json/.test(batchRtRowB?.error ?? ""), "batch remove_retakes take-b: error names the missing words file", (batchRtRowB?.error ?? "").slice(0, 160));
 // batch chroma_key via MCP (enum regression, lượt 38): lượt 36 added
 // chroma_key to BATCH_OPERATIONS but not the MCP batch enum, so MCP
 // callers got "Invalid enum value" while the CLI worked. The
@@ -3192,6 +3246,27 @@ const manifestCwCachedRes = await client.callTool({
 });
 const manifestCwCachedJson = JSON.parse(manifestCwCachedRes.content[0].text);
 checkOk(manifestCwCachedJson.cache_hits === 2 && manifestCwCachedJson.steps_run === 0, "manifest cut_words second run serves both steps from cache", `cache_hits=${manifestCwCachedJson.cache_hits} steps_run=${manifestCwCachedJson.steps_run}`);
+// manifest remove_retakes step (fixture test/manifest-retakes.json):
+// cut the repeated takes first, then loudness — the words file
+// resolves relative to the manifest and is hashed into the step
+// cache, so a second run serves both steps from cache.
+await rm(path.join(root, "outputs/mcp-manifest-rt.mp4"), { force: true });
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const manifestRtRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-retakes.json") },
+});
+const manifestRtJson = JSON.parse(manifestRtRes.content[0].text);
+checkOk(manifestRtJson.steps.every((s) => s.status === "ok") && manifestRtJson.steps_run === 2 && manifestRtJson.steps[0].result?.removed_count === 10, "manifest remove_retakes step cuts 10 words, loudness step follows", JSON.stringify(manifestRtJson.steps.map((s) => `${s.tool}:${s.status}`)));
+checkOk(near(manifestRtJson.final.duration_seconds, 5.74, 0.05), "manifest remove_retakes final is 5.74s", JSON.stringify(manifestRtJson.final));
+const manifestRtLufs = await measureLufs(path.join(root, "outputs/mcp-manifest-rt.mp4"));
+checkOk(near(manifestRtLufs, -14, 0.5), "manifest remove_retakes + loudness final measures -14 LUFS independently", `got ${manifestRtLufs}`);
+const manifestRtCachedRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-retakes.json") },
+});
+const manifestRtCachedJson = JSON.parse(manifestRtCachedRes.content[0].text);
+checkOk(manifestRtCachedJson.cache_hits === 2 && manifestRtCachedJson.steps_run === 0, "manifest remove_retakes second run serves both steps from cache", `cache_hits=${manifestRtCachedJson.cache_hits} steps_run=${manifestRtCachedJson.steps_run}`);
 // manifest chroma_key background (lượt 40): the background image is
 // a sidecar file — its bytes belong in the step cache key, so
 // editing the image re-runs the step (a hex background is already in
@@ -3254,7 +3329,13 @@ async function stageAssembleManifest(name) {
   if (doc.music) doc.music.path = abs(doc.music.path);
   if (doc.sfx) doc.sfx = doc.sfx.map((s) => ({ ...s, file: abs(s.file) }));
   if (doc.captions) doc.captions = abs(doc.captions);
-  if (doc.shots) doc.shots = doc.shots.map((s) => (s.source ? { ...s, source: abs(s.source) } : s));
+  if (doc.shots) doc.shots = doc.shots.map((s) => {
+    const out = { ...s };
+    if (s.source) out.source = abs(s.source);
+    if (s.scene) out.scene = abs(s.scene);
+    if (s.assets) out.assets = Object.fromEntries(Object.entries(s.assets).map(([k, v]) => [k, abs(v)]));
+    return out;
+  });
   const manifestPath = path.join(dir, name);
   await writeFile(manifestPath, JSON.stringify(doc), "utf8");
   return { manifestPath, dir };
@@ -3410,6 +3491,48 @@ checkOk(assembleTransReceipt.approval === "forced" && assembleTransReceipt.joins
 const assembleTransRender2Res = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleTransStage.manifestPath, mode: "render", output_dir: assembleTransOut, force: true } }, undefined, { timeout: 300000 });
 const assembleTransRender2Json = JSON.parse(assembleTransRender2Res.content[0].text);
 checkOk(assembleTransRender2Json.cache_hits === 4, "assemble second transitions render reuses all 4 shot segments from the cache", `cache_hits=${assembleTransRender2Json.cache_hits}`);
+
+// Canvas scenes: a shot drawn in code (Canvas 2D, node-canvas).
+// Fixture: test/assemble-canvas.json (voice 3s + lead/tail 0.5 = 4s,
+// 120 frames @30fps; one canvas_scene shot running the cat-mouse
+// chase scene). The motion is measured, not assumed: two frames
+// 2.4s apart must differ a lot (the runners cross half the frame),
+// which a still image could never do.
+const assembleCanvasStage = await stageAssembleManifest("assemble-canvas.json");
+const assembleCanvasOut = path.join(assembleCanvasStage.dir, "out");
+const assembleCanvasValidateRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleCanvasStage.manifestPath, mode: "validate" } });
+const assembleCanvasValidateJson = JSON.parse(assembleCanvasValidateRes.content[0].text);
+checkOk(assembleCanvasValidateJson.total_seconds === 4 && assembleCanvasValidateJson.total_frames === 120 && assembleCanvasValidateJson.shots?.length === 1 && assembleCanvasValidateJson.shots?.[0]?.kind === "canvas_scene", "assemble validate reports the canvas_scene shot (4s / 120 frames)", JSON.stringify(assembleCanvasValidateJson.shots));
+const assembleCanvasMissingText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-canvas-missing.json"), mode: "validate" });
+checkOk(/cannot load scene module|no-such-scene/.test(assembleCanvasMissingText ?? ""), "assemble validate refuses a canvas_scene with a missing scene module", assembleCanvasMissingText ?? "");
+const assembleCanvasNodrawText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-canvas-nodraw.json"), mode: "validate" });
+checkOk(/must export draw/.test(assembleCanvasNodrawText ?? ""), "assemble validate refuses a scene module with no draw export", assembleCanvasNodrawText ?? "");
+const assembleCanvasPreviewRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleCanvasStage.manifestPath, mode: "preview", output_dir: assembleCanvasOut, preview_seconds: 2 } });
+const assembleCanvasPreviewJson = JSON.parse(assembleCanvasPreviewRes.content[0].text);
+const assembleCanvasPreviewPath = path.join(assembleCanvasOut, "preview.mp4");
+const assembleCanvasPreviewFrames = await countFrames(assembleCanvasPreviewPath);
+checkOk(assembleCanvasPreviewJson.preview_seconds === 2 && assembleCanvasPreviewJson.dimensions === "540x960" && assembleCanvasPreviewFrames === 60, "assemble canvas preview renders 2s at 540x960 with exactly 60 frames", `frames=${assembleCanvasPreviewFrames}`);
+const assembleCanvasRenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleCanvasStage.manifestPath, mode: "render", output_dir: assembleCanvasOut, force: true } }, undefined, { timeout: 300000 });
+const assembleCanvasRenderJson = JSON.parse(assembleCanvasRenderRes.content[0].text);
+const assembleCanvasFinalPath = path.join(assembleCanvasOut, "final.mp4");
+const assembleCanvasFinalProbe = await probeStreams(assembleCanvasFinalPath);
+const assembleCanvasFinalFrames = await countFrames(assembleCanvasFinalPath);
+const assembleCanvasFinalLufs = await measureLufs(assembleCanvasFinalPath);
+checkOk(assembleCanvasRenderJson.approval === "forced" && assembleCanvasFinalProbe?.streams?.find((s) => s.codec_type === "video")?.width === 1080 && near(parseFloat(assembleCanvasFinalProbe?.format?.duration), 4, 0.15) && assembleCanvasFinalFrames === 120, "assemble canvas final is 1080x1920, 4s, exactly 120 frames", `duration=${assembleCanvasFinalProbe?.format?.duration} frames=${assembleCanvasFinalFrames}`);
+checkOk(assembleCanvasFinalLufs !== null && near(assembleCanvasFinalLufs, -14, 0.5), "assemble canvas final measures -14 LUFS independently", `LUFS=${assembleCanvasFinalLufs}`);
+// Motion proof: the frame at 0.6s (runners entering, right) vs the
+// frame at 3.0s (runners left-center) must differ substantially —
+// PSNR below 28 dB (measured 24.7-24.8 twice; a still shot would
+// measure near-infinite).
+const assembleCanvasEarlyPng = path.join(assembleCanvasOut, "canvas-0.6s.png");
+const assembleCanvasLatePng = path.join(assembleCanvasOut, "canvas-3.0s.png");
+await extractPng(assembleCanvasFinalPath, 0.6, assembleCanvasEarlyPng);
+await extractPng(assembleCanvasFinalPath, 3.0, assembleCanvasLatePng);
+const assembleCanvasMotionPsnr = await framePsnr(assembleCanvasEarlyPng, assembleCanvasLatePng);
+checkOk(assembleCanvasMotionPsnr !== null && assembleCanvasMotionPsnr < 28, "assemble canvas_scene really moves: frames 2.4s apart differ (PSNR < 28 dB)", `PSNR=${assembleCanvasMotionPsnr}`);
+const assembleCanvasRender2Res = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleCanvasStage.manifestPath, mode: "render", output_dir: assembleCanvasOut, force: true } }, undefined, { timeout: 300000 });
+const assembleCanvasRender2Json = JSON.parse(assembleCanvasRender2Res.content[0].text);
+checkOk(assembleCanvasRender2Json.cache_hits === 1, "assemble second canvas render reuses the shot segment from the cache", `cache_hits=${assembleCanvasRender2Json.cache_hits}`);
 
 await client.close();
 if (failures.length) {

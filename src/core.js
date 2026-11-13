@@ -11,6 +11,7 @@ import { constants as fsConstants, createReadStream } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 
 export const MEDIAKIT_VERSION = "0.1.0";
 
@@ -5055,6 +5056,180 @@ export async function cutWords({ input, output = null, wordsFile, remove = null,
   };
 }
 
+// ---------------------------------------------------------------- remove_retakes
+// Find and cut repeated takes from a talking-head recording, on the
+// word timings from transcribe --word-timestamps. The idea is
+// mariagorskikh/talking-head-reel's take selection, made
+// deterministic: a speaker says a sentence, dislikes it, says it
+// again — the transcript holds the same phrase twice with only
+// restart junk ("okay, again", a filler) between the two takes.
+// Later wins over earlier (people warm up), the fluent run is kept
+// whole, and cut points come from word times via cutWords' pads.
+// Two shapes are detected:
+//   * a full repeat: >= min_words identical words, then a short gap
+//     (<= max_gap_words words, <= max_gap_seconds), then the same
+//     phrase again — the earlier take + the gap junk are removed.
+//   * an abandoned start: 2..min_words-1 words that are a strict
+//     prefix of the phrase that follows right after (e.g. "the
+//     quick" — "um" — "the quick brown fox") — the short start +
+//     the gap are removed, the full phrase is kept.
+// Detection scans a live word list left to right: after a cluster
+// the removed words leave the list, so a third take of the same
+// phrase is found as a new pair against the kept take (keep=last),
+// and with keep=first the scan restarts from the top so the third
+// take is matched against the kept first one. What it deliberately
+// does NOT do: judge delivery. An intentional repetition ("I like
+// cats. I like cats a lot.") looks identical to a retake to this
+// detector — the gap bounds (<= 8 words, <= 5 s by default) are the
+// only guard, so --detect-only is the review gate: read the
+// clusters before cutting.
+export function detectRetakes(words, { minWords = 3, maxGapWords = 8, maxGapSeconds = 5, keep = "last" } = {}) {
+  const minW = num(minWords, "min_words", { min: 1, max: 10, integer: true });
+  const maxGW = num(maxGapWords, "max_gap_words", { min: 0, max: 50, integer: true });
+  const maxGS = num(maxGapSeconds, "max_gap_seconds", { min: 0, max: 60 });
+  if (keep !== "first" && keep !== "last") throw new MediaKitError(`remove_retakes --keep must be "first" or "last", got: ${keep}`, "INVALID_ARG");
+  const norm = words.map((w) => normalizeWord(w.word));
+  // Live list of word indices still present; removals splice it, so
+  // later pairs are matched on the transcript as it will sound.
+  let live = words.map((_, i) => i);
+  const clusters = [];
+  const removed = new Set();
+  let pos = 0;
+  while (pos < live.length) {
+    const i = live[pos];
+    let best = null;
+    const jLast = Math.min(live.length - 1, pos + minW + maxGW);
+    for (let jpos = pos + 1; jpos <= jLast; jpos++) {
+      const j = live[jpos];
+      let L = 0;
+      while (pos + L < live.length && jpos + L < live.length && norm[live[pos + L]] !== "" && norm[live[pos + L]] === norm[live[jpos + L]]) L++;
+      if (L === 0) continue;
+      const gapWords = jpos - (pos + L);
+      if (gapWords < 0 || gapWords > maxGW) continue;
+      const gapSeconds = words[j].start - words[live[pos + L - 1]].end;
+      if (gapSeconds > maxGS) continue;
+      const isFull = L >= minW;
+      const isAbandoned = L >= 2 && L < minW && (live.length - jpos) >= minW;
+      if (!isFull && !isAbandoned) continue;
+      if (!best || L > best.L || (L === best.L && gapWords < best.gapWords)) best = { jpos, L, gapWords, gapSeconds };
+    }
+    if (!best) { pos++; continue; }
+    const { jpos, L, gapWords, gapSeconds } = best;
+    const removedPos = keep === "last"
+      ? Array.from({ length: jpos - pos }, (_, k) => pos + k)
+      : Array.from({ length: L + gapWords }, (_, k) => pos + L + k);
+    const removedIdx = removedPos.map((p) => live[p]);
+    removedIdx.forEach((ix) => removed.add(ix));
+    clusters.push({
+      kept_start_index: live[keep === "last" ? jpos : pos],
+      kept_start: +words[live[keep === "last" ? jpos : pos]].start.toFixed(3),
+      repeat_words: L,
+      gap_words: gapWords,
+      gap_seconds: +gapSeconds.toFixed(3),
+      removed_indices: removedIdx,
+      removed_text: removedIdx.map((ix) => words[ix].word).join(" "),
+      kept_text: live.slice(jpos, jpos + L).map((ix) => words[ix].word).join(" "),
+    });
+    live = live.filter((_, p) => !removedPos.includes(p));
+    if (keep === "last") {
+      // The kept take now sits at live[pos]; it can itself be the
+      // earlier take of a third repeat, so keep scanning from it.
+      if (pos >= live.length) break;
+    } else {
+      // The kept take is the first one; restart from the top so a
+      // third take is matched against it.
+      pos = 0;
+    }
+  }
+  return { clusters, removed: [...removed].sort((a, b) => a - b) };
+}
+
+// "0,1,2,5,6" -> "0-2,5-6" — the --indices string cutWords takes.
+function formatWordRanges(indices) {
+  const sorted = [...indices].sort((a, b) => a - b);
+  const parts = [];
+  let start = null, prev = null;
+  for (const i of sorted) {
+    if (start === null) { start = i; prev = i; continue; }
+    if (i === prev + 1) { prev = i; continue; }
+    parts.push(start === prev ? `${start}` : `${start}-${prev}`);
+    start = i; prev = i;
+  }
+  if (start !== null) parts.push(start === prev ? `${start}` : `${start}-${prev}`);
+  return parts.join(",");
+}
+
+export async function removeRetakes({ input, output = null, wordsFile, minWords = 3, maxGapWords = 8, maxGapSeconds = 5, keep = "last", padBefore = 0.06, padAfter = 0.12, minKeep = 0.2, detectOnly = false }) {
+  const inPath = await requireInput(input);
+  const wordsPath = await requireInput(wordsFile, "words file");
+  let rawWords;
+  try {
+    rawWords = JSON.parse(await readFile(wordsPath, "utf8"));
+  } catch (e) {
+    throw new MediaKitError(`remove_retakes could not parse the words file as JSON: ${e.message}`, "INVALID_ARG");
+  }
+  const words = normalizeTranscriptWords(rawWords, "words file");
+  const { clusters, removed } = detectRetakes(words, { minWords, maxGapWords, maxGapSeconds, keep });
+  const removedWords = removed.map((i) => ({ index: i, word: words[i].word, start: words[i].start, end: words[i].end }));
+  const meta = await probe(inPath);
+  if (!meta.audio) throw new MediaKitError("remove_retakes needs an input with an audio stream", "INVALID_ARG");
+  const duration = meta.duration_seconds;
+  if (duration === null) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
+  const base = {
+    operation: "remove_retakes",
+    input: inPath,
+    words_file: wordsPath,
+    words_total: words.length,
+    min_words: num(minWords, "min_words", { min: 1, max: 10, integer: true }),
+    max_gap_words: num(maxGapWords, "max_gap_words", { min: 0, max: 50, integer: true }),
+    max_gap_seconds: num(maxGapSeconds, "max_gap_seconds", { min: 0, max: 60 }),
+    keep,
+    clusters,
+    removed_count: removed.length,
+    removed_words: removedWords,
+    duration_before: duration,
+    pad_before: num(padBefore, "pad_before", { min: 0, max: 1 }),
+    pad_after: num(padAfter, "pad_after", { min: 0, max: 1 }),
+    min_keep: num(minKeep, "min_keep", { min: 0.05, max: 5 }),
+  };
+  if (detectOnly === true) {
+    const cut = new Set(removed);
+    const { keep: kept, swallowed } = buildKeepSegmentsFromWords(words, cut, duration, { padBefore: base.pad_before, padAfter: base.pad_after, minKeep: base.min_keep });
+    const keptTotal = kept.reduce((s, k) => s + k.duration, 0);
+    return {
+      ...base, detect_only: true,
+      keep_segments: kept,
+      removed_seconds: +(duration - keptTotal).toFixed(3),
+      cut_check: { swallowed, warnings: swallowed.map((s) => `kept word #${s.index} '${s.word}' @${s.start}s is mostly cut out — play it, then re-run with a larger --max-gap-words or smaller --min-words`) },
+    };
+  }
+  if (removed.length === 0) {
+    // No retake found: copy the streams as-is (cut_words' no-op path).
+    const outPath = await prepareOutput(output, [inPath, wordsPath]);
+    await run(FFMPEG, ["-y", "-i", inPath, "-c", "copy", outPath]);
+    const info = await fileInfo(outPath);
+    return { ...base, output: outPath, duration_after: duration, stream_copy: true, warning: "no retakes found — copied unchanged", ...info };
+  }
+  // Cut through cutWords: one code path for word cuts, so pads,
+  // min-keep, swallowed warnings and the no-match behaviour stay
+  // identical. cutWords re-probes and re-reads the words file.
+  const cut = await cutWords({
+    input: inPath, output, wordsFile: wordsPath,
+    indices: formatWordRanges(removed),
+    padBefore: base.pad_before, padAfter: base.pad_after, minKeep: base.min_keep,
+  });
+  return {
+    ...base,
+    output: cut.output,
+    duration_after: cut.duration_after,
+    keep_segments: cut.keep_segments,
+    removed_seconds: cut.removed_seconds,
+    cut_check: cut.cut_check,
+    ...(cut.dimensions ? { dimensions: cut.dimensions } : {}),
+    ...(cut.size_bytes !== undefined ? { size_bytes: cut.size_bytes } : {}),
+  };
+}
+
 // ---------------------------------------------------------------- doctor
 // Read-only environment preflight (kinocut's video_doctor idea): what
 // ffmpeg/ffprobe can actually do on this machine, and which mediakit
@@ -5108,6 +5283,7 @@ const TOOL_REQUIREMENTS = {
   receipt: { filters: ["loudnorm"] },
   silence: { filters: ["silencedetect", "trim", "atrim", "concat"], encoders: ["libx264", "aac"] },
   cut_words: { filters: ["trim", "atrim", "concat", "setpts", "asetpts"], encoders: ["libx264", "aac"] },
+  remove_retakes: { filters: ["trim", "atrim", "concat", "setpts", "asetpts"], encoders: ["libx264", "aac"] },
   cropdetect: { filters: ["cropdetect"] },
   package: {},
   publish_kit: {},
@@ -6314,6 +6490,19 @@ export const BATCH_OPERATIONS = {
     // the second clip is served the first clip's cut.
     extraHash: async (input, a) => hashSidecar(cutWordsFileFor(input, a.words_dir)),
   },
+  // remove_retakes in batch: same words-file-by-convention as
+  // cut_words — <words_dir>/<stem>.words.json per clip.
+  remove_retakes: {
+    args: ["words_dir", "min_words", "max_gap_words", "max_gap_seconds", "keep", "pad_before", "pad_after", "min_keep"],
+    run: (input, output, a) => removeRetakes({
+      input, output,
+      wordsFile: cutWordsFileFor(input, a.words_dir),
+      minWords: a.min_words ?? 3, maxGapWords: a.max_gap_words ?? 8, maxGapSeconds: a.max_gap_seconds ?? 5,
+      keep: a.keep ?? "last",
+      padBefore: a.pad_before ?? 0.06, padAfter: a.pad_after ?? 0.12, minKeep: a.min_keep ?? 0.2,
+    }),
+    extraHash: async (input, a) => hashSidecar(cutWordsFileFor(input, a.words_dir)),
+  },
 };
 
 const BATCH_CACHE_FILENAME = ".mediakit-batch-cache.json";
@@ -6667,6 +6856,16 @@ export const MANIFEST_STEPS = {
       padBefore: a.pad_before ?? 0.06, padAfter: a.pad_after ?? 0.12, minKeep: a.min_keep ?? 0.2,
     }),
   },
+  // Same override for remove_retakes: one words file for the one input.
+  remove_retakes: {
+    args: ["words_file", "min_words", "max_gap_words", "max_gap_seconds", "keep", "pad_before", "pad_after", "min_keep"],
+    run: (input, output, a) => removeRetakes({
+      input, output, wordsFile: a.words_file,
+      minWords: a.min_words ?? 3, maxGapWords: a.max_gap_words ?? 8, maxGapSeconds: a.max_gap_seconds ?? 5,
+      keep: a.keep ?? "last",
+      padBefore: a.pad_before ?? 0.06, padAfter: a.pad_after ?? 0.12, minKeep: a.min_keep ?? 0.2,
+    }),
+  },
 };
 
 const MANIFEST_CACHE_DIRNAME = ".mediakit-manifest-cache";
@@ -6920,6 +7119,7 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
 const ASSEMBLE_VERSION = "assemble-v1";
 const ASSEMBLE_MAX_SHOTS = 64;
 const ASSEMBLE_MOTION_GATE_SECONDS = 2.5;
+const ASSEMBLE_CANVAS_MAX_SECONDS = 60;
 const ASSEMBLE_CACHE_DIRNAME = ".mediakit-assemble-cache";
 
 // Locked style values, read from skills/shorts-video/styles.json (the
@@ -7147,8 +7347,8 @@ async function validateAssembleManifest(doc, manifestAbs) {
     if (seenIds.has(id)) throw new MediaKitError(`duplicate shot id "${id}"`, "INVALID_ARG");
     seenIds.add(id);
     const kind = raw.kind;
-    if (!["image", "video", "color"].includes(kind)) {
-      throw new MediaKitError(`${label} (${id}): kind must be image, video or color, got: ${kind}`, "INVALID_ARG");
+    if (!["image", "video", "color", "canvas_scene"].includes(kind)) {
+      throw new MediaKitError(`${label} (${id}): kind must be image, video, color or canvas_scene, got: ${kind}`, "INVALID_ARG");
     }
     const duration = num(raw.duration, `${label} (${id}) duration`, { min: 0.5, max: 600 });
     const frames = Math.round(duration * fps);
@@ -7200,6 +7400,48 @@ async function validateAssembleManifest(doc, manifestAbs) {
       shot.start = start;
       shot.sourceDuration = meta.duration_seconds;
       shot.assetHash = await hashFile(srcPath);
+    } else if (kind === "canvas_scene") {
+      if (typeof raw.scene !== "string" || !raw.scene.trim()) throw new MediaKitError(`${label} (${id}): canvas_scene shot needs a scene (JS module path)`, "INVALID_ARG");
+      const scenePath = await requireInput(resolveRel(raw.scene), `${label} (${id}) scene`);
+      if (!/\.(cjs|js|mjs)$/i.test(path.extname(scenePath))) {
+        throw new MediaKitError(`${label} (${id}): scene must be a .js/.cjs/.mjs module, got ${path.extname(scenePath) || "(no extension)"}`, "INVALID_ARG");
+      }
+      // Loading the module runs its top-level code — same trust as
+      // rendering it. Validate fails here, not mid-render, if the
+      // module cannot load or has no draw export.
+      await loadCanvasSceneModule(scenePath, `${label} (${id})`);
+      shot.scene = scenePath;
+      shot.sceneHash = await hashFile(scenePath);
+      const assetHashes = {};
+      shot.assets = {};
+      if (raw.assets !== undefined && raw.assets !== null) {
+        if (typeof raw.assets !== "object" || Array.isArray(raw.assets)) {
+          throw new MediaKitError(`${label} (${id}): assets must be an object {name: path}`, "INVALID_ARG");
+        }
+        for (const [name, assetRaw] of Object.entries(raw.assets)) {
+          if (typeof assetRaw !== "string" || !assetRaw.trim()) throw new MediaKitError(`${label} (${id}): assets.${name} needs a path`, "INVALID_ARG");
+          const assetPath = await requireInput(resolveRel(assetRaw), `${label} (${id}) assets.${name}`);
+          const meta = await probe(assetPath);
+          if (!meta.video) throw new MediaKitError(`${label} (${id}): assets.${name} ${assetRaw} has no video stream`, "INVALID_ARG");
+          if (meta.audio || meta.duration_seconds !== null) {
+            throw new MediaKitError(`${label} (${id}): assets.${name} must be a still image, not a video (extract a frame first)`, "INVALID_ARG");
+          }
+          shot.assets[name] = assetPath;
+          assetHashes[name] = await hashFile(assetPath);
+        }
+      }
+      if (raw.params !== undefined && raw.params !== null) {
+        if (typeof raw.params !== "object" || Array.isArray(raw.params)) {
+          throw new MediaKitError(`${label} (${id}): params must be a plain JSON object`, "INVALID_ARG");
+        }
+        shot.params = raw.params;
+      }
+      if (duration > ASSEMBLE_CANVAS_MAX_SECONDS) {
+        throw new MediaKitError(`${label} (${id}): canvas_scene duration ${duration}s exceeds the ${ASSEMBLE_CANVAS_MAX_SECONDS}s cap (render cost is one PNG per frame — split the shot)`, "INVALID_ARG");
+      }
+      // One hash covers the scene code + its assets + its params, so
+      // the segment cache and the fingerprint both see any of them change.
+      shot.assetHash = createHash("sha256").update(stableStringify({ scene: shot.sceneHash, assets: assetHashes, params: shot.params ?? null })).digest("hex");
     } else {
       if (typeof raw.color !== "string" || !/^[0-9a-fA-F]{6}$/.test(raw.color.trim())) {
         throw new MediaKitError(`${label} (${id}): color shot needs a 6-digit hex color (RRGGBB), got: ${raw.color}`, "INVALID_ARG");
@@ -7305,6 +7547,100 @@ async function validateAssembleManifest(doc, manifestAbs) {
   };
 }
 
+// ---------------------------------------------------------------- canvas_scene
+// A canvas_scene shot is a JS module that draws every frame in code
+// (Canvas 2D, node-canvas). Same contract as the local-video-pipeline
+// skill: module.exports.draw = async (ctx, t, W, H, assets, M) => {}.
+// Frame N is a pure function of t = N/fps — deterministic, no clock,
+// no network. The scene runs as local code with the user's
+// privileges; only render manifests you trust. The module is loaded
+// through createRequire (scenes are CommonJS, like the pipeline
+// skill's scene.js) and the top-level module is cache-busted on
+// every load, so editing the scene file takes effect without
+// restarting the server. M.lib is vendored from the pipeline skill
+// (src/canvas-scene-lib/): camera + fx, pure functions, no deps.
+const canvasRequire = createRequire(import.meta.url);
+
+async function loadCanvasSceneModule(scenePath, label) {
+  try {
+    delete canvasRequire.cache[canvasRequire.resolve(scenePath)];
+  } catch { /* first load: nothing cached */ }
+  let mod;
+  try {
+    mod = canvasRequire(scenePath);
+  } catch (e) {
+    // A .js scene under a "type": "module" package is treated as ESM,
+    // so module.exports is not defined there. .cjs always works.
+    const hint = /ES module scope|Cannot use import statement/.test(e.message)
+      ? " (rename the scene to .cjs — the nearest package.json sets \"type\": \"module\")"
+      : "";
+    throw new MediaKitError(`${label}: cannot load scene module ${scenePath}: ${e.message}${hint}`, "INVALID_ARG");
+  }
+  const draw = mod?.draw ?? mod?.default?.draw ?? (typeof mod?.default === "function" ? mod.default : null);
+  if (typeof draw !== "function") {
+    throw new MediaKitError(`${label}: scene module must export draw(ctx, t, W, H, assets, M) (module.exports.draw)`, "INVALID_ARG");
+  }
+  return draw;
+}
+
+function canvasSceneLib() {
+  const libDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "canvas-scene-lib");
+  return {
+    camera: canvasRequire(path.join(libDir, "camera.cjs")),
+    fx: canvasRequire(path.join(libDir, "fx.cjs")),
+  };
+}
+
+function loadCanvasPackage(label) {
+  try {
+    return canvasRequire("canvas");
+  } catch {
+    throw new MediaKitError(`${label}: canvas_scene needs the "canvas" npm package — run "npm i canvas" in the mediakit directory`, "CANVAS_MISSING");
+  }
+}
+
+// Render a canvas_scene shot: run the scene's draw() for every
+// frame (t = N/fps, deterministic), write PNGs to a scratch dir
+// inside tmpDir, encode them to one segment. Frame count is
+// counted on disk, like every other shot kind. The scratch dir is
+// removed with tmpDir by the caller.
+async function buildAssembleCanvasShot(plan, shot, opts, outPath, tmpDir) {
+  const { width, height, fps, crf, preset } = opts;
+  const frames = shot.buildFrames;
+  const { createCanvas, loadImage } = loadCanvasPackage(`assemble shot ${shot.id}`);
+  const draw = await loadCanvasSceneModule(shot.scene, `assemble shot ${shot.id}`);
+  const assets = {};
+  for (const [name, assetPath] of Object.entries(shot.assets ?? {})) {
+    assets[name] = await loadImage(assetPath);
+  }
+  const lib = canvasSceneLib();
+  const M = { duration: shot.buildSeconds, fps, params: shot.params ?? {}, lib };
+  const framesDir = path.join(tmpDir, `canvas-${shot.id}-frames`);
+  await mkdir(framesDir, { recursive: true });
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext("2d");
+  try {
+    for (let n = 0; n < frames; n++) {
+      const t = n / fps;
+      ctx.clearRect(0, 0, width, height);
+      await draw(ctx, t, width, height, assets, M);
+      await writeFile(path.join(framesDir, `frame_${String(n).padStart(5, "0")}.png`), canvas.toBuffer("image/png"));
+    }
+    await run(FFMPEG, [
+      "-y", "-framerate", String(fps), "-i", path.join(framesDir, "frame_%05d.png"),
+      "-frames:v", String(frames),
+      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", String(crf), "-preset", preset, "-an", outPath,
+    ]);
+  } finally {
+    await rm(framesDir, { recursive: true, force: true });
+  }
+  const counted = await countVideoFrames(outPath);
+  if (counted !== frames) {
+    throw new MediaKitError(`assemble shot ${shot.id}: built ${counted} frames, expected ${frames}`, "ASSEMBLE_FRAME_MISMATCH");
+  }
+  return outPath;
+}
+
 // One shot -> one uniform segment (libx264/yuv420p, target size/fps,
 // no audio, exactly shot.buildFrames frames — counted on disk, not
 // assumed). The segment covers the nominal shot PLUS its transition
@@ -7318,6 +7654,9 @@ async function validateAssembleManifest(doc, manifestAbs) {
 // after it.
 async function buildAssembleShot(plan, shot, opts, outPath) {
   const { width, height, fps, crf, preset } = opts;
+  if (shot.kind === "canvas_scene") {
+    return buildAssembleCanvasShot(plan, shot, opts, outPath, opts.tmpDir);
+  }
   if (shot.kind === "image") {
     const z = shot.zoom ?? { from: 1, to: 1, focus: [0.5, 0.5], focus_end: [0.5, 0.5] };
     const r = await zoomPan({
@@ -7397,6 +7736,7 @@ async function assembleCachedShot(plan, shot, opts, tmpDir) {
     frames: shot.buildFrames,
     transition: shot.transition ? { type: shot.transition.type, frames: shot.transition.frames } : null,
     zoom: shot.zoom ?? null,
+    params: shot.params ?? null,
     width: opts.width, height: opts.height, fps: opts.fps, crf: opts.crf, preset: opts.preset,
   })).digest("hex");
   const cacheFile = path.join(cacheDir, `${key}.mp4`);
@@ -7416,7 +7756,7 @@ async function assembleCachedShot(plan, shot, opts, tmpDir) {
     } catch { /* cached segment gone or changed: rebuild */ }
   }
   await mkdir(cacheDir, { recursive: true });
-  await buildAssembleShot(plan, shot, opts, segPath);
+  await buildAssembleShot(plan, shot, { ...opts, tmpDir }, segPath);
   try {
     await copyFile(segPath, cacheFile);
     const st = await stat(cacheFile);

@@ -47,6 +47,19 @@ jobs:
           fi
           ffmpeg -version | head -1
           ffprobe -version | head -1
+      - name: Install canvas system libs
+        # node-canvas needs cairo/pango/jpeg/gif/rsvg at runtime (and
+        # the -dev headers if the prebuild is missing for this Node
+        # and npm falls back to building from source). Same bounded
+        # apt pattern as the ffmpeg step — a hung apt must fail fast.
+        run: |
+          APT_OPTS="-o Acquire::Retries=1 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10"
+          for i in 1 2 3; do
+            timeout 90 sudo apt-get update -qq $APT_OPTS && timeout 120 sudo apt-get install -y -qq $APT_OPTS build-essential libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev && break
+            echo "apt attempt $i failed, retrying in 10s..."
+            sleep 10
+          done
+          ldconfig -p | grep -E 'libcairo|libpango' | head -3
       - run: npm ci
       - name: Syntax check
         run: npm run check
@@ -115,6 +128,14 @@ jobs:
           ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-batch-cw/take-cut_words.mp4 | grep '^3.48'
           printf '%s' '{"version":1,"input":"../test/source.mp4","output":"ci-manifest-cw.mp4","steps":[{"tool":"cut_words","args":{"words_file":"../test/cut-words.json","remove":"um,uh"}}]}' > outputs/ci-manifest-cw.json
           node bin/mediakit.js manifest outputs/ci-manifest-cw.json | grep '"steps_run": 1'
+          node bin/mediakit.js remove-retakes test/source.mp4 --words-file test/retakes-words.json -o outputs/ci-retakes.mp4 | grep '"removed_count": 10'
+          ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-retakes.mp4 | grep '^5.74'
+          node bin/mediakit.js remove-retakes test/source.mp4 --words-file test/retakes-words.json --detect-only | grep '"detect_only": true'
+          mkdir -p outputs/ci-batch-rt-in && cp test/source.mp4 outputs/ci-batch-rt-in/take.mp4 && cp test/retakes-words.json outputs/ci-batch-rt-in/take.words.json
+          node bin/mediakit.js batch remove-retakes --pattern '*.mp4' --input-dir outputs/ci-batch-rt-in -o outputs/ci-batch-rt --args-json '{}' | grep '"succeeded": 1'
+          ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-batch-rt/take-remove_retakes.mp4 | grep '^5.74'
+          printf '%s' '{"version":1,"input":"../test/source.mp4","output":"ci-manifest-rt.mp4","steps":[{"tool":"remove_retakes","args":{"words_file":"../test/retakes-words.json"}}]}' > outputs/ci-manifest-rt.json
+          node bin/mediakit.js manifest outputs/ci-manifest-rt.json | grep '"steps_run": 1'
           node bin/mediakit.js assemble test/assemble-film-transitions.json --mode validate | grep '"total_frames": 300'
           node bin/mediakit.js assemble test/assemble-film-transitions.json --mode preview -o outputs/ci-assemble-trans --preview-seconds 5 | grep '"preview_seconds": 5'
       - name: MCP test

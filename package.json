@@ -5,10 +5,10 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
+    "canvas": "3.2.3",
     "zod": "^3.25.0"
   },
   "description": "Professional media tools for coding agents: an MCP server + CLI wrapping ffmpeg — trim, crop, resize, captions, loudness, thumbnails, and more.",
-  "devDependencies": {},
   "engines": {
     "node": ">=18"
   },

@@ -487,6 +487,23 @@ const COMMANDS = {
       ["-o, --output", "Output file (required unless --dry-run)"],
     ],
   },
+  "remove-retakes": {
+    usage: "mediakit remove-retakes <input> --words-file <words.json> -o <output> [--min-words 3] [--max-gap-words 8] [--max-gap-seconds 5] [--keep last|first] [--pad-before 0.06] [--pad-after 0.12] [--min-keep 0.2] [--detect-only]",
+    desc: "Cut repeated takes out of a talking-head clip, on word timings from transcribe --word-timestamps (save its printed JSON and pass it as --words-file): when the speaker says a sentence, restarts, and says it again, the earlier take plus the restart junk ('okay, again', a filler) is cut and the fluent take is kept whole. A repeat is --min-words identical words (default 3) with at most --max-gap-words words (default 8) and --max-gap-seconds (default 5) between the takes; a 2-word abandoned start ('the quick' — 'um' — 'the quick brown fox') is also cut. --keep last (default) keeps the later take, --keep first the earlier one. --detect-only reports the clusters and the cut plan and writes no file. No retake copies the input unchanged. Deterministic, not a judge: an intentional repetition looks like a retake to this detector — read the clusters (or run --detect-only) before cutting.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--words-file", "Transcript JSON with a words array (required) — the stdout of `transcribe --word-timestamps` saved to a file"],
+      ["--min-words", "Minimum repeated-phrase length in words (default 3)"],
+      ["--max-gap-words", "Max words allowed between the two takes (default 8)"],
+      ["--max-gap-seconds", "Max seconds between the takes (default 5)"],
+      ["--keep", "Which take to keep: last (default) or first"],
+      ["--pad-before", "Seconds kept before each kept-word run (default 0.06)"],
+      ["--pad-after", "Seconds kept after each kept-word run (default 0.12)"],
+      ["--min-keep", "Drop keep segments shorter than this many seconds (default 0.2)"],
+      ["--detect-only", "Report the clusters and the cut plan and write no file"],
+      ["-o, --output", "Output file (required unless --detect-only)"],
+    ],
+  },
   mix: {
     usage: "mediakit mix <voice> --music <file> -o <output> [--music-volume 0.3] [--duck-db 12] [--attack-ms 100] [--release-ms 400] [--voice-lufs -16] [--target-lufs -14] [--no-master] [--dry-run] [--sfx <file>@<s|MM:SS>[@<volume>]]",
     desc: "Mix voice over a music bed with sidechain ducking (bed drops under speech), then master to target LUFS. --sfx drops a short sound at an exact timestamp (repeatable, mixed after ducking). --dry-run prints the exact ffmpeg command and writes nothing.",
@@ -588,7 +605,7 @@ const COMMANDS = {
   },
   batch: {
     usage: "mediakit batch <operation> --pattern <glob> --input-dir <dir> -o <output-dir> [--args-json '{\"target_lufs\": -14}'] [--jobs 1] [--suffix -loudness] [--no-cache] [--stop-on-error] [--timeout 1800] [--max-files 200] [--dry-run]",
-    desc: "Apply one operation (loudness|resize|reframe|compress|convert|extract-audio|reverse|grade|fit|trim|silence|chroma-key|cut-words) to every file matching a glob under a folder, with the same args for all. Outputs are <stem>-<operation>.<ext> under the output dir, mirroring the input tree; a batch-manifest.json records every file's result. Unchanged files are skipped via a content-hash cache; --dry-run lists the planned outputs and writes nothing. cut-words finds each clip's words file as <words-dir>/<stem>.words.json (default: the input's own folder) — a clip with no words file fails its own row only.",
+    desc: "Apply one operation (loudness|resize|reframe|compress|convert|extract-audio|reverse|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes) to every file matching a glob under a folder, with the same args for all. Outputs are <stem>-<operation>.<ext> under the output dir, mirroring the input tree; a batch-manifest.json records every file's result. Unchanged files are skipped via a content-hash cache; --dry-run lists the planned outputs and writes nothing. cut-words and remove-retakes find each clip's words file as <words-dir>/<stem>.words.json (default: the input's own folder) — a clip with no words file fails its own row only.",
     args: [{ name: "operation", required: true }],
     options: [
       ["--pattern", "Glob under --input-dir: **/*.mp4 (any depth), sub/*.mp4 (one folder), or bare *.mp4 (basename at any depth) (required)"],
@@ -617,7 +634,7 @@ const COMMANDS = {
   },
   manifest: {
     usage: "mediakit manifest <manifest.json> [-o <output.mp4>] [--dry-run] [--no-cache] [--keep-intermediates]",
-    desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (trim|resize|reframe|compress|convert|extract-audio|reverse|grade|fit|silence|denoise|interpolate|burn-captions|overlay|chroma-key|cut-words), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file.",
+    desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (trim|resize|reframe|compress|convert|extract-audio|reverse|grade|fit|silence|denoise|interpolate|burn-captions|overlay|chroma-key|cut-words|remove-retakes), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file.",
     args: [{ name: "manifest", required: true }],
     options: [
       ["--dry-run", "Validate the manifest and list the planned steps without running anything"],
@@ -1157,6 +1174,23 @@ async function main() {
           padAfter: numOpt(opts, "pad_after") ?? 0.12,
           minKeep: numOpt(opts, "min_keep") ?? 0.2,
           dryRun: opts.dry_run === true,
+        });
+        break;
+      }
+      case "remove-retakes": {
+        if (!opts.words_file) fail("missing required option: --words-file <words.json>");
+        if (opts.keep !== undefined && opts.keep !== "first" && opts.keep !== "last") fail(`--keep must be "first" or "last", got: ${opts.keep}`);
+        result = await core.removeRetakes({
+          input: needInput(), output: opts.detect_only === true ? null : needOutput(opts),
+          wordsFile: opts.words_file,
+          minWords: numOpt(opts, "min_words") ?? 3,
+          maxGapWords: numOpt(opts, "max_gap_words") ?? 8,
+          maxGapSeconds: numOpt(opts, "max_gap_seconds") ?? 5,
+          keep: opts.keep ?? "last",
+          padBefore: numOpt(opts, "pad_before") ?? 0.06,
+          padAfter: numOpt(opts, "pad_after") ?? 0.12,
+          minKeep: numOpt(opts, "min_keep") ?? 0.2,
+          detectOnly: opts.detect_only === true,
         });
         break;
       }

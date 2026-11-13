@@ -1,0 +1,1 @@
+{"fps":30,"height":1920,"shots":[{"duration":4.0,"id":"chase","kind":"canvas_scene","scene":"no-such-scene.js"}],"title":"Canvas chase demo (bad scene)","version":1,"voice":{"lead":0.5,"path":"canvas-voice.mp3","tail":0.5},"width":1080}

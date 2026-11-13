@@ -88,6 +88,12 @@ pictures — pictures fit the voice:
     the source duration. Reframed (crop) to the manifest size.
   - `color`: `color` is a 6-digit hex (RRGGBB). A solid card —
     for separators and title beats.
+  - `canvas_scene`: `scene` is a JS module that draws every frame
+    in code (Canvas 2D) — see Canvas scenes below. Real 30fps
+    motion, not a still: the director's animation path. Use a
+    `.cjs` file — a `.js` scene under a `"type": "module"`
+    package is treated as ESM and `module.exports` is not defined
+    there (the loader says so when it happens).
   - Any shot after the first may carry `transition: {type,
     duration}` — see Transitions below.
 
@@ -140,6 +146,68 @@ the previous shot into this one:
 - v1 limits: the join itself is not cached (a second render
   reuses the shot segments but re-encodes the join), and there
   is no audio crossfade — the voice timeline is never touched.
+
+## Canvas scenes
+
+A `canvas_scene` shot is code that draws the shot, frame by
+frame, in Node with Canvas 2D — the same deterministic pipeline
+as the `local-video-pipeline` skill (frame N is a pure function
+of `t = N/fps`, no realtime capture, no dropped frames). This is
+the director's animation path: smooth 30fps motion for things a
+still image cannot do, with no AI video account and no browser.
+
+```json
+{"id": "chase", "kind": "canvas_scene", "scene": "chase-scene.js",
+ "duration": 3.975,
+ "assets": {"bg": "kitchen.png"},
+ "params": {"speed": 1.2}}
+```
+
+- `scene` is a JS module path (relative to the manifest, like
+  every other path). It must export `draw` (CommonJS, same
+  contract as the pipeline skill):
+
+  ```js
+  // chase-scene.js
+  module.exports.draw = async (ctx, t, W, H, assets, M) => {
+    // ctx: Canvas 2D context, t: seconds (0..duration), W/H: pixels
+    // assets: {name: Image} from the shot's `assets` map
+    // M: {duration, fps, params, lib: {camera, fx}}
+  };
+  ```
+
+  `M.lib.camera` (`shot`/`at`/`apply`, virtual 2D camera) and
+  `M.lib.fx` (`ease`/`prog`/`fade`/`pop`/`slide`,
+  `makeParticles`/`positions`, `transition`/`drawTransition`,
+  `glow`) are vendored into MediaKit from the pipeline skill —
+  the scene works with no other dependency. `M.params` is the
+  shot's `params` object, so one scene file serves many shots.
+  The scene must be deterministic: same `t` ⇒ same frame. No
+  `Math.random()`, no `Date.now()` — use `fx.rng(seed)` for
+  randomness. A scene that reads the clock or the network is a
+  bug, not a feature.
+- `assets` (optional) maps names to still-image paths, loaded
+  with `loadImage` and handed to `draw` as `assets`. Each must
+  be a still image (same probe as an `image` shot).
+- `params` (optional) must be a plain JSON object.
+- `duration` is 0.5–60s. Rendering costs real CPU (one PNG per
+  frame at full size), so keep scenes short — a film is made of
+  many short canvas shots, not one long one.
+- The motion gate does NOT apply: a canvas scene is assumed to
+  move by construction. The author owns the motion; the suite
+  proves it by measuring frame-to-frame change on the demo
+  scene (two frames 2s apart must differ — PSNR below 25 dB).
+- Transitions work like `image` shots: the content is
+  generated, so there is no source-handle limit. In a preview,
+  a clipped canvas shot renders from `t = 0` for the clipped
+  frames.
+- The scene runs as local code with the user's privileges — a
+  manifest you did not write can run arbitrary JS in its scene
+  modules. Only render manifests you trust, the same as any
+  code you run.
+- Needs the `canvas` npm package (installed with MediaKit).
+  If it is missing, `validate` passes but the build fails with
+  a clear message telling you to install it.
 
 ## Cache and approval
 

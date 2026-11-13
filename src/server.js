@@ -750,6 +750,37 @@ server.tool(
 );
 
 server.tool(
+  "remove_retakes",
+  "Cut repeated takes out of a talking-head clip, on word timings from transcribe --word-timestamps: when the speaker says a sentence, restarts, and says it again, the earlier take plus the restart junk ('okay, again', a filler) is cut and the fluent take is kept whole. A repeat is >= min_words identical words (default 3) with at most max_gap_words words (default 8) and max_gap_seconds (default 5) between the takes; a 2-word abandoned start ('the quick' — 'um' — 'the quick brown fox') is also cut. keep=last (default) keeps the later take — people warm up — keep=first keeps the earlier one. Returns the clusters found (kept take + removed indices + text) so the cut can be reviewed; detect_only=true returns the plan and writes no file. No retake stream-copies the input unchanged. Deterministic, not a judge: an intentional repetition ('I like cats. I like cats a lot.') looks like a retake to this detector — read the clusters (or run detect_only) before cutting.",
+  {
+    input: pathSchema.describe("Audio or video file with a speech track"),
+    output: pathSchema.optional().describe("Output media file path (not needed with detect_only=true)"),
+    words_file: pathSchema.describe("Transcript JSON with a words array — the stdout of `transcribe --word-timestamps` saved to a file, or a hand-written {words:[{start,end,word}]}"),
+    min_words: z.number().int().min(1).max(10).default(3).describe("Minimum repeated-phrase length in words (default 3); 2 also catches short restarts, 1 catches stutters ('the the') but flags common words more often"),
+    max_gap_words: z.number().int().min(0).max(50).default(8).describe("Max words allowed between the two takes — the restart junk ('okay, again', fillers) (default 8)"),
+    max_gap_seconds: z.number().min(0).max(60).default(5).describe("Max seconds between the end of the earlier take and the start of the later one (default 5)"),
+    keep: z.enum(["first", "last"]).default("last").describe("Which take to keep: 'last' (default — later takes are usually the warmed-up one) or 'first'"),
+    pad_before: z.number().min(0).max(1).default(0.06).describe("Seconds kept before each kept-word run (default 0.06, clamped to the gap to the neighbouring cut word)"),
+    pad_after: z.number().min(0).max(1).default(0.12).describe("Seconds kept after each kept-word run (default 0.12, clamped the same way)"),
+    min_keep: z.number().min(0.05).max(5).default(0.2).describe("Drop keep segments shorter than this many seconds (default 0.2)"),
+    detect_only: z.boolean().default(false).describe("Report the clusters and the cut plan without writing any file"),
+  },
+  async (a) => safe(() => core.removeRetakes({
+    input: a.input,
+    output: a.output,
+    wordsFile: a.words_file,
+    minWords: a.min_words ?? 3,
+    maxGapWords: a.max_gap_words ?? 8,
+    maxGapSeconds: a.max_gap_seconds ?? 5,
+    keep: a.keep ?? "last",
+    padBefore: a.pad_before ?? 0.06,
+    padAfter: a.pad_after ?? 0.12,
+    minKeep: a.min_keep ?? 0.2,
+    detectOnly: a.detect_only ?? false,
+  })),
+);
+
+server.tool(
   "find",
   "Find media files by filename, recursively under a directory (case-insensitive substring match). Returns each match with probe info (duration, dimensions, codecs) so the agent can pick the right file without guessing paths. Skips .git, node_modules and hidden folders; does not follow symlinked directories.",
   {
@@ -1059,9 +1090,9 @@ server.tool(
 
 server.tool(
   "batch",
-  "Apply ONE operation to many files matching a glob under a folder, in one call: loudness, resize, reframe, compress, convert, extract_audio, reverse, grade, fit, trim, silence, chroma_key or cut_words — the same args for every file. Outputs are named <stem>-<operation>.<ext> under the output directory, mirroring the input tree. Returns one row per file (input order) with status ok/error/cached/skipped plus counts, so a failure in one file never hides the rest. Unchanged files are skipped via a content-hash cache (.mediakit-batch-cache.json in the output dir, verified against the output's size + sha256); jobs runs up to 8 files at once under one shared timeout_seconds budget; dry_run lists the planned outputs and writes nothing. cut_words finds each clip's words file by convention (<words_dir>/<stem>.words.json, default the input's own folder) — a clip with no words file fails its own row only.",
+  "Apply ONE operation to many files matching a glob under a folder, in one call: loudness, resize, reframe, compress, convert, extract_audio, reverse, grade, fit, trim, silence, chroma_key, cut_words or remove_retakes — the same args for every file. Outputs are named <stem>-<operation>.<ext> under the output directory, mirroring the input tree. Returns one row per file (input order) with status ok/error/cached/skipped plus counts, so a failure in one file never hides the rest. Unchanged files are skipped via a content-hash cache (.mediakit-batch-cache.json in the output dir, verified against the output's size + sha256); jobs runs up to 8 files at once under one shared timeout_seconds budget; dry_run lists the planned outputs and writes nothing. cut_words and remove_retakes find each clip's words file by convention (<words_dir>/<stem>.words.json, default the input's own folder) — a clip with no words file fails its own row only.",
   {
-    operation: z.enum(["loudness", "resize", "reframe", "compress", "convert", "extract_audio", "reverse", "grade", "fit", "trim", "silence", "chroma_key", "cut_words"]).describe("The operation to apply to every matched file"),
+    operation: z.enum(["loudness", "resize", "reframe", "compress", "convert", "extract_audio", "reverse", "grade", "fit", "trim", "silence", "chroma_key", "cut_words", "remove_retakes"]).describe("The operation to apply to every matched file"),
     pattern: z.string().min(1).describe("Glob matched against paths under input_dir: **/*.mp4 for every mp4 at any depth, sub/*.mp4 for one folder, or a bare *.mp4 (matches the basename at any depth)"),
     input_dir: pathSchema.describe("Folder to search under (recursive; hidden dirs, .git, node_modules and .next are skipped)"),
     output_dir: pathSchema.describe("Directory to write outputs + batch-manifest.json into (created if needed; files under it are never treated as inputs)"),
@@ -1092,7 +1123,7 @@ server.tool(
 
 server.tool(
   "manifest",
-  "Run a whole edit pipeline from ONE declarative JSON manifest file: {version: 1, input, output, steps: [{tool, args}], qa?} — paths in the manifest are relative to the manifest file. Steps run in order, each feeding the next (trim, resize, reframe, compress, convert, extract_audio, reverse, grade, fit, silence, denoise, interpolate, burn_captions, overlay, chroma_key, cut_words); the whole plan is validated before anything renders, so a typo fails in seconds. Each step is cached by content hash (input bytes + tool + args + sidecar-file bytes, verified against the cached output's size + sha256) — re-running an unchanged manifest re-encodes nothing, and editing step 3 only re-runs from step 3. Set qa to a platform (or 'any') to run qa_report on the final file. dry_run prints the plan and writes nothing — the approve-before-render gate. A step failure aborts the run and keeps the intermediates for inspection.",
+  "Run a whole edit pipeline from ONE declarative JSON manifest file: {version: 1, input, output, steps: [{tool, args}], qa?} — paths in the manifest are relative to the manifest file. Steps run in order, each feeding the next (trim, resize, reframe, compress, convert, extract_audio, reverse, grade, fit, silence, denoise, interpolate, burn_captions, overlay, chroma_key, cut_words, remove_retakes); the whole plan is validated before anything renders, so a typo fails in seconds. Each step is cached by content hash (input bytes + tool + args + sidecar-file bytes, verified against the cached output's size + sha256) — re-running an unchanged manifest re-encodes nothing, and editing step 3 only re-runs from step 3. Set qa to a platform (or 'any') to run qa_report on the final file. dry_run prints the plan and writes nothing — the approve-before-render gate. A step failure aborts the run and keeps the intermediates for inspection.",
   {
     manifest_path: pathSchema.describe("Path to the manifest JSON file"),
     output: pathSchema.optional().describe("Output file path (overrides the manifest's output; the extension is adjusted to the step chain's final format when needed)"),
