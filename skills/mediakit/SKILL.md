@@ -769,6 +769,24 @@ size, so asking a 1280×720 photo for 1080×1920 gives a padded
 duration — a short bed loops, a long one is trimmed by `-t`. A
 video input is refused (extract a frame first); motion is
 `zoom_pan`'s job, not this tool's.
+
+### 47. A slideshow shows each image for its own time — the transition eats a handle, not slide time
+`slideshow` takes 2–32 stills and joins them with one xfade
+transition type between every pair (`fade` by default, any of the
+49 names `concat` accepts). The duration you give an image is its
+VISIBLE time: internally each clip is duration + transition
+(except the last), so the total is exactly the sum of the
+durations — a 3+3+3 show with 1s fades is 9s, 270 frames at 30fps,
+measured on disk. Give durations with `--duration` (uniform),
+`--durations 3,5,2` (one per image, in order), or `{file,
+duration}` objects in MCP (which win over both). The transition
+must be shorter than the shortest slide, or no slide is ever fully
+visible — the tool refuses it. The output always carries an audio
+track, silent unless `--audio` loops a bed under the whole show.
+Verify a slideshow by its frames, not its log: the frame mid-slide
+must match its image (PSNR > 40 dB) and the frame mid-transition
+must match NEITHER neighbour (a blend). Per-pair transition types
+are a follow-up, not v1.
 In a manifest, a `chroma_key` background is either an image file
 or a hex color — and the cache treats them differently. An image
 background resolves relative to the manifest and its bytes are
@@ -779,7 +797,7 @@ hashed. If a step mysteriously re-runs every time, check whether a
 sidecar path moved; if a step mysteriously never re-runs, check
 whether the sidecar bytes changed but the key did not.
 
-### 47. Assemble a film from a manifest — voice first, preview, approve, render
+### 48. Assemble a film from a manifest — voice first, preview, approve, render
 `assemble` is the film builder: one declarative JSON manifest
 (`skills/shorts-video/references/assemble-manifest.md` for the
 schema) becomes a finished video. The voice is the master clock —

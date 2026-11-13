@@ -430,6 +430,43 @@ server.tool(
 );
 
 server.tool(
+  "slideshow",
+  "Turn 2-32 still images into one video with an xfade transition between every pair (one transition type for all pairs in v1). Each image is visible for its own duration — the transition eats a handle, not slide time — so the total is exactly the sum of the durations. Images are rendered to clips in parallel first, then joined with the concat xfade chain. audio loops a bed under the whole slideshow. Output .mp4 only in v1. The result counts frames on the output file, so the duration is measured, not assumed.",
+  {
+    images: z.array(z.union([
+      z.string().describe("Image file path"),
+      z.object({
+        file: z.string().describe("Image file path"),
+        duration: z.number().min(0.5).max(600).optional().describe("How long this image stays visible, in seconds (overrides duration/durations for this slide)"),
+      }),
+    ])).min(2).max(32).describe("Images in display order, as paths or {file, duration} objects"),
+    output: pathSchema,
+    duration: z.number().min(0.5).max(600).default(3).describe("Visible seconds per image when no per-image duration is given (default 3)"),
+    durations: z.array(z.number().min(0.5).max(600)).min(2).max(32).optional().describe("One visible duration per image, in order (overrides duration; a per-image duration in images wins over this)"),
+    transition: z.string().default("fade").describe("xfade transition between every pair: fade (default), fadeblack, wipeleft, dissolve, circlecrop, ... (one of the 49 names concat accepts)"),
+    transition_duration: z.number().min(0.1).max(10).default(1).describe("Transition length in seconds (default 1, must be shorter than the shortest slide)"),
+    fps: z.number().int().min(1).max(120).default(30).describe("Output frame rate (default 30)"),
+    width: z.number().int().min(2).max(7680).default(1280).describe("Output width in pixels (default 1280)"),
+    height: z.number().int().min(2).max(4320).default(720).describe("Output height in pixels (default 720)"),
+    audio: pathSchema.optional().describe("Audio file to loop under the whole slideshow (optional)"),
+    crf: z.number().int().min(0).max(51).default(23),
+  },
+  async (a) => safe(() => core.slideshow({
+    images: a.images,
+    output: a.output,
+    duration: a.duration,
+    durations: a.durations ?? null,
+    transition: a.transition,
+    transitionDuration: a.transition_duration,
+    fps: a.fps,
+    width: a.width,
+    height: a.height,
+    audio: a.audio ?? null,
+    crf: a.crf,
+  })),
+);
+
+server.tool(
   "interpolate",
   "Raise a clip's frame rate with motion interpolation (minterpolate): 30fps to 60fps for smoother playback or slow motion. Modes: blend (fast default, cross-fades neighbours), mci (true motion-compensated frames, best quality but much slower — about 9x realtime on CPU), dup (repeats frames). Only raises the frame rate; use fit --max-fps to lower it. The result counts frames on the output file, so the fps is measured, not assumed.",
   {

@@ -114,10 +114,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 50 tools present");
-checkOk(missing.length === 0, "tools/list has all 50 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 51 tools present");
+checkOk(missing.length === 0, "tools/list has all 51 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -561,6 +561,73 @@ const img2vidExt = await callExpectThrow("image_to_video", { input: path.join(ro
 checkOk(/webm/.test(img2vidExt), "image_to_video refuses a .mov output (mp4 or webm only)", img2vidExt.slice(0, 200));
 const img2vidNoAudio = await callExpectThrow("image_to_video", { input: path.join(root, "test/kenburns.png"), output: path.join(root, "outputs/mcp-img2vid-bad4.mp4"), audio: path.join(root, "test/logo.png") });
 checkOk(/no audio stream/.test(img2vidNoAudio), "image_to_video refuses an --audio file with no audio stream", img2vidNoAudio.slice(0, 200));
+
+// slideshow: 3 still images -> one 9s video, fade 1s between pairs.
+// Each image is visible for its own 3s (total = 9s exactly), the
+// transition eats a handle, not slide time. Frame 30 (t=1) must be
+// slide 1, frame 135 (t=4.5) slide 2, frame 225 (t=7.5) slide 3, and
+// frame 105 (t=3.5, mid-fade) must be a blend of slides 1 and 2 —
+// neither pure slide.
+await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=c=0x00FF00:s=640x360:d=1", "-frames:v", "1", path.join(root, "outputs/mcp-slideshow-green.png")]);
+await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-i", path.join(root, "test/logo.png"), "-vf", "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2", "-c:v", "libx264", "-pix_fmt", "yuv420p", path.join(root, "outputs/mcp-slideshow-exp-logo.mp4")]);
+await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-i", path.join(root, "outputs/mcp-slideshow-green.png"), "-vf", "scale=640:360", "-c:v", "libx264", "-pix_fmt", "yuv420p", path.join(root, "outputs/mcp-slideshow-exp-green.mp4")]);
+const slideRes = await client.callTool({
+  name: "slideshow",
+  arguments: { images: [path.join(root, "test/kenburns.png"), path.join(root, "test/logo.png"), path.join(root, "outputs/mcp-slideshow-green.png")], output: path.join(root, "outputs/mcp-slideshow.mp4"), durations: [3, 3, 3], transition: "fade", transition_duration: 1, fps: 30, width: 640, height: 360 },
+});
+const slideJson = JSON.parse(slideRes.content[0].text);
+console.log("slideshow call:", JSON.stringify(slideJson));
+checkOk(slideJson.frames === 270 && near(slideJson.duration_seconds, 9, 0.1) && near(slideJson.expected_duration_seconds, 9, 0.01) && slideJson.dimensions === "640x360" && slideJson.fps === 30 && slideJson.transition === "fade", "slideshow makes a 9s 30fps 640x360 video from 3x3s slides (270 frames, total = sum of durations)", JSON.stringify(slideJson));
+await frameMp4(path.join(root, "outputs/mcp-slideshow.mp4"), 30, path.join(root, "outputs/mcp-slideshow-f30.mp4"));
+await frameMp4(path.join(root, "outputs/mcp-slideshow.mp4"), 105, path.join(root, "outputs/mcp-slideshow-f105.mp4"));
+await frameMp4(path.join(root, "outputs/mcp-slideshow.mp4"), 135, path.join(root, "outputs/mcp-slideshow-f135.mp4"));
+await frameMp4(path.join(root, "outputs/mcp-slideshow.mp4"), 225, path.join(root, "outputs/mcp-slideshow-f225.mp4"));
+const slideF30Psnr = await psnrY(path.join(root, "outputs/mcp-zoompan-exp-f0.mp4"), path.join(root, "outputs/mcp-slideshow-f30.mp4"));
+const slideF135Psnr = await psnrY(path.join(root, "outputs/mcp-slideshow-exp-logo.mp4"), path.join(root, "outputs/mcp-slideshow-f135.mp4"));
+const slideF225Psnr = await psnrY(path.join(root, "outputs/mcp-slideshow-exp-green.mp4"), path.join(root, "outputs/mcp-slideshow-f225.mp4"));
+const slideMidVs1 = await psnrY(path.join(root, "outputs/mcp-zoompan-exp-f0.mp4"), path.join(root, "outputs/mcp-slideshow-f105.mp4"));
+const slideMidVs2 = await psnrY(path.join(root, "outputs/mcp-slideshow-exp-logo.mp4"), path.join(root, "outputs/mcp-slideshow-f105.mp4"));
+const slideF30Vs2 = await psnrY(path.join(root, "outputs/mcp-slideshow-exp-logo.mp4"), path.join(root, "outputs/mcp-slideshow-f30.mp4"));
+console.log("slideshow PSNR: f30 vs slide1 =", slideF30Psnr, "| f135 vs slide2 =", slideF135Psnr, "| f225 vs slide3 =", slideF225Psnr, "| mid vs slide1 =", slideMidVs1, "| mid vs slide2 =", slideMidVs2, "| f30 vs slide2 =", slideF30Vs2);
+checkOk(slideF30Psnr !== null && slideF30Psnr > 40, "slideshow frame at t=1s is slide 1 (kenburns)", `PSNR ${slideF30Psnr}`);
+checkOk(slideF135Psnr !== null && slideF135Psnr > 40, "slideshow frame at t=4.5s is slide 2 (logo)", `PSNR ${slideF135Psnr}`);
+checkOk(slideF225Psnr !== null && slideF225Psnr > 40, "slideshow frame at t=7.5s is slide 3 (green)", `PSNR ${slideF225Psnr}`);
+checkOk(slideMidVs1 !== null && slideMidVs1 < 30 && slideMidVs2 !== null && slideMidVs2 < 30, "slideshow mid-transition frame is a blend of slides 1 and 2 (neither pure slide)", `vs slide1 ${slideMidVs1}, vs slide2 ${slideMidVs2}`);
+checkOk(slideF30Vs2 !== null && slideF30Vs2 < 15, "slideshow slides play in order (t=1s is not slide 2)", `PSNR ${slideF30Vs2}`);
+// Per-slide durations via the durations array: 2+4+2 = 8s, 240 frames.
+const slideDurRes = await client.callTool({
+  name: "slideshow",
+  arguments: { images: [path.join(root, "test/kenburns.png"), path.join(root, "test/logo.png"), path.join(root, "outputs/mcp-slideshow-green.png")], output: path.join(root, "outputs/mcp-slideshow-dur.mp4"), durations: [2, 4, 2], transition: "wipeleft", transition_duration: 1, fps: 30, width: 640, height: 360 },
+});
+const slideDurJson = JSON.parse(slideDurRes.content[0].text);
+checkOk(slideDurJson.frames === 240 && near(slideDurJson.duration_seconds, 8, 0.1) && slideDurJson.slides.map((s) => s.duration_seconds).join(",") === "2,4,2", "slideshow durations array [2,4,2] gives an 8s video (240 frames) with per-slide durations reported", JSON.stringify(slideDurJson));
+// Per-image object form: {file, duration} overrides the scalar.
+const slideObjRes = await client.callTool({
+  name: "slideshow",
+  arguments: { images: [{ file: path.join(root, "test/kenburns.png"), duration: 2 }, { file: path.join(root, "test/logo.png"), duration: 2 }], output: path.join(root, "outputs/mcp-slideshow-obj.mp4"), width: 640, height: 360 },
+});
+const slideObjJson = JSON.parse(slideObjRes.content[0].text);
+checkOk(slideObjJson.frames === 120 && near(slideObjJson.duration_seconds, 4, 0.1), "slideshow {file, duration} objects give a 4s video (120 frames)", JSON.stringify(slideObjJson));
+// Audio: the 9s voice bed loops under the 9s slideshow.
+const slideAudioRes = await client.callTool({
+  name: "slideshow",
+  arguments: { images: [path.join(root, "test/kenburns.png"), path.join(root, "test/logo.png"), path.join(root, "outputs/mcp-slideshow-green.png")], output: path.join(root, "outputs/mcp-slideshow-audio.mp4"), duration: 3, transition_duration: 1, fps: 30, width: 640, height: 360, audio: path.join(root, "test/mix-voice.mp3") },
+});
+const slideAudioJson = JSON.parse(slideAudioRes.content[0].text);
+checkOk(slideAudioJson.audio === true && near(slideAudioJson.duration_seconds, 9, 0.1), "slideshow with audio reports audio=true and stays 9s", JSON.stringify(slideAudioJson));
+const slideAudioProbe = await probeStreams(path.join(root, "outputs/mcp-slideshow-audio.mp4"));
+const slideAudioTypes = slideAudioProbe?.streams?.map((s) => `${s.codec_type}:${s.codec_name}`) ?? [];
+checkOk(slideAudioTypes.includes("video:h264") && slideAudioTypes.includes("audio:aac") && near(+slideAudioProbe.format.duration, 9, 0.1), "slideshow audio file has h264 + aac streams at 9s (ffprobe, independent)", JSON.stringify(slideAudioTypes));
+const slideOne = await callExpectThrow("slideshow", { images: [path.join(root, "test/kenburns.png")], output: path.join(root, "outputs/mcp-slideshow-bad.mp4") });
+checkOk(/at least 2/.test(slideOne), "slideshow refuses a single image", slideOne.slice(0, 200));
+const slideLong = await callExpectThrow("slideshow", { images: [path.join(root, "test/kenburns.png"), path.join(root, "test/logo.png")], output: path.join(root, "outputs/mcp-slideshow-bad2.mp4"), durations: [2, 2], transition_duration: 3 });
+checkOk(/shorter than the shortest slide/.test(slideLong), "slideshow refuses a transition longer than the shortest slide", slideLong.slice(0, 200));
+const slideTrans = await callExpectThrow("slideshow", { images: [path.join(root, "test/kenburns.png"), path.join(root, "test/logo.png")], output: path.join(root, "outputs/mcp-slideshow-bad3.mp4"), transition: "swirl" });
+checkOk(/unknown transition/.test(slideTrans), "slideshow refuses an unknown transition", slideTrans.slice(0, 200));
+const slideVideo = await callExpectThrow("slideshow", { images: [path.join(root, "test/source.mp4"), path.join(root, "test/logo.png")], output: path.join(root, "outputs/mcp-slideshow-bad4.mp4") });
+checkOk(/still image/.test(slideVideo), "slideshow refuses a video as a slide", slideVideo.slice(0, 200));
+const slideMov = await callExpectThrow("slideshow", { images: [path.join(root, "test/kenburns.png"), path.join(root, "test/logo.png")], output: path.join(root, "outputs/mcp-slideshow-bad5.mov") });
+checkOk(/mp4 only/.test(slideMov), "slideshow refuses a .mov output (mp4 only in v1)", slideMov.slice(0, 200));
 
 // interpolate: 30fps -> 60fps with blend (fast mode). The frame count
 // is asserted on the output file, not just r_frame_rate.
@@ -2650,7 +2717,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 50 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 50 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 51 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 51 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");

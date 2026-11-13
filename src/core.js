@@ -6,7 +6,7 @@
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants, createReadStream } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -3929,6 +3929,152 @@ export async function imageToVideo({ input, output, duration = 5, fps = 30, widt
   };
 }
 
+// ---------------------------------------------------------------- slideshow
+// Many still images -> one video with a transition between every pair
+// (the TravnikovDev/ffmpegSlideshow + Twinklebear/ffmpeg-slideshow-py
+// idea — MediaKit's image_to_video only does one image, and concat's
+// --transition only joins videos). Two stages, exactly the lesson
+// from ffmpeg-slideshow-py: image -> video is slow inside one big
+// filter graph, so each image is first rendered to a short clip
+// (image_to_video, up to 4 in parallel), then the clips are joined
+// with concat's xfade chain. Semantics follow Twinklebear: each
+// image is VISIBLE for its duration — the internal clip is
+// duration + transition (except the last, duration), so the
+// transition eats a handle, not slide time, and the total is exactly
+// sum(durations). One transition type for all pairs in v1 (a per-pair
+// list is a follow-up — concat's xfade chain takes one type). Output
+// is .mp4 only in v1: the concat transition path appends
+// -movflags +faststart, which belongs to the mp4 muxer. --audio loops
+// a bed under the whole slideshow (a short bed loops, a long one is
+// cut by -t to the total).
+function parseSlideshowImage(spec, idx) {
+  if (typeof spec === "string") return { file: spec, duration: null };
+  if (spec && typeof spec === "object" && !Array.isArray(spec)) {
+    if (typeof spec.file !== "string" || !spec.file) {
+      throw new MediaKitError(`slideshow image ${idx} needs a file path`, "INVALID_ARG");
+    }
+    return {
+      file: spec.file,
+      duration: spec.duration === null || spec.duration === undefined ? null : parseTime(spec.duration, `image ${idx} duration`),
+    };
+  }
+  throw new MediaKitError(`slideshow image ${idx} must be a file path or {file, duration}`, "INVALID_ARG");
+}
+
+/** Run async tasks with at most `limit` in flight; results in order. */
+async function runPool(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+export async function slideshow({ images, output, duration = 3, durations = null, transition = "fade", transitionDuration = 1, fps = 30, width = 1280, height = 720, audio = null, crf = 23 }) {
+  if (!Array.isArray(images) || images.length < 2) {
+    throw new MediaKitError("slideshow needs at least 2 images", "INVALID_ARG");
+  }
+  if (images.length > 32) {
+    throw new MediaKitError(`slideshow takes at most 32 images, got ${images.length}`, "INVALID_ARG");
+  }
+  const slides = images.map((s, i) => parseSlideshowImage(s, i + 1));
+  const inPaths = [];
+  for (const s of slides) inPaths.push(await requireInput(s.file, "slideshow image"));
+  const outPath = await prepareOutput(output, inPaths);
+  const ext = path.extname(outPath).slice(1).toLowerCase();
+  if (ext !== "mp4") {
+    throw new MediaKitError(`slideshow writes .mp4 only in v1 (the join path uses mp4 faststart flags) — got .${ext || "(no extension)"}`, "INVALID_ARG");
+  }
+  const defaultDur = num(duration, "duration", { min: 0.5, max: 600 });
+  let perSlide = null;
+  if (durations !== null && durations !== undefined) {
+    if (!Array.isArray(durations) || durations.length !== slides.length) {
+      throw new MediaKitError(`slideshow durations must be an array with one entry per image (${slides.length}), got ${Array.isArray(durations) ? durations.length : typeof durations}`, "INVALID_ARG");
+    }
+    perSlide = durations.map((d, i) => num(d, `durations[${i}]`, { min: 0.5, max: 600 }));
+  }
+  const durs = slides.map((s, i) => (s.duration !== null ? num(s.duration, `image ${i + 1} duration`, { min: 0.5, max: 600 }) : (perSlide !== null ? perSlide[i] : defaultDur)));
+  if (!XFADE_TRANSITIONS.includes(transition)) {
+    throw new MediaKitError(`unknown transition: ${transition} (supported: ${XFADE_TRANSITIONS.join(", ")})`, "INVALID_ARG");
+  }
+  const t = num(transitionDuration, "transition_duration", { min: 0.1, max: 10 });
+  const minDur = Math.min(...durs);
+  if (t >= minDur) {
+    throw new MediaKitError(`transition_duration (${t}s) must be shorter than the shortest slide (${minDur}s) — a slide needs to be fully visible at least briefly`, "INVALID_ARG");
+  }
+  const f = num(fps, "fps", { min: 1, max: 120, integer: true });
+  const w = num(width, "width", { min: 2, max: 7680, integer: true });
+  const h = num(height, "height", { min: 2, max: 4320, integer: true });
+  const c = num(crf, "crf", { min: 0, max: 51, integer: true });
+  // Each internal clip is duration + t (a handle for the xfade) except
+  // the last slide, which is exactly its duration. image_to_video caps
+  // a clip at 600s, so a long slide + handle can exceed it.
+  const clipDurs = durs.map((d, i) => (i < durs.length - 1 ? d + t : d));
+  if (clipDurs.some((d) => d > 600)) {
+    throw new MediaKitError(`slideshow slide duration + transition exceeds the 600s clip cap (longest clip would be ${Math.max(...clipDurs)}s)`, "INVALID_ARG");
+  }
+  let audioPath = null;
+  if (audio !== null && audio !== undefined && audio !== "") {
+    audioPath = await requireInput(audio, "audio");
+    const audioMeta = await probe(audioPath);
+    if (!audioMeta.audio) throw new MediaKitError(`slideshow --audio needs an audio file, got ${audio} (no audio stream)`, "INVALID_ARG");
+  }
+  const total = +durs.reduce((a, b) => a + b, 0).toFixed(3);
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-slideshow-"));
+  try {
+    // Stage 1: one still clip per image, up to 4 at a time
+    // (ffmpeg-slideshow-py runs these in parallel for the same reason:
+    // image -> video is the slow, serial part).
+    const clips = await runPool(inPaths, 4, async (p, i) => {
+      const clipPath = path.join(tmpDir, `slide-${String(i).padStart(3, "0")}.mp4`);
+      await imageToVideo({ input: p, output: clipPath, duration: clipDurs[i], fps: f, width: w, height: h, crf: c });
+      return clipPath;
+    });
+    // Stage 2: join with the same xfade chain concat --transition uses.
+    // Its expected total is sum(clipDurs) - (n-1)*t = sum(durations).
+    const joinPath = path.join(tmpDir, "joined.mp4");
+    const joined = await concat({ inputs: clips, output: joinPath, transition, transitionDuration: t });
+    if (Math.abs(joined.expected_duration_seconds - total) > 0.01) {
+      throw new MediaKitError(`slideshow join total mismatch: expected ${total}s, concat reported ${joined.expected_duration_seconds}s`, "VERIFY_FAILED");
+    }
+    // Stage 3: loop the bed under the joined video, or move it as-is.
+    if (audioPath) {
+      await run(FFMPEG, [
+        "-y", "-stream_loop", "-1", "-i", audioPath, "-i", joinPath,
+        "-map", "1:v:0", "-map", "0:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+        "-t", String(total), outPath,
+      ]);
+    } else {
+      try {
+        await rename(joinPath, outPath);
+      } catch {
+        await copyFile(joinPath, outPath);
+      }
+    }
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  const frames = await countVideoFrames(outPath);
+  return {
+    operation: "slideshow", images: inPaths, output: outPath,
+    slides: durs.map((d, i) => ({ file: inPaths[i], duration_seconds: d })),
+    transition, transition_duration: t,
+    expected_duration_seconds: total,
+    duration_seconds: out.duration_seconds,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+    fps: out.video?.fps ?? null, frames,
+    audio: !!audioPath,
+    size_bytes: info.size_bytes,
+  };
+}
+
 // ---------------------------------------------------------------- interpolate
 // Motion-interpolate a clip up to a higher frame rate
 // (hyepartners-gmail/vibevideo-mcp's MotionInterpolator idea —
@@ -4913,6 +5059,7 @@ const TOOL_REQUIREMENTS = {
   chroma_key: { filters: ["chromakey", "overlay", "scale"], encoders: ["libvpx-vp9", "prores_ks", "libx264"] },
   zoom_pan: { filters: ["zoompan", "scale", "crop"], encoders: ["libx264"] },
   image_to_video: { filters: ["scale", "pad"], encoders: ["libx264", "libvpx-vp9"] },
+  slideshow: { filters: ["scale", "pad", "xfade", "acrossfade", "fps"], encoders: ["libx264", "aac"] },
   doctor: {},
 };
 

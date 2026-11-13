@@ -306,6 +306,23 @@ const COMMANDS = {
       ["-o, --output", "Output file, .mp4 or .webm (required)"],
     ],
   },
+  slideshow: {
+    usage: "mediakit slideshow <img1> <img2> [img3...] -o <output.mp4> [--duration 3] [--durations 3,5,2] [--transition fade] [--transition-duration 1] [--fps 30] [--width 1280] [--height 720] [--audio <file>] [--crf 23]",
+    desc: "Turn 2-32 still images into one video with an xfade transition between every pair. Each image is visible for its own duration (total = sum of durations); the transition eats a handle, not slide time. One transition type for all pairs in v1. --audio loops a bed under the whole slideshow. Output .mp4 only in v1.",
+    args: [{ name: "images", required: true, variadic: true }],
+    options: [
+      ["--duration", "Visible seconds per image (default 3)"],
+      ["--durations", "Comma list, one visible duration per image, in order (overrides --duration)"],
+      ["--transition", "xfade transition between every pair: fade (default), wipeleft, dissolve, circlecrop, ..."],
+      ["--transition-duration", "Transition length in seconds (default 1, must be shorter than the shortest slide)"],
+      ["--fps", "Output frame rate (default 30)"],
+      ["--width", "Output width in pixels (default 1280)"],
+      ["--height", "Output height in pixels (default 720)"],
+      ["--audio", "Audio file to loop under the slideshow (optional)"],
+      ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["-o, --output", "Output file, .mp4 (required)"],
+    ],
+  },
   interpolate: {
     usage: "mediakit interpolate <input> -o <output> --fps 60 [--mode mci|blend|dup] [--crf 23]",
     desc: "Raise the frame rate with motion interpolation (minterpolate). blend is the fast default; mci is true motion compensation but much slower (~9x realtime on CPU). Reports fps and frame counts measured on the output file.",
@@ -965,6 +982,27 @@ async function main() {
           crf: numOpt(opts, "crf") ?? 23,
         });
         break;
+      case "slideshow": {
+        if (positional.length < 2) fail("slideshow needs at least 2 image files");
+        const durations = opts.durations ? String(opts.durations).split(",").map((s) => {
+          const n = Number(s.trim());
+          if (!Number.isFinite(n)) fail(`--durations has a non-number entry: ${s}`);
+          return n;
+        }) : null;
+        result = await core.slideshow({
+          images: positional, output: needOutput(opts),
+          duration: numOpt(opts, "duration") ?? 3,
+          durations,
+          transition: opts.transition ?? "fade",
+          transitionDuration: numOpt(opts, "transition_duration") ?? 1,
+          fps: numOpt(opts, "fps") ?? 30,
+          width: numOpt(opts, "width") ?? 1280,
+          height: numOpt(opts, "height") ?? 720,
+          audio: opts.audio ?? null,
+          crf: numOpt(opts, "crf") ?? 23,
+        });
+        break;
+      }
       case "interpolate":
         result = await core.interpolate({
           input: needInput(), output: needOutput(opts),
