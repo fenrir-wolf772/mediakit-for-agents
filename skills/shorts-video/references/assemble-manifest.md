@@ -88,6 +88,8 @@ pictures — pictures fit the voice:
     the source duration. Reframed (crop) to the manifest size.
   - `color`: `color` is a 6-digit hex (RRGGBB). A solid card —
     for separators and title beats.
+  - Any shot after the first may carry `transition: {type,
+    duration}` — see Transitions below.
 
 ## Motion gate
 
@@ -95,6 +97,49 @@ A still picture that does not move is dead air. An `image` shot
 without `zoom`, and a `color` shot, may last at most 2.5s — longer
 fails validation (`motion-gate`). Split the shot, or give the image
 a zoom. Video shots are assumed to move.
+
+## Transitions
+
+A shot after the first may carry a `transition` — the join from
+the previous shot into this one:
+
+```json
+{"id": "s2", "kind": "video", "source": "clip.mp4", "start": 2, "duration": 5,
+ "transition": {"type": "fade", "duration": 1.0}}
+```
+
+- `type` is one of the 49 xfade names `concat` accepts
+  (`fade`, `dissolve`, `wipeleft`, `slideleft`, `circleopen`, … —
+  the same list, so the two tools agree).
+- `duration` is 0.1–10s. It is centered on the cut: half of it
+  shows the tail of the previous shot, half the head of this one.
+- The total duration does NOT change, and the audio does NOT
+  change — transitions are video-only, the voice and music run
+  straight underneath. The frame math stays exact: the joined
+  video still has exactly `total_frames`.
+- How it stays exact: every shot segment is built longer by its
+  handles (half the transition on each side), and the xfade
+  chain consumes exactly the handles. The duration is converted
+  to frames first (`F = round(duration × fps)`), so a 0.5s
+  transition at 30fps is 15 frames — 8 before the cut (the next
+  shot's incoming handle) and 7 after (the previous shot's
+  outgoing handle).
+- Rules, all enforced at `validate` time:
+  - The first shot cannot have a transition (there is no cut
+    before it).
+  - The transition must not be longer than the shorter adjacent
+    shot.
+  - A `video` shot needs the handle footage to exist in its
+    source: `start` must be at least the incoming handle before
+    the shot, and `start + duration + outgoing handle` must not
+    pass the source end. Image and color shots have no such
+    limit (their content is generated).
+- In a `preview`, a transition is dropped (hard cut, with a
+  warning) when its cut falls outside the preview window, or
+  when the next shot is clipped below its handle.
+- v1 limits: the join itself is not cached (a second render
+  reuses the shot segments but re-encodes the join), and there
+  is no audio crossfade — the voice timeline is never touched.
 
 ## Cache and approval
 
@@ -125,7 +170,7 @@ mediakit assemble film.json --mode render -o out/ --force
 
 ## Out of scope for v1
 
-Crossfades/transitions between shots (plain cuts), per-shot text
-layers (use captions, or a `color` card under a burned caption),
-dual-format output (one manifest = one aspect — run `social` after
-for the other ratios), and motion detection inside video shots.
+Per-shot text layers (use captions, or a `color` card under a
+burned caption), dual-format output (one manifest = one aspect —
+run `social` after for the other ratios), and motion detection
+inside video shots.

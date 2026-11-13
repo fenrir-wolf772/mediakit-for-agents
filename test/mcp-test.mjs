@@ -7,7 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "node:url";
 import { existsSync, statSync } from "node:fs";
-import { copyFile, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -1223,6 +1223,23 @@ async function bandPsnr(fileA, fileB, t, y, h) {
 // plane "r"/"g"/"b" via extractplanes, "a" via alphaextract.
 // Returns null on any failure so a broken measurement FAILs the
 // assertion instead of crashing the whole run.
+// PSNR between two still frames (same size), via the psnr filter:
+// the printed "average" is the mean PSNR over the Y/U/V planes.
+// A 50/50 crossfade blend of A and B has
+// PSNR(blend, A) ≈ PSNR(blend, B) ≈ PSNR(A, B) + 6.02 dB.
+async function framePsnr(fileA, fileB) {
+  try {
+    const { stderr } = await execFileAsync("ffmpeg", ["-nostdin", "-v", "info", "-i", fileA, "-i", fileB, "-lavfi", "psnr", "-f", "null", "-"]);
+    const m = stderr.match(/average:([0-9.]+)/);
+    return m ? parseFloat(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
+async function extractPng(file, time, out) {
+  await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-ss", String(time), "-i", file, "-frames:v", "1", "-y", out]);
+}
+
 async function planeMean(file, crop, plane, time = null) {
   try {
     const vf = plane === "a"
@@ -3065,17 +3082,39 @@ const manifestChromaHexCachedRes = await client.callTool({ name: "manifest", arg
 const manifestChromaHexCachedJson = JSON.parse(manifestChromaHexCachedRes.content[0].text);
 checkOk(manifestChromaHexCachedJson.cache_hits === 1 && manifestChromaHexCachedJson.steps_run === 0, "manifest chroma_key hex background second run hits the cache", `cache_hits=${manifestChromaHexCachedJson.cache_hits} steps_run=${manifestChromaHexCachedJson.steps_run}`);
 
+// Stage a film manifest into a fresh per-run directory
+// (pid-suffixed) with absolute asset paths, so two suite runs
+// never share a cache dir, approval file, or output dir. The
+// assemble cache lives next to the manifest, and the suite used
+// to run straight off test/*.json — when my run and the 15:25
+// cron run overlapped on 2026-11-13, each wiped the other's
+// test/.mediakit-assemble-cache mid-suite and exactly one
+// cache_hits assert failed in each run. Staging makes every run
+// hermetic by construction.
+async function stageAssembleManifest(name) {
+  const dir = path.join(root, `outputs/mcp-assemble-stage-${process.pid}-${name.replace(/\.json$/, "")}`);
+  await rm(dir, { recursive: true, force: true });
+  await mkdir(dir, { recursive: true });
+  const doc = JSON.parse(await readFile(path.join(root, "test", name), "utf8"));
+  const abs = (p) => (path.isAbsolute(p) ? p : path.join(root, "test", p));
+  if (doc.voice) doc.voice.path = abs(doc.voice.path);
+  if (doc.music) doc.music.path = abs(doc.music.path);
+  if (doc.sfx) doc.sfx = doc.sfx.map((s) => ({ ...s, file: abs(s.file) }));
+  if (doc.captions) doc.captions = abs(doc.captions);
+  if (doc.shots) doc.shots = doc.shots.map((s) => (s.source ? { ...s, source: abs(s.source) } : s));
+  const manifestPath = path.join(dir, name);
+  await writeFile(manifestPath, JSON.stringify(doc), "utf8");
+  return { manifestPath, dir };
+}
+
 // assemble: film manifest — validate/preview/approve/render.
 // Fixture: test/assemble-film.json (voice 9s + lead/tail 0.5 = 10s,
 // 300 frames @30fps; image zoom 4s + video 4s + image static 1s +
-// color 1s; clean-bold captions). Start hermetic: wipe the per-shot
-// cache and the approval file left by earlier runs.
-const assembleOut = path.join(root, "outputs/mcp-assemble");
-const assembleApprovalPath = path.join(root, "test/assemble-film.assemble-approval.json");
-await rm(path.join(root, "test/.mediakit-assemble-cache"), { recursive: true, force: true });
-await rm(assembleApprovalPath, { force: true });
-await rm(assembleOut, { recursive: true, force: true });
-const assembleValidateRes = await client.callTool({ name: "assemble", arguments: { manifest_path: path.join(root, "test/assemble-film.json"), mode: "validate" } });
+// color 1s; clean-bold captions). Staged per run (see above).
+const assembleStage = await stageAssembleManifest("assemble-film.json");
+const assembleOut = path.join(assembleStage.dir, "out");
+const assembleApprovalPath = path.join(assembleStage.dir, "assemble-film.assemble-approval.json");
+const assembleValidateRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleStage.manifestPath, mode: "validate" } });
 const assembleValidateJson = JSON.parse(assembleValidateRes.content[0].text);
 checkOk(assembleValidateJson.total_seconds === 10 && assembleValidateJson.total_frames === 300 && assembleValidateJson.shots?.length === 4 && assembleValidateJson.voice?.duration_seconds === 9 && /^[0-9a-f]{64}$/.test(assembleValidateJson.fingerprint ?? ""), "assemble validate reports 10s / 300 frames / 4 shots / 9s voice + fingerprint", JSON.stringify(assembleValidateJson).slice(0, 200));
 const assembleGapText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-gap.json"), mode: "validate" });
@@ -3086,11 +3125,11 @@ const assembleStyleText = await callExpectThrow("assemble", { manifest_path: pat
 checkOk(/must be one of clean-bold, minimal-line, warm-story/.test(assembleStyleText ?? ""), "assemble validate refuses an unknown style id", assembleStyleText ?? "");
 const assembleMissingText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-missing.json"), mode: "validate" });
 checkOk(/nope\.png/.test(assembleMissingText ?? ""), "assemble validate refuses a missing shot asset", assembleMissingText ?? "");
-const assembleApproveEarlyText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-film.json"), mode: "approve", output_dir: assembleOut });
+const assembleApproveEarlyText = await callExpectThrow("assemble", { manifest_path: assembleStage.manifestPath, mode: "approve", output_dir: assembleOut });
 checkOk(/needs a preview/.test(assembleApproveEarlyText ?? ""), "assemble approve refuses without a preview", assembleApproveEarlyText ?? "");
-const assembleRenderEarlyText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-film.json"), mode: "render", output_dir: assembleOut });
+const assembleRenderEarlyText = await callExpectThrow("assemble", { manifest_path: assembleStage.manifestPath, mode: "render", output_dir: assembleOut });
 checkOk(/needs approval/.test(assembleRenderEarlyText ?? ""), "assemble render refuses without approval", assembleRenderEarlyText ?? "");
-const assemblePreviewRes = await client.callTool({ name: "assemble", arguments: { manifest_path: path.join(root, "test/assemble-film.json"), mode: "preview", output_dir: assembleOut, preview_seconds: 3 } });
+const assemblePreviewRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleStage.manifestPath, mode: "preview", output_dir: assembleOut, preview_seconds: 3 } });
 const assemblePreviewJson = JSON.parse(assemblePreviewRes.content[0].text);
 const assemblePreviewPath = path.join(assembleOut, "preview.mp4");
 const assemblePreviewProbe = await probeStreams(assemblePreviewPath);
@@ -3099,11 +3138,14 @@ const assemblePreviewFrames = await countFrames(assemblePreviewPath);
 checkOk(assemblePreviewFrames === 90, "assemble preview has exactly 90 frames (3s x 30fps)", `frames=${assemblePreviewFrames}`);
 const assemblePreviewDoc = JSON.parse(await readFile(path.join(assembleOut, "preview.json"), "utf8"));
 checkOk(assemblePreviewDoc.fingerprint === assembleValidateJson.fingerprint, "assemble preview.json on disk carries the fingerprint", assemblePreviewDoc.fingerprint ?? "");
-const assembleApproveRes = await client.callTool({ name: "assemble", arguments: { manifest_path: path.join(root, "test/assemble-film.json"), mode: "approve", output_dir: assembleOut } });
+const assembleApproveRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleStage.manifestPath, mode: "approve", output_dir: assembleOut } });
 const assembleApproveJson = JSON.parse(assembleApproveRes.content[0].text);
 const assembleApprovalDoc = JSON.parse(await readFile(assembleApprovalPath, "utf8"));
 checkOk(assembleApproveJson.fingerprint === assembleValidateJson.fingerprint && assembleApprovalDoc.fingerprint === assembleValidateJson.fingerprint, "assemble approve records the matching fingerprint on disk", assembleApproveJson.fingerprint ?? "");
-const assembleRenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: path.join(root, "test/assemble-film.json"), mode: "render", output_dir: assembleOut } });
+// Full renders (segments + mix + burn) run 40-90s on this VM and
+// cross the SDK's 60s default timeout when the machine is busy —
+// same 300s override as the social call and the transitions renders.
+const assembleRenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleStage.manifestPath, mode: "render", output_dir: assembleOut } }, undefined, { timeout: 300000 });
 const assembleRenderJson = JSON.parse(assembleRenderRes.content[0].text);
 const assembleFinalPath = path.join(assembleOut, "final.mp4");
 const assembleFinalProbe = await probeStreams(assembleFinalPath);
@@ -3114,14 +3156,14 @@ checkOk(assembleFinalProbe?.streams?.find((s) => s.codec_type === "video")?.widt
 checkOk(assembleFinalLufs !== null && near(assembleFinalLufs, -14, 0.5), "assemble final measures -14 LUFS independently", `LUFS=${assembleFinalLufs}`);
 const assembleReceipt = JSON.parse(await readFile(path.join(assembleOut, "assemble-receipt.json"), "utf8"));
 checkOk(assembleReceipt.approval === "approved" && assembleReceipt.final?.sha256?.length === 64 && assembleReceipt.qa?.checks?.every((c) => c.status === "pass"), "assemble receipt records approval + SHA-256 + an all-pass qa_report", JSON.stringify(assembleReceipt.qa?.checks?.map((c) => `${c.check}:${c.status}`)));
-const assembleRender2Res = await client.callTool({ name: "assemble", arguments: { manifest_path: path.join(root, "test/assemble-film.json"), mode: "render", output_dir: assembleOut } });
+const assembleRender2Res = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleStage.manifestPath, mode: "render", output_dir: assembleOut } }, undefined, { timeout: 300000 });
 const assembleRender2Json = JSON.parse(assembleRender2Res.content[0].text);
 checkOk(assembleRender2Json.cache_hits === 4, "assemble second render reuses all 4 shot segments from the cache", `cache_hits=${assembleRender2Json.cache_hits}`);
 // Fingerprint sensitivity + force: a copy with a different title
 // (absolute paths, so it can live under outputs/) has a different
 // fingerprint, renders without approval only with force:true, and
 // the receipt says so.
-const assembleEditDir = path.join(root, "outputs/mcp-assemble-edit");
+const assembleEditDir = path.join(root, `outputs/mcp-assemble-edit-${process.pid}`);
 await rm(assembleEditDir, { recursive: true, force: true });
 await mkdir(assembleEditDir, { recursive: true });
 const assembleEditDoc = JSON.parse(await readFile(path.join(root, "test/assemble-film.json"), "utf8"));
@@ -3137,18 +3179,84 @@ const assembleEditValidateJson = JSON.parse(assembleEditValidateRes.content[0].t
 checkOk(assembleEditValidateJson.fingerprint !== assembleValidateJson.fingerprint, "assemble fingerprint changes when the manifest changes (title only)", assembleEditValidateJson.fingerprint ?? "");
 const assembleEditRenderText = await callExpectThrow("assemble", { manifest_path: assembleEditPath, mode: "render", output_dir: assembleEditDir });
 checkOk(/needs approval/.test(assembleEditRenderText ?? ""), "assemble edited copy refuses render without approval", assembleEditRenderText ?? "");
-const assembleEditForceRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleEditPath, mode: "render", output_dir: assembleEditDir, force: true } });
+const assembleEditForceRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleEditPath, mode: "render", output_dir: assembleEditDir, force: true } }, undefined, { timeout: 300000 });
 const assembleEditForceJson = JSON.parse(assembleEditForceRes.content[0].text);
 checkOk(assembleEditForceJson.approval === "forced" && existsSync(path.join(assembleEditDir, "final.mp4")), "assemble force render succeeds and records approval:'forced'", JSON.stringify(assembleEditForceJson.approval));
 // No-music path: the same film without a bed must still render —
 // the padded voice goes through loudness instead of mix. Preview
 // only (3s) is enough to exercise the branch end to end.
-const assembleNoMusicOut = path.join(root, "outputs/mcp-assemble-nomusic");
-await rm(assembleNoMusicOut, { recursive: true, force: true });
-const assembleNoMusicRes = await client.callTool({ name: "assemble", arguments: { manifest_path: path.join(root, "test/assemble-nomusic.json"), mode: "preview", output_dir: assembleNoMusicOut, preview_seconds: 3 } });
+const assembleNoMusicStage = await stageAssembleManifest("assemble-nomusic.json");
+const assembleNoMusicOut = path.join(assembleNoMusicStage.dir, "out");
+const assembleNoMusicRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleNoMusicStage.manifestPath, mode: "preview", output_dir: assembleNoMusicOut, preview_seconds: 3 } });
 const assembleNoMusicJson = JSON.parse(assembleNoMusicRes.content[0].text);
 const assembleNoMusicProbe = await probeStreams(path.join(assembleNoMusicOut, "preview.mp4"));
 checkOk(assembleNoMusicJson.preview_seconds === 3 && assembleNoMusicProbe?.streams?.some((s) => s.codec_type === "audio") && near(parseFloat(assembleNoMusicProbe?.format?.duration), 3, 0.15), "assemble preview without music renders 3s with an audio track (loudness path)", JSON.stringify(assembleNoMusicJson).slice(0, 150));
+// Transitions: the same film with a fade into s2, a dissolve into
+// s3 and a fade into s4. Total duration and frame count must stay
+// exactly 10s / 300 frames — the transitions are centered on the
+// cuts and consume handles, never the timeline. The blend is
+// measured, not assumed: the frame at the center of the s1->s2
+// fade must be a 50/50 mix of the two pure segment frames
+// (PSNR(blend, A) ≈ PSNR(blend, B) ≈ PSNR(A, B) + 6 dB).
+const assembleTransStage = await stageAssembleManifest("assemble-film-transitions.json");
+const assembleTransOut = path.join(assembleTransStage.dir, "out");
+const assembleTransValidateRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleTransStage.manifestPath, mode: "validate" } });
+const assembleTransValidateJson = JSON.parse(assembleTransValidateRes.content[0].text);
+checkOk(assembleTransValidateJson.total_seconds === 10 && assembleTransValidateJson.total_frames === 300 && assembleTransValidateJson.shots?.[1]?.transition?.type === "fade" && assembleTransValidateJson.shots?.[1]?.transition?.frames === 30 && assembleTransValidateJson.shots?.[2]?.transition?.type === "dissolve" && assembleTransValidateJson.shots?.[2]?.transition?.frames === 15 && assembleTransValidateJson.shots?.[3]?.transition?.type === "fade", "assemble validate reports the 3 transitions (fade 30f, dissolve 15f, fade 15f) with the timeline still 10s / 300 frames", JSON.stringify(assembleTransValidateJson.shots?.map((s) => s.transition)));
+const assembleTransFirstText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-transition-first.json"), mode: "validate" });
+checkOk(/the first shot cannot have a transition/.test(assembleTransFirstText ?? ""), "assemble validate refuses a transition on the first shot", assembleTransFirstText ?? "");
+const assembleTransLongText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-transition-long.json"), mode: "validate" });
+checkOk(/longer than the shorter adjacent shot/.test(assembleTransLongText ?? ""), "assemble validate refuses a transition longer than the shorter adjacent shot", assembleTransLongText ?? "");
+const assembleTransHandleText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-transition-handle.json"), mode: "validate" });
+checkOk(/needs 0\.500s of handle before the shot start/.test(assembleTransHandleText ?? ""), "assemble validate refuses a video shot without handle footage for its transition", assembleTransHandleText ?? "");
+const assembleTransPreviewRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleTransStage.manifestPath, mode: "preview", output_dir: assembleTransOut, preview_seconds: 5 } });
+const assembleTransPreviewJson = JSON.parse(assembleTransPreviewRes.content[0].text);
+const assembleTransPreviewPath = path.join(assembleTransOut, "preview.mp4");
+const assembleTransPreviewFrames = await countFrames(assembleTransPreviewPath);
+checkOk(assembleTransPreviewJson.preview_seconds === 5 && assembleTransPreviewJson.dimensions === "540x960" && assembleTransPreviewFrames === 150 && Array.isArray(assembleTransPreviewJson.transition_warnings) && assembleTransPreviewJson.transition_warnings.length === 0, "assemble preview 5s with a transition keeps 150 frames at 540x960 and drops no transition", JSON.stringify(assembleTransPreviewJson.transition_warnings));
+// The transitions render re-encodes the whole join (xfade) plus the
+// burn, so it is the slowest call in the suite — past the SDK's
+// 60s default timeout when the machine is busy (the 2h cron fired
+// mid-suite once). Same 300s override as the other long call.
+const assembleTransRenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleTransStage.manifestPath, mode: "render", output_dir: assembleTransOut, force: true } }, undefined, { timeout: 300000 });
+const assembleTransRenderJson = JSON.parse(assembleTransRenderRes.content[0].text);
+const assembleTransFinalPath = path.join(assembleTransOut, "final.mp4");
+const assembleTransFinalProbe = await probeStreams(assembleTransFinalPath);
+const assembleTransFinalFrames = await countFrames(assembleTransFinalPath);
+const assembleTransFinalLufs = await measureLufs(assembleTransFinalPath);
+checkOk(assembleTransRenderJson.approval === "forced" && assembleTransRenderJson.joins?.length === 3 && assembleTransRenderJson.joins?.map((j) => j.type).join(",") === "fade,dissolve,fade" && near(assembleTransRenderJson.joins?.[0]?.offset_seconds, 3.5, 0.01) && near(assembleTransRenderJson.joins?.[1]?.offset_seconds, 7.7333, 0.01), "assemble force render records 3 joins (fade/dissolve/fade) at offsets 3.5s / 7.73s / 8.73s", JSON.stringify(assembleTransRenderJson.joins));
+checkOk(assembleTransFinalProbe?.streams?.find((s) => s.codec_type === "video")?.width === 1080 && near(parseFloat(assembleTransFinalProbe?.format?.duration), 10, 0.15) && assembleTransFinalFrames === 300, "assemble final with transitions is still 1080x1920, 10s, exactly 300 frames", `duration=${assembleTransFinalProbe?.format?.duration} frames=${assembleTransFinalFrames}`);
+checkOk(assembleTransFinalLufs !== null && near(assembleTransFinalLufs, -14, 0.5), "assemble final with transitions measures -14 LUFS independently (audio untouched by video transitions)", `LUFS=${assembleTransFinalLufs}`);
+// Blend proof: find the two full-size cached segments by width +
+// duration (s1 built 4.5s, s2 built 4.7333s), then compare the
+// frame at the fade center (4.0s) against the pure frames.
+const assembleTransCacheDir = path.join(assembleTransStage.dir, ".mediakit-assemble-cache");
+const assembleTransCacheFiles = (await readdir(assembleTransCacheDir)).filter((f) => f.endsWith(".mp4"));
+let assembleTransSegA = null;
+let assembleTransSegB = null;
+for (const f of assembleTransCacheFiles) {
+  const p = await probeStreams(path.join(assembleTransCacheDir, f));
+  const v = p?.streams?.find((s) => s.codec_type === "video");
+  if (v?.width !== 1080) continue;
+  const d = parseFloat(p?.format?.duration);
+  if (near(d, 4.5, 0.05)) assembleTransSegA = path.join(assembleTransCacheDir, f);
+  if (near(d, 4.7333, 0.05)) assembleTransSegB = path.join(assembleTransCacheDir, f);
+}
+const assembleTransBlendPng = path.join(assembleTransOut, "blend-4s.png");
+const assembleTransAPng = path.join(assembleTransOut, "pure-a-4s.png");
+const assembleTransBPng = path.join(assembleTransOut, "pure-b-0.5s.png");
+await extractPng(assembleTransFinalPath, 4.0, assembleTransBlendPng);
+await extractPng(assembleTransSegA, 4.0, assembleTransAPng);
+await extractPng(assembleTransSegB, 0.5, assembleTransBPng);
+const assembleTransPsnrAB = await framePsnr(assembleTransAPng, assembleTransBPng);
+const assembleTransPsnrBlendA = await framePsnr(assembleTransBlendPng, assembleTransAPng);
+const assembleTransPsnrBlendB = await framePsnr(assembleTransBlendPng, assembleTransBPng);
+checkOk(assembleTransSegA && assembleTransSegB && assembleTransPsnrAB !== null && assembleTransPsnrBlendA !== null && assembleTransPsnrBlendB !== null && Math.abs(assembleTransPsnrBlendA - assembleTransPsnrBlendB) < 1.5 && Math.abs(assembleTransPsnrBlendA - (assembleTransPsnrAB + 6)) < 2, "assemble fade center is a true 50/50 blend (PSNR blend~A and blend~B both ≈ PSNR(A,B)+6dB)", `PSNR(A,B)=${assembleTransPsnrAB} blend~A=${assembleTransPsnrBlendA} blend~B=${assembleTransPsnrBlendB}`);
+const assembleTransReceipt = JSON.parse(await readFile(path.join(assembleTransOut, "assemble-receipt.json"), "utf8"));
+checkOk(assembleTransReceipt.approval === "forced" && assembleTransReceipt.joins?.length === 3 && assembleTransReceipt.qa?.checks?.every((c) => c.status !== "fail"), "assemble receipt records the 3 joins and a qa_report with no failing check", JSON.stringify(assembleTransReceipt.joins));
+const assembleTransRender2Res = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleTransStage.manifestPath, mode: "render", output_dir: assembleTransOut, force: true } }, undefined, { timeout: 300000 });
+const assembleTransRender2Json = JSON.parse(assembleTransRender2Res.content[0].text);
+checkOk(assembleTransRender2Json.cache_hits === 4, "assemble second transitions render reuses all 4 shot segments from the cache", `cache_hits=${assembleTransRender2Json.cache_hits}`);
 
 await client.close();
 if (failures.length) {

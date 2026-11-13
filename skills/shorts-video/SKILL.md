@@ -135,7 +135,10 @@ The modes run in order: `validate` → `preview` (show it to the
 user) → `approve` → `render`. Never approve your own technical
 checks — approval means the user saw the preview and said yes.
 A render without approval fails loudly unless the user
-explicitly asks for `--force`.
+explicitly asks for `--force`. A shot after the first may carry
+`transition: {type, duration}` (one of the 49 xfade names,
+centered on the cut, video-only — the audio never moves); a
+video shot needs the handle footage in its source.
 
 ## Common failures
 

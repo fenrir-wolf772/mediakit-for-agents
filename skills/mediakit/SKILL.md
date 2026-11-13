@@ -791,7 +791,18 @@ in frames and seconds, never a silent trim or pad. Shot kinds:
 `video` (trimmed + reframed to the manifest size), `color`
 (a solid card). A still image without zoom, and a color card, may
 last at most 2.5s (the motion gate — split the shot or add a
-zoom). The four modes are a pipeline, in order: `validate`
+zoom). A shot after the first may carry `transition: {type,
+duration}` — one of the 49 xfade names `concat` accepts, centered
+on the cut: half the transition shows the tail of the previous
+shot, half the head of this one. The total duration and the audio
+do not change — transitions are video-only, and each shot segment
+is built longer by its handles so the xfade chain consumes exactly
+the handles. A transition must not be longer than the shorter
+adjacent shot, and a `video` shot needs the handle footage to exist
+in its source (start ≥ incoming handle, start + duration +
+outgoing handle ≤ source end) — validate refuses otherwise.
+In a preview, a transition whose next shot is clipped below its
+handle is dropped (hard cut, recorded in `transition_warnings`). The four modes are a pipeline, in order: `validate`
 (writes nothing), `preview` (first N seconds at half size —
 show it to the user), `approve` (records the fingerprint of the
 exact manifest + voice + assets + captions the preview showed),

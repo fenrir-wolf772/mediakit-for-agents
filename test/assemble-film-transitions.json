@@ -1,0 +1,69 @@
+{
+  "captions": "captions.srt",
+  "fps": 30,
+  "height": 1920,
+  "music": {
+    "duck_db": 12,
+    "path": "mix-music.mp3",
+    "volume": 0.3
+  },
+  "sfx": [
+    {
+      "at": 2.0,
+      "file": "sfx-beep.mp3",
+      "volume": 1
+    }
+  ],
+  "shots": [
+    {
+      "id": "s1",
+      "kind": "image",
+      "source": "kenburns.png",
+      "duration": 4,
+      "zoom": {
+        "from": 1.0,
+        "to": 1.15
+      }
+    },
+    {
+      "id": "s2",
+      "kind": "video",
+      "source": "source.mp4",
+      "start": 2,
+      "duration": 4,
+      "transition": {
+        "type": "fade",
+        "duration": 1.0
+      }
+    },
+    {
+      "id": "s3",
+      "kind": "image",
+      "source": "kenburns.png",
+      "duration": 1,
+      "transition": {
+        "type": "dissolve",
+        "duration": 0.5
+      }
+    },
+    {
+      "id": "s4",
+      "kind": "color",
+      "color": "111111",
+      "duration": 1,
+      "transition": {
+        "type": "fade",
+        "duration": 0.5
+      }
+    }
+  ],
+  "style": "clean-bold",
+  "title": "Assemble demo \u2014 transitions",
+  "version": 1,
+  "voice": {
+    "lead": 0.5,
+    "path": "mix-voice.mp3",
+    "tail": 0.5
+  },
+  "width": 1080
+}

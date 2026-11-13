@@ -4890,7 +4890,7 @@ const TOOL_REQUIREMENTS = {
   package: {},
   publish_kit: {},
   assemble: {
-    filters: ["zoompan", "scale", "crop", "fps", "trim", "setpts", "format", "subtitles", "sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay", "apad"],
+    filters: ["zoompan", "xfade", "scale", "crop", "fps", "trim", "setpts", "format", "subtitles", "sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay", "apad"],
     encoders: ["libx264", "aac"],
   },
   mix: { filters: ["sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay"], encoders: ["aac", "libmp3lame"] },
@@ -6674,6 +6674,65 @@ function assembleOptNum(v, def, label, opts = {}) {
 
 function assembleEvenDown(n) { return n % 2 ? n - 1 : n; }
 
+// Transition handles, in frames. A transition of F frames is
+// centered on its cut: floor(F/2) frames come from the previous
+// shot's tail (its outgoing handle, shown after the cut) and the
+// rest from the next shot's head (its incoming handle, shown
+// before the cut). Each shot segment is built longer by its
+// handles, so the xfade chain consumes exactly the handles and
+// the joined video keeps the nominal frame count. A 0.5s
+// transition at 30fps is 15 frames: 8 before the cut, 7 after.
+function deriveAssembleHandles(shots, fps) {
+  const out = shots.map((s) => ({ ...s, handleInFrames: 0, handleOutFrames: 0 }));
+  for (let i = 1; i < out.length; i++) {
+    const t = out[i].transition;
+    if (!t) continue;
+    const hBefore = Math.floor(t.frames / 2);
+    const hAfter = t.frames - hBefore;
+    out[i - 1].handleOutFrames = hBefore;
+    out[i].handleInFrames = hAfter;
+  }
+  for (const s of out) {
+    s.buildFrames = s.frames + s.handleInFrames + s.handleOutFrames;
+    s.buildSeconds = s.buildFrames / fps;
+    if (s.kind === "video") s.buildStart = s.start - s.handleInFrames / fps;
+  }
+  return out;
+}
+
+// The xfade joins for a shot list: one per transition, with the
+// offset (in frames and seconds) where the blend starts in the
+// joined timeline. The offset is frame-aligned by construction:
+// cutFrames - hAfter is an integer number of frames.
+function deriveAssembleJoins(shots, fps) {
+  const joins = [];
+  let cutFrames = 0;
+  for (let i = 0; i < shots.length - 1; i++) {
+    cutFrames += shots[i].frames;
+    const next = shots[i + 1];
+    if (!next.transition) continue;
+    const t = next.transition;
+    const hAfter = t.frames - Math.floor(t.frames / 2);
+    joins.push({
+      index: i + 1,
+      type: t.type,
+      durationSeconds: t.frames / fps,
+      frames: t.frames,
+      offsetFrames: cutFrames - hAfter,
+      offsetSeconds: (cutFrames - hAfter) / fps,
+    });
+  }
+  return joins;
+}
+
+// Full video plan for a shot list: built segments (with handles)
+// plus the xfade joins. Pure — used for the full render and for
+// previews (whose shot list is clipped first).
+function planAssembleVideo(shots, fps) {
+  const built = deriveAssembleHandles(shots, fps);
+  return { shots: built, joins: deriveAssembleJoins(built, fps) };
+}
+
 // Validate a parsed film manifest against the files on disk and
 // return the build plan (frame-exact). Probes the voice and every
 // asset; nothing is written. Throws MediaKitError on the first
@@ -6840,11 +6899,9 @@ async function validateAssembleManifest(doc, manifestAbs) {
       if (!meta.video) throw new MediaKitError(`${label} (${id}): video source ${raw.source} has no video stream`, "INVALID_ARG");
       if (!Number.isFinite(meta.duration_seconds)) throw new MediaKitError(`${label} (${id}): could not measure the video source duration`, "PROBE_FAILED");
       const start = assembleOptNum(raw.start, 0, `${label} (${id}) start`, { min: 0 });
-      if (start + duration > meta.duration_seconds + 0.05) {
-        throw new MediaKitError(`${label} (${id}): start ${start}s + duration ${duration}s passes the source end (${meta.duration_seconds}s)`, "INVALID_ARG");
-      }
       shot.source = srcPath;
       shot.start = start;
+      shot.sourceDuration = meta.duration_seconds;
       shot.assetHash = await hashFile(srcPath);
     } else {
       if (typeof raw.color !== "string" || !/^[0-9a-fA-F]{6}$/.test(raw.color.trim())) {
@@ -6858,7 +6915,62 @@ async function validateAssembleManifest(doc, manifestAbs) {
         );
       }
     }
+    // Transition into this shot (the join from the previous shot).
+    // Parsed here, cross-shot rules checked after the loop, when
+    // both neighbors exist.
+    if (raw.transition !== undefined && raw.transition !== null) {
+      if (i === 0) {
+        throw new MediaKitError(`shot 1 (${id}): the first shot cannot have a transition (there is no cut before it)`, "INVALID_ARG");
+      }
+      if (typeof raw.transition !== "object" || Array.isArray(raw.transition)) {
+        throw new MediaKitError(`${label} (${id}): transition must be an object {type, duration}`, "INVALID_ARG");
+      }
+      const type = raw.transition.type;
+      if (!XFADE_TRANSITIONS.includes(type)) {
+        throw new MediaKitError(`${label} (${id}): unknown transition "${type}" (supported: ${XFADE_TRANSITIONS.join(", ")})`, "INVALID_ARG");
+      }
+      const tDur = num(raw.transition.duration, `${label} (${id}) transition.duration`, { min: 0.1, max: 10 });
+      const tFrames = Math.round(tDur * fps);
+      if (tFrames < 2) {
+        throw new MediaKitError(`${label} (${id}): transition duration ${tDur}s is less than 2 frames at ${fps}fps`, "INVALID_ARG");
+      }
+      shot.transition = { type, duration_seconds: tFrames / fps, frames: tFrames, requested_seconds: tDur };
+    }
     shots.push(shot);
+  }
+  // Cross-shot transition rules: length against both neighbors,
+  // and the handle footage a video shot needs in its source.
+  const builtShots = deriveAssembleHandles(shots, fps);
+  for (let i = 1; i < builtShots.length; i++) {
+    const s = builtShots[i];
+    const t = s.transition;
+    if (!t) continue;
+    const prev = builtShots[i - 1];
+    if (t.frames > Math.min(prev.frames, s.frames)) {
+      throw new MediaKitError(
+        `shot ${i + 1} (${s.id}): transition ${t.frames} frames (${t.duration_seconds}s) is longer than the shorter adjacent shot (${Math.min(prev.frames, s.frames)} frames) — shorten the transition or lengthen the shots`,
+        "INVALID_ARG",
+      );
+    }
+  }
+  for (const [i, s] of builtShots.entries()) {
+    if (s.kind === "image" && s.buildSeconds > 600) {
+      throw new MediaKitError(`shot ${i + 1} (${s.id}): built segment ${s.buildSeconds.toFixed(1)}s exceeds the 600s image-shot limit (shorten the shot or its transitions)`, "INVALID_ARG");
+    }
+    if (s.kind === "video") {
+      if (s.buildStart < -1e-9) {
+        throw new MediaKitError(
+          `shot ${i + 1} (${s.id}): the incoming ${s.transition?.type ?? ""} transition needs ${(s.handleInFrames / fps).toFixed(3)}s of handle before the shot start (${s.start}s) — raise start or shorten the transition`,
+          "INVALID_ARG",
+        );
+      }
+      if (s.buildStart + s.buildSeconds > s.sourceDuration + 0.05) {
+        throw new MediaKitError(
+          `shot ${i + 1} (${s.id}): start ${s.start}s + duration ${s.duration}s${s.handleOutFrames ? ` + ${(s.handleOutFrames / fps).toFixed(3)}s outgoing handle` : ""} passes the source end (${s.sourceDuration}s)`,
+          "INVALID_ARG",
+        );
+      }
+    }
   }
   if (framesSum !== totalFrames) {
     const diffFrames = framesSum - totalFrames;
@@ -6897,46 +7009,78 @@ async function validateAssembleManifest(doc, manifestAbs) {
 }
 
 // One shot -> one uniform segment (libx264/yuv420p, target size/fps,
-// no audio, exactly shot.frames frames — counted on disk, not
-// assumed). Image shots go through zoomPan (a fixed 1.0 zoom fills
-// the frame for a still hold); video shots are trimmed + reframed
-// (crop) in one encode; color shots come from the lavfi color
-// source. Any frame-count mismatch throws — a segment that is a
-// frame short would silently shift every shot after it.
+// no audio, exactly shot.buildFrames frames — counted on disk, not
+// assumed). The segment covers the nominal shot PLUS its transition
+// handles (buildStart/buildDuration for video, buildDuration for
+// image/color); the xfade join consumes exactly the handles, so the
+// joined video keeps the nominal frame count. Image shots go through
+// zoomPan (a fixed 1.0 zoom fills the frame for a still hold); video
+// shots are trimmed + reframed (crop) in one encode; color shots come
+// from the lavfi color source. Any frame-count mismatch throws — a
+// segment that is a frame short would silently shift every shot
+// after it.
 async function buildAssembleShot(plan, shot, opts, outPath) {
   const { width, height, fps, crf, preset } = opts;
   if (shot.kind === "image") {
     const z = shot.zoom ?? { from: 1, to: 1, focus: [0.5, 0.5], focus_end: [0.5, 0.5] };
     const r = await zoomPan({
-      input: shot.source, output: outPath, duration: shot.duration, fps,
+      input: shot.source, output: outPath, duration: shot.buildSeconds, fps,
       zoomFrom: z.from, zoomTo: z.to,
       focusX: z.focus[0], focusY: z.focus[1],
       focusEndX: z.focus_end[0], focusEndY: z.focus_end[1],
       width, height, crf,
     });
-    if (r.frames !== shot.frames) {
-      throw new MediaKitError(`assemble shot ${shot.id}: built ${r.frames} frames, expected ${shot.frames}`, "ASSEMBLE_FRAME_MISMATCH");
+    if (r.frames !== shot.buildFrames) {
+      throw new MediaKitError(`assemble shot ${shot.id}: built ${r.frames} frames, expected ${shot.buildFrames}`, "ASSEMBLE_FRAME_MISMATCH");
     }
     return outPath;
   }
   if (shot.kind === "video") {
     const vf = `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},setpts=PTS-STARTPTS,fps=${fps},format=yuv420p`;
     await run(FFMPEG, [
-      "-y", "-ss", String(shot.start), "-t", String(shot.duration), "-i", shot.source,
-      "-vf", vf, "-frames:v", String(shot.frames),
+      "-y", "-ss", String(shot.buildStart), "-t", String(shot.buildSeconds), "-i", shot.source,
+      "-vf", vf, "-frames:v", String(shot.buildFrames),
       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", String(crf), "-preset", preset, "-an", outPath,
     ]);
   } else {
     await run(FFMPEG, [
       "-y", "-f", "lavfi", "-i", `color=c=0x${shot.color}:s=${width}x${height}:r=${fps}`,
-      "-frames:v", String(shot.frames),
+      "-frames:v", String(shot.buildFrames),
       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", String(crf), "-preset", preset, "-an", outPath,
     ]);
   }
   const counted = await countVideoFrames(outPath);
-  if (counted !== shot.frames) {
-    throw new MediaKitError(`assemble shot ${shot.id}: built ${counted} frames, expected ${shot.frames}`, "ASSEMBLE_FRAME_MISMATCH");
+  if (counted !== shot.buildFrames) {
+    throw new MediaKitError(`assemble shot ${shot.id}: built ${counted} frames, expected ${shot.buildFrames}`, "ASSEMBLE_FRAME_MISMATCH");
   }
+  return outPath;
+}
+
+// Join uniform segments with xfade transitions (video-only — the
+// audio is mixed separately from the voice timeline). Every offset
+// is frame-aligned by construction (see deriveAssembleJoins), so the
+// joined video has exactly the nominal frame count; the caller
+// verifies that on disk. The final fps filter pins the frame rate
+// after the chain.
+async function joinAssembleSegments(segmentPaths, joins, opts, outPath) {
+  const { fps, crf, preset } = opts;
+  const graph = [];
+  let vLabel = "0:v";
+  for (let k = 0; k < joins.length; k++) {
+    const j = joins[k];
+    const vOut = `x${k}`;
+    graph.push(`[${vLabel}][${k + 1}:v]xfade=transition=${j.type}:duration=${j.durationSeconds}:offset=${+j.offsetSeconds.toFixed(4)}[${vOut}]`);
+    vLabel = vOut;
+  }
+  graph.push(`[${vLabel}]fps=${fps},format=yuv420p[vout]`);
+  const args = ["-y"];
+  for (const p of segmentPaths) args.push("-i", p);
+  args.push(
+    "-filter_complex", graph.join(";"),
+    "-map", "[vout]", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+    "-crf", String(crf), "-preset", preset, "-an", outPath,
+  );
+  await run(FFMPEG, args);
   return outPath;
 }
 
@@ -6951,9 +7095,10 @@ async function assembleCachedShot(plan, shot, opts, tmpDir) {
     renderer: ASSEMBLE_VERSION,
     kind: shot.kind,
     asset: shot.assetHash ?? shot.color,
-    start: shot.start ?? null,
-    duration: shot.duration,
-    frames: shot.frames,
+    start: shot.buildStart ?? shot.start ?? null,
+    duration: shot.buildSeconds,
+    frames: shot.buildFrames,
+    transition: shot.transition ? { type: shot.transition.type, frames: shot.transition.frames } : null,
     zoom: shot.zoom ?? null,
     width: opts.width, height: opts.height, fps: opts.fps, crf: opts.crf, preset: opts.preset,
   })).digest("hex");
@@ -7043,7 +7188,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       music: plan.music ? { volume: plan.music.volume, duck_db: plan.music.duck_db } : null,
       sfx_count: plan.sfx.length,
       captions: plan.captions,
-      shots: plan.shots.map((s) => ({ id: s.id, kind: s.kind, duration: s.duration, frames: s.frames })),
+      shots: plan.shots.map((s) => ({ id: s.id, kind: s.kind, duration: s.duration, frames: s.frames, ...(s.transition ? { transition: { type: s.transition.type, duration_seconds: s.transition.duration_seconds, frames: s.transition.frames } } : {}) })),
     };
   }
   if (!["preview", "approve", "render"].includes(mode)) {
@@ -7118,9 +7263,12 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
 
   // Clip shots to the preview window (preview only): the last
   // intersecting shot is cut to the exact preview frame count.
+  // A transition is dropped (hard cut, with a warning) when the
+  // next shot is clipped below its incoming handle.
   let renderShots = plan.shots;
   let renderTotalSeconds = plan.total_seconds;
   let renderTotalFrames = plan.total_frames;
+  const previewWarnings = [];
   if (isPreview) {
     renderShots = [];
     let used = 0;
@@ -7132,7 +7280,19 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
     }
     renderTotalSeconds = previewTotal;
     renderTotalFrames = previewFrames;
+    for (let i = 1; i < renderShots.length; i++) {
+      const t = renderShots[i].transition;
+      if (!t) continue;
+      const hAfter = t.frames - Math.floor(t.frames / 2);
+      if (renderShots[i].frames < hAfter) {
+        previewWarnings.push(`preview: transition into shot ${renderShots[i].id} dropped — the shot is clipped to ${renderShots[i].frames} frames, below its ${hAfter}-frame handle (hard cut instead)`);
+        delete renderShots[i].transition;
+      }
+    }
   }
+  const videoPlan = planAssembleVideo(renderShots, plan.fps);
+  const renderShotsBuilt = videoPlan.shots;
+  const joins = videoPlan.joins;
 
   const tmpDir = path.join(outDirAbs, `.mediakit-assemble-tmp-${process.pid}`);
   await mkdir(tmpDir, { recursive: true });
@@ -7140,15 +7300,19 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
   let completed = false;
   const segmentPaths = [];
   try {
-    for (const shot of renderShots) {
+    for (const shot of renderShotsBuilt) {
       const r = await assembleCachedShot(plan, shot, opts, tmpDir);
       if (r.cached) cacheHits++;
       segmentPaths.push(r.path);
     }
     const videoOnlyPath = path.join(tmpDir, "video-only.mp4");
-    const listPath = path.join(tmpDir, "concat.txt");
-    await writeFile(listPath, segmentPaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join("\n") + "\n", "utf8");
-    await run(FFMPEG, ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-movflags", "+faststart", videoOnlyPath]);
+    if (joins.length === 0) {
+      const listPath = path.join(tmpDir, "concat.txt");
+      await writeFile(listPath, segmentPaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join("\n") + "\n", "utf8");
+      await run(FFMPEG, ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-movflags", "+faststart", videoOnlyPath]);
+    } else {
+      await joinAssembleSegments(segmentPaths, joins, opts, videoOnlyPath);
+    }
     const concatFrames = await countVideoFrames(videoOnlyPath);
     if (concatFrames !== renderTotalFrames) {
       throw new MediaKitError(`assemble concat produced ${concatFrames} frames, expected ${renderTotalFrames}`, "ASSEMBLE_FRAME_MISMATCH");
@@ -7199,6 +7363,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
         output: finalPath,
         dimensions: `${outW}x${outH}`,
         cache_hits: cacheHits,
+        transition_warnings: previewWarnings,
         elapsed_seconds: elapsed,
       };
       await writeFile(path.join(outDirAbs, "preview.json"), JSON.stringify(previewDoc, null, 2) + "\n", "utf8");
@@ -7216,6 +7381,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       output: finalPath,
       cache_hits: cacheHits,
       shots_run: renderShots.length,
+      joins: joins.map((j) => ({ into_shot: renderShotsBuilt[j.index]?.id ?? null, type: j.type, duration_seconds: j.durationSeconds, offset_seconds: j.offsetSeconds })),
       elapsed_seconds: elapsed,
       final: {
         duration_seconds: finalProbe.duration_seconds,
