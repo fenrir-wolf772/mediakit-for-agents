@@ -405,6 +405,31 @@ server.tool(
 );
 
 server.tool(
+  "image_to_video",
+  "Turn one still image into a fixed-duration video that holds still (no motion — use zoom_pan for Ken Burns). Use it for a podcast still, a song cover, or a title card held over audio. Dimensions default to the image itself; width/height fit the image inside the box and pad black to the exact size. audio loops an audio file to the same duration (a short bed loops, a long one is trimmed). Output .mp4 (H.264) or .webm (VP9). The result counts frames on the output file, so the duration is measured, not assumed.",
+  {
+    input: pathSchema.describe("Still image file (PNG/JPG/WebP)"),
+    output: pathSchema,
+    duration: z.number().min(0.5).max(600).default(5).describe("Clip length in seconds (default 5)"),
+    fps: z.number().int().min(1).max(120).default(30).describe("Output frame rate (default 30)"),
+    width: z.number().int().min(2).max(7680).optional().describe("Output width in pixels, rounded down to even (default = image width)"),
+    height: z.number().int().min(2).max(4320).optional().describe("Output height in pixels, rounded down to even (default = image height)"),
+    audio: pathSchema.optional().describe("Audio file to loop under the still (optional)"),
+    crf: z.number().int().min(0).max(51).default(23),
+  },
+  async (a) => safe(() => core.imageToVideo({
+    input: a.input,
+    output: a.output,
+    duration: a.duration,
+    fps: a.fps,
+    width: a.width ?? null,
+    height: a.height ?? null,
+    audio: a.audio ?? null,
+    crf: a.crf,
+  })),
+);
+
+server.tool(
   "interpolate",
   "Raise a clip's frame rate with motion interpolation (minterpolate): 30fps to 60fps for smoother playback or slow motion. Modes: blend (fast default, cross-fades neighbours), mci (true motion-compensated frames, best quality but much slower — about 9x realtime on CPU), dup (repeats frames). Only raises the frame rate; use fit --max-fps to lower it. The result counts frames on the output file, so the fps is measured, not assumed.",
   {

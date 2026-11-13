@@ -104,6 +104,7 @@ jobs:
           node bin/mediakit.js chroma-key test/greenscreen.mp4 -o outputs/ci-chroma.mov | grep '"has_alpha": true'
           node bin/mediakit.js chroma-key test/greenscreen.mp4 -o outputs/ci-chroma-bg.mp4 --background 1E40AF | grep '"mode": "composite"'
           node bin/mediakit.js zoom-pan test/kenburns.png -o outputs/ci-zoompan.mp4 --duration 3 --zoom-from 1 --zoom-to 2 --width 640 --height 360 | grep '"frames": 90'
+          node bin/mediakit.js image-to-video test/kenburns.png -o outputs/ci-img2vid.mp4 --duration 3 --fps 30 --width 640 --height 360 | grep '"frames": 90'
           node bin/mediakit.js cut-words test/source.mp4 --words-file test/cut-words.json --remove um,uh -o outputs/ci-cutwords.mp4 | grep '"removed_count": 2'
           ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-cutwords.mp4 | grep '^3.48'
           node bin/mediakit.js cut-words test/source.mp4 --words-file test/cut-words.json --remove um,uh --dry-run | grep '"dry_run": true'

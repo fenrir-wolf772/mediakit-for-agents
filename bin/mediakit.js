@@ -292,6 +292,20 @@ const COMMANDS = {
       ["-o, --output", "Output file (required)"],
     ],
   },
+  "image-to-video": {
+    usage: "mediakit image-to-video <image> -o <output.mp4> [--duration 5] [--fps 30] [--width 1280] [--height 720] [--audio <file>] [--crf 23]",
+    desc: "Turn one still image into a fixed-duration video that holds still (no motion — use zoom-pan for Ken Burns). Dimensions default to the image itself; --width/--height fit the image inside the box and pad black to the exact size (widths are rounded down to even). --audio loops an audio file to the same duration (a short bed loops, a long one is trimmed). Output .mp4 (H.264) or .webm (VP9). Reports frame count measured on the output file — exactly round(duration*fps).",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--duration", "Clip length in seconds (default 5)"],
+      ["--fps", "Output frame rate (default 30)"],
+      ["--width", "Output width in pixels, rounded down to even (default = image width)"],
+      ["--height", "Output height in pixels, rounded down to even (default = image height)"],
+      ["--audio", "Audio file to loop under the still (optional)"],
+      ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["-o, --output", "Output file, .mp4 or .webm (required)"],
+    ],
+  },
   interpolate: {
     usage: "mediakit interpolate <input> -o <output> --fps 60 [--mode mci|blend|dup] [--crf 23]",
     desc: "Raise the frame rate with motion interpolation (minterpolate). blend is the fast default; mci is true motion compensation but much slower (~9x realtime on CPU). Reports fps and frame counts measured on the output file.",
@@ -926,6 +940,17 @@ async function main() {
           focusEndY: numOpt(opts, "focus_end_y") ?? null,
           width: numOpt(opts, "width") ?? 1280,
           height: numOpt(opts, "height") ?? 720,
+          crf: numOpt(opts, "crf") ?? 23,
+        });
+        break;
+      case "image-to-video":
+        result = await core.imageToVideo({
+          input: needInput(), output: needOutput(opts),
+          duration: numOpt(opts, "duration") ?? 5,
+          fps: numOpt(opts, "fps") ?? 30,
+          width: numOpt(opts, "width") ?? null,
+          height: numOpt(opts, "height") ?? null,
+          audio: opts.audio ?? null,
           crf: numOpt(opts, "crf") ?? 23,
         });
         break;

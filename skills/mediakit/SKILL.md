@@ -756,6 +756,29 @@ lands at 854×480 (0.0481 bpp). `--no-resolution-ladder`
 (`resolution_ladder: false`) keeps the source frame when the mush
 is acceptable or the platform needs the exact dimensions.
 
+### 46. A still image holds still — and a manifest sidecar is a file, unless it is a color
+`image_to_video` is the still half of `zoom_pan`: one image, one
+fixed duration, zero motion — a podcast still, a song cover, a
+title card held over audio. The frame count is exactly
+round(duration×fps) (3s at 30fps is 90 frames, measured on disk),
+and the first frame is the source image itself (PSNR > 40 dB
+against the scaled source). Dimensions default to the image;
+`--width`/`--height` fit inside the box and pad black to the exact
+size, so asking a 1280×720 photo for 1080×1920 gives a padded
+1080×1920, never a stretch. `--audio` loops the bed to the same
+duration — a short bed loops, a long one is trimmed by `-t`. A
+video input is refused (extract a frame first); motion is
+`zoom_pan`'s job, not this tool's.
+In a manifest, a `chroma_key` background is either an image file
+or a hex color — and the cache treats them differently. An image
+background resolves relative to the manifest and its bytes are
+hashed into the step cache, so editing the image re-runs the key
+step (the corner pixel moves with the new image). A hex background
+is already in the args, so it is never resolved as a path and never
+hashed. If a step mysteriously re-runs every time, check whether a
+sidecar path moved; if a step mysteriously never re-runs, check
+whether the sidecar bytes changed but the key did not.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

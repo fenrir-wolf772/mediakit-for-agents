@@ -52,12 +52,15 @@ async function meanVolume(file, start, duration) {
 
 // Independent luma PSNR helper: ffmpeg's psnr filter between a clean
 // reference and a file (not through the tool under test). Returns the
-// Y-channel PSNR in dB, or null on failure.
+// Y-channel PSNR in dB, or null on failure. Identical frames print
+// "PSNR y:inf" — that is a perfect match, not a failure, so it maps
+// to 999 dB (caught 2026-11-13: image_to_video's first and last
+// frames are bit-identical, and the old regex returned null for them).
 async function psnrY(ref, file) {
   try {
     const { stderr } = await execFileAsync("ffmpeg", ["-hide_banner", "-i", ref, "-i", file, "-filter_complex", "psnr", "-f", "null", "-"]);
-    const m = stderr.match(/PSNR y:([0-9.]+)/);
-    return m ? parseFloat(m[1]) : null;
+    const m = stderr.match(/PSNR y:(inf|[0-9.]+)/);
+    return m ? (m[1] === "inf" ? 999 : parseFloat(m[1])) : null;
   } catch {
     return null;
   }
@@ -98,10 +101,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "cut_words"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 48 tools present");
-checkOk(missing.length === 0, "tools/list has all 48 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 49 tools present");
+checkOk(missing.length === 0, "tools/list has all 49 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -492,6 +495,59 @@ const zoomVideo = await callExpectThrow("zoom_pan", { input: path.join(root, "te
 checkOk(/still image/.test(zoomVideo), "zoom_pan refuses a video input", zoomVideo.slice(0, 200));
 const zoomBad = await callExpectThrow("zoom_pan", { input: path.join(root, "test/kenburns.png"), output: path.join(root, "outputs/mcp-zoompan-bad2.mp4"), zoom_to: 0 });
 checkOk(/zoom_to/.test(zoomBad), "zoom_pan refuses zoom_to below 1", zoomBad.slice(0, 200));
+
+// image_to_video: one still image -> fixed-duration video that holds
+// still. Frame 0 must match the source scaled to 640x360 (PSNR > 40,
+// same expected file the zoom_pan test built), and the last frame
+// must match the first (static video, PSNR > 50).
+const img2vidRes = await client.callTool({
+  name: "image_to_video",
+  arguments: { input: path.join(root, "test/kenburns.png"), output: path.join(root, "outputs/mcp-img2vid.mp4"), duration: 3, fps: 30, width: 640, height: 360 },
+});
+const img2vidJson = JSON.parse(img2vidRes.content[0].text);
+console.log("image_to_video call:", JSON.stringify(img2vidJson));
+checkOk(img2vidJson.frames === 90 && near(img2vidJson.duration_seconds, 3, 0.1) && img2vidJson.dimensions === "640x360" && img2vidJson.fps === 30, "image_to_video makes a 3s 30fps 640x360 clip with exactly 90 frames", JSON.stringify(img2vidJson));
+await frameMp4(path.join(root, "outputs/mcp-img2vid.mp4"), 0, path.join(root, "outputs/mcp-img2vid-f0.mp4"));
+await frameMp4(path.join(root, "outputs/mcp-img2vid.mp4"), 89, path.join(root, "outputs/mcp-img2vid-f89.mp4"));
+const img2vidF0Psnr = await psnrY(path.join(root, "outputs/mcp-zoompan-exp-f0.mp4"), path.join(root, "outputs/mcp-img2vid-f0.mp4"));
+const img2vidStaticPsnr = await psnrY(path.join(root, "outputs/mcp-img2vid-f0.mp4"), path.join(root, "outputs/mcp-img2vid-f89.mp4"));
+console.log("image_to_video PSNR: f0 vs source =", img2vidF0Psnr, "| f89 vs f0 =", img2vidStaticPsnr);
+checkOk(img2vidF0Psnr !== null && img2vidF0Psnr > 40, "image_to_video first frame is the source image", `PSNR ${img2vidF0Psnr}`);
+checkOk(img2vidStaticPsnr !== null && img2vidStaticPsnr > 50, "image_to_video holds still: last frame matches the first", `PSNR ${img2vidStaticPsnr}`);
+// Default dimensions = the image itself (1280x720); width-only keeps
+// the aspect (640 -> 640x360).
+const img2vidDefRes = await client.callTool({
+  name: "image_to_video",
+  arguments: { input: path.join(root, "test/kenburns.png"), output: path.join(root, "outputs/mcp-img2vid-def.mp4"), duration: 2, fps: 24 },
+});
+const img2vidDefJson = JSON.parse(img2vidDefRes.content[0].text);
+checkOk(img2vidDefJson.frames === 48 && img2vidDefJson.dimensions === "1280x720" && img2vidDefJson.fps === 24, "image_to_video defaults to the image size and fps given (2s 24fps = 48 frames)", JSON.stringify(img2vidDefJson));
+const img2vidWRes = await client.callTool({
+  name: "image_to_video",
+  arguments: { input: path.join(root, "test/kenburns.png"), output: path.join(root, "outputs/mcp-img2vid-w.mp4"), duration: 1, fps: 30, width: 640 },
+});
+const img2vidWJson = JSON.parse(img2vidWRes.content[0].text);
+checkOk(img2vidWJson.dimensions === "640x360" && img2vidWJson.frames === 30, "image_to_video width-only 640 keeps the 16:9 aspect (640x360)", JSON.stringify(img2vidWJson));
+// Audio: the 9s voice bed loops under a 3s still; the clip stays 3s
+// and carries a real audio stream (checked independently, not from
+// the tool's own report).
+const img2vidAudioRes = await client.callTool({
+  name: "image_to_video",
+  arguments: { input: path.join(root, "test/kenburns.png"), output: path.join(root, "outputs/mcp-img2vid-audio.mp4"), duration: 3, fps: 30, width: 640, height: 360, audio: path.join(root, "test/mix-voice.mp3") },
+});
+const img2vidAudioJson = JSON.parse(img2vidAudioRes.content[0].text);
+checkOk(img2vidAudioJson.audio === true && near(img2vidAudioJson.duration_seconds, 3, 0.1), "image_to_video with audio reports audio=true and stays 3s", JSON.stringify(img2vidAudioJson));
+const img2vidAudioProbe = await probeStreams(path.join(root, "outputs/mcp-img2vid-audio.mp4"));
+const img2vidAudioTypes = img2vidAudioProbe?.streams?.map((s) => `${s.codec_type}:${s.codec_name}`) ?? [];
+checkOk(img2vidAudioTypes.includes("video:h264") && img2vidAudioTypes.includes("audio:aac") && near(+img2vidAudioProbe.format.duration, 3, 0.1), "image_to_video audio file has h264 + aac streams at 3s (ffprobe, independent)", JSON.stringify(img2vidAudioTypes));
+const img2vidVideo = await callExpectThrow("image_to_video", { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-img2vid-bad.mp4") });
+checkOk(/still image/.test(img2vidVideo), "image_to_video refuses a video input", img2vidVideo.slice(0, 200));
+const img2vidDur = await callExpectThrow("image_to_video", { input: path.join(root, "test/kenburns.png"), output: path.join(root, "outputs/mcp-img2vid-bad2.mp4"), duration: 0 });
+checkOk(/duration/.test(img2vidDur), "image_to_video refuses duration below 0.5s", img2vidDur.slice(0, 200));
+const img2vidExt = await callExpectThrow("image_to_video", { input: path.join(root, "test/kenburns.png"), output: path.join(root, "outputs/mcp-img2vid-bad3.mov") });
+checkOk(/webm/.test(img2vidExt), "image_to_video refuses a .mov output (mp4 or webm only)", img2vidExt.slice(0, 200));
+const img2vidNoAudio = await callExpectThrow("image_to_video", { input: path.join(root, "test/kenburns.png"), output: path.join(root, "outputs/mcp-img2vid-bad4.mp4"), audio: path.join(root, "test/logo.png") });
+checkOk(/no audio stream/.test(img2vidNoAudio), "image_to_video refuses an --audio file with no audio stream", img2vidNoAudio.slice(0, 200));
 
 // interpolate: 30fps -> 60fps with blend (fast mode). The frame count
 // is asserted on the output file, not just r_frame_rate.
@@ -2564,7 +2620,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 48 && infoJson.tools_available >= 46 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 48 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 49 && infoJson.tools_available >= 47 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 49 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -2953,6 +3009,43 @@ const manifestCwCachedRes = await client.callTool({
 });
 const manifestCwCachedJson = JSON.parse(manifestCwCachedRes.content[0].text);
 checkOk(manifestCwCachedJson.cache_hits === 2 && manifestCwCachedJson.steps_run === 0, "manifest cut_words second run serves both steps from cache", `cache_hits=${manifestCwCachedJson.cache_hits} steps_run=${manifestCwCachedJson.steps_run}`);
+// manifest chroma_key background (lượt 40): the background image is
+// a sidecar file — its bytes belong in the step cache key, so
+// editing the image re-runs the step (a hex background is already in
+// args and must NOT be resolved as a file path). The corner of the
+// composite is the background itself, so swapping red -> blue must
+// move the corner B mean from ~0 to ~255.
+const chromaDir = path.join(root, "outputs/mcp-manifest-chroma");
+await mkdir(chromaDir, { recursive: true });
+const chromaManifestPath = path.join(chromaDir, "manifest.json");
+await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=c=0xFF0000:s=1280x720", "-frames:v", "1", "-y", path.join(chromaDir, "bg.png")]);
+await writeFile(chromaManifestPath, JSON.stringify({ version: 1, input: "../../test/greenscreen.mp4", output: "final.mp4", steps: [{ tool: "chroma_key", args: { background: "bg.png" } }] }), "utf8");
+const manifestChromaRes = await client.callTool({ name: "manifest", arguments: { manifest_path: chromaManifestPath } });
+const manifestChromaJson = JSON.parse(manifestChromaRes.content[0].text);
+checkOk(manifestChromaJson.steps.every((s) => s.status === "ok") && manifestChromaJson.cache_hits === 0 && manifestChromaJson.steps_run === 1, "manifest chroma_key with an image background runs the step", JSON.stringify(manifestChromaJson.steps.map((s) => `${s.tool}:${s.status}`)));
+const chromaCornerRed = await planeMean(path.join(chromaDir, "final.mp4"), "160:90:0:0", "b");
+checkOk(chromaCornerRed !== null && chromaCornerRed < 20, "manifest chroma_key red background shows in the corner (B ~0)", `B=${chromaCornerRed}`);
+const manifestChromaCachedRes = await client.callTool({ name: "manifest", arguments: { manifest_path: chromaManifestPath } });
+const manifestChromaCachedJson = JSON.parse(manifestChromaCachedRes.content[0].text);
+checkOk(manifestChromaCachedJson.cache_hits === 1 && manifestChromaCachedJson.steps_run === 0, "manifest chroma_key second run serves the step from cache", `cache_hits=${manifestChromaCachedJson.cache_hits} steps_run=${manifestChromaCachedJson.steps_run}`);
+// Edit the background image (same path, new bytes): the cache key
+// must change, so the step re-runs and the corner turns blue.
+await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=c=0x0000FF:s=1280x720", "-frames:v", "1", "-y", path.join(chromaDir, "bg.png")]);
+const manifestChromaEditedRes = await client.callTool({ name: "manifest", arguments: { manifest_path: chromaManifestPath } });
+const manifestChromaEditedJson = JSON.parse(manifestChromaEditedRes.content[0].text);
+checkOk(manifestChromaEditedJson.cache_hits === 0 && manifestChromaEditedJson.steps_run === 1, "manifest chroma_key re-runs the step after the background image changes", `cache_hits=${manifestChromaEditedJson.cache_hits} steps_run=${manifestChromaEditedJson.steps_run}`);
+const chromaCornerBlue = await planeMean(path.join(chromaDir, "final.mp4"), "160:90:0:0", "b");
+checkOk(chromaCornerBlue !== null && chromaCornerBlue > 200, "manifest chroma_key edited background shows in the corner (B ~255)", `B=${chromaCornerBlue}`);
+// Hex background: a color, not a file — it must not be resolved
+// relative to the manifest, and a second run must hit the cache.
+const chromaHexManifestPath = path.join(chromaDir, "manifest-hex.json");
+await writeFile(chromaHexManifestPath, JSON.stringify({ version: 1, input: "../../test/greenscreen.mp4", output: "final-hex.mp4", steps: [{ tool: "chroma_key", args: { background: "1E40AF" } }] }), "utf8");
+const manifestChromaHexRes = await client.callTool({ name: "manifest", arguments: { manifest_path: chromaHexManifestPath } });
+const manifestChromaHexJson = JSON.parse(manifestChromaHexRes.content[0].text);
+checkOk(manifestChromaHexJson.steps.every((s) => s.status === "ok") && manifestChromaHexJson.steps_run === 1, "manifest chroma_key with a hex background runs (color, not a file path)", JSON.stringify(manifestChromaHexJson.steps.map((s) => `${s.tool}:${s.status}`)));
+const manifestChromaHexCachedRes = await client.callTool({ name: "manifest", arguments: { manifest_path: chromaHexManifestPath } });
+const manifestChromaHexCachedJson = JSON.parse(manifestChromaHexCachedRes.content[0].text);
+checkOk(manifestChromaHexCachedJson.cache_hits === 1 && manifestChromaHexCachedJson.steps_run === 0, "manifest chroma_key hex background second run hits the cache", `cache_hits=${manifestChromaHexCachedJson.cache_hits} steps_run=${manifestChromaHexCachedJson.steps_run}`);
 
 await client.close();
 if (failures.length) {

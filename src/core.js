@@ -3858,6 +3858,77 @@ export async function zoomPan({ input, output, duration = 5, fps = 30, zoomFrom 
   };
 }
 
+// ---------------------------------------------------------------- image_to_video
+// Turn one still image into a fixed-duration video (the
+// PedroMarianoAlmeida/ffmpeg-mcp `image_to_video` idea — MediaKit's
+// zoom_pan always moves, this one holds still). One image, one
+// duration, no motion: the use case is a podcast still, a song
+// cover, or a title card held over audio. The image is looped at
+// the output fps and capped with -t, so the frame count is exactly
+// round(duration*fps) — the test asserts it on disk. Dimensions
+// default to the image itself (made even); --width/--height fit the
+// image inside the box and pad black to the exact size, so a
+// 1280x720 photo asked for 1080x1920 comes out 1080x1920, not
+// stretched. --audio loops the audio to the same duration (a short
+// bed loops, a long one is trimmed by -t). Output is .mp4 (libx264)
+// or .webm (VP9); a video input is refused — extract a frame first.
+function evenDown(n) { return n % 2 ? n - 1 : n; }
+
+export async function imageToVideo({ input, output, duration = 5, fps = 30, width = null, height = null, audio = null, crf = 23 }) {
+  const inPath = await requireInput(input);
+  const outPath = await prepareOutput(output, [inPath]);
+  const dur = num(duration, "duration", { min: 0.5, max: 600 });
+  const f = num(fps, "fps", { min: 1, max: 120, integer: true });
+  const c = num(crf, "crf", { min: 0, max: 51, integer: true });
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("image_to_video needs a still image input", "INVALID_ARG");
+  if (meta.audio || meta.duration_seconds !== null) {
+    throw new MediaKitError("image_to_video takes a still image, not a video (extract a frame first, or use zoom_pan for a moving clip)", "INVALID_ARG");
+  }
+  const ext = path.extname(outPath).slice(1).toLowerCase();
+  if (ext !== "mp4" && ext !== "webm") {
+    throw new MediaKitError(`image_to_video writes .mp4 (H.264) or .webm (VP9) — got .${ext || "(no extension)"}`, "INVALID_ARG");
+  }
+  const srcW = meta.video.width;
+  const srcH = meta.video.height;
+  let w, h;
+  if (width === null || width === undefined) {
+    if (height === null || height === undefined) { w = evenDown(srcW); h = evenDown(srcH); }
+    else { h = evenDown(num(height, "height", { min: 2, max: 4320, integer: true })); w = evenDown(Math.round((h * srcW) / srcH)); }
+  } else {
+    w = evenDown(num(width, "width", { min: 2, max: 7680, integer: true }));
+    h = (height === null || height === undefined)
+      ? evenDown(Math.round((w * srcH) / srcW))
+      : evenDown(num(height, "height", { min: 2, max: 4320, integer: true }));
+  }
+  if (w < 2 || h < 2) throw new MediaKitError(`image_to_video output dimensions too small after even-rounding (got ${w}x${h})`, "INVALID_ARG");
+  let audioPath = null;
+  if (audio !== null && audio !== undefined && audio !== "") {
+    audioPath = await requireInput(audio, "audio");
+    const audioMeta = await probe(audioPath);
+    if (!audioMeta.audio) throw new MediaKitError(`image_to_video --audio needs an audio file, got ${audio} (no audio stream)`, "INVALID_ARG");
+  }
+  const vf = `scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,format=yuv420p`;
+  const videoCodec = ext === "webm" ? "libvpx-vp9" : "libx264";
+  const args = ["-y", "-loop", "1", "-framerate", String(f), "-i", inPath];
+  if (audioPath) args.push("-stream_loop", "-1", "-i", audioPath);
+  args.push("-vf", vf, "-c:v", videoCodec, "-crf", String(c), "-preset", "medium");
+  if (audioPath) args.push("-c:a", ext === "webm" ? "libopus" : "aac", "-b:a", "128k");
+  args.push("-t", String(dur), outPath);
+  await run(FFMPEG, args);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  const frames = await countVideoFrames(outPath);
+  return {
+    operation: "image_to_video", input: inPath, output: outPath,
+    duration_seconds: out.duration_seconds,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+    fps: out.video?.fps ?? null, frames,
+    audio: !!audioPath,
+    size_bytes: info.size_bytes,
+  };
+}
+
 // ---------------------------------------------------------------- interpolate
 // Motion-interpolate a clip up to a higher frame rate
 // (hyepartners-gmail/vibevideo-mcp's MotionInterpolator idea —
@@ -4837,6 +4908,7 @@ const TOOL_REQUIREMENTS = {
   transcribe: {},
   chroma_key: { filters: ["chromakey", "overlay", "scale"], encoders: ["libvpx-vp9", "prores_ks", "libx264"] },
   zoom_pan: { filters: ["zoompan", "scale", "crop"], encoders: ["libx264"] },
+  image_to_video: { filters: ["scale", "pad"], encoders: ["libx264", "libvpx-vp9"] },
   doctor: {},
 };
 
@@ -6301,8 +6373,15 @@ const MANIFEST_MAX_STEPS = 32;
 
 // Step args that name a sidecar file: resolved relative to the
 // manifest file (like input/output), and hashed into the cache key
-// so editing the captions file re-runs the burn step.
-const MANIFEST_FILE_ARGS = ["captions", "overlay", "words_file"];
+// so editing the captions file re-runs the burn step. chroma_key's
+// `background` is the odd one: it is either an image file or a hex
+// color — only a file resolves and hashes (the hex is already in
+// args, and resolving "FF0000" relative to the manifest would turn
+// a color into a missing file). The resolver and the cache-key loop
+// below both skip hex backgrounds via isHexColorArg.
+const MANIFEST_FILE_ARGS = ["captions", "overlay", "words_file", "background"];
+
+const isHexColorArg = (v) => typeof v === "string" && (/^#?[0-9A-Fa-f]{6}$/.test(v.trim()) || /^0x[0-9A-Fa-f]{6}$/.test(v.trim()));
 
 export async function manifest({ manifestPath, output = null, cache = true, dryRun = false, keepIntermediates = false }) {
   const manifestAbs = await requireInput(manifestPath, "manifest");
@@ -6366,10 +6445,14 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
         throw new MediaKitError(`${label} (${step.tool}): argument "${k}" must be a string, number or boolean`, "INVALID_ARG");
       }
     }
-    // Sidecar files resolve relative to the manifest, like input.
+    // Sidecar files resolve relative to the manifest, like input —
+    // except a chroma_key hex background, which is a color, not a file.
     const resolved = { ...args };
     for (const k of MANIFEST_FILE_ARGS) {
-      if (typeof resolved[k] === "string" && resolved[k].trim()) resolved[k] = resolveRel(resolved[k]);
+      if (typeof resolved[k] === "string" && resolved[k].trim()) {
+        if (k === "background" && isHexColorArg(resolved[k])) continue;
+        resolved[k] = resolveRel(resolved[k]);
+      }
     }
     return { index: i, tool: step.tool, spec, args, resolved };
   });
@@ -6443,6 +6526,7 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
       let extraHash = null;
       for (const k of MANIFEST_FILE_ARGS) {
         if (typeof s.resolved[k] === "string") {
+          if (k === "background" && isHexColorArg(s.resolved[k])) continue;
           try { extraHash = await hashFile(s.resolved[k]); } catch { extraHash = null; }
         }
       }
