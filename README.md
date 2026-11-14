@@ -53,7 +53,7 @@ Then ask your agent things like:
 ### MCP over HTTP — same tools, curl instead of a client
 
 `mediakit mcp --http [--port 3000] [--host 127.0.0.1]` serves the
-exact same 55 tools over HTTP (REST + JSON-RPC 2.0), for hand-testing
+exact same 56 tools over HTTP (REST + JSON-RPC 2.0), for hand-testing
 and for agents that can only speak HTTP. It binds `127.0.0.1` by
 default — there is no auth, so only bind elsewhere on a network you
 trust. Request bodies are capped at 1 MB.
@@ -66,6 +66,7 @@ curl -X POST http://127.0.0.1:3000/mcp/tools/probe/invoke \
   -d '{"arguments": {"input": "clip.mp4"}}'
 curl http://127.0.0.1:3000/mcp/jobs                 # async render jobs, newest first
 curl http://127.0.0.1:3000/mcp/jobs/<job_id>        # one job: status + stage/percent progress
+curl -N http://127.0.0.1:3000/mcp/jobs/<job_id>/events   # live progress as SSE (see below)
 curl -X POST http://127.0.0.1:3000/mcp/jobs/<job_id>/cancel
 ```
 curl -X POST http://127.0.0.1:3000/ \
@@ -91,6 +92,18 @@ so they poll instead: start one with `assemble` invoked with
 (`stage` + `percent`) and, when finished, the terminal `result` or
 `error`. `POST /mcp/jobs/<job_id>/cancel` stops a queued or running
 job. Same job store and `job_id` format as the `job` tool over stdio.
+
+Or skip the polling loop: `GET /mcp/jobs/<job_id>/events` streams
+the same record as Server-Sent Events — one `event: job` per change
+(the first arrives immediately, so a finished job still sends exactly
+one event and the stream closes), a `: heartbeat` comment every 15 s,
+and the stream closes itself when the job reaches a terminal status.
+`?timeout_s=` caps how long the stream stays open (default 600,
+clamp 1–3600); on timeout the last event is `event: timeout` with the
+latest record. An unknown id fails as JSON 404 before any SSE header.
+The worker is a separate process, so the stream watches the durable
+`job.json` on disk and pushes only when the record actually changed —
+what you see is the record, not a guess at it.
 
 ## Tools
 
@@ -142,6 +155,7 @@ job. Same job store and `job_id` format as the `job` tool over stdio.
 | `intro` | Render a short intro clip: title on a solid-colour background, fading in and out (silent video) — concat it in front of the main clip. `--style` reuses the same locked palette (box colour becomes the background) | `mediakit intro "Welcome Back" -o intro.mp4 --duration 3 --style clean-bold` |
 | `social` | Export one video to several platform specs in one call: reframe + trim to max duration + loudness + check each, writing `<base>-<platform>.mp4` + `manifest.json` | `mediakit social in.mp4 -o out/ --platforms tiktok,reels,shorts` |
 | `scenes` | Detect scene changes / hard cuts; returns cut timestamps + segments (probe-only) | `mediakit scenes in.mp4` |
+| `motion` | Measure real movement (probe-only): per-second curve of the fraction of pixels that changed between adjacent frames, still intervals (runs ≥ `--min-still-seconds`, default 2s), and a verdict `moving` / `mostly-static` / `static`. Scale measured on disk: static title card 0.0000–0.0001, bouncing ball 0.003–0.009, testsrc 0.06, frozen stretch exactly 0.0000 — default still threshold 0.001 (0.1% of pixels). The director's motion gate: run it on every shot before calling a film done | `mediakit motion shot.mp4` |
 | `keyframes` | List keyframe (I-frame) timestamps + GOP min/max/avg interval (probe-only) — check before a stream-copy trim | `mediakit keyframes in.mp4` |
 | `find` | Find media files by name, recursively under a directory (case-insensitive substring); each match comes back with probe info (duration, dimensions, codecs) so you pick the right file without guessing paths | `mediakit find clips/ --name moon` |
 | `download` | Download a media file from an http(s) URL into the workspace — stock footage, a reference clip, a music bed. Typed and guarded (unlike a bare `ffmpeg -i <url> -c copy`): http/https only, no credentials in the URL, size cap enforced while streaming (default 500 MB, refused upfront when Content-Length already exceeds it), 5 redirects max, 300s timeout, written atomically via `<output>.partial` and renamed only on success, then probed — a file that is not media is deleted and reported, never left as a success. HLS (`.m3u8`) / DASH (`.mpd`) playlists are fetched with ffmpeg `-c copy` under a protocol whitelist (no `file://` segments) and the size cap is enforced after the fetch, since a playlist's size is unknowable until the last segment arrives; the output must be a video/audio container. The output extension is either given (must be a media extension) or derived from the Content-Type / URL path | `mediakit download https://example.com/clip.mp4 -o clips/clip.mp4` |

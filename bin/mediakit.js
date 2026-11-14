@@ -583,6 +583,16 @@ const COMMANDS = {
     args: [{ name: "input", required: true }],
     options: [],
   },
+  motion: {
+    usage: "mediakit motion <input> [--threshold 0.001] [--min-still-seconds 2] [--window 1]",
+    desc: "Measure real movement: per-second curve of the fraction of pixels that changed between adjacent frames, still intervals, and a verdict (moving / mostly-static / static). Probe-only, writes no file. The director's motion gate for a shot.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--threshold", "Still threshold on the moved-pixel fraction 0-0.5 (default 0.001 = 0.1% of pixels)"],
+      ["--min-still-seconds", "A still interval must last at least this long to be reported (default 2)"],
+      ["--window", "Curve window in seconds (default 1)"],
+    ],
+  },
   mux: {
     usage: "mediakit mux <video> <audio> -o <output> [--audio-offset <s>] [--shortest] [--dry-run]",
     desc: "Replace a video's audio track with an external audio file, stream-copying both (no re-encode). --audio-offset shifts the new audio (positive = audio later, negative = video later). --dry-run prints the ffmpeg command and writes no file.",
@@ -1345,6 +1355,14 @@ async function main() {
         break;
       case "keyframes":
         result = await core.listKeyframes({ input: needInput() });
+        break;
+      case "motion":
+        result = await core.measureMotion({
+          input: needInput(),
+          threshold: numOpt(opts, "threshold") ?? 0.001,
+          minStillSeconds: numOpt(opts, "min_still_seconds") ?? 2,
+          windowSeconds: numOpt(opts, "window") ?? 1,
+        });
         break;
       case "mux": {
         if (!positional[1]) fail("missing audio file");

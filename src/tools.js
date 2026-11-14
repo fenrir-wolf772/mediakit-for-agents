@@ -1284,4 +1284,22 @@ export const TOOL_DEFS = [
     verify: a.verify === true,
   })),
   },
+
+
+  {
+    name: "motion",
+    description: "Measure real movement in a video (probe-only, writes no file): per-second curve of the fraction of pixels that changed between adjacent frames, plus still intervals and a verdict (moving / mostly-static / static). Use it as the director's motion gate — a shot that looks alive in the timeline but scores 0.0000 is a still wearing a video's clothes. A static title card measures 0.0000-0.0001, a bouncing ball 0.003-0.009, testsrc 0.06; the default still threshold 0.001 splits movement from encoder noise with a wide margin.",
+    schema: {
+    input: pathSchema,
+    threshold: z.number().min(0).max(0.5).default(0.001).describe("Still threshold on the moved-pixel fraction (0-0.5, default 0.001 = 0.1% of pixels; a window below it counts as still)"),
+    min_still_seconds: z.number().min(0.5).max(60).default(2).describe("A still interval must last at least this long to be reported (default 2s; shorter still blips are ignored)"),
+    window_seconds: z.number().min(0.25).max(5).default(1).describe("Curve window in seconds (default 1)"),
+  },
+    handler: async (a) => safe(() => core.measureMotion({
+    input: a.input,
+    threshold: a.threshold,
+    minStillSeconds: a.min_still_seconds,
+    windowSeconds: a.window_seconds,
+  })),
+  },
 ];

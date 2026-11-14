@@ -964,7 +964,7 @@ cap, no timeout, no verify) — MediaKit's `download` exists so the
 agent never has to.
 
 ### 52. Test a tool over HTTP before wiring up an MCP client — same tools, curl instead of stdio
-`mediakit mcp --http [--port 3000]` serves the same 55 tools over
+`mediakit mcp --http [--port 3000]` serves the same 56 tools over
 HTTP on `127.0.0.1`: `GET /mcp` (metadata), `GET /mcp/tools`
 (every tool + JSON input schema), `POST /mcp/tools/{name}/invoke`
 (`{"arguments": {...}}`), and `POST /` for JSON-RPC 2.0
@@ -992,6 +992,24 @@ didn't expect. URL query strings are stripped from recorded
 arguments (a download URL can carry a token); `MEDIAKIT_AUDIT=0`
 disables recording; `doctor` reports whether the log is enabled and
 how many entries it holds.
+
+### 54. A shot that doesn't move is a still — measure it with `motion`, don't eyeball it
+`motion <video>` returns a per-second curve of the fraction of
+pixels that changed between adjacent frames, the still intervals
+(runs of still windows lasting at least `--min-still-seconds`, 2s
+by default), and a verdict: `moving`, `mostly-static`, or `static`.
+The scale, measured on disk: a static title card scores 0.0000–
+0.0001, a bouncing ball 0.003–0.009, testsrc 0.06, a frozen stretch
+exactly 0.0000 — the default still threshold 0.001 (0.1% of pixels)
+splits movement from encoder noise with a wide margin. Run it on
+every shot before calling a film done: the report videos of lượt
+52/54 failed `qa_report` on frozen frames because a title-card
+shot sat still for 9–11 seconds under a voiceover, and `check
+--content` only catches that at the very end. `motion` catches it
+at the shot level, before the render. A transition spike in one
+window is not motion — look at the curve, not a single number. Do
+not use raw lavfi scene_score for this: testsrc scores 0.0006 while
+a bounce scores 0.0005, indistinguishable on that scale.
 
 ## Workflow: vertical captioned clip from a landscape source
 

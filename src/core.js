@@ -5671,6 +5671,7 @@ const DOCTOR_FILTERS = [
   "minterpolate", "hqdn3d", "nlmeans",
   "chromakey", "zoompan",
   "afade",
+  "tblend", "signalstats",
 ];
 const DOCTOR_ENCODERS = [
   "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4", "prores_ks",
@@ -5719,6 +5720,7 @@ const TOOL_REQUIREMENTS = {
   mix: { filters: ["sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay"], encoders: ["aac", "libmp3lame"] },
   overlay: { filters: ["overlay", "format", "scale", "colorchannelmixer"], encoders: ["libx264"] },
   scenes: { filters: ["select"] },
+  motion: { filters: ["tblend", "geq", "signalstats", "scale"] },
   keyframes: {},
   fit: { filters: ["setpts", "atempo", "fps"], encoders: ["libx264", "aac"] },
   pip: { filters: ["overlay", "format", "scale", "colorchannelmixer", "amix"], encoders: ["libx264"] },
@@ -6693,6 +6695,126 @@ export async function detectScenes({ input, threshold = 0.3 }) {
     scene_changes: changes,
     count: changes.length,
     segments,
+  };
+}
+
+// ---------------------------------------------------------------- motion
+// Measure REAL movement, not just cuts (PySceneDetect's ContentDetector
+// idea: a per-frame change score, aggregated here into a per-second
+// curve): downscale to 160px gray, tblend difference between adjacent
+// frames, geq binarizes "pixel changed by >2 levels", signalstats YAVG
+// / 255 = fraction of pixels that moved in that frame. Measured on
+// disk 2026-11-14: a static title card scores 0.0000-0.0001, a
+// bouncing ball 0.003-0.009, testsrc 0.06, a frozen stretch exactly
+// 0.0000 — so the default still threshold 0.001 (0.1% of pixels)
+// splits "the picture is moving" from "encoder noise on a still" with
+// a wide margin on every fixture. Raw lavfi scene_score does NOT work
+// for this: testsrc scores 0.0006 while a bounce scores 0.0005 — the
+// two are indistinguishable on that scale. Probe-only: no file is
+// written. Windows are [k*w, (k+1)*w) aligned to 0; a still interval
+// is a maximal run of still windows lasting >= min_still_seconds
+// (FlashFilter/min_scene_len idea from PySceneDetect — a 1-frame blip
+// is not a still). The first output frame compares input frames 0 and
+// 1 (tblend needs a pair), so frames_analyzed = total frames - 1.
+// Metadata prints only at info level: never add -v error here (same
+// trap as the loudnorm/astats parsers).
+export async function measureMotion({ input, threshold = 0.001, minStillSeconds = 2, windowSeconds = 1 }) {
+  const inPath = await requireInput(input);
+  const t = num(threshold, "threshold", { min: 0, max: 0.5 });
+  const minStill = num(minStillSeconds, "min_still_seconds", { min: 0.5, max: 60 });
+  const win = num(windowSeconds, "window_seconds", { min: 0.25, max: 5 });
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("motion needs a video input", "INVALID_ARG");
+  const duration = meta.duration_seconds;
+  const vf = "scale=160:-2,format=gray,tblend=all_mode=difference,geq=lum='if(gt(lum(X,Y)\\,2)\\,255\\,0)',signalstats,metadata=print:key=lavfi.signalstats.YAVG";
+  const { stderr } = await run(FFMPEG, [
+    "-hide_banner", "-nostats", "-i", inPath, "-vf", vf, "-f", "null", "-",
+  ]);
+  const frames = [];
+  let curT = null;
+  for (const line of stderr.split("\n")) {
+    let m;
+    if ((m = line.match(/pts_time:\s*([\d.]+)/))) { curT = parseFloat(m[1]); continue; }
+    if ((m = line.match(/lavfi\.signalstats\.YAVG=([0-9.]+)/))) {
+      if (curT === null) continue;
+      frames.push({ t: curT, fraction: +(+m[1] / 255).toFixed(5) });
+    }
+  }
+  const buckets = new Map(); // window start -> { sum, count }
+  for (const f of frames) {
+    const wStart = Math.floor(f.t / win) * win;
+    const b = buckets.get(wStart) ?? { sum: 0, count: 0 };
+    b.sum += f.fraction;
+    b.count++;
+    buckets.set(wStart, b);
+  }
+  const motionCurve = [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([s, b]) => ({
+    start_seconds: +s.toFixed(3),
+    end_seconds: +(Math.min(s + win, duration ?? s + win)).toFixed(3),
+    motion_fraction: +(b.sum / b.count).toFixed(5),
+    frames: b.count,
+  }));
+  const stillIntervals = [];
+  let runStart = null;
+  let runEnd = null;
+  const flushRun = () => {
+    if (runStart !== null && runEnd - runStart >= minStill - 1e-9) {
+      stillIntervals.push({
+        start_seconds: +runStart.toFixed(3),
+        end_seconds: +runEnd.toFixed(3),
+        duration_seconds: +(runEnd - runStart).toFixed(3),
+      });
+    }
+    runStart = null;
+    runEnd = null;
+  };
+  for (const w of motionCurve) {
+    if (w.motion_fraction < t) {
+      if (runStart === null) runStart = w.start_seconds;
+      runEnd = w.end_seconds;
+    } else {
+      flushRun();
+    }
+  }
+  flushRun();
+  const motionEnergy = frames.length
+    ? +(frames.reduce((a, b) => a + b.fraction, 0) / frames.length).toFixed(5)
+    : 0;
+  if (!frames.length && duration) {
+    // A 1-frame video has no pair to diff: nothing ever moves.
+    stillIntervals.push({ start_seconds: 0, end_seconds: +duration.toFixed(3), duration_seconds: +duration.toFixed(3) });
+  }
+  const totalStill = stillIntervals.reduce((a, b) => a + b.duration_seconds, 0);
+  const movingFraction = duration ? +(1 - totalStill / duration).toFixed(3) : null;
+  let verdict;
+  if (!stillIntervals.length) {
+    verdict = "moving";
+  } else if (movingFraction !== null && movingFraction < 0.5) {
+    verdict = "static";
+  } else {
+    verdict = "mostly-static";
+  }
+  let peakWindow = null;
+  for (const w of motionCurve) {
+    if (!peakWindow || w.motion_fraction > peakWindow.motion_fraction) {
+      peakWindow = { start_seconds: w.start_seconds, motion_fraction: w.motion_fraction };
+    }
+  }
+  return {
+    operation: "motion",
+    input: inPath,
+    threshold: t,
+    min_still_seconds: minStill,
+    window_seconds: win,
+    duration_seconds: duration,
+    dimensions: meta.video ? `${meta.video.width}x${meta.video.height}` : null,
+    frames_analyzed: frames.length,
+    motion_energy: motionEnergy,
+    moving_fraction: movingFraction,
+    verdict,
+    motion_curve: motionCurve,
+    still_intervals: stillIntervals,
+    peak_window: peakWindow,
   };
 }
 
@@ -7757,7 +7879,15 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
 // assumed to move. Per-shot text layers ARE supported (shot.text):
 // drawtext lower-thirds/titles timed inside the shot, rendered in a
 // second pass over the built segment.
-const ASSEMBLE_VERSION = "assemble-v2";
+const ASSEMBLE_VERSION = "assemble-v3";
+// Average glyph advance of DejaVu Sans Bold all-caps text, in em per
+// character — used to wrap a text layer before drawtext renders it.
+// 0.55 was measured wrong: "IT MEASURES REAL MOVEMENT" is 1118px at
+// 64px (0.73 em/char; "TAMPERED = CHANGED" 0.72, "STILL SCORES ZERO"
+// 0.65), so a 24-char layer at 64px overflowed a 1080-wide frame by
+// ~40px instead of wrapping (caught by eye on the lượt 56 report
+// preview, 2026-11-14). 0.75 covers the widest all-caps text measured.
+const ASSEMBLE_TEXT_EM_PER_CHAR = 0.75;
 const ASSEMBLE_MAX_SHOTS = 64;
 const ASSEMBLE_MOTION_GATE_SECONDS = 2.5;
 const ASSEMBLE_CANVAS_MAX_SECONDS = 60;
@@ -8142,7 +8272,7 @@ function parseAssembleTextLayers(raw, label, id, duration, width, height) {
     if (end > duration + 1e-9) {
       throw new MediaKitError(`${llabel} end ${end}s is past the shot duration ${duration}s`, "INVALID_ARG");
     }
-    const maxChars = Math.max(8, Math.floor(width / (size * 0.55)));
+    const maxChars = Math.max(8, Math.floor(width / (size * ASSEMBLE_TEXT_EM_PER_CHAR)));
     const lines = wrapTitleLines(text, maxChars);
     return { text, lines, position, size, color: color.toUpperCase(), box, start_seconds: +start.toFixed(3), end_seconds: +end.toFixed(3) };
   });
@@ -8657,7 +8787,7 @@ async function applyAssembleTextLayers(plan, shot, opts, inPath) {
       const tmpFile = path.join(path.dirname(inPath), `.assemble-text-${process.pid}-${i}.txt`);
       tmpFiles.push(tmpFile);
       const size = Math.max(8, Math.round(layer.size * scale));
-      const maxChars = Math.max(8, Math.floor(opts.width / (size * 0.55)));
+      const maxChars = Math.max(8, Math.floor(opts.width / (size * ASSEMBLE_TEXT_EM_PER_CHAR)));
       await writeFile(tmpFile, wrapTitleLines(layer.text, maxChars).join("\n"), "utf8");
       jobs.push({ layer, tmpFile, size });
     }
@@ -8905,7 +9035,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       sfx_count: plan.sfx.length,
       captions: plan.captions,
       chapters: plan.chapters,
-      shots: plan.shots.map((s) => ({ id: s.id, kind: s.kind, duration: s.duration, frames: s.frames, ...(s.template ? { template: s.template, params: s.params ?? null } : {}), ...(s.transition ? { transition: { type: s.transition.type, duration_seconds: s.transition.duration_seconds, frames: s.transition.frames } } : {}), ...(s.textLayers?.length ? { text_layers: s.textLayers.map((t) => ({ text: t.text, position: t.position, size: t.size, color: t.color, box: t.box, start_seconds: t.start_seconds, end_seconds: t.end_seconds })) } : {}) })),
+      shots: plan.shots.map((s) => ({ id: s.id, kind: s.kind, duration: s.duration, frames: s.frames, ...(s.template ? { template: s.template, params: s.params ?? null } : {}), ...(s.transition ? { transition: { type: s.transition.type, duration_seconds: s.transition.duration_seconds, frames: s.transition.frames } } : {}), ...(s.textLayers?.length ? { text_layers: s.textLayers.map((t) => ({ text: t.text, lines: t.lines, position: t.position, size: t.size, color: t.color, box: t.box, start_seconds: t.start_seconds, end_seconds: t.end_seconds })) } : {}) })),
     };
   }
   if (!["preview", "approve", "render"].includes(mode)) {

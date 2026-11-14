@@ -181,10 +181,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 55 tools present");
-checkOk(missing.length === 0, "tools/list has all 55 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 56 tools present");
+checkOk(missing.length === 0, "tools/list has all 56 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -1224,6 +1224,39 @@ const scenesRes = await client.callTool({
 const scenesJson = JSON.parse(scenesRes.content[0].text);
 console.log("scenes call: count", scenesJson.count, "| changes", scenesJson.scene_changes.join(","), "| segments", scenesJson.segments.map((s) => `${s.start}-${s.end}`).join(" "));
 checkOk(scenesJson.count === 1 && near(scenesJson.scene_changes[0], 5.033, 0.05), "scenes finds the 5.033s cut", JSON.stringify(scenesJson.scene_changes));
+
+// motion: per-second changed-pixel fraction. testsrc moves steadily
+// (~0.06), the frozen stretch of content-freeze is exactly 0.0000,
+// a static clip is 0 everywhere — the verdict must tell them apart.
+const motionRes = await client.callTool({
+  name: "motion",
+  arguments: { input: path.join(root, "test/source.mp4") },
+});
+const motionJson = JSON.parse(motionRes.content[0].text);
+console.log("motion call:", motionJson.verdict, "| energy", motionJson.motion_energy, "| curve", motionJson.motion_curve.map((w) => w.motion_fraction).join(","));
+checkOk(motionJson.verdict === "moving" && motionJson.motion_energy > 0.05 && motionJson.motion_energy < 0.08 && motionJson.still_intervals.length === 0 && motionJson.motion_curve.length === 10 && motionJson.frames_analyzed === 299, "motion: testsrc is moving (energy ~0.06, 10 windows, no still)", `energy=${motionJson.motion_energy} verdict=${motionJson.verdict}`);
+const motionFreezeRes = await client.callTool({
+  name: "motion",
+  arguments: { input: path.join(root, "test/content-freeze.mp4") },
+});
+const motionFreezeJson = JSON.parse(motionFreezeRes.content[0].text);
+console.log("motion freeze call:", motionFreezeJson.verdict, "| still", JSON.stringify(motionFreezeJson.still_intervals), "| moving_fraction", motionFreezeJson.moving_fraction);
+checkOk(motionFreezeJson.verdict === "mostly-static" && motionFreezeJson.still_intervals.length === 1 && motionFreezeJson.still_intervals[0].start_seconds === 5 && motionFreezeJson.still_intervals[0].end_seconds === 7 && near(motionFreezeJson.motion_curve[5].motion_fraction, 0, 0.0001) && near(motionFreezeJson.motion_curve[6].motion_fraction, 0, 0.0001) && motionFreezeJson.moving_fraction === 0.8, "motion: frozen stretch [5,7] is one still interval, moving_fraction 0.8", JSON.stringify(motionFreezeJson.still_intervals));
+const motionStaticRes = await client.callTool({
+  name: "motion",
+  arguments: { input: path.join(root, "test/static-clip.mp4") },
+});
+const motionStaticJson = JSON.parse(motionStaticRes.content[0].text);
+console.log("motion static call:", motionStaticJson.verdict, "| energy", motionStaticJson.motion_energy, "| still", JSON.stringify(motionStaticJson.still_intervals));
+checkOk(motionStaticJson.verdict === "static" && motionStaticJson.motion_energy === 0 && motionStaticJson.still_intervals.length === 1 && motionStaticJson.still_intervals[0].duration_seconds === 3 && motionStaticJson.frames_analyzed === 89, "motion: static clip is static (energy 0, still [0,3])", `energy=${motionStaticJson.motion_energy} verdict=${motionStaticJson.verdict}`);
+const motionHighThRes = await client.callTool({
+  name: "motion",
+  arguments: { input: path.join(root, "test/source.mp4"), threshold: 0.1 },
+});
+const motionHighThJson = JSON.parse(motionHighThRes.content[0].text);
+checkOk(motionHighThJson.verdict === "static" && motionHighThJson.still_intervals.length === 1 && motionHighThJson.still_intervals[0].duration_seconds === 10, "motion: threshold 0.1 turns testsrc static (threshold honored)", `verdict=${motionHighThJson.verdict}`);
+const motionAudioOnly = await callExpectThrow("motion", { input: path.join(root, "test/mix-voice.mp3") });
+checkOk(/needs a video input/.test(motionAudioOnly), "motion refuses audio-only input", motionAudioOnly.slice(0, 120));
 
 const keyframesRes = await client.callTool({
   name: "keyframes",
@@ -2439,7 +2472,10 @@ checkOk(gifTightJson.attempts.every((a, i) => i === 0 || a.size_bytes <= gifTigh
 const gifImpossRes = await client.callTool({
   name: "export_gif",
   arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-demo-imposs.gif"), max_size_mb: 0.02 },
-});
+  // 8 ladder steps on a 10s clip take ~65s on this VM (timed on the
+  // CLI, lượt 56) — over the SDK's 60s default, same trap as the mci
+  // interpolate above, same 300s override. The tool itself is fine.
+}, undefined, { timeout: 300000 });
 const gifImpossJson = JSON.parse(gifImpossRes.content[0].text);
 checkOk(gifImpossJson.size_budget_met === false && gifImpossJson.attempts_tried === 8 && typeof gifImpossJson.warning === "string" && /could not be met/.test(gifImpossJson.warning), "export_gif reports honestly when the budget cannot be met (all 8 ladder steps + warning)", JSON.stringify({ met: gifImpossJson.size_budget_met, attempts: gifImpossJson.attempts_tried }));
 // Segment 2-4s: 2s / 30 frames.
@@ -3045,7 +3081,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 55 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 55 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 56 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 56 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -3812,6 +3848,18 @@ checkOk(await assembleTextBad((d) => { d.shots[0].text.position = "left"; }, /to
 checkOk(await assembleTextBad((d) => { d.shots[0].text.end = 5; }, /past the shot duration/), "assemble validate refuses a text layer ending past its shot", "");
 checkOk(await assembleTextBad((d) => { d.shots[0].text.text = "  "; }, /non-empty text/), "assemble validate refuses an empty text layer", "");
 checkOk(await assembleTextBad((d) => { d.shots[0].text.start = 1.5; d.shots[0].text.end = 0.5; }, /must be before end/), "assemble validate refuses a text layer with start after end", "");
+// Regression (lượt 56): a long all-caps layer must wrap instead of
+// overflowing the frame — 0.55 em/char underestimated DejaVu Sans
+// Bold (measured 0.65-0.73 em/char on disk); the wrap constant is
+// now 0.75, so a 24-char layer at 64px becomes 2 lines.
+const assembleLongTextDoc = JSON.parse(JSON.stringify(assembleTextDoc));
+assembleLongTextDoc.shots[0].text.text = "IT MEASURES REAL MOVEMENT";
+assembleLongTextDoc.shots[0].text.size = 64;
+const assembleLongTextPath = path.join(assembleTextStage.dir, "assemble-long-text.json");
+await writeFile(assembleLongTextPath, JSON.stringify(assembleLongTextDoc), "utf8");
+const assembleLongTextRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleLongTextPath, mode: "validate" } });
+const assembleLongTextJson = JSON.parse(assembleLongTextRes.content[0].text);
+checkOk(JSON.stringify(assembleLongTextJson.shots?.[0]?.text_layers?.[0]?.lines) === JSON.stringify(["IT MEASURES REAL", "MOVEMENT"]), "assemble validate wraps a 24-char 64px layer into 2 lines instead of overflowing 1080px", JSON.stringify(assembleLongTextJson.shots?.[0]?.text_layers?.[0]?.lines));
 const assembleTextRenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleTextStage.manifestPath, mode: "render", output_dir: assembleTextOut, force: true } }, undefined, { timeout: 300000 });
 const assembleTextRenderJson = JSON.parse(assembleTextRenderRes.content[0].text);
 const assembleTextFinalPath = path.join(assembleTextOut, "final.mp4");
@@ -4241,7 +4289,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 55 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 56 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -4260,11 +4308,52 @@ const httpCall = async (method, p, body) => {
   return { status: res.status, json, text };
 };
 const httpMeta = await httpCall("GET", "/mcp");
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 55, "GET /mcp reports name/version/transport and 55 tools", JSON.stringify(httpMeta.json));
+// SSE job events (turn 56): read a text/event-stream to completion,
+// parsing `event: <name>` + `data: <json>` frames; `: ...` comment
+// lines (heartbeats) are ignored. Returns the frames in order, plus
+// whether the guard timeout fired instead of a clean stream end.
+async function readSse(url, { maxMs = 120000 } = {}) {
+  const res = await fetch(url);
+  const contentType = res.headers.get("content-type") ?? "";
+  if (res.status !== 200 || !/text\/event-stream/.test(contentType)) {
+    return { status: res.status, contentType, events: [], timedOut: false, text: await res.text() };
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const deadline = Date.now() + maxMs;
+  const events = [];
+  let buffer = "";
+  let timedOut = false;
+  for (;;) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) { timedOut = true; try { await reader.cancel(); } catch {} break; }
+    const got = await Promise.race([
+      reader.read(),
+      new Promise((r) => setTimeout(() => r({ timeout: true }), remaining)),
+    ]);
+    if (got.timeout) { timedOut = true; try { await reader.cancel(); } catch {} break; }
+    if (got.done) break;
+    buffer += decoder.decode(got.value, { stream: true });
+    let idx;
+    while ((idx = buffer.indexOf("\n\n")) !== -1) {
+      const raw = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      let name = "message";
+      let data = "";
+      for (const line of raw.split("\n")) {
+        if (line.startsWith("event:")) name = line.slice(6).trim();
+        else if (line.startsWith("data:")) data += line.slice(5).trim();
+      }
+      if (data) events.push({ event: name, data: JSON.parse(data) });
+    }
+  }
+  return { status: res.status, contentType, events, timedOut };
+}
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 56, "GET /mcp reports name/version/transport and 56 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 55 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 55 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 56 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 56 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -4288,7 +4377,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 55, "JSON-RPC tools/list returns the same 55 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 56, "JSON-RPC tools/list returns the same 56 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));
@@ -4335,8 +4424,35 @@ for (let i = 0; i < 150; i++) {
   await new Promise((r2) => setTimeout(r2, 2000));
 }
 checkOk(httpAsyncJob?.status === "done" && httpAsyncJob?.progress?.percent === 100 && near(httpAsyncJob?.result?.duration_seconds, 4, 0.15), "HTTP-polled async job reaches done with progress 100% and a 4s result", `status=${httpAsyncJob?.status} progress=${JSON.stringify(httpAsyncJob?.progress)}`);
+// SSE job events (turn 56): the same job store, pushed instead of
+// polled. An unknown id fails as JSON 404 before any SSE header;
+// a done job sends one `job` event and closes; a live job pushes
+// progress as the worker writes it; ?timeout_s ends the stream.
+const httpEventsUnknown = await httpCall("GET", "/mcp/jobs/job-20000101-000000-deadbeef/events");
+checkOk(httpEventsUnknown.status === 404 && httpEventsUnknown.json?.code === "JOB_NOT_FOUND", "GET /mcp/jobs/{unknown}/events is a 404 JOB_NOT_FOUND (JSON, before any SSE header)", JSON.stringify(httpEventsUnknown.json));
+const httpEventsPost = await httpCall("POST", `/mcp/jobs/${asyncJobId}/events`, {});
+checkOk(httpEventsPost.status === 405, "POST on an events endpoint is a 405 (events are GET-only)", `status=${httpEventsPost.status}`);
+const httpEventsDone = await readSse(`${httpBase}/mcp/jobs/${asyncJobId}/events`);
+checkOk(httpEventsDone.status === 200 && /text\/event-stream/.test(httpEventsDone.contentType) && httpEventsDone.events.length === 1 && httpEventsDone.events[0].event === "job" && httpEventsDone.events[0].data?.status === "done" && httpEventsDone.events[0].data?.progress?.percent === 100 && !httpEventsDone.timedOut, "SSE on a done job sends exactly one `job` event (status done, 100%) and closes", `events=${httpEventsDone.events.length} timedOut=${httpEventsDone.timedOut}`);
+const sseOut = path.join(root, "outputs/mcp-assemble-async-sse");
+const sseStart = await httpCall("POST", "/mcp/tools/assemble/invoke", { arguments: { manifest_path: assembleAsyncStage.manifestPath, mode: "render", output_dir: sseOut, force: true, async: true } });
+const sseJobId = sseStart.json?.job_id;
+checkOk(typeof sseJobId === "string" && /^job-\d{8}-\d{6}-[0-9a-f]{8}$/.test(sseJobId), "second HTTP async assemble returns a job_id for the live SSE test", `job_id=${sseJobId}`);
+const sseLive = await readSse(`${httpBase}/mcp/jobs/${sseJobId}/events`, { maxMs: 180000 });
+const ssePercents = sseLive.events.filter((e) => e.event === "job").map((e) => e.data?.progress?.percent ?? -1);
+const sseFinal = sseLive.events.filter((e) => e.event === "job").at(-1)?.data;
+checkOk(!sseLive.timedOut && sseLive.events.length >= 2 && sseFinal?.status === "done" && sseFinal?.progress?.percent === 100 && new Set(ssePercents).size >= 2 && sseLive.events.every((e) => e.event !== "timeout"), "SSE on a live job pushes progress as it moves (>=2 distinct percents) and ends with done/100% (no timeout event: a missing ?timeout_s= must default to 600s, not 1s)", `events=${sseLive.events.length} percents=${[...new Set(ssePercents)].join(",")}`);
+const sseTimeoutOut = path.join(root, "outputs/mcp-assemble-async-sse-timeout");
+const sseTimeoutStart = await httpCall("POST", "/mcp/tools/assemble/invoke", { arguments: { manifest_path: assembleAsyncStage.manifestPath, mode: "render", output_dir: sseTimeoutOut, force: true, async: true } });
+const sseTimeoutJobId = sseTimeoutStart.json?.job_id;
+const sseTimeout = await readSse(`${httpBase}/mcp/jobs/${sseTimeoutJobId}/events?timeout_s=1`, { maxMs: 30000 });
+const sseTimeoutLast = sseTimeout.events.at(-1);
+checkOk(!sseTimeout.timedOut && sseTimeout.events.length >= 1 && sseTimeout.events[0]?.event === "job" && sseTimeoutLast?.event === "timeout", "SSE ?timeout_s=1 ends the stream with an `event: timeout` after ~1s (job still rendering)", `events=${sseTimeout.events.length} last=${sseTimeoutLast?.event}`);
+// Tidy up: the timeout test's render is still running in its worker;
+// cancel it so no stray ffmpeg keeps working after the suite ends.
+await httpCall("POST", `/mcp/jobs/${sseTimeoutJobId}/cancel`);
 const httpMetaJobs = await httpCall("GET", "/mcp");
-checkOk(httpMetaJobs.json?.endpoints?.jobs === "GET /mcp/jobs" && httpMetaJobs.json?.endpoints?.job === "GET /mcp/jobs/{id}" && httpMetaJobs.json?.endpoints?.jobCancel === "POST /mcp/jobs/{id}/cancel", "GET /mcp metadata advertises the job endpoints", JSON.stringify(httpMetaJobs.json?.endpoints));
+checkOk(httpMetaJobs.json?.endpoints?.jobs === "GET /mcp/jobs" && httpMetaJobs.json?.endpoints?.job === "GET /mcp/jobs/{id}" && httpMetaJobs.json?.endpoints?.jobEvents === "GET /mcp/jobs/{id}/events" && httpMetaJobs.json?.endpoints?.jobCancel === "POST /mcp/jobs/{id}/cancel", "GET /mcp metadata advertises the job endpoints", JSON.stringify(httpMetaJobs.json?.endpoints));
 const httpSecond = createHttpServer();
 const httpSecondErr = await new Promise((resolve) => {
   httpSecond.on("error", resolve);
