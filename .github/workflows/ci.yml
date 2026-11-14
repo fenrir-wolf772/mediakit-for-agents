@@ -140,6 +140,17 @@ jobs:
           ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-batch-slideshow/slideshow.mp4 | grep '^6'
           node bin/mediakit.js download https://raw.githubusercontent.com/fenrir-wolf772/mediakit-for-agents/main/test/source.mp4 -o outputs/ci-download.mp4 | grep '"size_bytes": 243932'
           node bin/mediakit.js download ftp://example.com/clip.mp4 -o outputs/ci-download-ftp.mp4 2>&1 | grep -q 'http(s) URL'
+          node bin/mediakit.js mcp --http --port 3101 > outputs/ci-http.log 2>&1 &
+          HTTP_PID=$!
+          sleep 2
+          curl -fsS http://127.0.0.1:3101/mcp | grep '"tools": 54'
+          curl -fsS http://127.0.0.1:3101/mcp/tools | grep -c '"name": "probe"'
+          curl -fsS -X POST http://127.0.0.1:3101/mcp/tools/probe/invoke -H 'content-type: application/json' -d '{"arguments": {"input": "test/source.mp4"}}' | grep '"duration_seconds": 10'
+          curl -fsS -X POST http://127.0.0.1:3101/ -H 'content-type: application/json' -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}' | grep -c '"name": "download"'
+          curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:3101/mcp/tools/nope/invoke -H 'content-type: application/json' -d '{"arguments": {}}' | grep '^404$'
+          kill $HTTP_PID
+          sleep 1
+          if curl -fsS -m 2 http://127.0.0.1:3101/mcp >/dev/null 2>&1; then echo "HTTP server orphaned after wrapper kill"; exit 1; fi
           printf '%s' '{"version":1,"input":"../test/logo.png","output":"ci-manifest-slideshow.mp4","steps":[{"tool":"slideshow","args":{"images":["../test/logo.png","../test/kenburns.png"],"duration":2,"transition_duration":0.5}},{"tool":"trim","args":{"start":0,"end":2}}]}' > outputs/ci-manifest-slideshow.json
           node bin/mediakit.js manifest outputs/ci-manifest-slideshow.json | grep '"steps_run": 2'
           ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-manifest-slideshow.mp4 | grep '^2'

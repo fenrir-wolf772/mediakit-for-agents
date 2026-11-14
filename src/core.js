@@ -976,7 +976,15 @@ const VIDEO_CONTAINER_AUDIO = { mp4: "aac", mov: "aac", m4v: "aac", mkv: "aac", 
 // -14.0 lossless, same two-pass gain). Pin mp3 encodes to 192k in the
 // mastering paths (loudness, mix) so the measured output stays inside
 // the ±0.5 LUFS tolerance instead of sitting on its edge.
-const mp3BitrateArgs = (codec) => (codec === "libmp3lame" ? ["-b:a", "192k"] : []);
+// Lossy audio encoders need an explicit bitrate: ffmpeg's default
+// for AAC is ~69 kbps on mono, and at that rate the encoder smears
+// inter-sample peaks — a voice mastered to TP -2.00 measured +1.37
+// dBTP after the AAC encode (turn 53: the report film failed qa on
+// true_peak while the same loudnorm into WAV measured exactly -2.00,
+// and the same WAV into AAC 192k measured -1.98). Pin both lossy
+// codecs to 192k so the master the limiter produced is the master
+// on disk. Used by loudness() and mix().
+const audioBitrateArgs = (codec) => (codec === "libmp3lame" || codec === "aac" ? ["-b:a", "192k"] : []);
 
 // acompressor takes a LINEAR threshold (0-1), so -24 dB = 0.0631 —
 // the same conversion mix() uses for its -18 dB voice compressor
@@ -1067,7 +1075,7 @@ export async function loudness({ input, output, targetLufs = -14, format = null,
         "-ar", "48000",
       );
       if (normSource !== inPath) args.push("-map", "0:v?", "-map", "1:a");
-      args.push("-c:v", "copy", "-c:a", codec, ...mp3BitrateArgs(codec), outPath);
+      args.push("-c:v", "copy", "-c:a", codec, ...audioBitrateArgs(codec), outPath);
       await run(FFMPEG, args);
       twoPass = true;
     } else {
@@ -1075,7 +1083,7 @@ export async function loudness({ input, output, targetLufs = -14, format = null,
       await run(FFMPEG, [
         "-y", "-i", inPath,
         "-af", `${comp ? `acompressor=threshold=${+(10 ** (comp.threshold_db / 20)).toFixed(4)}:ratio=${comp.ratio}:attack=${comp.attack_ms}:release=${comp.release_ms}:knee=${comp.knee_db}:detection=${comp.detection},` : ""}loudnorm=I=${target}:TP=-2:LRA=11`,
-        "-ar", "48000", "-c:v", "copy", "-c:a", codec, ...mp3BitrateArgs(codec), outPath,
+        "-ar", "48000", "-c:v", "copy", "-c:a", codec, ...audioBitrateArgs(codec), outPath,
       ]);
     }
   } finally {
@@ -1083,16 +1091,30 @@ export async function loudness({ input, output, targetLufs = -14, format = null,
   }
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
-  const outputLufs = out.audio ? await measureLoudness(outPath) : null;
+  // Measure the file on disk (not the filter's promise): the encode
+  // after loudnorm can move the true peak — AAC at a low bitrate
+  // added +3.4 dB on one voice (turn 53), so the reported peak must
+  // come from the finished file. Reuse the one measurement for both
+  // LUFS and TP instead of running loudnorm twice.
+  const outFull = out.audio ? await measureLoudnessFull(outPath) : null;
+  const outputLufs = outFull === null ? null : +outFull.i.toFixed(1);
+  const outputTp = outFull === null ? null : outFull.tp;
   // Honest reporting: when the input is peak-limited (true peak caps the
   // gain — e.g. sub-bass-heavy music with a 20+ dB crest), even two-pass
   // cannot reach the target without clipping. Say so instead of
-  // pretending the target was hit.
+  // pretending the target was hit. Same for a true peak over the -0.3
+  // dBTP delivery ceiling: the file fails qa_report on true_peak, so
+  // the tool must say so here instead of reporting a clean -14 LUFS.
   const offTarget = outputLufs === null ? null : +(outputLufs - target).toFixed(1);
-  const warning = offTarget !== null && Math.abs(offTarget) > 0.5
-    ? `reached ${outputLufs} LUFS, ${Math.abs(offTarget)} LUFS ${offTarget < 0 ? "below" : "above"} target — input is peak-limited (true peak caps the gain)${comp ? " (compressor already applied)" : "; high-pass sub-bass or compress first, then normalize again"}`
-    : null;
-  return { operation: "loudness", input: inPath, output: outPath, target_lufs: target, input_lufs: measured?.i ?? null, output_lufs: outputLufs, two_pass: twoPass, ...(comp ? { compressor: { threshold_db: comp.threshold_db, ratio: comp.ratio, attack_ms: comp.attack_ms, release_ms: comp.release_ms, knee_db: comp.knee_db, detection: comp.detection }, compressed_lufs: compressedLufs } : {}), ...(warning ? { warning } : {}), format: ext, ...info, duration_seconds: out.duration_seconds };
+  const warnings = [];
+  if (offTarget !== null && Math.abs(offTarget) > 0.5) {
+    warnings.push(`reached ${outputLufs} LUFS, ${Math.abs(offTarget)} LUFS ${offTarget < 0 ? "below" : "above"} target — input is peak-limited (true peak caps the gain)${comp ? " (compressor already applied)" : "; high-pass sub-bass or compress first, then normalize again"}`);
+  }
+  if (outputTp !== null && outputTp > -0.3) {
+    warnings.push(`true peak ${outputTp} dBTP is over the -0.3 dBTP delivery ceiling — the file fails qa_report on true_peak; re-master with --compressor and check the output again`);
+  }
+  const warning = warnings.length ? warnings.join("; ") : null;
+  return { operation: "loudness", input: inPath, output: outPath, target_lufs: target, input_lufs: measured?.i ?? null, output_lufs: outputLufs, output_true_peak_db: outputTp, two_pass: twoPass, ...(comp ? { compressor: { threshold_db: comp.threshold_db, ratio: comp.ratio, attack_ms: comp.attack_ms, release_ms: comp.release_ms, knee_db: comp.knee_db, detection: comp.detection }, compressed_lufs: compressedLufs } : {}), ...(warning ? { warning } : {}), format: ext, ...info, duration_seconds: out.duration_seconds };
 }
 
 // ---------------------------------------------------------------- concat
@@ -6258,9 +6280,9 @@ export async function mix({
   for (const s of sfxList) renderArgs.push("-i", s.file);
   renderArgs.push("-filter_complex", graph);
   if (voiceMeta.video) {
-    renderArgs.push("-map", "0:v", "-map", mixLabel, "-c:v", "copy", "-c:a", audioCodec, ...mp3BitrateArgs(audioCodec), "-shortest");
+    renderArgs.push("-map", "0:v", "-map", mixLabel, "-c:v", "copy", "-c:a", audioCodec, ...audioBitrateArgs(audioCodec), "-shortest");
   } else {
-    renderArgs.push("-map", mixLabel, "-c:a", audioCodec, ...mp3BitrateArgs(audioCodec));
+    renderArgs.push("-map", mixLabel, "-c:a", audioCodec, ...audioBitrateArgs(audioCodec));
   }
   // The unmastered render lives next to the output so the plan can name
   // it exactly (dry-run prints real paths); it is deleted after the
@@ -6277,8 +6299,8 @@ export async function mix({
       ? `loudnorm=I=${mTarget}:TP=-2:LRA=11:measured_I=${measured.i}:measured_TP=${measured.tp}:measured_LRA=${measured.lra}:measured_thresh=${measured.thresh}:offset=${measured.offset}:linear=true`
       : `loudnorm=I=${mTarget}:TP=-2:LRA=11`;
     const a = ["-y", "-i", unmasteredPath, "-af", af, "-ar", "48000"];
-    if (voiceMeta.video) a.push("-map", "0:v", "-map", "0:a", "-c:v", "copy", "-c:a", audioCodec, ...mp3BitrateArgs(audioCodec));
-    else a.push("-c:a", audioCodec, ...mp3BitrateArgs(audioCodec));
+    if (voiceMeta.video) a.push("-map", "0:v", "-map", "0:a", "-c:v", "copy", "-c:a", audioCodec, ...audioBitrateArgs(audioCodec));
+    else a.push("-c:a", audioCodec, ...audioBitrateArgs(audioCodec));
     if (voiceMeta.video && ["mp4", "mov", "m4v"].includes(ext)) a.push("-movflags", "+faststart");
     a.push(outPath);
     return a;

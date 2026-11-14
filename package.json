@@ -6,7 +6,8 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
     "canvas": "3.2.3",
-    "zod": "^3.25.0"
+    "zod": "^3.25.0",
+    "zod-to-json-schema": "^3.25.2"
   },
   "description": "Professional media tools for coding agents: an MCP server + CLI wrapping ffmpeg — trim, crop, resize, captions, loudness, thumbnails, and more.",
   "engines": {
@@ -37,7 +38,7 @@
     "url": "https://github.com/fenrir-wolf772/mediakit-for-agents.git"
   },
   "scripts": {
-    "check": "node --check src/core.js && node --check src/server.js && node --check bin/mediakit.js && node scripts/check-docs.mjs",
+    "check": "node --check src/core.js && node --check src/server.js && node --check bin/mediakit.js && node --input-type=module -e \"await import('./src/tools.js'); await import('./src/http.js')\" && node scripts/check-docs.mjs",
     "start": "node bin/mediakit.js mcp",
     "test": "node test/mcp-test.mjs"
   },

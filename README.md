@@ -50,6 +50,35 @@ Then ask your agent things like:
 **Requirements:** `ffmpeg` and `ffprobe` on your PATH
 ([ffmpeg.org/download](https://ffmpeg.org/download.html)). Node 18+.
 
+### MCP over HTTP — same tools, curl instead of a client
+
+`mediakit mcp --http [--port 3000] [--host 127.0.0.1]` serves the
+exact same 54 tools over HTTP (REST + JSON-RPC 2.0), for hand-testing
+and for agents that can only speak HTTP. It binds `127.0.0.1` by
+default — there is no auth, so only bind elsewhere on a network you
+trust. Request bodies are capped at 1 MB.
+
+```bash
+curl http://127.0.0.1:3000/mcp                        # server metadata
+curl http://127.0.0.1:3000/mcp/tools                 # every tool + JSON input schema
+curl -X POST http://127.0.0.1:3000/mcp/tools/probe/invoke \
+  -H 'content-type: application/json' \
+  -d '{"arguments": {"input": "clip.mp4"}}'
+curl -X POST http://127.0.0.1:3000/ \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+       "params": {"name": "trim", "arguments": {"input": "clip.mp4", "output": "cut.mp4", "start": 2, "duration": 5}}}'
+```
+
+Errors are JSON (`{error, code, retry}`) with an HTTP status that
+matches the failure — `400` for bad arguments, `404` for an unknown
+tool, `500` for a failed run — and `retry: {tool, arguments}` on
+every tool error, so a caller can re-issue the identical call.
+JSON-RPC errors use the standard codes (`-32700` parse error,
+`-32601` unknown method, `-32602` unknown tool / bad params); a tool
+that runs and fails reports `isError: true` in the result, exactly
+as over stdio.
+
 ## Tools
 
 | Tool | What it does | CLI |

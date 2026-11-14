@@ -3,6 +3,7 @@
  * mediakit — CLI front-end for the ffmpeg core.
  * Usage: mediakit <command> [args] [options]
  *        mediakit mcp            start the MCP server on stdio
+ *        mediakit mcp --http     same tools over HTTP (REST + JSON-RPC)
  */
 import * as core from "../src/core.js";
 
@@ -675,10 +676,14 @@ const COMMANDS = {
     options: [],
   },
   mcp: {
-    usage: "mediakit mcp",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex).",
+    usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 54 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
-    options: [],
+    options: [
+      ["--http", "Serve MCP over HTTP instead of stdio"],
+      ["--port", "HTTP port (default 3000)"],
+      ["--host", "HTTP bind address (default 127.0.0.1; no auth, so only bind elsewhere on a trusted network)"],
+    ],
   },
 };
 
@@ -1438,12 +1443,32 @@ async function main() {
         result = await core.doctor();
         break;
       case "mcp": {
-        // Hand off to the MCP server process (same stdio).
+        // Hand off to the MCP server process (same stdio), or with
+        // --http to the HTTP transport (same tools, REST + JSON-RPC).
+        // The child is the server: forward termination signals to it
+        // so killing this wrapper never orphans a server (an orphaned
+        // HTTP server would keep holding its port).
         const { spawn } = await import("node:child_process");
         const { fileURLToPath } = await import("node:url");
+        const spawnServer = (args) => {
+          const child = spawn(process.execPath, args, { stdio: "inherit" });
+          const stop = (signal) => { try { child.kill(signal); } catch { /* already gone */ } };
+          process.on("SIGINT", () => stop("SIGINT"));
+          process.on("SIGTERM", () => stop("SIGTERM"));
+          child.on("exit", (code) => process.exit(code ?? 0));
+          return child;
+        };
+        if (opts.http === true) {
+          const port = numOpt(opts, "port") ?? 3000;
+          const host = opts.host ?? "127.0.0.1";
+          if (!Number.isInteger(port) || port < 1 || port > 65535) fail(`--port must be 1-65535, got "${opts.port}"`);
+          if (typeof host !== "string" || !host) fail(`--host must be an address, got "${opts.host}"`);
+          const httpPath = fileURLToPath(new URL("../src/http.js", import.meta.url));
+          spawnServer([httpPath, "--port", String(port), "--host", host]);
+          return;
+        }
         const serverPath = fileURLToPath(new URL("../src/server.js", import.meta.url));
-        const child = spawn(process.execPath, [serverPath], { stdio: "inherit" });
-        child.on("exit", (code) => process.exit(code ?? 0));
+        spawnServer([serverPath]);
         return;
       }
       default:

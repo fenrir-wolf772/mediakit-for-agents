@@ -14,6 +14,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fixForMissing, groupWords, SHORTS_STYLE_IDS } from "../src/core.js";
+import { createHttpServer } from "../src/http.js";
 
 const execFileAsync = promisify(execFile);
 // Independent loudness measurement: run ffmpeg's loudnorm analysis
@@ -23,6 +24,19 @@ async function measureLufs(file) {
   try {
     const { stderr } = await execFileAsync("ffmpeg", ["-i", file, "-af", "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-"]);
     const m = stderr.match(/"input_i"\s*:\s*"(-?[\d.]+)"/);
+    return m ? parseFloat(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Independent true-peak measurement: the same loudnorm analysis
+// pass as measureLufs, but reading input_tp — the delivery ceiling
+// is -0.3 dBTP, and an encoder can move it after the LUFS is right.
+async function measureTp(file) {
+  try {
+    const { stderr } = await execFileAsync("ffmpeg", ["-i", file, "-af", "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-"]);
+    const m = stderr.match(/"input_tp"\s*:\s*"(-?[\d.]+)"/);
     return m ? parseFloat(m[1]) : null;
   } catch {
     return null;
@@ -1703,6 +1717,26 @@ checkOk(loudKokoroCompJson.compressor?.threshold_db === -24 && loudKokoroCompJso
 checkOk(near(loudKokoroCompJson.output_lufs, -14, 0.5) && !loudKokoroCompJson.warning, "loudness with compressor hits -14 LUFS (±0.5) on Kokoro voice, no warning", `got ${loudKokoroCompJson.output_lufs}`);
 const loudKokoroCompMeasured = await measureLufs(path.join(root, "outputs/mcp-loudness-kokoro-comp.wav"));
 checkOk(near(loudKokoroCompMeasured, -14, 0.5), "loudness compressor output independently measures -14 LUFS (±0.5)", `got ${loudKokoroCompMeasured}`);
+// loudness AAC bitrate (turn 53): ffmpeg's default AAC bitrate (~69k
+// on mono) smeared inter-sample peaks — a voice mastered to TP -2.00
+// measured +1.37 dBTP after the encode and failed qa true_peak, while
+// the same loudnorm into WAV measured exactly -2.00 and into AAC 192k
+// measured -1.98. loudness() now pins AAC to 192k (like mp3) and
+// reports the true peak of the finished file, so a bad master cannot
+// hide behind a clean LUFS. The Kokoro fixture itself only reached
+// -1.37 dBTP at 69k (under the ceiling), so the bitrate assert below
+// is the regression guard — the TP assert is the ceiling guard.
+const loudKokoroAacRes = await client.callTool({
+  name: "loudness",
+  arguments: { input: path.join(root, "test/kokoro-voice.wav"), output: path.join(root, "outputs/mcp-loudness-kokoro.m4a"), compressor: true },
+});
+const loudKokoroAacJson = JSON.parse(loudKokoroAacRes.content[0].text);
+const loudKokoroAacSize = statSync(path.join(root, "outputs/mcp-loudness-kokoro.m4a")).size;
+const loudKokoroAacBitrate = (loudKokoroAacSize * 8) / (loudKokoroAacJson.duration_seconds ?? 21.8);
+const loudKokoroAacTp = await measureTp(path.join(root, "outputs/mcp-loudness-kokoro.m4a"));
+checkOk(typeof loudKokoroAacJson.output_true_peak_db === "number" && loudKokoroAacJson.output_true_peak_db <= -0.3 && !loudKokoroAacJson.warning, "loudness reports the true peak of the finished .m4a (<= -0.3 dBTP) next to the LUFS, no warning", `tp=${loudKokoroAacJson.output_true_peak_db} warning=${loudKokoroAacJson.warning ?? "(none)"}`);
+checkOk(loudKokoroAacBitrate >= 128000, "loudness AAC output is encoded at >=128k, not ffmpeg's ~69k mono default (the bitrate that smeared true peaks)", `bitrate~${Math.round(loudKokoroAacBitrate)} bps from ${loudKokoroAacSize} bytes`);
+checkOk(loudKokoroAacTp !== null && loudKokoroAacTp <= -0.3 && Math.abs(loudKokoroAacTp - loudKokoroAacJson.output_true_peak_db) <= 0.5, "the .m4a independently measures TP <= -0.3 dBTP and agrees with the tool's report (±0.5)", `independent=${loudKokoroAacTp} reported=${loudKokoroAacJson.output_true_peak_db}`);
 const loudKokoroCompMp3Res = await client.callTool({
   name: "loudness",
   arguments: { input: path.join(root, "test/kokoro-voice.wav"), output: path.join(root, "outputs/mcp-loudness-kokoro-comp.mp3"), compressor: true },
@@ -4110,6 +4144,73 @@ const dlManNoUrlText = await callExpectThrow("manifest", { manifest_path: dlManN
 checkOk(/needs a url/.test(dlManNoUrlText ?? ""), "manifest refuses a download step with no url at lint time", dlManNoUrlText ?? "");
 downloadServer.closeAllConnections();
 downloadServer.close();
+
+// HTTP mode (turn 53): the same 54 tools over REST + JSON-RPC on an
+// ephemeral loopback port — no network, no real server process. The
+// probe call goes through the HTTP dispatch, not the stdio client,
+// so a divergence between the two transports fails here.
+const httpServer = createHttpServer();
+await new Promise((r) => httpServer.listen(0, "127.0.0.1", r));
+const httpBase = `http://127.0.0.1:${httpServer.address().port}`;
+const httpCall = async (method, p, body) => {
+  const res = await fetch(`${httpBase}${p}`, {
+    method,
+    headers: { "content-type": "application/json" },
+    body: body === undefined ? undefined : (typeof body === "string" ? body : JSON.stringify(body)),
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch { /* non-JSON body */ }
+  return { status: res.status, json, text };
+};
+const httpMeta = await httpCall("GET", "/mcp");
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 54, "GET /mcp reports name/version/transport and 54 tools", JSON.stringify(httpMeta.json));
+const httpRoot = await httpCall("GET", "/");
+checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
+const httpTools = await httpCall("GET", "/mcp/tools");
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 54 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 54 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
+checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
+const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
+checkOk(httpProbe.status === 200 && near(httpProbe.json?.duration_seconds, 10, 0.1) && httpProbe.json?.video?.width === 1280, "POST /mcp/tools/probe/invoke probes test/source.mp4 through HTTP: 10s, 1280 wide", JSON.stringify(httpProbe.json).slice(0, 200));
+const httpUnknown = await httpCall("POST", "/mcp/tools/nope/invoke", { arguments: {} });
+checkOk(httpUnknown.status === 404 && /unknown tool/.test(httpUnknown.json?.error ?? ""), "POST invoke of an unknown tool is a 404, not a 500", JSON.stringify(httpUnknown.json));
+const httpBadArgs = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: {} });
+checkOk(httpBadArgs.status === 400 && httpBadArgs.json?.code === "INVALID_ARG" && httpBadArgs.json?.retry?.tool === "probe", "POST invoke with missing required args is a 400 with code INVALID_ARG and a retry", JSON.stringify(httpBadArgs.json));
+const httpWrongType = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: 123 } });
+checkOk(httpWrongType.status === 400 && httpWrongType.json?.code === "INVALID_ARG", "POST invoke with a wrong-typed arg is a 400 (zod validates on the HTTP path too)", JSON.stringify(httpWrongType.json));
+const httpGetInvoke = await httpCall("GET", "/mcp/tools/probe/invoke");
+checkOk(httpGetInvoke.status === 405, "GET on an invoke endpoint is a 405 (invoke is POST-only)", `status=${httpGetInvoke.status}`);
+const httpRpcInit = await httpCall("POST", "/", { jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolVersion === "string" && httpRpcInit.json?.result?.serverInfo?.name === "mediakit-for-agents", "JSON-RPC initialize returns a protocol version and server info", JSON.stringify(httpRpcInit.json?.result));
+const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
+checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
+const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 54, "JSON-RPC tools/list returns the same 54 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
+const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
+checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));
+const httpRpcUnknownTool = await httpCall("POST", "/", { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "nope", arguments: {} } });
+checkOk(httpRpcUnknownTool.json?.error?.code === -32602, "JSON-RPC tools/call of an unknown tool fails -32602", JSON.stringify(httpRpcUnknownTool.json?.error));
+const httpRpcUnknownMethod = await httpCall("POST", "/", { jsonrpc: "2.0", id: 6, method: "resources/list" });
+checkOk(httpRpcUnknownMethod.json?.error?.code === -32601, "JSON-RPC unknown method fails -32601", JSON.stringify(httpRpcUnknownMethod.json?.error));
+const httpRpcBadJson = await httpCall("POST", "/", "{not json");
+checkOk(httpRpcBadJson.json?.error?.code === -32700, "JSON-RPC malformed JSON fails -32700 (parse error)", JSON.stringify(httpRpcBadJson.json?.error));
+const httpRpcNotif = await httpCall("POST", "/", { jsonrpc: "2.0", method: "notifications/initialized" });
+checkOk(httpRpcNotif.status === 204, "a JSON-RPC notification (no id) gets a 204 with no body", `status=${httpRpcNotif.status}`);
+const httpRpcToolError = await httpCall("POST", "/", { jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "probe", arguments: {} } });
+const httpRpcToolErrorBody = JSON.parse(httpRpcToolError.json?.result?.content?.[0]?.text ?? "{}");
+checkOk(httpRpcToolError.json?.result?.isError === true && httpRpcToolErrorBody.code === "INVALID_ARG" && httpRpcToolErrorBody.retry?.tool === "probe", "JSON-RPC tools/call of a tool that fails reports isError with the retry attached (same as stdio)", JSON.stringify(httpRpcToolErrorBody).slice(0, 200));
+const http404 = await httpCall("GET", "/nope");
+checkOk(http404.status === 404, "an unknown path is a 404", `status=${http404.status}`);
+const httpSecond = createHttpServer();
+const httpSecondErr = await new Promise((resolve) => {
+  httpSecond.on("error", resolve);
+  httpSecond.listen(httpServer.address().port, "127.0.0.1", () => resolve(null));
+});
+checkOk(httpSecondErr?.code === "EADDRINUSE", "a second server on the same port fails with EADDRINUSE instead of silently sharing it", `code=${httpSecondErr?.code}`);
+httpServer.closeAllConnections();
+httpServer.close();
 
 await client.close();
 if (failures.length) {
