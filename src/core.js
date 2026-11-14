@@ -5740,6 +5740,7 @@ const TOOL_REQUIREMENTS = {
   slideshow: { filters: ["scale", "pad", "xfade", "acrossfade", "fps"], encoders: ["libx264", "aac"] },
   job: {},
   doctor: {},
+  audit: {},
 };
 
 async function listCapabilities(kind) {
