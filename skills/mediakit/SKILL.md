@@ -930,6 +930,26 @@ done/failed. Jobs live under `MEDIAKIT_JOBS_DIR`, else
 `worker.log`). Never poll in a tight loop: 2s between polls is
 plenty — a render takes minutes, not seconds.
 
+### 51. Pull media from the web with `download` — never with a bare ffmpeg URL input
+`download <url> -o <file>` is the only way to fetch media from the
+web: http(s) only, no credentials in the URL (use a signed URL with
+query parameters), no HLS/DASH playlist in v1 — give a direct file
+URL. The size cap (default 500 MB, `--max-size-mb`) is enforced
+while streaming, not just from Content-Length, so a server that
+lies about the length still cannot fill the disk; a declared length
+over the cap is refused before a body byte is read. Redirects are
+capped at 5 and a redirect off http(s) is refused. The file is
+written to `<output>.partial` and renamed only on success, then
+probed — a download that is not media is deleted and reported, so
+a 200 OK with an HTML error page never becomes a "clip". The
+output extension is either given (must be a media extension) or
+derived from the Content-Type / URL path, and a video served as
+`.mp3` is refused rather than mislabelled. Never `ffmpeg -i <url>`
+directly: that is exactly the unguarded pattern
+brookcs3/m3u8-mcp-server's `m3u8_download` uses (no validation, no
+cap, no timeout, no verify) — MediaKit's `download` exists so the
+agent never has to.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

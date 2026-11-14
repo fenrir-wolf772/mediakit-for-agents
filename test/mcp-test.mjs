@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { existsSync, statSync } from "node:fs";
 import { copyFile, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { createServer } from "node:http";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -162,10 +163,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 53 tools present");
-checkOk(missing.length === 0, "tools/list has all 53 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 54 tools present");
+checkOk(missing.length === 0, "tools/list has all 54 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -2957,7 +2958,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 53 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 53 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 54 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 54 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -3944,6 +3945,99 @@ checkOk(assembleCancelRecheckJson.status === "cancelled" && !existsSync(path.joi
 // Unknown job id.
 const jobUnknownText = await callExpectThrow("job", { job_id: "job-20000101-000000-deadbeef", action: "status" });
 checkOk(/unknown job/.test(jobUnknownText ?? ""), "job status refuses an unknown job id", jobUnknownText ?? "");
+
+// download: a local HTTP server stands in for the internet, so the
+// suite never depends on the network — every guard (redirect, size
+// cap mid-stream, content-type, 404, timeout) is exercised against a
+// server this test controls. Node fetch honours NO_PROXY for
+// 127.0.0.1, so the sandbox proxy is bypassed for these calls.
+const downloadFixture = await readFile(path.join(root, "test/source.mp4"));
+const downloadServer = createServer((req, res) => {
+  if (req.url === "/source.mp4") {
+    res.writeHead(200, { "content-type": "video/mp4", "content-length": downloadFixture.length });
+    res.end(downloadFixture);
+  } else if (req.url === "/noext") {
+    res.writeHead(200, { "content-type": "video/mp4", "content-length": downloadFixture.length });
+    res.end(downloadFixture);
+  } else if (req.url === "/octet") {
+    res.writeHead(200, { "content-type": "application/octet-stream", "content-length": downloadFixture.length });
+    res.end(downloadFixture);
+  } else if (req.url === "/redir") {
+    res.writeHead(302, { location: "/source.mp4" });
+    res.end();
+  } else if (req.url === "/redir-loop") {
+    res.writeHead(302, { location: "/redir-loop" });
+    res.end();
+  } else if (req.url === "/big") {
+    // Declares 600 MB but sends nothing: the tool must refuse from
+    // the header alone, before reading a body byte.
+    res.writeHead(200, { "content-type": "video/mp4", "content-length": 600 * 1024 * 1024 });
+    res.end();
+  } else if (req.url === "/stream-big") {
+    // Lies by omission: no Content-Length, chunked body ~3x the
+    // fixture — the streaming cap (0.5 MB) must trip mid-body.
+    res.writeHead(200, { "content-type": "video/mp4" });
+    res.end(Buffer.concat([downloadFixture, downloadFixture, downloadFixture]));
+  } else if (req.url === "/text") {
+    res.writeHead(200, { "content-type": "text/html", "content-length": 13 });
+    res.end("<html>hi</html>");
+  } else if (req.url === "/fake-mp4") {
+    // Right content-type, wrong bytes: probe must fail and the file
+    // must be deleted, not reported as a success.
+    const body = Buffer.from("this is not a video file at all, just text pretending to be one");
+    res.writeHead(200, { "content-type": "video/mp4", "content-length": body.length });
+    res.end(body);
+  } else if (req.url === "/slow") {
+    // Never responds: the tool's timeout must fire, not the test's.
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
+});
+await new Promise((resolve) => downloadServer.listen(0, "127.0.0.1", resolve));
+const dlBase = `http://127.0.0.1:${downloadServer.address().port}`;
+const dlHappyRes = await client.callTool({ name: "download", arguments: { url: `${dlBase}/source.mp4`, output: path.join(root, "outputs/mcp-download.mp4") } });
+const dlHappy = JSON.parse(dlHappyRes.content[0].text);
+checkOk(dlHappy.size_bytes === downloadFixture.length && dlHappy.media?.duration_seconds === 10 && dlHappy.media?.video?.width === 1280 && dlHappy.redirects === 0 && dlHappy.content_type === "video/mp4", "download fetches the fixture: exact size + 10s + 1280 wide + 0 redirects", JSON.stringify(dlHappy).slice(0, 300));
+checkOk(existsSync(path.join(root, "outputs/mcp-download.mp4")) && statSync(path.join(root, "outputs/mcp-download.mp4")).size === downloadFixture.length && !existsSync(path.join(root, "outputs/mcp-download.mp4.partial")), "downloaded file exists on disk with the fixture's exact size and no .partial left behind", `size=${existsSync(path.join(root, "outputs/mcp-download.mp4")) ? statSync(path.join(root, "outputs/mcp-download.mp4")).size : "missing"}`);
+const dlNoextRes = await client.callTool({ name: "download", arguments: { url: `${dlBase}/noext`, output: path.join(root, "outputs/mcp-download-noext") } });
+const dlNoext = JSON.parse(dlNoextRes.content[0].text);
+checkOk(dlNoext.output.endsWith(".mp4") && dlNoext.size_bytes === downloadFixture.length, "download derives .mp4 from the Content-Type when the output has no extension", dlNoext.output);
+const dlOctetRes = await client.callTool({ name: "download", arguments: { url: `${dlBase}/octet`, output: path.join(root, "outputs/mcp-download-octet.mp4") } });
+const dlOctet = JSON.parse(dlOctetRes.content[0].text);
+checkOk(dlOctet.size_bytes === downloadFixture.length && dlOctet.content_type === "application/octet-stream", "download accepts application/octet-stream when the output extension is media", JSON.stringify(dlOctet).slice(0, 200));
+const dlRedirRes = await client.callTool({ name: "download", arguments: { url: `${dlBase}/redir`, output: path.join(root, "outputs/mcp-download-redir.mp4") } });
+const dlRedir = JSON.parse(dlRedirRes.content[0].text);
+checkOk(dlRedir.redirects === 1 && dlRedir.final_url.endsWith("/source.mp4") && dlRedir.size_bytes === downloadFixture.length, "download follows one redirect and reports it (redirects=1, final_url is the target)", JSON.stringify(dlRedir).slice(0, 200));
+const dlLoopText = await callExpectThrow("download", { url: `${dlBase}/redir-loop`, output: path.join(root, "outputs/mcp-download-loop.mp4") });
+checkOk(/too many redirects/.test(dlLoopText ?? ""), "download refuses a redirect loop after 5 hops", dlLoopText ?? "");
+const dlBigText = await callExpectThrow("download", { url: `${dlBase}/big`, output: path.join(root, "outputs/mcp-download-big.mp4") });
+checkOk(/exceeds max_size_mb/.test(dlBigText ?? "") && !existsSync(path.join(root, "outputs/mcp-download-big.mp4")), "download refuses a 600 MB Content-Length upfront, before reading the body", dlBigText ?? "");
+const dlStreamBigText = await callExpectThrow("download", { url: `${dlBase}/stream-big`, output: path.join(root, "outputs/mcp-download-streambig.mp4"), max_size_mb: 0.5 });
+checkOk(/exceeded max_size_mb.*while streaming/.test(dlStreamBigText ?? "") && !existsSync(path.join(root, "outputs/mcp-download-streambig.mp4")) && !existsSync(path.join(root, "outputs/mcp-download-streambig.mp4.partial")), "download aborts mid-stream when the body passes the cap with no Content-Length, and leaves no file or .partial", dlStreamBigText ?? "");
+const dlTextText = await callExpectThrow("download", { url: `${dlBase}/text`, output: path.join(root, "outputs/mcp-download-text.mp4") });
+checkOk(/not media/.test(dlTextText ?? "") && !existsSync(path.join(root, "outputs/mcp-download-text.mp4")), "download refuses a text/html content-type", dlTextText ?? "");
+const dl404Text = await callExpectThrow("download", { url: `${dlBase}/missing.mp4`, output: path.join(root, "outputs/mcp-download-404.mp4") });
+checkOk(/HTTP 404/.test(dl404Text ?? ""), "download reports HTTP 404 instead of writing a file", dl404Text ?? "");
+const dlMismatchText = await callExpectThrow("download", { url: `${dlBase}/source.mp4`, output: path.join(root, "outputs/mcp-download-mismatch.mp3") });
+checkOk(/refuses: content-type video\/mp4 is video but the output extension .mp3 is audio/.test(dlMismatchText ?? ""), "download refuses a video served as .mp3 (category mismatch)", dlMismatchText ?? "");
+const dlFakeText = await callExpectThrow("download", { url: `${dlBase}/fake-mp4`, output: path.join(root, "outputs/mcp-download-fake.mp4") });
+checkOk(/not media/.test(dlFakeText ?? "") && !existsSync(path.join(root, "outputs/mcp-download-fake.mp4")), "download deletes a file whose bytes fail the probe (right content-type, wrong bytes)", dlFakeText ?? "");
+const dlFtpText = await callExpectThrow("download", { url: "ftp://example.com/clip.mp4", output: path.join(root, "outputs/mcp-download-ftp.mp4") });
+checkOk(/http\(s\) URL/.test(dlFtpText ?? ""), "download refuses a non-http(s) URL", dlFtpText ?? "");
+const dlM3u8Text = await callExpectThrow("download", { url: "https://example.com/stream.m3u8", output: path.join(root, "outputs/mcp-download-m3u8.mp4") });
+checkOk(/playlists/.test(dlM3u8Text ?? ""), "download refuses an HLS playlist URL in v1", dlM3u8Text ?? "");
+const dlCredsText = await callExpectThrow("download", { url: "https://user:pass@example.com/clip.mp4", output: path.join(root, "outputs/mcp-download-creds.mp4") });
+checkOk(/embedded credentials/.test(dlCredsText ?? ""), "download refuses a URL with embedded credentials", dlCredsText ?? "");
+const dlBadExtText = await callExpectThrow("download", { url: `${dlBase}/source.mp4`, output: path.join(root, "outputs/mcp-download-bad.txt") });
+checkOk(/writes a media file/.test(dlBadExtText ?? ""), "download refuses a non-media output extension", dlBadExtText ?? "");
+const dlSlowText = await callExpectThrow("download", { url: `${dlBase}/slow`, output: path.join(root, "outputs/mcp-download-slow.mp4"), timeout_seconds: 1 });
+checkOk(/timed out after 1s/.test(dlSlowText ?? ""), "download times out after timeout_seconds on a silent server", dlSlowText ?? "");
+const dlDoctorRes = await client.callTool({ name: "doctor", arguments: {} });
+const dlDoctor = JSON.parse(dlDoctorRes.content[0].text);
+checkOk(dlDoctor.tools?.download?.available === true, "doctor reports download available (pure Node fetch + ffprobe, no ffmpeg filter needed)", JSON.stringify(dlDoctor.tools?.download));
+downloadServer.closeAllConnections();
+downloadServer.close();
 
 await client.close();
 if (failures.length) {

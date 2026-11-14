@@ -7,7 +7,9 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { access, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
-import { constants as fsConstants, createReadStream } from "node:fs";
+import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -4040,6 +4042,202 @@ export async function imageToVideo({ input, output, duration = 5, fps = 30, widt
   };
 }
 
+// ---------------------------------------------------------------- download
+// Fetch a media file from an http(s) URL into the workspace, typed and
+// guarded — the mrdainami/ffmpeg-mcp `download` idea, but the lesson
+// from brookcs3/m3u8-mcp-server's m3u8_download is what NOT to do:
+// that tool is one bare `ffmpeg -i <url> -c copy` with no URL
+// validation, no size cap, no timeout and no check of what came back.
+// MediaKit's download is the opposite: validate the URL first
+// (http/https only, no embedded credentials, no HLS/DASH playlist —
+// those need a different fetcher because a size cap cannot be
+// enforced upfront), stream the body to disk with a byte cap enforced
+// WHILE streaming (not just from Content-Length, which a server can
+// lie about), cap redirects at 5, refuse a redirect off http(s),
+// write to `<output>.partial` and rename only on success, then probe
+// the file — a download that is not media is deleted and reported,
+// never left on disk as a success. Content-Type must be media
+// (video/*, audio/*, image/*) or application/octet-stream with a
+// media extension; the output extension is either given (and must be
+// a media extension, same list as `find`) or derived from the
+// Content-Type / URL path. A caller extension whose category
+// disagrees with a specific Content-Type (mp4 served as .mp3) is
+// refused instead of silently mislabelled.
+const DOWNLOAD_MAX_REDIRECTS = 5;
+const DOWNLOAD_DEFAULT_MAX_MB = 500;
+const DOWNLOAD_DEFAULT_TIMEOUT_S = 300;
+// Download only takes files ffprobe can read as media — the caption
+// extensions in FIND_EXTENSIONS (srt/vtt/ass) are left out on
+// purpose: a .srt would pass the extension check and then fail the
+// probe, which is a confusing two-step refusal.
+const DOWNLOAD_EXTENSIONS = FIND_EXTENSIONS.filter((e) => !["srt", "vtt", "ass"].includes(e));
+const DOWNLOAD_CONTENT_TYPE_EXT = {
+  "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov",
+  "video/x-matroska": "mkv", "video/x-msvideo": "avi", "video/x-m4v": "m4v",
+  "audio/mpeg": "mp3", "audio/mp4": "m4a", "audio/wav": "wav",
+  "audio/x-wav": "wav", "audio/flac": "flac", "audio/ogg": "ogg",
+  "audio/opus": "opus",
+  "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp",
+  "image/gif": "gif",
+};
+const DOWNLOAD_MEDIA_CATEGORY = {
+  mp4: "video", mov: "video", mkv: "video", webm: "video", avi: "video", m4v: "video",
+  mp3: "audio", wav: "audio", m4a: "audio", flac: "audio", ogg: "audio", opus: "audio",
+  png: "image", jpg: "image", jpeg: "image", webp: "image", gif: "image",
+};
+
+export async function downloadMedia({ url, output, maxSizeMb = DOWNLOAD_DEFAULT_MAX_MB, timeoutSeconds = DOWNLOAD_DEFAULT_TIMEOUT_S }) {
+  if (typeof url !== "string" || !url.trim()) {
+    throw new MediaKitError("download needs a URL", "INVALID_ARG");
+  }
+  let u;
+  try { u = new URL(url.trim()); } catch {
+    throw new MediaKitError(`download needs a valid URL, got: ${url}`, "INVALID_ARG");
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    throw new MediaKitError(`download needs an http(s) URL, got protocol ${u.protocol}`, "INVALID_ARG");
+  }
+  if (u.username || u.password) {
+    throw new MediaKitError("download refuses URLs with embedded credentials — use a signed URL (query parameters) instead", "INVALID_ARG");
+  }
+  const urlExt = path.extname(u.pathname).slice(1).toLowerCase();
+  if (urlExt === "m3u8" || urlExt === "mpd") {
+    throw new MediaKitError(`download does not fetch HLS/DASH playlists (.${urlExt}) in v1 — give a direct media file URL`, "INVALID_ARG");
+  }
+  const maxMb = num(maxSizeMb, "max_size_mb", { min: 0.01, max: 2000 });
+  const maxBytes = Math.floor(maxMb * 1024 * 1024);
+  const timeoutS = num(timeoutSeconds, "timeout_seconds", { min: 1, max: 3600, integer: true });
+  if (typeof output !== "string" || !output.trim()) {
+    throw new MediaKitError("download needs an output path", "INVALID_ARG");
+  }
+  const requestedExt = path.extname(output).slice(1).toLowerCase();
+  if (requestedExt && !DOWNLOAD_EXTENSIONS.includes(requestedExt)) {
+    throw new MediaKitError(`download writes a media file (${DOWNLOAD_EXTENSIONS.join(", ")}) — got .${requestedExt}`, "INVALID_ARG");
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutS * 1000);
+  try {
+    // Manual redirect loop: fetch's built-in follow does not cap the
+    // count, and a redirect off http(s) must be refused, not followed.
+    let current = u;
+    let res = null;
+    let redirects = 0;
+    for (;;) {
+      let attempt;
+      try {
+        attempt = await fetch(current, {
+          redirect: "manual",
+          signal: controller.signal,
+          headers: { "user-agent": `mediakit-for-agents/${MEDIAKIT_VERSION}` },
+        });
+      } catch (err) {
+        if (err?.name === "AbortError") throw new MediaKitError(`download timed out after ${timeoutS}s`, "DOWNLOAD_TIMEOUT");
+        throw new MediaKitError(`download failed: ${err?.message ?? err}`, "DOWNLOAD_FAILED");
+      }
+      if ([301, 302, 303, 307, 308].includes(attempt.status)) {
+        const loc = attempt.headers.get("location");
+        if (!loc) throw new MediaKitError(`download failed: redirect (${attempt.status}) without a location`, "DOWNLOAD_FAILED");
+        if (redirects >= DOWNLOAD_MAX_REDIRECTS) throw new MediaKitError(`download failed: too many redirects (max ${DOWNLOAD_MAX_REDIRECTS})`, "DOWNLOAD_FAILED");
+        let next;
+        try { next = new URL(loc, current); } catch {
+          throw new MediaKitError(`download failed: bad redirect location: ${loc}`, "DOWNLOAD_FAILED");
+        }
+        if (next.protocol !== "http:" && next.protocol !== "https:") {
+          throw new MediaKitError(`download refuses a redirect to a non-http(s) URL: ${next.protocol}`, "DOWNLOAD_FAILED");
+        }
+        current = next;
+        redirects++;
+        continue;
+      }
+      res = attempt;
+      break;
+    }
+    if (!res.ok) {
+      throw new MediaKitError(`download failed: HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ""}`, "DOWNLOAD_FAILED");
+    }
+    if (!res.body) throw new MediaKitError("download failed: empty response body", "DOWNLOAD_FAILED");
+    const contentType = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    const typeCategory = contentType.startsWith("video/") ? "video"
+      : contentType.startsWith("audio/") ? "audio"
+      : contentType.startsWith("image/") ? "image" : null;
+    if (!typeCategory && contentType !== "application/octet-stream" && contentType !== "") {
+      throw new MediaKitError(`download refuses content-type ${contentType || "(missing)"} — not media`, "DOWNLOAD_FAILED");
+    }
+    const lengthHeader = res.headers.get("content-length");
+    if (lengthHeader !== null) {
+      const declared = Number(lengthHeader);
+      if (Number.isFinite(declared) && declared > maxBytes) {
+        throw new MediaKitError(`download refused: Content-Length ${declared} bytes exceeds max_size_mb ${maxMb} (${maxBytes} bytes)`, "SIZE_LIMIT");
+      }
+    }
+    // Final extension: the caller's wins when given; otherwise the
+    // Content-Type, then the URL path.
+    let ext = requestedExt;
+    if (!ext) ext = DOWNLOAD_CONTENT_TYPE_EXT[contentType] ?? (DOWNLOAD_EXTENSIONS.includes(urlExt) ? urlExt : "");
+    if (!ext) {
+      throw new MediaKitError(`download cannot determine a media extension from content-type ${contentType || "(missing)"} or the URL — give the output a media extension`, "INVALID_ARG");
+    }
+    if (typeCategory && DOWNLOAD_MEDIA_CATEGORY[ext] !== typeCategory) {
+      throw new MediaKitError(`download refuses: content-type ${contentType} is ${typeCategory} but the output extension .${ext} is ${DOWNLOAD_MEDIA_CATEGORY[ext]}`, "DOWNLOAD_FAILED");
+    }
+    const finalOutput = requestedExt ? output : `${output}.${ext}`;
+    const outPath = await prepareOutput(finalOutput);
+    const partialPath = `${outPath}.partial`;
+    let bytes = 0;
+    try {
+      const counting = new Transform({
+        transform(chunk, _enc, cb) {
+          bytes += chunk.length;
+          if (bytes > maxBytes) {
+            cb(new MediaKitError(`download stopped: exceeded max_size_mb ${maxMb} (${maxBytes} bytes) while streaming`, "SIZE_LIMIT"));
+            return;
+          }
+          cb(null, chunk);
+        },
+      });
+      await pipeline(Readable.fromWeb(res.body), counting, createWriteStream(partialPath));
+    } catch (err) {
+      await unlink(partialPath).catch(() => {});
+      if (err instanceof MediaKitError) throw err;
+      if (err?.name === "AbortError") throw new MediaKitError(`download timed out after ${timeoutS}s`, "DOWNLOAD_TIMEOUT");
+      throw new MediaKitError(`download failed while streaming: ${err?.message ?? err}`, "DOWNLOAD_FAILED");
+    }
+    await rename(partialPath, outPath);
+    const info = await fileInfo(outPath);
+    let media;
+    try {
+      media = await probe(outPath);
+    } catch {
+      await unlink(outPath).catch(() => {});
+      throw new MediaKitError("downloaded file is not media (ffprobe could not read it) — deleted", "DOWNLOAD_FAILED");
+    }
+    if (!media.video && !media.audio) {
+      await unlink(outPath).catch(() => {});
+      throw new MediaKitError("downloaded file has no video or audio stream — deleted", "DOWNLOAD_FAILED");
+    }
+    return {
+      operation: "download",
+      url: url.trim(),
+      final_url: current.href,
+      redirects,
+      output: outPath,
+      size_bytes: info.size_bytes,
+      size_human: info.size_human,
+      content_type: contentType || null,
+      max_size_bytes: maxBytes,
+      media: {
+        format: media.format,
+        duration_seconds: media.duration_seconds,
+        video: media.video,
+        audio: media.audio,
+      },
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 // ---------------------------------------------------------------- slideshow
 // Many still images -> one video with a transition between every pair
 // (the TravnikovDev/ffmpegSlideshow + Twinklebear/ffmpeg-slideshow-py
@@ -5405,6 +5603,7 @@ const TOOL_REQUIREMENTS = {
   convert_captions: {},
   generate_srt: {},
   find: {},
+  download: {},
   batch: {},
   manifest: {},
   mux: {},

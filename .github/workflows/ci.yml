@@ -138,6 +138,8 @@ jobs:
           node bin/mediakit.js manifest outputs/ci-manifest-rt.json | grep '"steps_run": 1'
           node bin/mediakit.js batch slideshow --pattern '*.png' --input-dir test -o outputs/ci-batch-slideshow --args-json '{"duration": 2, "transition_duration": 0.5}' | grep '"succeeded": 1'
           ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-batch-slideshow/slideshow.mp4 | grep '^6'
+          node bin/mediakit.js download https://raw.githubusercontent.com/fenrir-wolf772/mediakit-for-agents/main/test/source.mp4 -o outputs/ci-download.mp4 | grep '"size_bytes": 243932'
+          node bin/mediakit.js download ftp://example.com/clip.mp4 -o outputs/ci-download-ftp.mp4 2>&1 | grep -q 'http(s) URL'
           printf '%s' '{"version":1,"input":"../test/logo.png","output":"ci-manifest-slideshow.mp4","steps":[{"tool":"slideshow","args":{"images":["../test/logo.png","../test/kenburns.png"],"duration":2,"transition_duration":0.5}},{"tool":"trim","args":{"start":0,"end":2}}]}' > outputs/ci-manifest-slideshow.json
           node bin/mediakit.js manifest outputs/ci-manifest-slideshow.json | grep '"steps_run": 2'
           ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-manifest-slideshow.mp4 | grep '^2'

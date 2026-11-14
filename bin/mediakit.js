@@ -295,6 +295,16 @@ const COMMANDS = {
       ["-o, --output", "Output file (required)"],
     ],
   },
+  download: {
+    usage: "mediakit download <url> -o <output.mp4> [--max-size-mb 500] [--timeout-seconds 300]",
+    desc: "Download a media file from an http(s) URL into the workspace. Typed and guarded: http/https only (no credentials in the URL, no HLS/DASH playlist in v1), size cap enforced while streaming (default 500 MB), 5 redirects max, 300s timeout, written atomically via <output>.partial and renamed only on success, then probed — a file that is not media is deleted and reported. The output extension is either given (must be a media extension) or derived from the Content-Type / URL path.",
+    args: [{ name: "url", required: true }],
+    options: [
+      ["--max-size-mb", "Maximum download size in MB (default 500)"],
+      ["--timeout-seconds", "Whole-download timeout in seconds (default 300)"],
+      ["-o, --output", "Output file (required) — with a media extension, or without one (derived from Content-Type / URL path)"],
+    ],
+  },
   "image-to-video": {
     usage: "mediakit image-to-video <image> -o <output.mp4> [--duration 5] [--fps 30] [--width 1280] [--height 720] [--audio <file>] [--crf 23]",
     desc: "Turn one still image into a fixed-duration video that holds still (no motion — use zoom-pan for Ken Burns). Dimensions default to the image itself; --width/--height fit the image inside the box and pad black to the exact size (widths are rounded down to even). --audio loops an audio file to the same duration (a short bed loops, a long one is trimmed). Output .mp4 (H.264) or .webm (VP9). Reports frame count measured on the output file — exactly round(duration*fps).",
@@ -1004,6 +1014,14 @@ async function main() {
           width: numOpt(opts, "width") ?? 1280,
           height: numOpt(opts, "height") ?? 720,
           crf: numOpt(opts, "crf") ?? 23,
+        });
+        break;
+      case "download":
+        result = await core.downloadMedia({
+          url: needInput("URL"),
+          output: needOutput(opts),
+          maxSizeMb: numOpt(opts, "max_size_mb") ?? 500,
+          timeoutSeconds: numOpt(opts, "timeout_seconds") ?? 300,
         });
         break;
       case "image-to-video":

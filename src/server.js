@@ -1193,6 +1193,34 @@ server.tool(
   }),
 );
 
+// Download a media file from the web (idea: mrdainami/ffmpeg-mcp's
+// `download`, but typed and guarded — brookcs3/m3u8-mcp-server's
+// m3u8_download is one bare `ffmpeg -i <url> -c copy` with no URL
+// validation, no size cap, no timeout and no check of the result, and
+// MediaKit does the opposite on every one of those). The director's
+// way to pull stock footage, a reference clip or a music bed into the
+// workspace: http(s) only, no credentials in the URL, no HLS/DASH
+// playlist in v1, 500 MB cap by default, 5 redirects max, streamed to
+// disk with the cap enforced while streaming, written atomically via
+// .partial, then probed — a non-media download is deleted, not
+// reported as a success.
+server.tool(
+  "download",
+  "Download a media file from an http(s) URL into the workspace — stock footage, a reference clip, a music bed. Typed and guarded: http/https only (no credentials in the URL, no HLS/DASH playlist in v1), size cap enforced while streaming (default 500 MB, refused upfront when Content-Length already exceeds it), 5 redirects max, 300s timeout, written atomically via <output>.partial and renamed only on success, then probed — a file that is not media is deleted and reported, never left as a success. The output extension is either given (must be a media extension) or derived from the Content-Type / URL path. Returns the output path, size, content-type, redirect count and the probe summary (duration, dimensions, codecs).",
+  {
+    url: z.string().url().describe("http(s) URL of a direct media file (video/audio/image)"),
+    output: pathSchema.describe("Output file path — with a media extension, or without one (the extension is then derived from the Content-Type / URL path)"),
+    max_size_mb: z.number().min(0.01).max(2000).default(500).describe("Maximum download size in MB (default 500); refused upfront when Content-Length exceeds it, aborted mid-stream otherwise"),
+    timeout_seconds: z.number().int().min(1).max(3600).default(300).describe("Whole-download timeout in seconds (default 300)"),
+  },
+  async (a) => safe(() => core.downloadMedia({
+    url: a.url,
+    output: a.output,
+    maxSizeMb: a.max_size_mb,
+    timeoutSeconds: a.timeout_seconds,
+  })),
+);
+
 // ---------------------------------------------------------------- MCP resources
 // Workspace-scoped reads (idea: conneroisu/vfx-mcp's videos:// URIs):
 // a client can list the workspace's media, read one file's probe, and
