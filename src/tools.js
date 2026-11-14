@@ -11,6 +11,7 @@
  */
 import { z } from "zod";
 import * as core from "./core.js";
+import { queryAudit } from "./audit.js";
 
 function result(obj) {
   return { content: [{ type: "text", text: JSON.stringify(obj, null, 2) }] };
@@ -1252,6 +1253,35 @@ export const TOOL_DEFS = [
     output: a.output,
     maxSizeMb: a.max_size_mb,
     timeoutSeconds: a.timeout_seconds,
+  })),
+  },
+
+  // Audit log / operation envelope (idea: Mnehmos/ffmpeg-llm's
+  // src/audit.ts, turn 54; verify shape from heristop/leclap's
+  // `leclap verify`, turn 55): every tool call on every transport
+  // appends one JSONL line — tool, arguments hash + redacted copy,
+  // input/output files with size + SHA-256, duration, status. This
+  // tool reads the log back; verify:true re-hashes the recorded
+  // files and reports matched/missing/changed per file, so the log
+  // is a claim and the disk is the evidence. The log lives at
+  // <workdir>/.mediakit-audit.jsonl (MEDIAKIT_AUDIT_PATH overrides,
+  // MEDIAKIT_AUDIT=0 disables recording); `doctor` reports its state.
+  {
+    name: "audit",
+    description: "Read the audit log: every tool call this workspace has recorded (newest first), with its arguments hash, input/output files + SHA-256, duration and status. Filter by tool, status, or since a date; verify:true re-hashes the recorded files on disk and reports matched/missing/changed per file, so a stale or tampered output is caught instead of trusted.",
+    schema: {
+    limit: z.number().int().min(1).max(200).default(20).describe("How many entries to return, newest first (default 20, max 200)"),
+    tool: z.string().optional().describe("Only entries for this tool name (e.g. trim, assemble)"),
+    status: z.enum(["ok", "error"]).optional().describe("Only entries with this status"),
+    since: z.string().optional().describe("Only entries at or after this date (YYYY-MM-DD or ISO timestamp)"),
+    verify: z.boolean().default(false).describe("Re-hash every recorded file on disk and report matched/missing/changed per entry"),
+  },
+    handler: async (a) => safe(() => queryAudit({
+    limit: a.limit,
+    tool: a.tool ?? null,
+    status: a.status ?? null,
+    since: a.since ?? null,
+    verify: a.verify === true,
   })),
   },
 ];

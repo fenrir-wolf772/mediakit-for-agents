@@ -162,6 +162,10 @@ const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 // (transport env is process.env), and the worker inherits it from the
 // server, so all three agree on the same root.
 process.env.MEDIAKIT_JOBS_DIR = path.join(root, `outputs/mcp-jobs-${process.pid}`);
+// Hermetic audit log for the suite (same idea as the jobs dir): the
+// server child inherits this env, so its per-call records land in a
+// per-run file instead of the repo's real .mediakit-audit.jsonl.
+process.env.MEDIAKIT_AUDIT_PATH = path.join(root, `outputs/mcp-audit-${process.pid}.jsonl`);
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: [path.join(root, "src/server.js")],
@@ -177,10 +181,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 54 tools present");
-checkOk(missing.length === 0, "tools/list has all 54 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 55 tools present");
+checkOk(missing.length === 0, "tools/list has all 55 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -881,6 +885,55 @@ checkOk(typeof fixEnc === "string" && fixEnc.includes("libx264|aac"), "doctor fi
 const fixMixed = fixForMissing(["filter:crop", "decoder:librsvg"]);
 checkOk(typeof fixMixed === "string" && fixMixed.includes("filter:crop") && fixMixed.includes("decoder:librsvg"), "doctor fix: one hint covers all missing capabilities", fixMixed ?? "");
 checkOk(doctorJson.sandbox?.enabled === false, "doctor: sandbox disabled when MEDIAKIT_WORKDIR is unset", JSON.stringify(doctorJson.sandbox));
+
+// Audit log / operation envelope (lượt 55): every tool call above
+// was recorded into the hermetic audit file — the log must prove it
+// with hashes that match the files on disk, not just claim it.
+// (sha256File is defined earlier in this file; reused here.)
+async function runCliJson(args, env = {}) {
+  const { stdout } = await execFileAsync(process.execPath, [path.join(root, "bin/mediakit.js"), ...args], {
+    env: { ...process.env, ...env },
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  return JSON.parse(stdout);
+}
+const auditPath = process.env.MEDIAKIT_AUDIT_PATH;
+checkOk(doctorJson.audit?.enabled === true && doctorJson.audit?.path === auditPath && doctorJson.audit?.entries > 0, "doctor: audit enabled, path is the hermetic test file, entries > 0", JSON.stringify(doctorJson.audit));
+const auditAllRes = await client.callTool({ name: "audit", arguments: { limit: 200 } });
+const auditAll = JSON.parse(auditAllRes.content[0].text);
+checkOk(auditAll.audit_path === auditPath && auditAll.total >= 10 && Array.isArray(auditAll.entries) && auditAll.entries.length > 0, "audit: log reads back with path + total + newest-first entries", `total=${auditAll.total} entries=${auditAll.entries.length}`);
+checkOk(auditAll.entries.every((e) => e.id && e.tool && e.via && typeof e.duration_ms === "number" && e.status && /^[0-9a-f]{64}$/.test(e.args_sha256 ?? "")), "audit: every entry has id/tool/via/duration/status + a 64-hex args hash", JSON.stringify(auditAll.entries[0]).slice(0, 300));
+const auditTrim = auditAll.entries.find((e) => e.tool === "trim" && e.status === "ok" && e.files?.some((f) => f.path.endsWith("outputs/mcp-trim.mp4")));
+checkOk(!!auditTrim, "audit: the suite's first trim call is in the log with status ok", `found=${!!auditTrim}`);
+if (auditTrim) {
+  const trimIn = auditTrim.files.find((f) => f.role === "input");
+  const trimOut = auditTrim.files.find((f) => f.role === "output");
+  checkOk(trimIn?.sha256 === await sha256File(path.join(root, "test/source.mp4")), "audit: trim entry's input SHA-256 matches test/source.mp4 on disk", `recorded=${trimIn?.sha256?.slice(0, 12)}`);
+  checkOk(trimOut?.sha256 === await sha256File(path.join(root, "outputs/mcp-trim.mp4")), "audit: trim entry's output SHA-256 matches outputs/mcp-trim.mp4 on disk", `recorded=${trimOut?.sha256?.slice(0, 12)}`);
+}
+// verify:true re-hashes on disk — untouched files match.
+const auditVerifyRes = await client.callTool({ name: "audit", arguments: { tool: "trim", status: "ok", verify: true, limit: 3 } });
+const auditVerify = JSON.parse(auditVerifyRes.content[0].text);
+checkOk(auditVerify.entries.length > 0 && auditVerify.entries.every((e) => e.verified === true), "audit --verify: untouched recorded files all match", JSON.stringify(auditVerify.entries.map((e) => e.verified)));
+const auditProbeRes = await client.callTool({ name: "audit", arguments: { tool: "probe", limit: 1 } });
+const auditProbe = JSON.parse(auditProbeRes.content[0].text);
+checkOk(auditProbe.entries.length === 1 && auditProbe.entries[0].tool === "probe", "audit: --tool probe returns only probe entries", `got ${auditProbe.entries.length} entries`);
+// The CLI records too, and verify catches a tampered output (the
+// LeClap verify idea: the log is a claim, the disk is the evidence).
+const cliAuditEnv = { MEDIAKIT_AUDIT_PATH: auditPath };
+const cliTrimOut = path.join(root, "outputs/mcp-audit-trim.mp4");
+await runCliJson(["trim", path.join(root, "test/source.mp4"), "--start", "0", "--duration", "1", "-o", cliTrimOut], cliAuditEnv);
+await writeFile(cliTrimOut, Buffer.from([0]), { flag: "a" });
+const cliAuditVerify = await runCliJson(["audit", "--tool", "trim", "--status", "ok", "--verify", "--limit", "1"], cliAuditEnv);
+const tampered = cliAuditVerify.entries[0];
+checkOk(tampered?.verified === false && tampered.file_checks?.some((c) => c.state === "changed" && c.path === cliTrimOut), "audit --verify (CLI): a tampered output is reported changed, entry verified=false", JSON.stringify(tampered?.file_checks));
+const cliAuditList = await runCliJson(["audit", "--limit", "3"], cliAuditEnv);
+checkOk(Array.isArray(cliAuditList.entries) && cliAuditList.entries.length >= 1 && cliAuditList.audit_path === auditPath, "audit (CLI): --limit returns newest-first entries from the same log", `entries=${cliAuditList.entries.length}`);
+// Opt-out: MEDIAKIT_AUDIT=0 records nothing.
+const auditCountBefore = (await readFile(auditPath, "utf8")).split("\n").filter(Boolean).length;
+await runCliJson(["probe", path.join(root, "test/source.mp4")], { MEDIAKIT_AUDIT_PATH: auditPath, MEDIAKIT_AUDIT: "0" });
+const auditCountAfter = (await readFile(auditPath, "utf8")).split("\n").filter(Boolean).length;
+checkOk(auditCountAfter === auditCountBefore, "audit: MEDIAKIT_AUDIT=0 records nothing", `before=${auditCountBefore} after=${auditCountAfter}`);
 
 const silenceRes = await client.callTool({
   name: "silence",
@@ -4207,15 +4260,21 @@ const httpCall = async (method, p, body) => {
   return { status: res.status, json, text };
 };
 const httpMeta = await httpCall("GET", "/mcp");
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 54, "GET /mcp reports name/version/transport and 54 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 55, "GET /mcp reports name/version/transport and 55 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 54 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 54 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 55 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 55 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
 checkOk(httpProbe.status === 200 && near(httpProbe.json?.duration_seconds, 10, 0.1) && httpProbe.json?.video?.width === 1280, "POST /mcp/tools/probe/invoke probes test/source.mp4 through HTTP: 10s, 1280 wide", JSON.stringify(httpProbe.json).slice(0, 200));
+// The HTTP transport records into the same audit log as stdio/CLI:
+// the probe above is already in the log by the time this reads it
+// (its record is fire-and-forget, but the probe's own encode-free
+// record lands in milliseconds; the assertion only needs entries).
+const httpAudit = await httpCall("POST", "/mcp/tools/audit/invoke", { arguments: { limit: 5 } });
+checkOk(httpAudit.status === 200 && httpAudit.json?.total >= 1 && Array.isArray(httpAudit.json?.entries) && httpAudit.json.entries.length > 0 && httpAudit.json.audit_path === auditPath, "POST /mcp/tools/audit/invoke reads the same audit log over HTTP", `total=${httpAudit.json?.total}`);
 const httpUnknown = await httpCall("POST", "/mcp/tools/nope/invoke", { arguments: {} });
 checkOk(httpUnknown.status === 404 && /unknown tool/.test(httpUnknown.json?.error ?? ""), "POST invoke of an unknown tool is a 404, not a 500", JSON.stringify(httpUnknown.json));
 const httpBadArgs = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: {} });
@@ -4229,7 +4288,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 54, "JSON-RPC tools/list returns the same 54 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 55, "JSON-RPC tools/list returns the same 55 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

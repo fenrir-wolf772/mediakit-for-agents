@@ -6,6 +6,7 @@
  *        mediakit mcp --http     same tools over HTTP (REST + JSON-RPC)
  */
 import * as core from "../src/core.js";
+import { queryAudit, recordToolCall } from "../src/audit.js";
 
 const VERSION = "0.1.0";
 
@@ -675,9 +676,21 @@ const COMMANDS = {
     args: [],
     options: [],
   },
+  audit: {
+    usage: "mediakit audit [--limit <n>] [--tool <name>] [--status ok|error] [--since <YYYY-MM-DD>] [--verify]",
+    desc: "Read the audit log: every tool call this workspace has recorded (newest first), with arguments hash, input/output files + SHA-256, duration and status. --verify re-hashes the recorded files on disk and reports matched/missing/changed per entry. The log lives at <workdir>/.mediakit-audit.jsonl (MEDIAKIT_AUDIT_PATH overrides, MEDIAKIT_AUDIT=0 disables recording).",
+    args: [],
+    options: [
+      ["--limit", "How many entries to return, newest first (default 20, max 200)"],
+      ["--tool", "Only entries for this tool name (e.g. trim, assemble)"],
+      ["--status", "Only entries with this status (ok | error)"],
+      ["--since", "Only entries at or after this date (YYYY-MM-DD or ISO timestamp)"],
+      ["--verify", "Re-hash every recorded file on disk and report matched/missing/changed"],
+    ],
+  },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 54 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 55 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -811,6 +824,15 @@ async function main() {
 
   const { positional, opts } = parseArgs(rest);
   if (opts.help) { printHelp(cmd); return; }
+  // Audit hook: every dispatched CLI tool call is recorded (tool,
+  // args hash + redacted copy, input/output files + SHA-256,
+  // duration, status) — the CLI side of the operation envelope.
+  // Usage errors that fail() inside the switch exit the process
+  // directly and are NOT recorded: only calls that actually ran are
+  // audited. `mcp` returns early below (the server records its own
+  // calls), and --help/--version never reach here.
+  const cliStartedAt = Date.now();
+  const cliArgs = { input: positional[0] ?? null, options: opts };
 
   const input = positional[0];
   const needInput = (label = "input") => {
@@ -1442,6 +1464,17 @@ async function main() {
       case "doctor":
         result = await core.doctor();
         break;
+      case "audit": {
+        if (opts.status !== undefined && opts.status !== "ok" && opts.status !== "error") fail(`--status must be "ok" or "error", got: ${opts.status}`);
+        result = await queryAudit({
+          limit: numOpt(opts, "limit") ?? 20,
+          tool: opts.tool ?? null,
+          status: opts.status ?? null,
+          since: opts.since ?? null,
+          verify: opts.verify === true,
+        });
+        break;
+      }
       case "mcp": {
         // Hand off to the MCP server process (same stdio), or with
         // --http to the HTTP transport (same tools, REST + JSON-RPC).
@@ -1475,9 +1508,21 @@ async function main() {
         fail(`unhandled command: ${cmd}`);
     }
   } catch (err) {
+    await recordToolCall({
+      tool: cmd, via: "cli", args: cliArgs, result: null,
+      status: "error", errorCode: err.code ?? "ERROR",
+      durationMs: Date.now() - cliStartedAt,
+    });
     if (err instanceof core.MediaKitError) fail(`${err.message} [${err.code}]`, 2);
     fail(err.message, 2);
   }
+  // The CLI is short-lived, so the record is awaited here (unlike
+  // the MCP transports, which fire-and-forget into a long-lived
+  // process) — otherwise the process could exit before the line lands.
+  await recordToolCall({
+    tool: cmd, via: "cli", args: cliArgs, result,
+    status: "ok", durationMs: Date.now() - cliStartedAt,
+  });
   console.log(JSON.stringify(result, null, 2));
 }
 

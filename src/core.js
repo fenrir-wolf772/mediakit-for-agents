@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { auditStatus } from "./audit.js";
 
 export const MEDIAKIT_VERSION = "0.1.0";
 
@@ -5835,6 +5836,9 @@ export async function doctor() {
   tools.transcribe = asr.available
     ? { available: true, engine: asr.engine, ...(asr.python ? { python: asr.python } : {}), ...(asr.binary ? { binary: asr.binary, model: asr.model } : {}) }
     : { available: false, engine: asr.engine, ...(asr.python ? { python: asr.python } : {}), fix: asr.fix };
+  // Audit log state: enabled/path/entries, so a caller can tell
+  // whether tool calls are being recorded before trusting `audit`.
+  const audit = await auditStatus();
   return {
     operation: "doctor",
     ffmpeg_version: ffmpegVersion,
@@ -5842,6 +5846,7 @@ export async function doctor() {
     node_version: process.version,
     platform: `${process.platform}-${process.arch}`,
     sandbox,
+    audit,
     gpu,
     filters,
     encoders,

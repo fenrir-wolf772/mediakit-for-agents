@@ -2,7 +2,7 @@
 /**
  * mediakit-for-agents — MCP over HTTP (REST + JSON-RPC).
  *
- * The same 54 tools as the stdio server (src/tools.js is the single
+ * The same 55 tools as the stdio server (src/tools.js is the single
  * source of truth), reachable with curl instead of an MCP client —
  * for hand-testing, for agents that can only speak HTTP, and for
  * debugging a tool call without launching a client:
@@ -42,6 +42,7 @@ import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { TOOL_DEFS } from "./tools.js";
 import { getJob, listJobs, cancelJob } from "./core.js";
+import { recordToolCall } from "./audit.js";
 
 const NAME = "mediakit-for-agents";
 const VERSION = "0.1.0";
@@ -84,11 +85,21 @@ export function listTools() {
 // carry `retry` so a caller can re-issue the identical call — the
 // same eyes-free law as the stdio server.
 export async function invokeTool(name, args) {
+  const startedAt = Date.now();
+  // Audit log, same as the stdio server: fire-and-forget, so hashing
+  // a big output never delays the HTTP reply. Failures are recorded
+  // too (unknown tool, bad arguments, tool error) — a failed call is
+  // still a call worth tracing.
+  const record = (body, status, errorCode) => recordToolCall({
+    tool: name, via: "mcp-http", args: args ?? {}, result: body,
+    status, errorCode, durationMs: Date.now() - startedAt,
+  });
   const tool = TOOL_DEFS.find((t) => t.name === name);
   if (!tool) {
     const err = new Error(`unknown tool: ${name}`);
     err.code = "TOOL_NOT_FOUND";
     err.status = 404;
+    record(null, "error", "TOOL_NOT_FOUND");
     throw err;
   }
   const parsed = z.object(tool.schema).safeParse(args ?? {});
@@ -98,6 +109,7 @@ export async function invokeTool(name, args) {
     err.code = "INVALID_ARG";
     err.status = 400;
     err.retry = { tool: name, arguments: args ?? {} };
+    record(null, "error", "INVALID_ARG");
     throw err;
   }
   const res = await tool.handler(parsed.data);
@@ -107,8 +119,10 @@ export async function invokeTool(name, args) {
     err.code = body.code ?? "ERROR";
     err.status = STATUS_BY_CODE[err.code] ?? 500;
     err.retry = { tool: name, arguments: parsed.data };
+    record(body, "error", err.code);
     throw err;
   }
+  record(body, "ok", null);
   return body;
 }
 

@@ -964,7 +964,7 @@ cap, no timeout, no verify) — MediaKit's `download` exists so the
 agent never has to.
 
 ### 52. Test a tool over HTTP before wiring up an MCP client — same tools, curl instead of stdio
-`mediakit mcp --http [--port 3000]` serves the same 54 tools over
+`mediakit mcp --http [--port 3000]` serves the same 55 tools over
 HTTP on `127.0.0.1`: `GET /mcp` (metadata), `GET /mcp/tools`
 (every tool + JSON input schema), `POST /mcp/tools/{name}/invoke`
 (`{"arguments": {...}}`), and `POST /` for JSON-RPC 2.0
@@ -977,6 +977,21 @@ unknown tool, `500` failed run) and the same `retry:
 {tool, arguments}` the stdio server attaches, so a failed curl can
 be re-issued verbatim. Never bind `--host 0.0.0.0` on an untrusted
 network: there is no auth, and the tools read/write workspace files.
+
+### 53. When a render is disputed, read the audit log — don't re-argue it
+Every tool call on every transport is recorded in
+`<workdir>/.mediakit-audit.jsonl` (one JSONL line per call: tool,
+arguments hash, input/output files with size + SHA-256, duration,
+status). `mediakit audit --tool <name> --status ok --verify` re-hashes
+the recorded files on disk and reports matched/missing/changed per
+entry — a log line is a claim, the disk is the evidence, so a
+tampered output shows up as `verified: false` instead of being
+trusted. Use it to answer "did this file really come from that
+call?" after a render, and to find which call produced a file you
+didn't expect. URL query strings are stripped from recorded
+arguments (a download URL can carry a token); `MEDIAKIT_AUDIT=0`
+disables recording; `doctor` reports whether the log is enabled and
+how many entries it holds.
 
 ## Workflow: vertical captioned clip from a landscape source
 

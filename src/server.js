@@ -10,6 +10,7 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as core from "./core.js";
 import { TOOL_DEFS } from "./tools.js";
+import { recordToolCall } from "./audit.js";
 
 const server = new McpServer({
   name: "mediakit-for-agents",
@@ -25,7 +26,20 @@ const server = new McpServer({
 // arguments the call carried (zod defaults already applied).
 const registerTool = server.tool.bind(server);
 server.tool = (name, description, schema, handler) => registerTool(name, description, schema, async (a) => {
+  const startedAt = Date.now();
   const res = await handler(a);
+  // Audit log (one JSONL line per call, files hashed): fire-and-
+  // forget — hashing a big output must never delay the MCP reply,
+  // and the server process stays alive long enough for the write
+  // to land. recordToolCall never throws.
+  let resultObj = null;
+  try { resultObj = JSON.parse(res.content?.[0]?.text ?? ""); } catch { /* not JSON — record without a result */ }
+  recordToolCall({
+    tool: name, via: "mcp-stdio", args: a, result: resultObj,
+    status: res?.isError ? "error" : "ok",
+    errorCode: res?.isError ? (resultObj?.code ?? "ERROR") : null,
+    durationMs: Date.now() - startedAt,
+  });
   if (res && res.isError) {
     try {
       const body = JSON.parse(res.content?.[0]?.text ?? "");

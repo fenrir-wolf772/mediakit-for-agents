@@ -2,6 +2,7 @@ node_modules/
 outputs/
 .mediakit-assemble-cache/
 .mediakit-jobs/
+.mediakit-audit.jsonl
 *.assemble-approval.json
 test/media/
 *.log
