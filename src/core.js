@@ -6859,9 +6859,16 @@ export async function detectScenes({ input, threshold = 0.3 }) {
 // 1 (tblend needs a pair), so frames_analyzed = total frames - 1.
 // Metadata prints only at info level: never add -v error here (same
 // trap as the loudnorm/astats parsers).
-export async function measureMotion({ input, threshold = 0.001, minStillSeconds = 2, windowSeconds = 1 }) {
+// --adaptive calibrates the threshold to the clip (see the pass-2
+// block below): light grain on a static shot (measured 0.00074-
+// 0.00126) reads still instead of flickering across the fixed 0.001,
+// while a bouncing ball (slowest second 0.00695) still reads moving.
+export async function measureMotion({ input, threshold = 0.001, minStillSeconds = 2, windowSeconds = 1, adaptive = false, adaptiveFactor = 2, adaptiveCap = 0.005 }) {
   const inPath = await requireInput(input);
   const t = num(threshold, "threshold", { min: 0, max: 0.5 });
+  const adapt = adaptive === true;
+  const factor = adapt ? num(adaptiveFactor, "adaptive_factor", { min: 1, max: 10 }) : 2;
+  const cap = adapt ? num(adaptiveCap, "adaptive_cap", { min: 0.0005, max: 0.05 }) : 0.005;
   const minStill = num(minStillSeconds, "min_still_seconds", { min: 0.5, max: 60 });
   const win = num(windowSeconds, "window_seconds", { min: 0.25, max: 5 });
   const meta = await probe(inPath);
@@ -6895,6 +6902,39 @@ export async function measureMotion({ input, threshold = 0.001, minStillSeconds 
     motion_fraction: +(b.sum / b.count).toFixed(5),
     frames: b.count,
   }));
+  // Adaptive threshold (PySceneDetect's AdaptiveDetector idea, ported
+  // to a still detector): pass 2 calibrates the threshold to this
+  // clip's own quiet quarter. floor = 25th percentile of the curve,
+  // threshold = min(max(fixed, floor * factor), max(cap, fixed)).
+  // The cap sits in the measured gap between light grain (max 0.0013)
+  // and the slowest real motion (a bouncing ball's slowest second,
+  // 0.00695), so steady motion can never be thresholded away. What
+  // did NOT transfer from AdaptiveDetector: its adaptive_ratio
+  // (score / rolling local average) — that detects *cuts*, and a
+  // smoothly moving ball scores ratio ~1.0 against its neighbours, so
+  // using it for the verdict would call a bounce "still". Heavy grain
+  // (measured 0.53 changed-fraction) still reads as moving in both
+  // modes — at that level no threshold can separate grain from real
+  // motion by magnitude alone. The fixed threshold stays as the
+  // absolute floor (AdaptiveDetector's min_content_val idea).
+  let thresholdMode = "fixed";
+  let effectiveThreshold = t;
+  let adaptiveInfo = null;
+  if (adapt && motionCurve.length) {
+    const sorted = motionCurve.map((w) => w.motion_fraction).sort((a, b) => a - b);
+    const floorP25 = sorted[Math.floor(0.25 * (sorted.length - 1))];
+    const raw = floorP25 * factor;
+    const effCap = Math.max(cap, t);
+    effectiveThreshold = Math.min(Math.max(t, raw), effCap);
+    thresholdMode = "adaptive";
+    adaptiveInfo = {
+      floor_p25: +floorP25.toFixed(5),
+      factor,
+      cap: +effCap.toFixed(5),
+      raw_threshold: +raw.toFixed(5),
+      capped: raw > effCap,
+    };
+  }
   const stillIntervals = [];
   let runStart = null;
   let runEnd = null;
@@ -6910,7 +6950,7 @@ export async function measureMotion({ input, threshold = 0.001, minStillSeconds 
     runEnd = null;
   };
   for (const w of motionCurve) {
-    if (w.motion_fraction < t) {
+    if (w.motion_fraction < effectiveThreshold) {
       if (runStart === null) runStart = w.start_seconds;
       runEnd = w.end_seconds;
     } else {
@@ -6944,7 +6984,9 @@ export async function measureMotion({ input, threshold = 0.001, minStillSeconds 
   return {
     operation: "motion",
     input: inPath,
-    threshold: t,
+    threshold: +effectiveThreshold.toFixed(5),
+    threshold_mode: thresholdMode,
+    adaptive: adaptiveInfo,
     min_still_seconds: minStill,
     window_seconds: win,
     duration_seconds: duration,

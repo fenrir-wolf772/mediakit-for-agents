@@ -1364,6 +1364,9 @@ async function main() {
           threshold: numOpt(opts, "threshold") ?? 0.001,
           minStillSeconds: numOpt(opts, "min_still_seconds") ?? 2,
           windowSeconds: numOpt(opts, "window") ?? 1,
+          adaptive: opts.adaptive === true,
+          adaptiveFactor: numOpt(opts, "adaptive_factor") ?? 2,
+          adaptiveCap: numOpt(opts, "adaptive_cap") ?? 0.005,
         });
         break;
       case "mux": {

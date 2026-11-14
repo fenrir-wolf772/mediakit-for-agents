@@ -143,6 +143,7 @@ jobs:
           ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-batch-slideshow/slideshow.mp4 | grep '^6'
           node bin/mediakit.js motion test/content-freeze.mp4 | grep '"verdict": "mostly-static"'
           node bin/mediakit.js motion test/static-clip.mp4 | grep '"verdict": "static"'
+          node bin/mediakit.js motion test/motion-noise-light.mp4 --adaptive | grep '"verdict": "static"'
           node bin/mediakit.js download https://raw.githubusercontent.com/fenrir-wolf772/mediakit-for-agents/main/test/source.mp4 -o outputs/ci-download.mp4 | grep '"size_bytes": 243932'
           node bin/mediakit.js download ftp://example.com/clip.mp4 -o outputs/ci-download-ftp.mp4 2>&1 | grep -q 'http(s) URL'
           node bin/mediakit.js mcp --http --port 3101 > outputs/ci-http.log 2>&1 &

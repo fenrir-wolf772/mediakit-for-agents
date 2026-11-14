@@ -1258,6 +1258,70 @@ checkOk(motionHighThJson.verdict === "static" && motionHighThJson.still_interval
 const motionAudioOnly = await callExpectThrow("motion", { input: path.join(root, "test/mix-voice.mp3") });
 checkOk(/needs a video input/.test(motionAudioOnly), "motion refuses audio-only input", motionAudioOnly.slice(0, 120));
 
+// motion --adaptive: two-pass calibration to the clip's own quiet
+// quarter (floor = p25 of the curve, threshold = min(max(fixed,
+// floor * factor), max(cap, fixed))). Light grain on a static shot
+// straddles the fixed 0.001 (fixed: mostly-static, still only
+// [3,6]); adaptive lifts the threshold to 0.00164 and the whole
+// 6s reads still. Steady motion must survive the calibration: the
+// ball, the bounce template and testsrc all stay moving at the
+// 0.005 cap, and a frozen stretch keeps its still interval.
+const motionAdaptNoiseRes = await client.callTool({
+  name: "motion",
+  arguments: { input: path.join(root, "test/motion-noise-light.mp4"), adaptive: true },
+});
+const motionAdaptNoiseJson = JSON.parse(motionAdaptNoiseRes.content[0].text);
+console.log("motion adaptive noise-light:", motionAdaptNoiseJson.verdict, "| thr", motionAdaptNoiseJson.threshold, "| adapt", JSON.stringify(motionAdaptNoiseJson.adaptive), "| still", JSON.stringify(motionAdaptNoiseJson.still_intervals));
+checkOk(motionAdaptNoiseJson.verdict === "static" && motionAdaptNoiseJson.threshold_mode === "adaptive" && near(motionAdaptNoiseJson.threshold, 0.00164, 0.0002) && near(motionAdaptNoiseJson.adaptive.floor_p25, 0.00082, 0.0001) && motionAdaptNoiseJson.adaptive.factor === 2 && motionAdaptNoiseJson.adaptive.capped === false && motionAdaptNoiseJson.still_intervals.length === 1 && motionAdaptNoiseJson.still_intervals[0].duration_seconds === 6, "motion adaptive: grainy static reads static (threshold 0.00164 from p25 0.00082 x2, still [0,6])", JSON.stringify(motionAdaptNoiseJson.still_intervals));
+const motionFixedNoiseRes = await client.callTool({
+  name: "motion",
+  arguments: { input: path.join(root, "test/motion-noise-light.mp4") },
+});
+const motionFixedNoiseJson = JSON.parse(motionFixedNoiseRes.content[0].text);
+checkOk(motionFixedNoiseJson.verdict === "mostly-static" && motionFixedNoiseJson.threshold_mode === "fixed" && motionFixedNoiseJson.adaptive === null && motionFixedNoiseJson.still_intervals.length === 1 && motionFixedNoiseJson.still_intervals[0].start_seconds === 3, "motion fixed: same grainy static flickers to mostly-static (still only [3,6]) — adaptive changes the answer", JSON.stringify(motionFixedNoiseJson.still_intervals));
+const motionAdaptBallRes = await client.callTool({
+  name: "motion",
+  arguments: { input: path.join(root, "test/motion-ball.mp4"), adaptive: true },
+});
+const motionAdaptBallJson = JSON.parse(motionAdaptBallRes.content[0].text);
+console.log("motion adaptive ball:", motionAdaptBallJson.verdict, "| thr", motionAdaptBallJson.threshold, "| adapt", JSON.stringify(motionAdaptBallJson.adaptive));
+checkOk(motionAdaptBallJson.verdict === "moving" && motionAdaptBallJson.threshold === 0.005 && motionAdaptBallJson.adaptive.capped === true && near(motionAdaptBallJson.adaptive.raw_threshold, 0.0253, 0.001) && motionAdaptBallJson.still_intervals.length === 0, "motion adaptive: smooth ball stays moving (raw 0.0253 capped to 0.005)", `verdict=${motionAdaptBallJson.verdict} thr=${motionAdaptBallJson.threshold}`);
+const motionAdaptBounceRes = await client.callTool({
+  name: "motion",
+  arguments: { input: path.join(root, "test/motion-bounce.mp4"), adaptive: true },
+});
+const motionAdaptBounceJson = JSON.parse(motionAdaptBounceRes.content[0].text);
+console.log("motion adaptive bounce:", motionAdaptBounceJson.verdict, "| thr", motionAdaptBounceJson.threshold, "| adapt", JSON.stringify(motionAdaptBounceJson.adaptive), "| curve", motionAdaptBounceJson.motion_curve.map((w) => w.motion_fraction).join(","));
+checkOk(motionAdaptBounceJson.verdict === "moving" && motionAdaptBounceJson.threshold === 0.005 && motionAdaptBounceJson.adaptive.capped === true && near(motionAdaptBounceJson.adaptive.raw_threshold, 0.0228, 0.001) && motionAdaptBounceJson.still_intervals.length === 0, "motion adaptive: bounce template stays moving (cap 0.005 under its slowest second 0.011)", `verdict=${motionAdaptBounceJson.verdict} thr=${motionAdaptBounceJson.threshold}`);
+const motionAdaptSrcRes = await client.callTool({
+  name: "motion",
+  arguments: { input: path.join(root, "test/source.mp4"), adaptive: true },
+});
+const motionAdaptSrcJson = JSON.parse(motionAdaptSrcRes.content[0].text);
+checkOk(motionAdaptSrcJson.verdict === "moving" && motionAdaptSrcJson.threshold === 0.005 && motionAdaptSrcJson.adaptive.capped === true && motionAdaptSrcJson.still_intervals.length === 0, "motion adaptive: testsrc stays moving (threshold capped at 0.005)", `verdict=${motionAdaptSrcJson.verdict}`);
+const motionAdaptFreezeRes = await client.callTool({
+  name: "motion",
+  arguments: { input: path.join(root, "test/content-freeze.mp4"), adaptive: true },
+});
+const motionAdaptFreezeJson = JSON.parse(motionAdaptFreezeRes.content[0].text);
+checkOk(motionAdaptFreezeJson.verdict === "mostly-static" && motionAdaptFreezeJson.still_intervals.length === 1 && motionAdaptFreezeJson.still_intervals[0].start_seconds === 5 && motionAdaptFreezeJson.still_intervals[0].end_seconds === 7, "motion adaptive: frozen stretch [5,7] survives calibration", JSON.stringify(motionAdaptFreezeJson.still_intervals));
+const motionAdaptStaticRes = await client.callTool({
+  name: "motion",
+  arguments: { input: path.join(root, "test/static-clip.mp4"), adaptive: true },
+});
+const motionAdaptStaticJson = JSON.parse(motionAdaptStaticRes.content[0].text);
+checkOk(motionAdaptStaticJson.verdict === "static" && motionAdaptStaticJson.threshold === 0.001 && motionAdaptStaticJson.adaptive.capped === false && motionAdaptStaticJson.still_intervals[0].duration_seconds === 3, "motion adaptive: clean static keeps threshold 0.001 (floor 0)", `thr=${motionAdaptStaticJson.threshold}`);
+const motionAdaptFactorRes = await client.callTool({
+  name: "motion",
+  arguments: { input: path.join(root, "test/motion-noise-light.mp4"), adaptive: true, adaptive_factor: 3 },
+});
+const motionAdaptFactorJson = JSON.parse(motionAdaptFactorRes.content[0].text);
+checkOk(motionAdaptFactorJson.verdict === "static" && near(motionAdaptFactorJson.threshold, 0.00246, 0.0002), "motion adaptive: factor 3 lifts the grainy-static threshold to 0.00246", `thr=${motionAdaptFactorJson.threshold}`);
+const motionAdaptBadFactor = await callExpectThrow("motion", { input: path.join(root, "test/motion-noise-light.mp4"), adaptive: true, adaptive_factor: 0 });
+checkOk(/greater than or equal to 1/.test(motionAdaptBadFactor), "motion adaptive refuses factor 0 (zod schema; CLI refuses with the core message)", motionAdaptBadFactor.slice(0, 120));
+const motionAdaptBadCap = await callExpectThrow("motion", { input: path.join(root, "test/motion-noise-light.mp4"), adaptive: true, adaptive_cap: 0 });
+checkOk(/greater than or equal to 0\.0005/.test(motionAdaptBadCap), "motion adaptive refuses cap 0 (zod schema; CLI refuses with the core message)", motionAdaptBadCap.slice(0, 120));
+
 const keyframesRes = await client.callTool({
   name: "keyframes",
   arguments: { input: path.join(root, "test/source.mp4") },

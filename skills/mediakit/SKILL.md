@@ -1019,6 +1019,19 @@ at the shot level, before the render. A transition spike in one
 window is not motion — look at the curve, not a single number. Do
 not use raw lavfi scene_score for this: testsrc scores 0.0006 while
 a bounce scores 0.0005, indistinguishable on that scale.
+If the footage is grainy, the fixed threshold flickers: light grain
+on a static shot measures 0.0007–0.0013, straddling 0.001, so the
+same shot reads `mostly-static` with a broken still interval. Pass
+`--adaptive`: the threshold is calibrated to the clip's own quiet
+quarter (25th percentile of the curve × 2.0, capped at 0.005), so
+the grainy still reads `static` with one still interval while a
+bouncing ball (slowest second 0.007) still reads `moving`. The cap
+is the guard: steady motion above 0.005 can never be thresholded
+away. Heavy grain (0.5 changed-fraction) still reads as moving in
+both modes — no magnitude threshold can separate it from real
+motion. Do not port PySceneDetect's adaptive *ratio* (score over a
+rolling local average) to this verdict: it detects cuts, and a
+smoothly moving ball scores ratio ~1.0 against its neighbours.
 
 ## Workflow: vertical captioned clip from a landscape source
 
