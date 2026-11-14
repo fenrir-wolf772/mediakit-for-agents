@@ -110,7 +110,7 @@ what you see is the record, not a guess at it.
 | Tool | What it does | CLI |
 |---|---|---|
 | `probe` | Duration, dimensions, codecs, streams (ffprobe) | `mediakit probe in.mp4` |
-| `trim` | Cut a clip by start + duration/end (times accept seconds or `MM:SS`) | `mediakit trim in.mp4 --start 2 --duration 5 -o out.mp4` |
+| `trim` | Cut a clip by start + duration/end (times accept seconds or `MM:SS`); re-encodes by default (frame-accurate), `--stream-copy` is fast but keyframe-only — `--snap` moves the cut onto keyframes, `--smart-cut` keeps the exact start by re-encoding only the head up to the next keyframe (source bitrate ×1.2) | `mediakit trim in.mp4 --start 2 --duration 5 -o out.mp4` |
 | `fit` | Fit a file to an exact target duration: `speed` (up/down, factor 0.25–4x), `trim` (cut longer), `loop` (repeat shorter) — reports the duration actually measured. `--max-fps` caps the output frame rate (only ever lowers it) | `mediakit fit in.mp4 --duration 0:30 -o out.mp4` |
 | `crop` | Crop to a rectangle (w, h, x, y) | `mediakit crop in.mp4 --width 720 --height 1280 -o out.mp4` |
 | `resize` | Resize, keeping aspect ratio by default; `--preset 360p|480p|720p|1080p|2160p` fits the frame inside that box and never upscales | `mediakit resize in.mp4 --preset 720p -o out.mp4` |
@@ -302,7 +302,13 @@ scores ~0.4, so keep the threshold at or below 0.4. `keyframes` is
 probe-only: it lists every I-frame timestamp plus the GOP interval, so
 you know where a lossless cut can land — `trim --stream-copy --snap`
 snaps the requested start down and end up to the nearest keyframes and
-reports both the requested and the actual range. `check --content`
+reports both the requested and the actual range. `trim --stream-copy
+--smart-cut` keeps the exact start instead: it re-encodes only the head
+up to the next keyframe (source bitrate ×1.2, like LosslessCut) and
+stream-copies the rest — a start on a keyframe copies with no
+re-encode at all, and a request wholly inside one GOP re-encodes the
+whole clip. The tail end is capped by exact frame count, so the
+duration lands within ~0.03s (the rest is AAC frame granularity). `check --content`
 adds one decode pass that scans for black frames, frozen frames,
 silence and audio peaks and folds them into the same pass/fail list — a short black
 stretch at the very start/end is a warning (likely a fade in/out), the

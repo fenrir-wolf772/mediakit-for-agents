@@ -477,7 +477,137 @@ export async function workspaceMetadata(relPath) {
 
 // ---------------------------------------------------------------- trim
 
-export async function trim({ input, output, start = 0, duration = null, end = null, streamCopy = false, snapToKeyframe = false }) {
+// ---------------------------------------------------------------- trim
+// Smart cut (idea: mifi/lossless-cut's smartcut.ts — re-encode only
+// the GOP between the desired cut and the next keyframe, stream-copy
+// the rest). A plain stream-copy trim whose start is NOT on a
+// keyframe silently slides the cut to the previous keyframe; smart
+// cut re-encodes just the head [start, nextKeyframe) at the source
+// bitrate x1.2 (LosslessCut's margin for the re-encode loss, with a
+// size/duration estimate when the stream bitrate is unknown, and
+// CRF 18 when even that is unavailable), then stream-copies the
+// tail and joins both parts with the concat demuxer. The result
+// starts exactly where asked, and only a fraction of a second is
+// ever re-encoded. Supported video codecs map to their ffmpeg
+// encoder; anything else is refused with the codec named.
+const SMART_CUT_VIDEO_ENCODERS = {
+  h264: "libx264", hevc: "libx265", h265: "libx265",
+  vp9: "libvpx-vp9", av1: "libsvtav1", mpeg4: "mpeg4",
+};
+const SMART_CUT_AUDIO_ENCODERS = {
+  aac: "aac", mp3: "libmp3lame", opus: "libopus",
+  vorbis: "libvorbis", flac: "flac", pcm_s16le: "pcm_s16le", ac3: "ac3",
+};
+
+async function smartCutTrim({ inPath, outPath, s, dur }) {
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("smart_cut needs a video input (audio-only files cut exactly with a plain re-encode trim)", "INVALID_ARG");
+  const reqEnd = s + dur;
+  const kf = await listKeyframes({ input: inPath });
+  const kfs = kf.keyframe_timestamps;
+  if (!kfs.length) throw new MediaKitError("smart_cut found no keyframes in the input", "PROBE_FAILED");
+  // Exact keyframe: no re-encode at all, plain stream copy.
+  const exact = kfs.find((t) => Math.abs(t - s) < 0.001);
+  if (exact !== undefined) {
+    await run(FFMPEG, ["-y", "-ss", String(s), "-i", inPath, "-t", String(dur), "-c", "copy", outPath]);
+    const info = await fileInfo(outPath);
+    const out = await probe(outPath);
+    return {
+      operation: "trim", input: inPath, output: outPath,
+      start: s, duration_seconds: dur, stream_copy: true,
+      smart_cut: true, mode: "keyframe-exact", next_keyframe: exact, head_reencoded_seconds: 0,
+      ...info, duration_actual: out.duration_seconds,
+      duration_error_seconds: +(out.duration_seconds - dur).toFixed(3),
+    };
+  }
+  const nextKf = kfs.find((t) => t > s + 0.001) ?? null;
+  const headDur = nextKf === null ? dur : +(nextKf - s).toFixed(3);
+  const vEnc = SMART_CUT_VIDEO_ENCODERS[meta.video.codec];
+  if (!vEnc) throw new MediaKitError(`smart_cut does not support video codec ${meta.video.codec} (supported: ${Object.keys(SMART_CUT_VIDEO_ENCODERS).join(", ")}) — use a plain re-encode trim instead`, "INVALID_ARG");
+  // Whole request inside one GOP (or no keyframe after the start):
+  // nothing to copy, re-encode the whole clip like a normal trim.
+  if (nextKf === null || nextKf >= reqEnd - 0.001) {
+    const aEnc = meta.audio ? (SMART_CUT_AUDIO_ENCODERS[meta.audio.codec] ?? null) : null;
+    const args = ["-y", "-i", inPath, "-ss", String(s), "-t", String(dur)];
+    args.push("-map", "0:v:0", "-c:v", vEnc, "-preset", "veryfast");
+    args.push("-pix_fmt", meta.video.pixel_format ?? "yuv420p");
+    if (meta.audio) {
+      args.push("-map", "0:a:0");
+      if (aEnc) args.push("-c:a", aEnc, ...audioBitrateArgs(aEnc));
+      else args.push("-c:a", "copy");
+    }
+    args.push("-fps_mode", "passthrough", outPath);
+    await run(FFMPEG, args);
+    const info = await fileInfo(outPath);
+    const out = await probe(outPath);
+    return {
+      operation: "trim", input: inPath, output: outPath,
+      start: s, duration_seconds: dur, stream_copy: false,
+      smart_cut: true, mode: "full-reencode",
+      next_keyframe: nextKf, head_reencoded_seconds: dur,
+      reason: nextKf === null ? "no keyframe after the requested start" : "the next keyframe is past the requested end, so the whole clip is inside one GOP",
+      ...info, duration_actual: out.duration_seconds,
+      duration_error_seconds: +(out.duration_seconds - dur).toFixed(3),
+    };
+  }
+  // Head bitrate: stream bitrate x1.2; fall back to size/duration.
+  let headBitrate = meta.video.bit_rate ? Math.floor(meta.video.bit_rate * 1.2) : null;
+  if (headBitrate === null && meta.size_bytes && meta.duration_seconds) {
+    headBitrate = Math.floor((meta.size_bytes * 8 / meta.duration_seconds) * 1.2);
+  }
+  const tailStart = nextKf;
+  const tailDur = +(reqEnd - nextKf).toFixed(3);
+  const ext = path.extname(outPath).slice(1).toLowerCase() || "mp4";
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-smartcut-"));
+  const headPath = path.join(tmpDir, `head.${ext}`);
+  const tailPath = path.join(tmpDir, `tail.${ext}`);
+  const listPath = path.join(tmpDir, "list.txt");
+  try {
+    const aEnc = meta.audio ? (SMART_CUT_AUDIO_ENCODERS[meta.audio.codec] ?? null) : null;
+    const headArgs = ["-y", "-ss", String(s), "-i", inPath, "-t", String(headDur)];
+    headArgs.push("-map", "0:v:0", "-c:v", vEnc, "-preset", "veryfast");
+    if (headBitrate) headArgs.push("-b:v", String(headBitrate));
+    else headArgs.push("-crf", "18");
+    headArgs.push("-pix_fmt", meta.video.pixel_format ?? "yuv420p");
+    if (meta.audio) {
+      headArgs.push("-map", "0:a:0");
+      if (aEnc) headArgs.push("-c:a", aEnc, ...audioBitrateArgs(aEnc));
+      else headArgs.push("-c:a", "copy");
+    }
+    headArgs.push("-fps_mode", "passthrough", headPath);
+    await run(FFMPEG, headArgs);
+    // Tail end cut: plain `-t` on a stream copy overshoots by up to
+    // a few frames on B-frame sources (measured 2026-11-15: -t 3.5
+    // gave 107 frames / 3.567s) because the stop check runs on DTS
+    // while frames are stamped by PTS. The frame count is exact, so
+    // cap it directly when the fps is known — measured: exactly 105
+    // frames / 3.501s. The remaining +0.02s is AAC frame granularity.
+    const tailArgs = ["-y", "-ss", String(tailStart), "-i", inPath, "-t", String(tailDur)];
+    if (meta.video.fps) tailArgs.push("-frames:v", String(Math.max(1, Math.round(tailDur * meta.video.fps))));
+    tailArgs.push("-c", "copy", tailPath);
+    await run(FFMPEG, tailArgs);
+    await writeFile(listPath, `file '${headPath}'\nfile '${tailPath}'\n`, "utf8");
+    const joinArgs = ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy"];
+    if (["mp4", "mov", "m4v"].includes(ext)) joinArgs.push("-movflags", "+faststart");
+    joinArgs.push(outPath);
+    await run(FFMPEG, joinArgs);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  return {
+    operation: "trim", input: inPath, output: outPath,
+    start: s, duration_seconds: dur, stream_copy: true,
+    smart_cut: true, mode: "smart-cut", next_keyframe: nextKf,
+    head_reencoded_seconds: headDur,
+    head_bitrate_bps: headBitrate,
+    ...info, duration_actual: out.duration_seconds,
+    duration_error_seconds: +(out.duration_seconds - dur).toFixed(3),
+  };
+}
+
+export async function trim({ input, output, start = 0, duration = null, end = null, streamCopy = false, snapToKeyframe = false, smartCut = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const s = parseTime(start, "start");
@@ -491,6 +621,17 @@ export async function trim({ input, output, start = 0, duration = null, end = nu
     dur = e - s;
   }
   if (dur === null) throw new MediaKitError("trim needs duration or end", "INVALID_ARG");
+
+  // smart_cut is a stream-copy cut with an exact start: it re-encodes
+  // only the head up to the next keyframe. snap_to_keyframe would
+  // move the cut instead of landing it exactly, so the two refuse
+  // each other; and without stream_copy there is nothing to be
+  // smart about (a plain re-encode trim is already frame-accurate).
+  if (smartCut) {
+    if (!streamCopy) throw new MediaKitError("smart_cut needs stream_copy (it is a stream-copy cut with an exact start)", "INVALID_ARG");
+    if (snapToKeyframe) throw new MediaKitError("smart_cut and snap_to_keyframe cannot be combined (smart_cut already lands the start exactly)", "INVALID_ARG");
+    return smartCutTrim({ inPath, outPath, s, dur });
+  }
 
   // snapToKeyframe only makes sense for stream copy: re-encode cuts are
   // already frame-accurate, and snapping them would only widen the clip.
@@ -7004,8 +7145,8 @@ export const BATCH_OPERATIONS = {
     run: (input, output, a) => fitDuration({ input, output, duration: a.duration, method: a.method ?? "speed", maxFps: a.max_fps ?? null }),
   },
   trim: {
-    args: ["start", "end", "duration", "stream_copy", "snap_to_keyframe"],
-    run: (input, output, a) => trim({ input, output, start: a.start ?? 0, duration: a.duration ?? null, end: a.end ?? null, streamCopy: a.stream_copy ?? false, snapToKeyframe: a.snap_to_keyframe ?? false }),
+    args: ["start", "end", "duration", "stream_copy", "snap_to_keyframe", "smart_cut"],
+    run: (input, output, a) => trim({ input, output, start: a.start ?? 0, duration: a.duration ?? null, end: a.end ?? null, streamCopy: a.stream_copy ?? false, snapToKeyframe: a.snap_to_keyframe ?? false, smartCut: a.smart_cut ?? false }),
   },
   silence: {
     args: ["threshold_db", "min_duration", "margin"],

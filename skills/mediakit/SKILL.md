@@ -241,7 +241,16 @@ down and the end up to the nearest keyframes; the result reports the
 requested range and the actual range — read both, don't assume. If the
 snapped range is wider than you can accept, re-encode instead
 (`trim` without `--stream-copy` is frame-accurate). `--snap` without
-`--stream-copy` is refused: there is nothing to snap.
+`--stream-copy` is refused: there is nothing to snap. `--smart-cut`
+is the third option (with `--stream-copy` only, refuses `--snap`):
+it keeps the exact start by re-encoding just the head up to the next
+keyframe at source bitrate ×1.2 and stream-copying the rest — the
+result reports `mode` (`smart-cut` / `keyframe-exact` /
+`full-reencode`), `next_keyframe` and `head_reencoded_seconds`.
+Verify it by frame count (exactly round(duration×fps)) and by pixel:
+the head frame must match the source at the same content time
+(PSNR > 30 dB), the tail frame must be bit-identical. Supported video
+codecs: h264, hevc, vp9, av1, mpeg4 — anything else is refused by name.
 
 ### 16. Fit the duration before you publish — and read the measured one
 A clip that must be exactly N seconds (a 30s ad slot, a 60s Short) gets

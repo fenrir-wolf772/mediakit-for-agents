@@ -41,7 +41,7 @@ export const TOOL_DEFS = [
 
   {
     name: "trim",
-    description: "Cut a clip out of a media file. Give start (seconds) plus duration OR end. Re-encodes by default for frame-accurate cuts; set stream_copy=true for fast lossless cuts (keyframe boundaries only). With stream_copy, set snap_to_keyframe=true to move start down / end up to the nearest keyframes so the cut lands exactly (see the keyframes tool first).",
+    description: "Cut a clip out of a media file. Give start (seconds) plus duration OR end. Re-encodes by default for frame-accurate cuts; set stream_copy=true for fast lossless cuts (keyframe boundaries only). With stream_copy, set snap_to_keyframe=true to move start down / end up to the nearest keyframes so the cut lands exactly (see the keyframes tool first), or smart_cut=true to keep the exact start instead: only the head up to the next keyframe is re-encoded (source bitrate x1.2), the rest is stream-copied — exact start, near-lossless speed.",
     schema: {
     input: pathSchema,
     output: pathSchema.describe("Output file path"),
@@ -50,6 +50,7 @@ export const TOOL_DEFS = [
     end: z.number().positive().optional().describe("End time in seconds (alternative to duration)"),
     stream_copy: z.boolean().default(false).describe("Copy streams without re-encoding (fast, keyframe-accurate only)"),
     snap_to_keyframe: z.boolean().default(false).describe("With stream_copy only: snap start/end to the nearest keyframes (start down, end up)"),
+    smart_cut: z.boolean().default(false).describe("With stream_copy only: exact start by re-encoding only the head up to the next keyframe (source bitrate x1.2); refuses snap_to_keyframe"),
   },
     handler: async (a) => safe(() => core.trim({
     input: a.input,
@@ -59,6 +60,7 @@ export const TOOL_DEFS = [
     end: a.end ?? null,
     streamCopy: a.stream_copy,
     snapToKeyframe: a.snap_to_keyframe,
+    smartCut: a.smart_cut,
   })),
   },
 

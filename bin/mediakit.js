@@ -18,8 +18,8 @@ const COMMANDS = {
     options: [],
   },
   trim: {
-    usage: "mediakit trim <input> --start <s|MM:SS> (--duration <s|MM:SS> | --end <s|MM:SS>) -o <output> [--stream-copy] [--snap]",
-    desc: "Cut a clip. Re-encodes by default (frame-accurate); --stream-copy is fast but keyframe-only. --snap (with --stream-copy) moves start/end onto the nearest keyframes. Times accept seconds or MM:SS.",
+    usage: "mediakit trim <input> --start <s|MM:SS> (--duration <s|MM:SS> | --end <s|MM:SS>) -o <output> [--stream-copy] [--snap] [--smart-cut]",
+    desc: "Cut a clip. Re-encodes by default (frame-accurate); --stream-copy is fast but keyframe-only. --snap (with --stream-copy) moves start/end onto the nearest keyframes. --smart-cut (with --stream-copy) keeps the exact start: only the head up to the next keyframe is re-encoded, the rest is copied. Times accept seconds or MM:SS.",
     args: [{ name: "input", required: true }],
     options: [
       ["--start", "Start time in seconds or MM:SS (default 0)"],
@@ -27,6 +27,7 @@ const COMMANDS = {
       ["--end", "End time in seconds or MM:SS (alternative to --duration)"],
       ["--stream-copy", "Copy streams without re-encoding"],
       ["--snap", "Snap start/end to the nearest keyframes (needs --stream-copy)"],
+      ["--smart-cut", "Exact start with stream copy: re-encode only the head up to the next keyframe (needs --stream-copy, refuses --snap)"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -864,6 +865,7 @@ async function main() {
           end: opts.end ?? null,
           streamCopy: opts.stream_copy === true,
           snapToKeyframe: opts.snap === true,
+          smartCut: opts.smart_cut === true,
         });
         break;
       }

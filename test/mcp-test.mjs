@@ -1282,6 +1282,61 @@ console.log("trim snap call: stream_copy", trimSnapJson.stream_copy, "| requeste
 checkOk(trimSnapJson.stream_copy === true, "MCP trim stream_copy=true actually reaches core", `got stream_copy=${trimSnapJson.stream_copy}`);
 checkOk(trimSnapJson.snapped === true && trimSnapJson.start === 0 && near(trimSnapJson.duration_actual, 8.4, 0.1), "trim snap moves 1-3s onto keyframes 0-8.333", `got ${trimSnapJson.start}-${trimSnapJson.start + trimSnapJson.duration_seconds}, actual ${trimSnapJson.duration_actual}s`);
 
+// smart_cut (idea: LosslessCut): stream-copy trim with an exact
+// start — only the head up to the next keyframe is re-encoded.
+// Fixture test/gop1s.mp4 has a keyframe every 1s (10s, 30fps).
+const smartRes = await client.callTool({
+  name: "trim",
+  arguments: {
+    input: path.join(root, "test/gop1s.mp4"),
+    output: path.join(root, "outputs/mcp-trim-smartcut.mp4"),
+    start: 2.5, duration: 4, stream_copy: true, smart_cut: true,
+  },
+});
+const smartJson = JSON.parse(smartRes.content[0].text);
+console.log("trim smart-cut call:", smartJson.mode, "| next kf", smartJson.next_keyframe, "| head", smartJson.head_reencoded_seconds + "s", "| bitrate", smartJson.head_bitrate_bps, "| duration_actual", smartJson.duration_actual + "s", "| error", smartJson.duration_error_seconds + "s");
+checkOk(smartJson.mode === "smart-cut" && smartJson.next_keyframe === 3 && smartJson.head_reencoded_seconds === 0.5 && smartJson.head_bitrate_bps === 200803 && smartJson.stream_copy === true, "trim smart_cut re-encodes only the 0.5s head to keyframe 3 at source bitrate x1.2", JSON.stringify({ mode: smartJson.mode, next: smartJson.next_keyframe, head: smartJson.head_reencoded_seconds, br: smartJson.head_bitrate_bps }));
+checkOk(near(smartJson.duration_actual, 4, 0.05) && near(smartJson.duration_error_seconds, 0, 0.05), "trim smart_cut lands on 4s (error ~0)", `got actual ${smartJson.duration_actual}s, error ${smartJson.duration_error_seconds}s`);
+const smartFrames = await countFrames(path.join(root, "outputs/mcp-trim-smartcut.mp4"));
+checkOk(smartFrames === 120, "trim smart_cut has exactly 120 frames (4s x 30fps, no B-frame overshoot)", `got ${smartFrames}`);
+// Pixel-verify both halves with bandPsnrAt (full frame): the
+// re-encoded head must show the same picture as the source at the
+// same content time (PSNR > 30 dB), and the stream-copied tail
+// must be bit-identical (PSNR inf).
+const smartHeadPsnr = await bandPsnrAt(path.join(root, "outputs/mcp-trim-smartcut.mp4"), 0.1, path.join(root, "test/gop1s.mp4"), 2.6, 0, 720);
+checkOk(smartHeadPsnr !== null && smartHeadPsnr > 30, "trim smart_cut head frame matches the source at 2.6s (PSNR > 30 dB)", `got PSNR ${smartHeadPsnr}`);
+const smartTailPsnr = await bandPsnrAt(path.join(root, "outputs/mcp-trim-smartcut.mp4"), 1.0, path.join(root, "test/gop1s.mp4"), 3.5, 0, 720);
+checkOk(smartTailPsnr === Infinity, "trim smart_cut tail frame is bit-identical to the source at 3.5s (stream-copied)", `got PSNR ${smartTailPsnr}`);
+// Start exactly on a keyframe: no re-encode at all.
+const smartExactRes = await client.callTool({
+  name: "trim",
+  arguments: {
+    input: path.join(root, "test/gop1s.mp4"),
+    output: path.join(root, "outputs/mcp-trim-smartcut-exact.mp4"),
+    start: 3, duration: 2, stream_copy: true, smart_cut: true,
+  },
+});
+const smartExactJson = JSON.parse(smartExactRes.content[0].text);
+checkOk(smartExactJson.mode === "keyframe-exact" && smartExactJson.head_reencoded_seconds === 0 && smartExactJson.next_keyframe === 3, "trim smart_cut on a keyframe copies with no re-encode", `got mode=${smartExactJson.mode}, head=${smartExactJson.head_reencoded_seconds}`);
+// Whole request inside one GOP: full re-encode.
+const smartFullRes = await client.callTool({
+  name: "trim",
+  arguments: {
+    input: path.join(root, "test/gop1s.mp4"),
+    output: path.join(root, "outputs/mcp-trim-smartcut-full.mp4"),
+    start: 2.5, duration: 0.4, stream_copy: true, smart_cut: true,
+  },
+});
+const smartFullJson = JSON.parse(smartFullRes.content[0].text);
+checkOk(smartFullJson.mode === "full-reencode" && near(smartFullJson.duration_actual, 0.4, 0.05), "trim smart_cut inside one GOP re-encodes the whole clip", `got mode=${smartFullJson.mode}, actual=${smartFullJson.duration_actual}`);
+// Refusals: needs stream_copy, refuses snap, needs video.
+const smartNoCopy = await callExpectThrow("trim", { input: path.join(root, "test/gop1s.mp4"), output: path.join(root, "outputs/mcp-trim-smartcut-nocopy.mp4"), start: 2.5, duration: 4, smart_cut: true });
+checkOk(/needs stream_copy/.test(smartNoCopy), "trim smart_cut without stream_copy is refused", smartNoCopy.slice(0, 120));
+const smartSnap = await callExpectThrow("trim", { input: path.join(root, "test/gop1s.mp4"), output: path.join(root, "outputs/mcp-trim-smartcut-snap.mp4"), start: 2.5, duration: 4, stream_copy: true, snap_to_keyframe: true, smart_cut: true });
+checkOk(/cannot be combined/.test(smartSnap), "trim smart_cut + snap_to_keyframe is refused", smartSnap.slice(0, 120));
+const smartAudio = await callExpectThrow("trim", { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-trim-smartcut-audio.mp3"), start: 1, duration: 2, stream_copy: true, smart_cut: true });
+checkOk(/needs a video input/.test(smartAudio), "trim smart_cut refuses audio-only input", smartAudio.slice(0, 120));
+
 // fit: 10s source -> 5s by speed (factor 2x), verified on disk below.
 const fitRes = await client.callTool({
   name: "fit",
