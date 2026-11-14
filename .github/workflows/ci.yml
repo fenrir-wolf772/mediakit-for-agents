@@ -143,6 +143,9 @@ jobs:
           printf '%s' '{"version":1,"input":"../test/logo.png","output":"ci-manifest-slideshow.mp4","steps":[{"tool":"slideshow","args":{"images":["../test/logo.png","../test/kenburns.png"],"duration":2,"transition_duration":0.5}},{"tool":"trim","args":{"start":0,"end":2}}]}' > outputs/ci-manifest-slideshow.json
           node bin/mediakit.js manifest outputs/ci-manifest-slideshow.json | grep '"steps_run": 2'
           ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-manifest-slideshow.mp4 | grep '^2'
+          printf '%s' '{"version":1,"output":"ci-manifest-download.mp4","steps":[{"tool":"download","args":{"url":"https://raw.githubusercontent.com/fenrir-wolf772/mediakit-for-agents/main/test/source.mp4"}},{"tool":"trim","args":{"start":0,"end":2}}]}' > outputs/ci-manifest-download.json
+          node bin/mediakit.js manifest outputs/ci-manifest-download.json | grep '"steps_run": 2'
+          ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-manifest-download.mp4 | grep '^2'
           node bin/mediakit.js assemble test/assemble-film-transitions.json --mode validate | grep '"total_frames": 300'
           node bin/mediakit.js assemble test/assemble-film-transitions.json --mode preview -o outputs/ci-assemble-trans --preview-seconds 5 | grep '"preview_seconds": 5'
           node bin/mediakit.js loudness test/kokoro-voice.wav -o outputs/ci-loud-comp.wav --compressor | grep '"compressed_lufs"'

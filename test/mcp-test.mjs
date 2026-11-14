@@ -3952,7 +3952,14 @@ checkOk(/unknown job/.test(jobUnknownText ?? ""), "job status refuses an unknown
 // server this test controls. Node fetch honours NO_PROXY for
 // 127.0.0.1, so the sandbox proxy is bypassed for these calls.
 const downloadFixture = await readFile(path.join(root, "test/source.mp4"));
-const downloadServer = createServer((req, res) => {
+// HLS/DASH fixtures, generated on the fly from the same source clip
+// (stream copy, so the segments carry the source's own streams —
+// no re-encode, and the suite stays network-free).
+await mkdir(path.join(root, "outputs/hls-test"), { recursive: true });
+await mkdir(path.join(root, "outputs/dash-test"), { recursive: true });
+await execFileAsync("ffmpeg", ["-y", "-v", "error", "-i", path.join(root, "test/source.mp4"), "-c", "copy", "-f", "hls", "-hls_time", "2", "-hls_list_size", "0", path.join(root, "outputs/hls-test/stream.m3u8")]);
+await execFileAsync("ffmpeg", ["-y", "-v", "error", "-i", path.join(root, "test/source.mp4"), "-c", "copy", "-f", "dash", path.join(root, "outputs/dash-test/stream.mpd")]);
+const downloadServer = createServer(async (req, res) => {
   if (req.url === "/source.mp4") {
     res.writeHead(200, { "content-type": "video/mp4", "content-length": downloadFixture.length });
     res.end(downloadFixture);
@@ -3989,6 +3996,23 @@ const downloadServer = createServer((req, res) => {
     res.end(body);
   } else if (req.url === "/slow") {
     // Never responds: the tool's timeout must fire, not the test's.
+  } else if (req.url.startsWith("/hls/") || req.url.startsWith("/dash/")) {
+    // A generated playlist fixture: the playlist, its segments and
+    // init files, with the content-type a real CDN would send
+    // (ffmpeg sniffs, but the types must be right). basename only —
+    // the URL must never pick a file outside the fixture dir.
+    const kind = req.url.startsWith("/hls/") ? "hls-test" : "dash-test";
+    const file = path.join(root, "outputs", kind, path.basename(req.url));
+    const ext = path.extname(file).slice(1).toLowerCase();
+    const types = { m3u8: "application/vnd.apple.mpegurl", ts: "video/mp2t", mpd: "application/dash+xml", m4s: "video/iso.segment" };
+    try {
+      const body = await readFile(file);
+      res.writeHead(200, { "content-type": types[ext] ?? "application/octet-stream", "content-length": body.length });
+      res.end(body);
+    } catch {
+      res.writeHead(404);
+      res.end();
+    }
   } else {
     res.writeHead(404);
     res.end();
@@ -4025,8 +4049,17 @@ const dlFakeText = await callExpectThrow("download", { url: `${dlBase}/fake-mp4`
 checkOk(/not media/.test(dlFakeText ?? "") && !existsSync(path.join(root, "outputs/mcp-download-fake.mp4")), "download deletes a file whose bytes fail the probe (right content-type, wrong bytes)", dlFakeText ?? "");
 const dlFtpText = await callExpectThrow("download", { url: "ftp://example.com/clip.mp4", output: path.join(root, "outputs/mcp-download-ftp.mp4") });
 checkOk(/http\(s\) URL/.test(dlFtpText ?? ""), "download refuses a non-http(s) URL", dlFtpText ?? "");
-const dlM3u8Text = await callExpectThrow("download", { url: "https://example.com/stream.m3u8", output: path.join(root, "outputs/mcp-download-m3u8.mp4") });
-checkOk(/playlists/.test(dlM3u8Text ?? ""), "download refuses an HLS playlist URL in v1", dlM3u8Text ?? "");
+const dlHlsRes = await client.callTool({ name: "download", arguments: { url: `${dlBase}/hls/stream.m3u8`, output: path.join(root, "outputs/mcp-download-hls.mp4") } });
+const dlHls = JSON.parse(dlHlsRes.content[0].text);
+checkOk(dlHls.playlist === "m3u8" && dlHls.redirects === null && near(dlHls.media?.duration_seconds, 10, 0.1) && dlHls.media?.video?.width === 1280 && dlHls.media?.video?.codec === "h264", "download fetches an HLS playlist with ffmpeg -c copy: 10s, 1280 wide, h264, playlist=m3u8", JSON.stringify(dlHls).slice(0, 300));
+checkOk(existsSync(path.join(root, "outputs/mcp-download-hls.mp4")) && !existsSync(path.join(root, "outputs/mcp-download-hls.mp4.partial")), "HLS download leaves the file and no .partial", `exists=${existsSync(path.join(root, "outputs/mcp-download-hls.mp4"))}`);
+const dlDashRes = await client.callTool({ name: "download", arguments: { url: `${dlBase}/dash/stream.mpd`, output: path.join(root, "outputs/mcp-download-dash.mp4") } });
+const dlDash = JSON.parse(dlDashRes.content[0].text);
+checkOk(dlDash.playlist === "mpd" && near(dlDash.media?.duration_seconds, 10, 0.1) && dlDash.media?.video?.width === 1280, "download fetches a DASH playlist with ffmpeg -c copy: 10s, 1280 wide, playlist=mpd", JSON.stringify(dlDash).slice(0, 300));
+const dlHlsCapText = await callExpectThrow("download", { url: `${dlBase}/hls/stream.m3u8`, output: path.join(root, "outputs/mcp-download-hls-cap.mp4"), max_size_mb: 0.01 });
+checkOk(/exceeds max_size_mb/.test(dlHlsCapText ?? "") && !existsSync(path.join(root, "outputs/mcp-download-hls-cap.mp4")) && !existsSync(path.join(root, "outputs/mcp-download-hls-cap.mp4.partial")), "HLS download enforces the size cap after the fetch and deletes the over-cap file", dlHlsCapText ?? "");
+const dlHlsPngText = await callExpectThrow("download", { url: `${dlBase}/hls/stream.m3u8`, output: path.join(root, "outputs/mcp-download-hls.png") });
+checkOk(/video\/audio container/.test(dlHlsPngText ?? ""), "download refuses a playlist into an image extension (a stream needs a container)", dlHlsPngText ?? "");
 const dlCredsText = await callExpectThrow("download", { url: "https://user:pass@example.com/clip.mp4", output: path.join(root, "outputs/mcp-download-creds.mp4") });
 checkOk(/embedded credentials/.test(dlCredsText ?? ""), "download refuses a URL with embedded credentials", dlCredsText ?? "");
 const dlBadExtText = await callExpectThrow("download", { url: `${dlBase}/source.mp4`, output: path.join(root, "outputs/mcp-download-bad.txt") });
@@ -4036,6 +4069,45 @@ checkOk(/timed out after 1s/.test(dlSlowText ?? ""), "download times out after t
 const dlDoctorRes = await client.callTool({ name: "doctor", arguments: {} });
 const dlDoctor = JSON.parse(dlDoctorRes.content[0].text);
 checkOk(dlDoctor.tools?.download?.available === true, "doctor reports download available (pure Node fetch + ffprobe, no ffmpeg filter needed)", JSON.stringify(dlDoctor.tools?.download));
+
+// manifest download step: the URL in step 1 IS the input, so the
+// manifest omits `input` entirely — download, then trim the fetched
+// HLS clip to 5s. The manifest is written here because the URL
+// carries this test's ephemeral local port.
+const dlManifestPath = path.join(root, "outputs/mcp-manifest-download.json");
+await writeFile(dlManifestPath, JSON.stringify({
+  version: 1, output: "mcp-manifest-download.mp4",
+  steps: [
+    { tool: "download", args: { url: `${dlBase}/hls/stream.m3u8` } },
+    { tool: "trim", args: { start: 0, end: 5 } },
+  ],
+}, null, 2));
+const dlManDryRes = await client.callTool({ name: "manifest", arguments: { manifest_path: dlManifestPath, dry_run: true } });
+const dlManDry = JSON.parse(dlManDryRes.content[0].text);
+checkOk(dlManDry.input === null && dlManDry.input_duration_seconds === null && dlManDry.steps?.length === 2 && dlManDry.steps[0].tool === "download" && dlManDry.steps[0].output.endsWith(".mp4"), "manifest dry-run plans a download-first pipeline with no input file", JSON.stringify(dlManDry).slice(0, 300));
+const dlManRes = await client.callTool({ name: "manifest", arguments: { manifest_path: dlManifestPath } });
+const dlMan = JSON.parse(dlManRes.content[0].text);
+checkOk(dlMan.steps_run === 2 && dlMan.cache_hits === 0 && dlMan.final?.duration_seconds === 5 && dlMan.final?.dimensions === "1280x720", "manifest download step fetches the HLS clip and trims it to 5s, 1280x720", JSON.stringify(dlMan.final));
+const dlManAgainRes = await client.callTool({ name: "manifest", arguments: { manifest_path: dlManifestPath } });
+const dlManAgain = JSON.parse(dlManAgainRes.content[0].text);
+checkOk(dlManAgain.cache_hits === 2 && dlManAgain.steps_run === 0 && dlManAgain.final?.duration_seconds === 5, "re-running the download-first manifest serves both steps from cache and re-fetches nothing", JSON.stringify({ cache_hits: dlManAgain.cache_hits, steps_run: dlManAgain.steps_run }));
+const dlManBadPath = path.join(root, "outputs/mcp-manifest-download-bad.json");
+await writeFile(dlManBadPath, JSON.stringify({
+  version: 1, input: "../test/source.mp4", output: "mcp-manifest-download-bad.mp4",
+  steps: [
+    { tool: "trim", args: { start: 0, end: 2 } },
+    { tool: "download", args: { url: `${dlBase}/hls/stream.m3u8` } },
+  ],
+}, null, 2));
+const dlManBadText = await callExpectThrow("manifest", { manifest_path: dlManBadPath });
+checkOk(/must be the first step/.test(dlManBadText ?? ""), "manifest refuses download as step 2 at lint time", dlManBadText ?? "");
+const dlManNoUrlPath = path.join(root, "outputs/mcp-manifest-download-nourl.json");
+await writeFile(dlManNoUrlPath, JSON.stringify({
+  version: 1, output: "mcp-manifest-download-nourl.mp4",
+  steps: [{ tool: "download", args: {} }],
+}, null, 2));
+const dlManNoUrlText = await callExpectThrow("manifest", { manifest_path: dlManNoUrlPath });
+checkOk(/needs a url/.test(dlManNoUrlText ?? ""), "manifest refuses a download step with no url at lint time", dlManNoUrlText ?? "");
 downloadServer.closeAllConnections();
 downloadServer.close();
 

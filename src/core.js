@@ -4049,20 +4049,29 @@ export async function imageToVideo({ input, output, duration = 5, fps = 30, widt
 // that tool is one bare `ffmpeg -i <url> -c copy` with no URL
 // validation, no size cap, no timeout and no check of what came back.
 // MediaKit's download is the opposite: validate the URL first
-// (http/https only, no embedded credentials, no HLS/DASH playlist —
-// those need a different fetcher because a size cap cannot be
-// enforced upfront), stream the body to disk with a byte cap enforced
-// WHILE streaming (not just from Content-Length, which a server can
-// lie about), cap redirects at 5, refuse a redirect off http(s),
-// write to `<output>.partial` and rename only on success, then probe
-// the file — a download that is not media is deleted and reported,
-// never left on disk as a success. Content-Type must be media
-// (video/*, audio/*, image/*) or application/octet-stream with a
-// media extension; the output extension is either given (and must be
-// a media extension, same list as `find`) or derived from the
-// Content-Type / URL path. A caller extension whose category
-// disagrees with a specific Content-Type (mp4 served as .mp3) is
-// refused instead of silently mislabelled.
+// (http/https only, no embedded credentials), stream the body to
+// disk with a byte cap enforced WHILE streaming (not just from
+// Content-Length, which a server can lie about), cap redirects at
+// 5, refuse a redirect off http(s), write to `<output>.partial` and
+// rename only on success, then probe the file — a download that is
+// not media is deleted and reported, never left on disk as a
+// success. Content-Type must be media (video/*, audio/*, image/*)
+// or application/octet-stream with a media extension; the output
+// extension is either given (and must be a media extension, same
+// list as `find`) or derived from the Content-Type / URL path. A
+// caller extension whose category disagrees with a specific
+// Content-Type (mp4 served as .mp3) is refused instead of silently
+// mislabelled.
+//
+// HLS (.m3u8) / DASH (.mpd) playlists take a different fetcher — a
+// playlist is a list of segments, not a file, so the direct path's
+// streaming cap cannot apply. The playlist branch (downloadPlaylist-
+// Media, below) fetches with ffmpeg `-c copy` (re-mux, never
+// re-encode), fenced to network protocols only so a hostile playlist
+// cannot pull file:// segments off disk, under the same timeout,
+// and enforces the size cap AFTER the fetch: an over-cap file is
+// deleted and reported, never left as a success. The probe check at
+// the end is the same as the direct path.
 const DOWNLOAD_MAX_REDIRECTS = 5;
 const DOWNLOAD_DEFAULT_MAX_MB = 500;
 const DOWNLOAD_DEFAULT_TIMEOUT_S = 300;
@@ -4101,9 +4110,6 @@ export async function downloadMedia({ url, output, maxSizeMb = DOWNLOAD_DEFAULT_
     throw new MediaKitError("download refuses URLs with embedded credentials — use a signed URL (query parameters) instead", "INVALID_ARG");
   }
   const urlExt = path.extname(u.pathname).slice(1).toLowerCase();
-  if (urlExt === "m3u8" || urlExt === "mpd") {
-    throw new MediaKitError(`download does not fetch HLS/DASH playlists (.${urlExt}) in v1 — give a direct media file URL`, "INVALID_ARG");
-  }
   const maxMb = num(maxSizeMb, "max_size_mb", { min: 0.01, max: 2000 });
   const maxBytes = Math.floor(maxMb * 1024 * 1024);
   const timeoutS = num(timeoutSeconds, "timeout_seconds", { min: 1, max: 3600, integer: true });
@@ -4113,6 +4119,11 @@ export async function downloadMedia({ url, output, maxSizeMb = DOWNLOAD_DEFAULT_
   const requestedExt = path.extname(output).slice(1).toLowerCase();
   if (requestedExt && !DOWNLOAD_EXTENSIONS.includes(requestedExt)) {
     throw new MediaKitError(`download writes a media file (${DOWNLOAD_EXTENSIONS.join(", ")}) — got .${requestedExt}`, "INVALID_ARG");
+  }
+  // A playlist is not a file: hand it to the ffmpeg fetcher, which
+  // re-muxes the segments with -c copy under the same timeout.
+  if (urlExt === "m3u8" || urlExt === "mpd") {
+    return downloadPlaylistMedia({ url: url.trim(), urlExt, output, maxBytes, maxMb, timeoutS, requestedExt });
   }
 
   const controller = new AbortController();
@@ -4236,6 +4247,90 @@ export async function downloadMedia({ url, output, maxSizeMb = DOWNLOAD_DEFAULT_
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+// A playlist is fetched by ffmpeg, not by Node fetch: only ffmpeg
+// knows how to walk segments. The output must be a video/audio
+// container — an image extension makes no sense for a stream — and
+// defaults to .mp4 when the caller gave no extension. The protocol
+// whitelist is the guard that matters here: a playlist is attacker-
+// controlled text, and without it a segment URI of file:///etc/...
+// would be read straight off disk. The size cap cannot be enforced
+// while streaming (a playlist's total size is unknowable until the
+// last segment arrives), so it is enforced after the fetch instead:
+// an over-cap file is deleted and reported, never left as a success.
+const DOWNLOAD_PLAYLIST_CONTAINER_EXTS = ["mp4", "mov", "mkv", "webm", "m4v", "avi", "mp3", "m4a", "wav", "flac", "ogg", "opus"];
+
+async function downloadPlaylistMedia({ url, urlExt, output, maxBytes, maxMb, timeoutS, requestedExt }) {
+  const ext = requestedExt || "mp4";
+  if (!DOWNLOAD_PLAYLIST_CONTAINER_EXTS.includes(ext)) {
+    throw new MediaKitError(`download refuses: an HLS/DASH playlist (.${urlExt}) can only be written to a video/audio container (${DOWNLOAD_PLAYLIST_CONTAINER_EXTS.join(", ")}) — got .${ext}`, "INVALID_ARG");
+  }
+  const finalOutput = requestedExt ? output : `${output}.${ext}`;
+  const outPath = await prepareOutput(finalOutput);
+  const partialPath = `${outPath}.partial`;
+  // The .partial suffix hides the real extension from ffmpeg, so
+  // the muxer format is named explicitly (mp4/mov/m4v share the
+  // mp4 muxer; m4a is mp4 audio-only).
+  const PLAYLIST_FORMAT = {
+    mp4: "mp4", mov: "mov", m4v: "mp4", mkv: "matroska", webm: "webm", avi: "avi",
+    mp3: "mp3", m4a: "mp4", wav: "wav", flac: "flac", ogg: "ogg", opus: "opus",
+  };
+  const args = [
+    "-hide_banner", "-nostdin", "-y",
+    "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2",
+    "-protocol_whitelist", "http,https,tcp,tls,crypto",
+    "-i", url, "-c", "copy",
+    ...(["mp4", "mov", "m4v"].includes(ext) ? ["-movflags", "+faststart"] : []),
+    "-f", PLAYLIST_FORMAT[ext], partialPath,
+  ];
+  try {
+    await run(FFMPEG, args, { timeoutMs: timeoutS * 1000 });
+  } catch (err) {
+    await unlink(partialPath).catch(() => {});
+    if (err instanceof MediaKitError && /timed out/i.test(err.message)) {
+      throw new MediaKitError(`download timed out after ${timeoutS}s`, "DOWNLOAD_TIMEOUT");
+    }
+    if (err instanceof MediaKitError) throw new MediaKitError(`download failed fetching the playlist: ${err.message}`, "DOWNLOAD_FAILED");
+    throw err;
+  }
+  // Post-fetch cap: the only place it can bite for a playlist.
+  const fetched = await fileInfo(partialPath).catch(() => null);
+  if (fetched && fetched.size_bytes > maxBytes) {
+    await unlink(partialPath).catch(() => {});
+    throw new MediaKitError(`download stopped: HLS/DASH output ${fetched.size_bytes} bytes exceeds max_size_mb ${maxMb} (${maxBytes} bytes) — a playlist's size cannot be capped while streaming, so the file was deleted after the fetch`, "SIZE_LIMIT");
+  }
+  await rename(partialPath, outPath);
+  const info = await fileInfo(outPath);
+  let media;
+  try {
+    media = await probe(outPath);
+  } catch {
+    await unlink(outPath).catch(() => {});
+    throw new MediaKitError("downloaded playlist produced no media (ffprobe could not read it) — deleted", "DOWNLOAD_FAILED");
+  }
+  if (!media.video && !media.audio) {
+    await unlink(outPath).catch(() => {});
+    throw new MediaKitError("downloaded playlist has no video or audio stream — deleted", "DOWNLOAD_FAILED");
+  }
+  return {
+    operation: "download",
+    url,
+    final_url: url,
+    redirects: null,
+    playlist: urlExt,
+    output: outPath,
+    size_bytes: info.size_bytes,
+    size_human: info.size_human,
+    content_type: null,
+    max_size_bytes: maxBytes,
+    media: {
+      format: media.format,
+      duration_seconds: media.duration_seconds,
+      video: media.video,
+      audio: media.audio,
+    },
+  };
 }
 
 // ---------------------------------------------------------------- slideshow
@@ -6846,6 +6941,18 @@ const BATCH_MANIFEST_FILENAME = "batch-manifest.json";
 // container must match the codec the tool was told to write).
 function batchOutputExt(operation, inputExt, args) {
   if (operation === "slideshow") return "mp4";
+  // download: the URL's extension wins when it names a media file
+  // (a signed URL with no extension falls back to the input — for a
+  // download-first manifest that is the manifest output's extension,
+  // since the manifest seeds `ext` from its output then).
+  if (operation === "download") {
+    try {
+      const u = new URL(String(args.url ?? ""));
+      const urlExt = path.extname(u.pathname).slice(1).toLowerCase();
+      if (DOWNLOAD_EXTENSIONS.includes(urlExt)) return urlExt;
+    } catch { /* no usable URL: fall through to the input extension */ }
+    return inputExt;
+  }
   if (operation === "extract_audio") {
     if (args.whisper) return "wav";
     if (args.format) return String(args.format).toLowerCase().replace(/^\./, "");
@@ -7224,9 +7331,13 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
 // slideshow is the exception that proves the rule — it builds from
 // images in args, so it may only be step 1 (it ignores the chain
 // input; the manifest's input should be the first slide image).
-// Multi-input tools (concat, mix, mux, pip) and probe-only tools
-// (probe, check, keyframes...) are not chainable steps — a manifest
-// is one pipeline through one file.
+// download is the second exception: it fetches from a URL in args,
+// so it may only be step 1 too — and when it is step 1 the
+// manifest's `input` may be omitted entirely (there is no local file
+// to start from; the extension then seeds from the manifest output
+// unless the URL names one). Multi-input tools (concat, mix, mux,
+// pip) and probe-only tools (probe, check, keyframes...) are not
+// chainable steps — a manifest is one pipeline through one file.
 export const MANIFEST_STEPS = {
   ...BATCH_OPERATIONS,
   denoise: {
@@ -7268,6 +7379,15 @@ export const MANIFEST_STEPS = {
       keep: a.keep ?? "last",
       padBefore: a.pad_before ?? 0.06, padAfter: a.pad_after ?? 0.12, minKeep: a.min_keep ?? 0.2,
     }),
+  },
+  // download is manifest-only, not a batch operation: batch maps one
+  // operation over files matching a glob, and a download's input is
+  // a URL, not a file — there is nothing to map over. In a manifest
+  // it is the pipeline's source, like slideshow: step 1 only, and
+  // the manifest's `input` may be omitted (see manifest()).
+  download: {
+    args: ["url", "max_size_mb", "timeout_seconds"],
+    run: (input, output, a) => downloadMedia({ url: a.url, output, maxSizeMb: a.max_size_mb ?? 500, timeoutSeconds: a.timeout_seconds ?? 300 }),
   },
 };
 
@@ -7338,7 +7458,11 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
   if (doc.version !== 1) {
     throw new MediaKitError(`manifest version must be 1, got: ${doc.version}`, "INVALID_ARG");
   }
-  if (typeof doc.input !== "string" || !doc.input.trim()) {
+  // A download-first manifest has no local input file: the URL in
+  // step 1 IS the input, so `input` may be omitted (any other
+  // manifest still needs one).
+  const downloadFirst = Array.isArray(doc.steps) && doc.steps.length > 0 && doc.steps[0]?.tool === "download";
+  if ((typeof doc.input !== "string" || !doc.input.trim()) && !downloadFirst) {
     throw new MediaKitError("manifest needs an \"input\" file path", "INVALID_ARG");
   }
   if (!Array.isArray(doc.steps) || !doc.steps.length || doc.steps.length > MANIFEST_MAX_STEPS) {
@@ -7350,7 +7474,9 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
   }
   const manifestDir = path.dirname(manifestAbs);
   const resolveRel = (p) => (path.isAbsolute(p) ? p : path.join(manifestDir, p));
-  const inputAbs = await requireInput(resolveRel(doc.input), "manifest input");
+  const inputAbs = typeof doc.input === "string" && doc.input.trim()
+    ? await requireInput(resolveRel(doc.input), "manifest input")
+    : null;
   const outputRaw = output ?? doc.output;
   if (typeof outputRaw !== "string" || !outputRaw.trim()) {
     throw new MediaKitError("manifest needs an \"output\" file path (in the manifest or -o)", "INVALID_ARG");
@@ -7377,6 +7503,14 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
       throw new MediaKitError(`${label}: slideshow must be the first step — it builds a video from images in args, it does not transform the previous step's output`, "INVALID_ARG");
     }
     if (step.tool === "slideshow") validateSlideshowManifestArgs(step, args, label);
+    // download fetches from a URL — same rule as slideshow, and the
+    // URL is checked at lint time, not after step 1 starts.
+    if (step.tool === "download" && i > 0) {
+      throw new MediaKitError(`${label}: download must be the first step — it fetches from a URL in args, it does not transform the previous step's output`, "INVALID_ARG");
+    }
+    if (step.tool === "download" && (typeof args.url !== "string" || !args.url.trim())) {
+      throw new MediaKitError(`${label} (download) needs a url`, "INVALID_ARG");
+    }
     for (const k of Object.keys(args)) {
       if (!spec.args.includes(k)) {
         throw new MediaKitError(`${label} (${step.tool}) does not take argument "${k}" (supported: ${spec.args.join(", ") || "none"})`, "INVALID_ARG");
@@ -7406,8 +7540,13 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
 
   // Output extension follows the step chain (extract_audio changes
   // it); a mismatched output extension is adjusted and reported,
-  // never silently written with wrong bytes under a wrong name.
-  let ext = path.extname(inputAbs).slice(1).toLowerCase();
+  // never silently written with wrong bytes under a wrong name. A
+  // download-first manifest has no input file, so the chain seeds
+  // from the manifest output's extension instead (the download step
+  // itself prefers the URL's extension when it names a media file).
+  let ext = inputAbs
+    ? path.extname(inputAbs).slice(1).toLowerCase()
+    : path.extname(resolveRel(outputRaw)).slice(1).toLowerCase();
   const chainExts = steps.map((s) => {
     ext = batchOutputExt(s.tool, ext, s.args);
     return ext;
@@ -7420,7 +7559,7 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
     outputAdjusted = true;
   }
   const outDir = path.dirname(finalOutput);
-  const inputProbe = await probe(inputAbs);
+  const inputProbe = inputAbs ? await probe(inputAbs) : null;
 
   if (dryRun) {
     // Plan only: probe the input (read-only) and list the chain.
@@ -7436,8 +7575,8 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
       operation: "manifest", manifest: manifestAbs, input: inputAbs, output: finalOutput,
       ...(outputAdjusted ? { output_adjusted: true } : {}),
       qa: doc.qa ?? null, dry_run: true, cache,
-      input_duration_seconds: inputProbe.duration_seconds,
-      input_dimensions: inputProbe.video ? `${inputProbe.video.width}x${inputProbe.video.height}` : null,
+      input_duration_seconds: inputProbe?.duration_seconds ?? null,
+      input_dimensions: inputProbe?.video ? `${inputProbe.video.width}x${inputProbe.video.height}` : null,
       steps: planned,
     };
   }
@@ -7469,7 +7608,10 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
     for (const s of steps) {
       const nextExt = chainExts[s.index];
       const stepOut = path.join(tmpDir, `step-${String(s.index).padStart(2, "0")}-${s.tool}.${nextExt}`);
-      const inputHash = await hashFile(curInput);
+      // A download-first manifest has no chain input for step 1 —
+      // the URL is already in the cache key via args, so null is the
+      // honest input hash there.
+      const inputHash = curInput ? await hashFile(curInput) : null;
       let extraHash = null;
       for (const k of MANIFEST_FILE_ARGS) {
         if (typeof s.resolved[k] === "string") {

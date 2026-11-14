@@ -1127,7 +1127,7 @@ server.tool(
 
 server.tool(
   "manifest",
-  "Run a whole edit pipeline from ONE declarative JSON manifest file: {version: 1, input, output, steps: [{tool, args}], qa?} — paths in the manifest are relative to the manifest file. Steps run in order, each feeding the next (slideshow as step 1 only — it builds a video from images in args, so the manifest input should be the first slide image; then trim, resize, reframe, compress, convert, extract_audio, reverse, grade, fit, silence, denoise, interpolate, burn_captions, overlay, chroma_key, cut_words, remove_retakes); the whole plan is validated before anything renders, so a typo fails in seconds. Each step is cached by content hash (input bytes + tool + args + sidecar-file bytes, verified against the cached output's size + sha256) — re-running an unchanged manifest re-encodes nothing, and editing step 3 only re-runs from step 3. Set qa to a platform (or 'any') to run qa_report on the final file. dry_run prints the plan and writes nothing — the approve-before-render gate. A step failure aborts the run and keeps the intermediates for inspection.",
+  "Run a whole edit pipeline from ONE declarative JSON manifest file: {version: 1, input, output, steps: [{tool, args}], qa?} — paths in the manifest are relative to the manifest file. Steps run in order, each feeding the next (slideshow as step 1 only — it builds a video from images in args, so the manifest input should be the first slide image; download as step 1 only — it fetches from a URL in args, and when it is step 1 the manifest input may be omitted entirely; then trim, resize, reframe, compress, convert, extract_audio, reverse, grade, fit, silence, denoise, interpolate, burn_captions, overlay, chroma_key, cut_words, remove_retakes); the whole plan is validated before anything renders, so a typo fails in seconds. Each step is cached by content hash (input bytes + tool + args + sidecar-file bytes, verified against the cached output's size + sha256) — re-running an unchanged manifest re-encodes nothing, and editing step 3 only re-runs from step 3. Set qa to a platform (or 'any') to run qa_report on the final file. dry_run prints the plan and writes nothing — the approve-before-render gate. A step failure aborts the run and keeps the intermediates for inspection.",
   {
     manifest_path: pathSchema.describe("Path to the manifest JSON file"),
     output: pathSchema.optional().describe("Output file path (overrides the manifest's output; the extension is adjusted to the step chain's final format when needed)"),
@@ -1199,16 +1199,19 @@ server.tool(
 // validation, no size cap, no timeout and no check of the result, and
 // MediaKit does the opposite on every one of those). The director's
 // way to pull stock footage, a reference clip or a music bed into the
-// workspace: http(s) only, no credentials in the URL, no HLS/DASH
-// playlist in v1, 500 MB cap by default, 5 redirects max, streamed to
-// disk with the cap enforced while streaming, written atomically via
-// .partial, then probed — a non-media download is deleted, not
-// reported as a success.
+// workspace: http(s) only, no credentials in the URL, 500 MB cap by
+// default, 5 redirects max, streamed to disk with the cap enforced
+// while streaming, written atomically via .partial, then probed — a
+// non-media download is deleted, not reported as a success. HLS
+// (.m3u8) / DASH (.mpd) playlists are fetched with ffmpeg -c copy
+// under a protocol whitelist (no file:// segments) and the cap is
+// enforced after the fetch, since a playlist's size is unknowable
+// until the last segment arrives.
 server.tool(
   "download",
-  "Download a media file from an http(s) URL into the workspace — stock footage, a reference clip, a music bed. Typed and guarded: http/https only (no credentials in the URL, no HLS/DASH playlist in v1), size cap enforced while streaming (default 500 MB, refused upfront when Content-Length already exceeds it), 5 redirects max, 300s timeout, written atomically via <output>.partial and renamed only on success, then probed — a file that is not media is deleted and reported, never left as a success. The output extension is either given (must be a media extension) or derived from the Content-Type / URL path. Returns the output path, size, content-type, redirect count and the probe summary (duration, dimensions, codecs).",
+  "Download a media file from an http(s) URL into the workspace — stock footage, a reference clip, a music bed. Typed and guarded: http/https only (no credentials in the URL), size cap enforced while streaming for direct files (default 500 MB, refused upfront when Content-Length already exceeds it), 5 redirects max, 300s timeout, written atomically via <output>.partial and renamed only on success, then probed — a file that is not media is deleted and reported, never left as a success. HLS (.m3u8) / DASH (.mpd) playlists are fetched with ffmpeg -c copy (re-mux, never re-encode) under a protocol whitelist, and the size cap is enforced after the fetch. The output extension is either given (must be a media extension) or derived from the Content-Type / URL path. Returns the output path, size, content-type, redirect count and the probe summary (duration, dimensions, codecs).",
   {
-    url: z.string().url().describe("http(s) URL of a direct media file (video/audio/image)"),
+    url: z.string().url().describe("http(s) URL of a direct media file (video/audio/image) or an HLS (.m3u8) / DASH (.mpd) playlist"),
     output: pathSchema.describe("Output file path — with a media extension, or without one (the extension is then derived from the Content-Type / URL path)"),
     max_size_mb: z.number().min(0.01).max(2000).default(500).describe("Maximum download size in MB (default 500); refused upfront when Content-Length exceeds it, aborted mid-stream otherwise"),
     timeout_seconds: z.number().int().min(1).max(3600).default(300).describe("Whole-download timeout in seconds (default 300)"),

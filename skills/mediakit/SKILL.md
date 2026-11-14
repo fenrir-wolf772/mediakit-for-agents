@@ -694,6 +694,19 @@ video from images in args, so the manifest input should be the first
 slide image, and later steps then trim, reframe or grade the slideshow
 like any clip. Editing a slide image re-runs the step: the image bytes
 are in the cache key, the same as a `chroma_key` background.
+`download` is the second exception: it may only be step 1 too — it
+fetches from a URL in args, so when it is step 1 the manifest `input`
+may be omitted entirely (the URL is the input). That is the whole
+fetch-then-edit pipeline in one file: download a stock clip or an HLS
+stream, then trim, reframe, grade it. A changed URL re-runs the step
+(the URL is in the cache key); an unchanged manifest re-fetches
+nothing. `download` is deliberately NOT a batch operation: batch maps
+one operation over files matching a glob, and a download's input is a
+URL, not a file. HLS (`.m3u8`) / DASH (`.mpd`) downloads are re-muxed
+with `-c copy`, never re-encoded; the size cap for a playlist is
+enforced after the fetch, since its total size is unknowable until
+the last segment arrives — so keep `max_size_mb` tight on playlists
+you do not trust.
 
 ### 41. One style id for the whole video — don't retype hex values
 Pick the style once (`clean-bold`, `minimal-line` or `warm-story`,

@@ -1,0 +1,1 @@
+{"output":"../outputs/download-first.mp4","steps":[{"args":{"url":"https://raw.githubusercontent.com/fenrir-wolf772/mediakit-for-agents/main/test/source.mp4"},"tool":"download"},{"args":{"end":2,"start":0},"tool":"trim"}],"version":1}
