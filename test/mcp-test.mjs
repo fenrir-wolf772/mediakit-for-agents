@@ -3798,6 +3798,69 @@ const assembleCanvasRender2Res = await client.callTool({ name: "assemble", argum
 const assembleCanvasRender2Json = JSON.parse(assembleCanvasRender2Res.content[0].text);
 checkOk(assembleCanvasRender2Json.cache_hits === 1, "assemble second canvas render reuses the shot segment from the cache", `cache_hits=${assembleCanvasRender2Json.cache_hits}`);
 
+// Scene templates: reusable built-in canvas_scene shots — a shot
+// says `"template": "bounce"` + params instead of a scene file.
+// Fixture: test/assemble-template.json (4s film: bounce 2s with
+// color + bounces overridden, title-card 2s with text overridden;
+// preset vertical). Validate must echo the template id and the
+// params merged with defaults; bad ids / template+scene / unknown
+// params fail; the render must show real motion (bounce frames
+// 0.5s apart differ) and the title-card text band must be bright.
+const assembleTemplateStage = await stageAssembleManifest("assemble-template.json");
+const assembleTemplateOut = path.join(assembleTemplateStage.dir, "out");
+const assembleTemplateValidateRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleTemplateStage.manifestPath, mode: "validate" } });
+const assembleTemplateValidateJson = JSON.parse(assembleTemplateValidateRes.content[0].text);
+checkOk(assembleTemplateValidateJson.total_seconds === 4 && assembleTemplateValidateJson.total_frames === 120 && assembleTemplateValidateJson.shots?.length === 2 && assembleTemplateValidateJson.shots[0]?.template === "bounce" && assembleTemplateValidateJson.shots[0]?.params?.color === "#EF4444" && assembleTemplateValidateJson.shots[0]?.params?.bounces === 2 && assembleTemplateValidateJson.shots[0]?.params?.bg === "#0F172A" && assembleTemplateValidateJson.shots[0]?.params?.radius === 0.08 && assembleTemplateValidateJson.shots[1]?.template === "title-card" && assembleTemplateValidateJson.shots[1]?.params?.text === "TEMPLATES" && assembleTemplateValidateJson.shots[1]?.params?.fg === "#FFFFFF", "assemble validate echoes template ids + params merged with defaults (bounce color/bounces overridden, bg/radius defaulted)", JSON.stringify(assembleTemplateValidateJson.shots));
+const assembleBadTemplateText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-template.json"), mode: "validate" });
+checkOk(/must be one of title-card, bounce, slide-in, rings/.test(assembleBadTemplateText ?? ""), "assemble validate refuses an unknown scene template id", assembleBadTemplateText ?? "");
+const assembleBadTemplateSceneText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-template-scene.json"), mode: "validate" });
+checkOk(/either scene or template, not both/.test(assembleBadTemplateSceneText ?? ""), "assemble validate refuses a canvas_scene shot with both scene and template", assembleBadTemplateSceneText ?? "");
+const assembleBadTemplateParamText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-template-param.json"), mode: "validate" });
+checkOk(/unknown param/.test(assembleBadTemplateParamText ?? "") && /allowed: bg, bounces, color, radius/.test(assembleBadTemplateParamText ?? ""), "assemble validate refuses an unknown template param (with the allowed list)", assembleBadTemplateParamText ?? "");
+const assembleTemplateRenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleTemplateStage.manifestPath, mode: "render", output_dir: assembleTemplateOut, force: true } }, undefined, { timeout: 300000 });
+const assembleTemplateRenderJson = JSON.parse(assembleTemplateRenderRes.content[0].text);
+const assembleTemplateFinalPath = path.join(assembleTemplateOut, "final.mp4");
+const assembleTemplateFinalProbe = await probeStreams(assembleTemplateFinalPath);
+const assembleTemplateFinalFrames = await countFrames(assembleTemplateFinalPath);
+const assembleTemplateFinalLufs = await measureLufs(assembleTemplateFinalPath);
+checkOk(assembleTemplateRenderJson.approval === "forced" && near(parseFloat(assembleTemplateFinalProbe?.format?.duration), 4, 0.15) && assembleTemplateFinalFrames === 120, "assemble template film renders 4s with exactly 120 frames", `duration=${assembleTemplateFinalProbe?.format?.duration} frames=${assembleTemplateFinalFrames}`);
+checkOk(assembleTemplateFinalLufs !== null && near(assembleTemplateFinalLufs, -14, 0.5), "assemble template final measures -14 LUFS independently", `LUFS=${assembleTemplateFinalLufs}`);
+// Motion proof: bounce frames 0.5s apart differ (PSNR < 28, same
+// bar as the chase scene); the title-card shot at 3.0s shows the
+// white title in the middle band (R mean well above the navy bg).
+const assembleTemplateEarlyPng = path.join(assembleTemplateOut, "template-0.5s.png");
+const assembleTemplateMidPng = path.join(assembleTemplateOut, "template-1.0s.png");
+const assembleTemplateTitlePng = path.join(assembleTemplateOut, "template-3.0s.png");
+await extractPng(assembleTemplateFinalPath, 0.5, assembleTemplateEarlyPng);
+await extractPng(assembleTemplateFinalPath, 1.0, assembleTemplateMidPng);
+await extractPng(assembleTemplateFinalPath, 3.0, assembleTemplateTitlePng);
+const assembleTemplateBouncePsnr = await framePsnr(assembleTemplateEarlyPng, assembleTemplateMidPng);
+checkOk(assembleTemplateBouncePsnr !== null && assembleTemplateBouncePsnr < 28, "assemble bounce template really moves: frames 0.5s apart differ (PSNR < 28 dB)", `PSNR=${assembleTemplateBouncePsnr}`);
+const assembleTemplateTitleBandR = await planeMean(assembleTemplateTitlePng, "1080:300:0:810", "r");
+checkOk(assembleTemplateTitleBandR !== null && assembleTemplateTitleBandR > 35, "assemble title-card template draws the white title in the middle band", `band R=${assembleTemplateTitleBandR}`);
+const assembleTemplateRender2Res = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleTemplateStage.manifestPath, mode: "render", output_dir: assembleTemplateOut, force: true } }, undefined, { timeout: 300000 });
+const assembleTemplateRender2Json = JSON.parse(assembleTemplateRender2Res.content[0].text);
+checkOk(assembleTemplateRender2Json.cache_hits === 2, "assemble second template render reuses both template segments from the cache", `cache_hits=${assembleTemplateRender2Json.cache_hits}`);
+
+// Transition offsets must be full precision: a cut at 50 frames
+// puts the second xfade offset at 44/30 = 1.4666...s, and rounding
+// it to 4 decimals (1.4667) overshoots by 33us — enough for the
+// trailing fps filter to emit one extra frame (measured 601
+// instead of 600 on a 20s preview, 2026-11-14). Fixture:
+// test/assemble-transitions-repeating.json (4s film, template
+// shots + a color card, fade + dissolve).
+const assembleRepeatStage = await stageAssembleManifest("assemble-transitions-repeating.json");
+const assembleRepeatOut = path.join(assembleRepeatStage.dir, "out");
+const assembleRepeatValidateRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleRepeatStage.manifestPath, mode: "validate" } });
+const assembleRepeatValidateJson = JSON.parse(assembleRepeatValidateRes.content[0].text);
+checkOk(assembleRepeatValidateJson.total_seconds === 4 && assembleRepeatValidateJson.total_frames === 120, "assemble repeating-offset film validates at 4s / 120 frames", JSON.stringify({ total_seconds: assembleRepeatValidateJson.total_seconds, total_frames: assembleRepeatValidateJson.total_frames }));
+const assembleRepeatRenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleRepeatStage.manifestPath, mode: "render", output_dir: assembleRepeatOut, force: true } }, undefined, { timeout: 300000 });
+const assembleRepeatRenderJson = JSON.parse(assembleRepeatRenderRes.content[0].text);
+const assembleRepeatFinalPath = path.join(assembleRepeatOut, "final.mp4");
+const assembleRepeatFinalProbe = await probeStreams(assembleRepeatFinalPath);
+const assembleRepeatFinalFrames = await countFrames(assembleRepeatFinalPath);
+checkOk(assembleRepeatRenderJson.approval === "forced" && near(parseFloat(assembleRepeatFinalProbe?.format?.duration), 4, 0.15) && assembleRepeatFinalFrames === 120, "assemble film with repeating-decimal transition offsets renders exactly 120 frames (no off-by-one)", `duration=${assembleRepeatFinalProbe?.format?.duration} frames=${assembleRepeatFinalFrames}`);
+
 // Chapters: named markers on the film timeline become real MP4
 // chapters on render (not preview). Fixture:
 // test/assemble-chapters.json (the 10s film + Intro @0 / The turn

@@ -141,7 +141,12 @@ centered on the cut, video-only — the audio never moves); a
 video shot needs the handle footage in its source. For real
 animation (not a still with a zoom), use a `canvas_scene` shot:
 a JS module that draws every frame in code at 30fps — the
-director's path, no AI video account needed.
+director's path, no AI video account needed. Reach for a
+built-in scene template first (`"template": "bounce"` +
+`params`, registry in `scene-templates.json`: `title-card`,
+`bounce`, `slide-in`, `rings`) and write a custom scene file
+only when no template fits — template params merge over
+defaults, unknown names fail validate.
 
 ## Common failures
 

@@ -228,6 +228,43 @@ still image cannot do, with no AI video account and no browser.
   `Math.random()`, no `Date.now()` — use `fx.rng(seed)` for
   randomness. A scene that reads the clock or the network is a
   bug, not a feature.
+
+### Scene templates
+
+For shots that need motion but not a custom scene, use a
+built-in template instead of a `scene` file — a shot says
+`"template": "bounce"` and MediaKit resolves it to a shipped
+`.cjs` module under `src/canvas-scene-lib/templates/`. The
+registry is `skills/shorts-video/scene-templates.json` (one
+entry per template: `id`, `name`, `description`, `file`,
+`params`); the ids in the registry must match
+`SCENE_TEMPLATE_IDS` in `src/core.js`, and a missing or corrupt
+registry fails loudly instead of resolving to different motion.
+
+```json
+{"id": "bounce", "kind": "canvas_scene", "template": "bounce",
+ "duration": 2.0, "params": {"color": "#EF4444", "bounces": 2}}
+```
+
+- A shot takes either `scene` or `template`, never both.
+  Template shots take no `assets` (they draw everything in code).
+- `params` are merged over the template's defaults — only
+  override what changes. Unknown param names, wrong types, and
+  out-of-range numbers fail validate with the allowed list.
+- Templates available now (see the registry for defaults):
+  `title-card` (gradient + big sliding title + accent bar;
+  `text`, `bg1`, `bg2`, `fg`, `accent`), `bounce` (ball on a
+  floor line with squash + shadow; `color`, `bg`, `radius`,
+  `bounces`), `slide-in` (rounded card slides in from the left,
+  text fades in; `text`, `bg`, `card`, `fg`), `rings`
+  (concentric rings expand and fade; `color`, `bg`, `count`,
+  `speed`).
+- Validate echoes `template` + the merged `params` per shot,
+  and the segment cache key includes the template id, so
+  changing a param re-renders only that shot.
+- Write a custom scene file when the shot needs something no
+  template does; reach for a template first when it fits —
+  that is the director's shortcut from script to storyboard.
 - `assets` (optional) maps names to still-image paths, loaded
   with `loadImage` and handed to `draw` as `assets`. Each must
   be a still image (same probe as an `image` shot).

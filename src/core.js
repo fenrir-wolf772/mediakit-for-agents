@@ -7493,6 +7493,156 @@ export async function resolveAssemblePreset(preset) {
   return found;
 }
 
+// Scene templates: reusable built-in canvas_scene shots for
+// assemble — a manifest shot says `"template": "bounce"` + params
+// instead of writing a scene file. Same pattern as assemble
+// presets: a JSON registry
+// (skills/shorts-video/scene-templates.json) + one .cjs module per
+// template under src/canvas-scene-lib/templates/. No embedded
+// fallback — a missing or corrupt registry fails loudly, because a
+// template that silently resolved to different motion would ship
+// the wrong shot. Params are declared per template (string /
+// number / boolean / color, each with a default); the manifest may
+// override any of them, and an unknown param name fails validate.
+export const SCENE_TEMPLATE_IDS = ["title-card", "bounce", "slide-in", "rings"];
+const SCENE_TEMPLATES_PATH = fileURLToPath(new URL("../skills/shorts-video/scene-templates.json", import.meta.url));
+const SCENE_TEMPLATES_DIR = fileURLToPath(new URL("./canvas-scene-lib/templates/", import.meta.url));
+let cachedSceneTemplates = null;
+const SCENE_TEMPLATE_PARAM_TYPES = ["string", "number", "boolean", "color"];
+
+function normalizeSceneTemplateColor(value, where) {
+  if (typeof value !== "string" || !/^#?[0-9a-fA-F]{6}$/.test(value)) {
+    throw new MediaKitError(`${where} must be a 6-digit hex color (RRGGBB or #RRGGBB), got: ${JSON.stringify(value)}`, "PRESET_LIBRARY_INVALID");
+  }
+  return value.startsWith("#") ? value.toUpperCase() : `#${value.toUpperCase()}`;
+}
+
+export async function getSceneTemplates() {
+  if (cachedSceneTemplates) return cachedSceneTemplates;
+  let doc;
+  try {
+    doc = JSON.parse(await readFile(SCENE_TEMPLATES_PATH, "utf8"));
+  } catch {
+    throw new MediaKitError("assemble scene template library missing: skills/shorts-video/scene-templates.json not found next to the package", "PRESET_LIBRARY_MISSING");
+  }
+  if (!doc || !Array.isArray(doc.templates) || doc.templates.length === 0) {
+    throw new MediaKitError("assemble scene template library has no templates: skills/shorts-video/scene-templates.json", "PRESET_LIBRARY_INVALID");
+  }
+  const byId = {};
+  for (const t of doc.templates) {
+    if (typeof t?.id !== "string" || !t.id) throw new MediaKitError("assemble scene template library: template without an id", "PRESET_LIBRARY_INVALID");
+    if (byId[t.id]) throw new MediaKitError(`assemble scene template library: duplicate template id "${t.id}"`, "PRESET_LIBRARY_INVALID");
+    if (typeof t.file !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*\.cjs$/.test(t.file)) {
+      throw new MediaKitError(`assemble scene template library: template "${t.id}" has a bad file ${JSON.stringify(t.file)} (one .cjs filename, no path)`, "PRESET_LIBRARY_INVALID");
+    }
+    const fileAbs = path.join(SCENE_TEMPLATES_DIR, t.file);
+    try {
+      const st = await stat(fileAbs);
+      if (!st.isFile()) throw new Error("not a file");
+    } catch {
+      throw new MediaKitError(`assemble scene template library: template "${t.id}" file ${t.file} is missing under src/canvas-scene-lib/templates/`, "PRESET_LIBRARY_INVALID");
+    }
+    if (t.params !== undefined && (typeof t.params !== "object" || t.params === null || Array.isArray(t.params))) {
+      throw new MediaKitError(`assemble scene template library: template "${t.id}" params must be an object`, "PRESET_LIBRARY_INVALID");
+    }
+    const params = {};
+    for (const [name, spec] of Object.entries(t.params ?? {})) {
+      const where = `assemble scene template library: template "${t.id}" param "${name}"`;
+      if (!spec || typeof spec !== "object" || !SCENE_TEMPLATE_PARAM_TYPES.includes(spec.type)) {
+        throw new MediaKitError(`${where} needs a type (one of ${SCENE_TEMPLATE_PARAM_TYPES.join(", ")})`, "PRESET_LIBRARY_INVALID");
+      }
+      if (!("default" in spec)) throw new MediaKitError(`${where} needs a default`, "PRESET_LIBRARY_INVALID");
+      const param = { type: spec.type, default: spec.default, description: spec.description ?? "" };
+      if (spec.type === "string") {
+        if (typeof spec.default !== "string") throw new MediaKitError(`${where} default must be a string`, "PRESET_LIBRARY_INVALID");
+        if (spec.maxLength !== undefined) {
+          if (!Number.isInteger(spec.maxLength) || spec.maxLength < 1) throw new MediaKitError(`${where} maxLength must be a positive integer`, "PRESET_LIBRARY_INVALID");
+          if (spec.default.length > spec.maxLength) throw new MediaKitError(`${where} default is longer than maxLength ${spec.maxLength}`, "PRESET_LIBRARY_INVALID");
+          param.maxLength = spec.maxLength;
+        }
+      } else if (spec.type === "boolean") {
+        if (typeof spec.default !== "boolean") throw new MediaKitError(`${where} default must be true or false`, "PRESET_LIBRARY_INVALID");
+      } else if (spec.type === "color") {
+        param.default = normalizeSceneTemplateColor(spec.default, where);
+      } else {
+        if (typeof spec.default !== "number" || !Number.isFinite(spec.default)) throw new MediaKitError(`${where} default must be a number`, "PRESET_LIBRARY_INVALID");
+        if (spec.integer) param.integer = true;
+        if (spec.min !== undefined) {
+          if (typeof spec.min !== "number" || !Number.isFinite(spec.min)) throw new MediaKitError(`${where} min must be a number`, "PRESET_LIBRARY_INVALID");
+          param.min = spec.min;
+        }
+        if (spec.max !== undefined) {
+          if (typeof spec.max !== "number" || !Number.isFinite(spec.max)) throw new MediaKitError(`${where} max must be a number`, "PRESET_LIBRARY_INVALID");
+          param.max = spec.max;
+        }
+        if (param.min !== undefined && param.max !== undefined && param.min > param.max) throw new MediaKitError(`${where} min ${param.min} is above max ${param.max}`, "PRESET_LIBRARY_INVALID");
+        if (param.min !== undefined && spec.default < param.min) throw new MediaKitError(`${where} default ${spec.default} is below min ${param.min}`, "PRESET_LIBRARY_INVALID");
+        if (param.max !== undefined && spec.default > param.max) throw new MediaKitError(`${where} default ${spec.default} is above max ${param.max}`, "PRESET_LIBRARY_INVALID");
+        if (param.integer && !Number.isInteger(spec.default)) throw new MediaKitError(`${where} default must be a whole number`, "PRESET_LIBRARY_INVALID");
+      }
+      params[name] = param;
+    }
+    byId[t.id] = { id: t.id, name: t.name ?? t.id, description: t.description ?? "", file: fileAbs, params };
+  }
+  const ids = Object.keys(byId).sort();
+  if (JSON.stringify(ids) !== JSON.stringify([...SCENE_TEMPLATE_IDS].sort())) {
+    throw new MediaKitError(`assemble scene template library ids (${ids.join(", ")}) do not match SCENE_TEMPLATE_IDS (${SCENE_TEMPLATE_IDS.join(", ")}); update both together`, "PRESET_LIBRARY_INVALID");
+  }
+  cachedSceneTemplates = byId;
+  return byId;
+}
+
+export async function resolveSceneTemplate(id) {
+  if (typeof id !== "string" || !id.trim()) {
+    throw new MediaKitError(`assemble scene template must be one of ${SCENE_TEMPLATE_IDS.join(", ")}, got: ${JSON.stringify(id)}`, "INVALID_ARG");
+  }
+  const templates = await getSceneTemplates();
+  const found = templates[id];
+  if (!found) {
+    throw new MediaKitError(`assemble scene template must be one of ${SCENE_TEMPLATE_IDS.join(", ")}, got: ${id}`, "INVALID_ARG");
+  }
+  return found;
+}
+
+// Merge a template's defaults with the shot's params: shot values
+// win, unknown names fail, every value is type/range-checked, so a
+// bad param fails validate instead of drawing garbage mid-render.
+export function resolveSceneTemplateParams(template, rawParams, label) {
+  const merged = {};
+  for (const [name, spec] of Object.entries(template.params)) merged[name] = spec.default;
+  if (rawParams === undefined || rawParams === null) return merged;
+  if (typeof rawParams !== "object" || Array.isArray(rawParams)) {
+    throw new MediaKitError(`${label}: params must be a plain JSON object`, "INVALID_ARG");
+  }
+  for (const [name, value] of Object.entries(rawParams)) {
+    const spec = template.params[name];
+    if (!spec) {
+      throw new MediaKitError(`${label}: unknown param "${name}" for template "${template.id}" (allowed: ${Object.keys(template.params).join(", ") || "none"})`, "INVALID_ARG");
+    }
+    const where = `${label}: template "${template.id}" param "${name}"`;
+    if (spec.type === "string") {
+      if (typeof value !== "string") throw new MediaKitError(`${where} must be a string`, "INVALID_ARG");
+      if (spec.maxLength !== undefined && value.length > spec.maxLength) throw new MediaKitError(`${where} is too long (${value.length} > ${spec.maxLength} characters)`, "INVALID_ARG");
+      merged[name] = value;
+    } else if (spec.type === "boolean") {
+      if (typeof value !== "boolean") throw new MediaKitError(`${where} must be true or false`, "INVALID_ARG");
+      merged[name] = value;
+    } else if (spec.type === "color") {
+      if (typeof value !== "string" || !/^#?[0-9a-fA-F]{6}$/.test(value)) {
+        throw new MediaKitError(`${where} must be a 6-digit hex color (RRGGBB or #RRGGBB), got: ${JSON.stringify(value)}`, "INVALID_ARG");
+      }
+      merged[name] = value.startsWith("#") ? value.toUpperCase() : `#${value.toUpperCase()}`;
+    } else {
+      if (typeof value !== "number" || !Number.isFinite(value)) throw new MediaKitError(`${where} must be a number`, "INVALID_ARG");
+      if (spec.integer && !Number.isInteger(value)) throw new MediaKitError(`${where} must be a whole number`, "INVALID_ARG");
+      if (spec.min !== undefined && value < spec.min) throw new MediaKitError(`${where} must be >= ${spec.min}`, "INVALID_ARG");
+      if (spec.max !== undefined && value > spec.max) throw new MediaKitError(`${where} must be <= ${spec.max}`, "INVALID_ARG");
+      merged[name] = value;
+    }
+  }
+  return merged;
+}
+
 function assembleEvenDown(n) { return n % 2 ? n - 1 : n; }
 
 // Transition handles, in frames. A transition of F frames is
@@ -7812,10 +7962,34 @@ async function validateAssembleManifest(doc, manifestAbs) {
       shot.sourceDuration = meta.duration_seconds;
       shot.assetHash = await hashFile(srcPath);
     } else if (kind === "canvas_scene") {
-      if (typeof raw.scene !== "string" || !raw.scene.trim()) throw new MediaKitError(`${label} (${id}): canvas_scene shot needs a scene (JS module path)`, "INVALID_ARG");
-      const scenePath = await requireInput(resolveRel(raw.scene), `${label} (${id}) scene`);
-      if (!/\.(cjs|js|mjs)$/i.test(path.extname(scenePath))) {
-        throw new MediaKitError(`${label} (${id}): scene must be a .js/.cjs/.mjs module, got ${path.extname(scenePath) || "(no extension)"}`, "INVALID_ARG");
+      const hasScene = typeof raw.scene === "string" && raw.scene.trim();
+      const hasTemplate = typeof raw.template === "string" && raw.template.trim();
+      if (hasScene && hasTemplate) {
+        throw new MediaKitError(`${label} (${id}): canvas_scene shot takes either scene or template, not both`, "INVALID_ARG");
+      }
+      let scenePath;
+      if (hasTemplate) {
+        const tpl = await resolveSceneTemplate(raw.template.trim());
+        shot.template = tpl.id;
+        scenePath = tpl.file;
+        // A template shot is self-contained: it draws everything in
+        // code, so no external assets are accepted.
+        if (raw.assets !== undefined && raw.assets !== null) {
+          throw new MediaKitError(`${label} (${id}): template "${tpl.id}" takes no assets (it draws everything in code)`, "INVALID_ARG");
+        }
+        shot.params = resolveSceneTemplateParams(tpl, raw.params, `${label} (${id})`);
+      } else {
+        if (!hasScene) throw new MediaKitError(`${label} (${id}): canvas_scene shot needs a scene (JS module path) or a template (one of ${SCENE_TEMPLATE_IDS.join(", ")})`, "INVALID_ARG");
+        scenePath = await requireInput(resolveRel(raw.scene), `${label} (${id}) scene`);
+        if (!/\.(cjs|js|mjs)$/i.test(path.extname(scenePath))) {
+          throw new MediaKitError(`${label} (${id}): scene must be a .js/.cjs/.mjs module, got ${path.extname(scenePath) || "(no extension)"}`, "INVALID_ARG");
+        }
+        if (raw.params !== undefined && raw.params !== null) {
+          if (typeof raw.params !== "object" || Array.isArray(raw.params)) {
+            throw new MediaKitError(`${label} (${id}): params must be a plain JSON object`, "INVALID_ARG");
+          }
+          shot.params = raw.params;
+        }
       }
       // Loading the module runs its top-level code — same trust as
       // rendering it. Validate fails here, not mid-render, if the
@@ -7840,12 +8014,6 @@ async function validateAssembleManifest(doc, manifestAbs) {
           shot.assets[name] = assetPath;
           assetHashes[name] = await hashFile(assetPath);
         }
-      }
-      if (raw.params !== undefined && raw.params !== null) {
-        if (typeof raw.params !== "object" || Array.isArray(raw.params)) {
-          throw new MediaKitError(`${label} (${id}): params must be a plain JSON object`, "INVALID_ARG");
-        }
-        shot.params = raw.params;
       }
       if (duration > ASSEMBLE_CANVAS_MAX_SECONDS) {
         throw new MediaKitError(`${label} (${id}): canvas_scene duration ${duration}s exceeds the ${ASSEMBLE_CANVAS_MAX_SECONDS}s cap (render cost is one PNG per frame — split the shot)`, "INVALID_ARG");
@@ -8200,7 +8368,14 @@ async function joinAssembleSegments(segmentPaths, joins, opts, outPath) {
   for (let k = 0; k < joins.length; k++) {
     const j = joins[k];
     const vOut = `x${k}`;
-    graph.push(`[${vLabel}][${k + 1}:v]xfade=transition=${j.type}:duration=${j.durationSeconds}:offset=${+j.offsetSeconds.toFixed(4)}[${vOut}]`);
+    // Full double precision on the offset: it is (cutFrames -
+    // hAfter)/fps, and a repeating decimal like 542/30 =
+    // 18.0666... rounded to 4 decimals (18.0667) overshoots by
+    // 33us — enough for the trailing fps filter to emit one extra
+    // frame at the end (measured 2026-11-14: 601 frames instead of
+    // 600 on a 20s preview; full precision gives exactly 600).
+    // durationSeconds is already printed at full precision.
+    graph.push(`[${vLabel}][${k + 1}:v]xfade=transition=${j.type}:duration=${j.durationSeconds}:offset=${j.offsetSeconds}[${vOut}]`);
     vLabel = vOut;
   }
   graph.push(`[${vLabel}]fps=${fps},format=yuv420p[vout]`);
@@ -8225,6 +8400,7 @@ async function assembleCachedShot(plan, shot, opts, tmpDir) {
   const key = createHash("sha256").update(stableStringify({
     renderer: ASSEMBLE_VERSION,
     kind: shot.kind,
+    template: shot.template ?? null,
     asset: shot.assetHash ?? shot.color,
     start: shot.buildStart ?? shot.start ?? null,
     duration: shot.buildSeconds,
@@ -8353,7 +8529,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       sfx_count: plan.sfx.length,
       captions: plan.captions,
       chapters: plan.chapters,
-      shots: plan.shots.map((s) => ({ id: s.id, kind: s.kind, duration: s.duration, frames: s.frames, ...(s.transition ? { transition: { type: s.transition.type, duration_seconds: s.transition.duration_seconds, frames: s.transition.frames } } : {}), ...(s.textLayers?.length ? { text_layers: s.textLayers.map((t) => ({ text: t.text, position: t.position, size: t.size, color: t.color, box: t.box, start_seconds: t.start_seconds, end_seconds: t.end_seconds })) } : {}) })),
+      shots: plan.shots.map((s) => ({ id: s.id, kind: s.kind, duration: s.duration, frames: s.frames, ...(s.template ? { template: s.template, params: s.params ?? null } : {}), ...(s.transition ? { transition: { type: s.transition.type, duration_seconds: s.transition.duration_seconds, frames: s.transition.frames } } : {}), ...(s.textLayers?.length ? { text_layers: s.textLayers.map((t) => ({ text: t.text, position: t.position, size: t.size, color: t.color, box: t.box, start_seconds: t.start_seconds, end_seconds: t.end_seconds })) } : {}) })),
     };
   }
   if (!["preview", "approve", "render"].includes(mode)) {
