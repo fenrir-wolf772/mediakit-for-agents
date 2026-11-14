@@ -12,8 +12,19 @@
  *   GET  /mcp                        server metadata
  *   GET  /mcp/tools                  every tool + its JSON input schema
  *   POST /mcp/tools/{name}/invoke    {"arguments": {...}} -> the tool result
+ *   GET  /mcp/jobs                   durable async render jobs, newest first
+ *   GET  /mcp/jobs/{id}              one job: status + stage/percent progress
+ *   POST /mcp/jobs/{id}/cancel       stop a queued/running job
  *   POST /                            JSON-RPC 2.0 (initialize, ping,
  *                                     tools/list, tools/call)
+ *
+ * The job endpoints are the HTTP form of progress notifications: an
+ * MCP client gets progress pushed inside a long call, but a curl
+ * caller cannot — so it starts a render with
+ * POST /mcp/tools/assemble/invoke {"arguments": {..., "async": true}}
+ * and polls GET /mcp/jobs/{id} for stage + percent until the job is
+ * done/failed/cancelled. Same job store (and same job_id format) as
+ * the `job` tool over stdio — one registry, two transports.
  *
  * Shape follows vinayakbhati/ffmpeg-mcp-server's REST trio (studied
  * turn 52): the same three endpoints, but every tool is intent-level
@@ -30,6 +41,7 @@ import { createServer } from "node:http";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { TOOL_DEFS } from "./tools.js";
+import { getJob, listJobs, cancelJob } from "./core.js";
 
 const NAME = "mediakit-for-agents";
 const VERSION = "0.1.0";
@@ -147,6 +159,9 @@ const METADATA = {
     metadata: "GET /mcp",
     tools: "GET /mcp/tools",
     invoke: "POST /mcp/tools/{name}/invoke",
+    jobs: "GET /mcp/jobs",
+    job: "GET /mcp/jobs/{id}",
+    jobCancel: "POST /mcp/jobs/{id}/cancel",
     jsonrpc: "POST /",
   },
 };
@@ -227,6 +242,35 @@ export function createHttpServer() {
       }
       if (req.method === "GET" && path === "/mcp/tools") {
         sendJson(res, 200, { tools: listTools() });
+        return;
+      }
+      // Durable async render jobs (started by assemble async:true):
+      // list newest-first, one job's status + stage/percent progress,
+      // cancel a queued/running job. Unknown ids are 404 JOB_NOT_FOUND;
+      // cancelling a terminal job is a 400 — same errors as the `job`
+      // tool over stdio, via sendError's STATUS_BY_CODE map.
+      if (req.method === "GET" && path === "/mcp/jobs") {
+        const rawLimit = Number(url.searchParams.get("limit") ?? "50");
+        const limit = Number.isFinite(rawLimit) ? Math.min(200, Math.max(1, Math.floor(rawLimit))) : 50;
+        sendJson(res, 200, await listJobs({ limit }));
+        return;
+      }
+      const jobMatch = path.match(/^\/mcp\/jobs\/([^/]+)$/);
+      if (jobMatch) {
+        if (req.method !== "GET") {
+          sendJson(res, 405, { error: `method ${req.method} not allowed here, use GET`, code: "INVALID_ARG" });
+          return;
+        }
+        sendJson(res, 200, await getJob(decodeURIComponent(jobMatch[1])));
+        return;
+      }
+      const jobCancelMatch = path.match(/^\/mcp\/jobs\/([^/]+)\/cancel$/);
+      if (jobCancelMatch) {
+        if (req.method !== "POST") {
+          sendJson(res, 405, { error: `method ${req.method} not allowed here, use POST`, code: "INVALID_ARG" });
+          return;
+        }
+        sendJson(res, 200, await cancelJob(decodeURIComponent(jobCancelMatch[1])));
         return;
       }
       const invokeMatch = path.match(/^\/mcp\/tools\/([a-z0-9_]+)\/invoke$/);

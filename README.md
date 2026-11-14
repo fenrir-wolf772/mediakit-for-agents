@@ -64,6 +64,10 @@ curl http://127.0.0.1:3000/mcp/tools                 # every tool + JSON input s
 curl -X POST http://127.0.0.1:3000/mcp/tools/probe/invoke \
   -H 'content-type: application/json' \
   -d '{"arguments": {"input": "clip.mp4"}}'
+curl http://127.0.0.1:3000/mcp/jobs                 # async render jobs, newest first
+curl http://127.0.0.1:3000/mcp/jobs/<job_id>        # one job: status + stage/percent progress
+curl -X POST http://127.0.0.1:3000/mcp/jobs/<job_id>/cancel
+```
 curl -X POST http://127.0.0.1:3000/ \
   -H 'content-type: application/json' \
   -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -72,12 +76,21 @@ curl -X POST http://127.0.0.1:3000/ \
 
 Errors are JSON (`{error, code, retry}`) with an HTTP status that
 matches the failure — `400` for bad arguments, `404` for an unknown
-tool, `500` for a failed run — and `retry: {tool, arguments}` on
+tool or job, `500` for a failed run — and `retry: {tool, arguments}` on
 every tool error, so a caller can re-issue the identical call.
 JSON-RPC errors use the standard codes (`-32700` parse error,
 `-32601` unknown method, `-32602` unknown tool / bad params); a tool
 that runs and fails reports `isError: true` in the result, exactly
 as over stdio.
+
+Async renders are the one thing curl cannot get pushed progress for,
+so they poll instead: start one with `assemble` invoked with
+`"async": true` (it returns a `job_id` at once), then poll
+`GET /mcp/jobs/<job_id>` — the record carries `status`
+(`queued`/`running`/`done`/`failed`/`cancelled`) plus `progress`
+(`stage` + `percent`) and, when finished, the terminal `result` or
+`error`. `POST /mcp/jobs/<job_id>/cancel` stops a queued or running
+job. Same job store and `job_id` format as the `job` tool over stdio.
 
 ## Tools
 
@@ -235,7 +248,12 @@ a hard cut: every clip is normalized to the first clip's size/fps first
 (in one filter graph, no intermediate files), then chained with `xfade`
 + `acrossfade` — output duration is sum(durations) minus (n−1) ×
 transition length, and a clip without audio gets a silent bed so the
-audio crossfade still works. `frames` pulls N evenly spaced frames out
+audio crossfade still works. Every tool that re-encodes AAC or MP3
+pins the audio bitrate to 192k: ffmpeg's low AAC default let true
+peak overshoot by ~1.4 dB on a loudness-normalised master (measured
+turn 53). `compress`/`loudness` keep their preset bitrates, and
+`image_to_video`, `slideshow` and `segment` keep their deliberate
+128k. `frames` pulls N evenly spaced frames out
 as separate `frame-001.png` files with timestamps, so an agent can look
 at what's actually in a clip before deciding where to cut — use it
 instead of guessing from `probe` alone. `overlay` puts a logo or

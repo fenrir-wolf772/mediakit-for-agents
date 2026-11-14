@@ -1940,7 +1940,7 @@ const findSourceRes = await client.callTool({
   arguments: { directory: path.join(root, "test"), name: "source" },
 });
 const findSourceJson = JSON.parse(findSourceRes.content[0].text);
-checkOk(findSourceJson.total_matches === 5, "find 'source' matches 5 files (source, source2, silence-source, scenes-source, quiet-source)", `got ${findSourceJson.total_matches}`);
+checkOk(findSourceJson.total_matches === 6, "find 'source' matches 6 files (source, source2, silence-source, scenes-source, quiet-source, rich-source)", `got ${findSourceJson.total_matches}`);
 
 const findMp3Res = await client.callTool({
   name: "find",
@@ -3873,6 +3873,17 @@ const assembleTemplateBouncePsnr = await framePsnr(assembleTemplateEarlyPng, ass
 checkOk(assembleTemplateBouncePsnr !== null && assembleTemplateBouncePsnr < 28, "assemble bounce template really moves: frames 0.5s apart differ (PSNR < 28 dB)", `PSNR=${assembleTemplateBouncePsnr}`);
 const assembleTemplateTitleBandR = await planeMean(assembleTemplateTitlePng, "1080:300:0:810", "r");
 checkOk(assembleTemplateTitleBandR !== null && assembleTemplateTitleBandR > 35, "assemble title-card template draws the white title in the middle band", `band R=${assembleTemplateTitleBandR}`);
+// Preview captions must scale too: the style's locked burn values
+// (60px/500px, tuned for 1080x1920) were passed to burnCaptions
+// unscaled, so on a 540x960 preview the subtitles rendered 2x too
+// big and climbed to y=0-540, over the text layers (measured turn
+// 54: R mean 42.9 in the 300-450 band that must stay dark). The
+// title-card shot at 2.5s is a clean probe: dark navy background,
+// caption cue active (0.5-3.5s), title text lives lower.
+const assembleTemplatePreviewRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleTemplateStage.manifestPath, mode: "preview", output_dir: path.join(assembleTemplateStage.dir, "out-preview"), preview_seconds: 3 } });
+const assembleTemplatePreviewJson = JSON.parse(assembleTemplatePreviewRes.content[0].text);
+const assembleTemplateCaptionBand = await planeMean(path.join(assembleTemplateStage.dir, "out-preview", "preview.mp4"), "540:150:0:300", "r", 2.5);
+checkOk(assembleTemplatePreviewJson.dimensions === "540x960" && assembleTemplateCaptionBand !== null && assembleTemplateCaptionBand < 25, "assemble preview scales caption burn to half size (300-450 band stays dark navy, R < 25)", `dimensions=${assembleTemplatePreviewJson.dimensions} band R=${assembleTemplateCaptionBand}`);
 const assembleTemplateRender2Res = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleTemplateStage.manifestPath, mode: "render", output_dir: assembleTemplateOut, force: true } }, undefined, { timeout: 300000 });
 const assembleTemplateRender2Json = JSON.parse(assembleTemplateRender2Res.content[0].text);
 checkOk(assembleTemplateRender2Json.cache_hits === 2, "assemble second template render reuses both template segments from the cache", `cache_hits=${assembleTemplateRender2Json.cache_hits}`);
@@ -4145,6 +4156,38 @@ checkOk(/needs a url/.test(dlManNoUrlText ?? ""), "manifest refuses a download s
 downloadServer.closeAllConnections();
 downloadServer.close();
 
+// AAC 192k pin (turn 54): every tool that re-encodes AAC must carry
+// -b:a 192k — ffmpeg's low default let true peak overshoot (+1.37
+// dBTP on the turn-53 report video). Verified on
+// test/rich-source.mp4 (pink noise + tones, silence gaps at
+// [2,4)/[6,7)): the native AAC encoder is ABR, so a tone fixture
+// undershoots any target and proves nothing — on this rich fixture
+// the default encodes at 61.6k while -b:a 192k measures 139.2k
+// (gaps pull the file average down; all-rich cuts land ~192k).
+// The band 110k–210k separates the pin from the default (61.6k)
+// with margin on both sides.
+// (chroma_key transparent has no audio track to pin — greenscreen
+// has no audio stream; its composite mode copies audio.)
+async function audioBitrate(file) {
+  const r = await client.callTool({ name: "probe", arguments: { input: file } });
+  return JSON.parse(r.content[0].text).audio?.bit_rate ?? null;
+}
+async function checkBitrate(label, toolName, args, outFile) {
+  const res = await client.callTool({ name: toolName, arguments: args });
+  checkOk(res.isError !== true, `${label} runs for the bitrate check`, res.content?.[0]?.text?.slice(0, 200) ?? "");
+  const br = await audioBitrate(outFile);
+  checkOk(br !== null && br > 110000 && br < 210000, `${label} re-encodes AAC in the 110k-210k band (default would be ~62k; measured ${br})`, `file=${outFile} bit_rate=${br}`);
+}
+const richSrc = path.join(root, "test/rich-source.mp4");
+await checkBitrate("fit speed", "fit", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-fit.mp4"), duration: 5, method: "speed" }, path.join(root, "outputs/mcp-bitrate-fit.mp4"));
+await checkBitrate("silence re-encode", "silence", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-silence.mp4") }, path.join(root, "outputs/mcp-bitrate-silence.mp4"));
+await checkBitrate("reverse", "reverse", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-reverse.mp4") }, path.join(root, "outputs/mcp-bitrate-reverse.mp4"));
+await checkBitrate("concat fade", "concat", { inputs: [richSrc, richSrc], output: path.join(root, "outputs/mcp-bitrate-concat.mp4"), transition: "fade", transition_duration: 1 }, path.join(root, "outputs/mcp-bitrate-concat.mp4"));
+await checkBitrate("cut_words", "cut_words", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-cutwords.mp4"), words_file: path.join(root, "test/cut-words.json"), remove: "um,uh" }, path.join(root, "outputs/mcp-bitrate-cutwords.mp4"));
+await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-extract.m4a") }, path.join(root, "outputs/mcp-bitrate-extract.m4a"));
+await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
+await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
+
 // HTTP mode (turn 53): the same 54 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
@@ -4203,6 +4246,38 @@ const httpRpcToolErrorBody = JSON.parse(httpRpcToolError.json?.result?.content?.
 checkOk(httpRpcToolError.json?.result?.isError === true && httpRpcToolErrorBody.code === "INVALID_ARG" && httpRpcToolErrorBody.retry?.tool === "probe", "JSON-RPC tools/call of a tool that fails reports isError with the retry attached (same as stdio)", JSON.stringify(httpRpcToolErrorBody).slice(0, 200));
 const http404 = await httpCall("GET", "/nope");
 checkOk(http404.status === 404, "an unknown path is a 404", `status=${http404.status}`);
+// HTTP job endpoints (turn 54): the same durable job store as the
+// `job` tool, over REST — poll GET /mcp/jobs/{id} for stage/percent.
+// The stdio async test above already left one done job (asyncJobId)
+// in this suite's hermetic jobs dir, so the list must contain it.
+const httpJobs = await httpCall("GET", "/mcp/jobs");
+checkOk(httpJobs.status === 200 && Array.isArray(httpJobs.json?.jobs) && typeof httpJobs.json?.jobs_root === "string" && httpJobs.json.jobs.some((j) => j.job_id === asyncJobId && j.status === "done"), "GET /mcp/jobs lists jobs newest-first and contains the stdio async job as done", `count=${httpJobs.json?.count}`);
+const httpJobsLimit = await httpCall("GET", "/mcp/jobs?limit=1");
+checkOk(httpJobsLimit.status === 200 && httpJobsLimit.json?.jobs?.length === 1, "GET /mcp/jobs?limit=1 returns exactly one job", `count=${httpJobsLimit.json?.jobs?.length}`);
+const httpJobOne = await httpCall("GET", `/mcp/jobs/${asyncJobId}`);
+checkOk(httpJobOne.status === 200 && httpJobOne.json?.job_id === asyncJobId && httpJobOne.json?.status === "done" && httpJobOne.json?.progress?.percent === 100, "GET /mcp/jobs/{id} returns the job with status done and progress 100%", JSON.stringify(httpJobOne.json?.progress));
+const httpJobUnknown = await httpCall("GET", "/mcp/jobs/job-20000101-000000-deadbeef");
+checkOk(httpJobUnknown.status === 404 && httpJobUnknown.json?.code === "JOB_NOT_FOUND", "GET /mcp/jobs/{unknown} is a 404 JOB_NOT_FOUND", JSON.stringify(httpJobUnknown.json));
+const httpJobCancelDone = await httpCall("POST", `/mcp/jobs/${asyncJobId}/cancel`);
+checkOk(httpJobCancelDone.status === 400, "POST /mcp/jobs/{done}/cancel is a 400 (terminal job)", `status=${httpJobCancelDone.status} ${JSON.stringify(httpJobCancelDone.json).slice(0, 150)}`);
+const httpJobCancelGet = await httpCall("GET", `/mcp/jobs/${asyncJobId}/cancel`);
+checkOk(httpJobCancelGet.status === 405, "GET on a cancel endpoint is a 405 (cancel is POST-only)", `status=${httpJobCancelGet.status}`);
+// Dogfood: start an async assemble render over HTTP and poll the new
+// endpoint until it finishes — the render itself runs in the worker,
+// the polling here only reads the job record.
+const httpAsyncStart = await httpCall("POST", "/mcp/tools/assemble/invoke", { arguments: { manifest_path: assembleAsyncStage.manifestPath, mode: "render", output_dir: assembleAsyncOut, force: true, async: true } });
+const httpAsyncJobId = httpAsyncStart.json?.job_id;
+checkOk(httpAsyncStart.status === 200 && typeof httpAsyncJobId === "string" && /^job-\d{8}-\d{6}-[0-9a-f]{8}$/.test(httpAsyncJobId), "POST assemble/invoke async:true over HTTP returns a job_id", `job_id=${httpAsyncJobId}`);
+let httpAsyncJob = null;
+for (let i = 0; i < 150; i++) {
+  const r = await httpCall("GET", `/mcp/jobs/${httpAsyncJobId}`);
+  httpAsyncJob = r.json;
+  if (httpAsyncJob?.status === "done" || httpAsyncJob?.status === "failed") break;
+  await new Promise((r2) => setTimeout(r2, 2000));
+}
+checkOk(httpAsyncJob?.status === "done" && httpAsyncJob?.progress?.percent === 100 && near(httpAsyncJob?.result?.duration_seconds, 4, 0.15), "HTTP-polled async job reaches done with progress 100% and a 4s result", `status=${httpAsyncJob?.status} progress=${JSON.stringify(httpAsyncJob?.progress)}`);
+const httpMetaJobs = await httpCall("GET", "/mcp");
+checkOk(httpMetaJobs.json?.endpoints?.jobs === "GET /mcp/jobs" && httpMetaJobs.json?.endpoints?.job === "GET /mcp/jobs/{id}" && httpMetaJobs.json?.endpoints?.jobCancel === "POST /mcp/jobs/{id}/cancel", "GET /mcp metadata advertises the job endpoints", JSON.stringify(httpMetaJobs.json?.endpoints));
 const httpSecond = createHttpServer();
 const httpSecondErr = await new Promise((resolve) => {
   httpSecond.on("error", resolve);

@@ -595,7 +595,7 @@ export async function fitDuration({ input, output, duration, method = "speed", m
     if (meta.audio) filters.push(`[0:a]${atempoChain(f)}[a]`);
     if (filters.length) args.push("-filter_complex", filters.join(";"));
     if (meta.video) args.push("-map", "[v]", "-c:v", "libx264", "-crf", "18", "-preset", "veryfast");
-    if (meta.audio) args.push("-map", "[a]", "-c:a", audioCodec);
+    if (meta.audio) args.push("-map", "[a]", "-c:a", audioCodec, ...audioBitrateArgs(audioCodec));
     // -fps_mode passthrough: without it, ffmpeg's default CFR resampling
     // duplicates frames back onto the source fps grid (300 frames at 2x
     // came out as 152 frames / 5.067s instead of 5.0s). -t trims the
@@ -609,7 +609,7 @@ export async function fitDuration({ input, output, duration, method = "speed", m
     args = ["-y", "-i", inPath, "-t", String(target)];
     if (capFps) args.push("-vf", `fps=${capFps}`);
     if (meta.video) args.push("-c:v", "libx264", "-crf", "18", "-preset", "veryfast");
-    if (meta.audio) args.push("-c:a", audioCodec);
+    if (meta.audio) args.push("-c:a", audioCodec, ...audioBitrateArgs(audioCodec));
     args.push(outPath);
   } else { // loop
     if (srcDur >= target) {
@@ -619,7 +619,7 @@ export async function fitDuration({ input, output, duration, method = "speed", m
     args = ["-y", "-stream_loop", "-1", "-i", inPath, "-t", String(target)];
     if (capFps) args.push("-vf", `fps=${capFps}`);
     if (meta.video) args.push("-c:v", "libx264", "-crf", "18", "-preset", "veryfast");
-    if (meta.audio) args.push("-c:a", audioCodec);
+    if (meta.audio) args.push("-c:a", audioCodec, ...audioBitrateArgs(audioCodec));
     args.push(outPath);
   }
   await run(FFMPEG, args);
@@ -757,7 +757,7 @@ export async function extractAudio({ input, output, format = null, whisper = fal
   }
   const args = ["-y", "-i", inPath, "-vn"];
   if (channelIdx !== null) args.push("-af", `pan=mono|c0=c${channelIdx}`);
-  args.push("-c:a", codec);
+  args.push("-c:a", codec, ...audioBitrateArgs(codec));
   if (whisper) args.push("-ar", "16000", "-ac", "1");
   args.push(outPath);
   await run(FFMPEG, args);
@@ -984,6 +984,13 @@ const VIDEO_CONTAINER_AUDIO = { mp4: "aac", mov: "aac", m4v: "aac", mkv: "aac", 
 // and the same WAV into AAC 192k measured -1.98). Pin both lossy
 // codecs to 192k so the master the limiter produced is the master
 // on disk. Used by loudness() and mix().
+// Pin the audio bitrate on every lossy re-encode: ffmpeg's native AAC
+// encoder defaults to a low bitrate, and that bitrate — not loudnorm —
+// was the root cause of the true-peak overshoot measured in turn 53
+// (WAV at -2.00 dBTP came back from AAC at +1.37 dBTP). 192k is the
+// floor everywhere a tool re-encodes AAC or MP3 without an explicit
+// preset bitrate (compress/loudness keep their own preset numbers;
+// image_to_video, slideshow and segment keep their deliberate 128k).
 const audioBitrateArgs = (codec) => (codec === "libmp3lame" || codec === "aac" ? ["-b:a", "192k"] : []);
 
 // acompressor takes a LINEAR threshold (0-1), so -24 dB = 0.0631 —
@@ -1264,7 +1271,7 @@ export async function concat({ inputs, output, videoCodec = "libx264", audioCode
     } else {
       await run(FFMPEG, [
         "-y", "-f", "concat", "-safe", "0", "-i", listPath,
-        "-c:v", videoCodec, "-c:a", audioCodec, "-movflags", "+faststart", outPath,
+        "-c:v", videoCodec, "-c:a", audioCodec, ...audioBitrateArgs(audioCodec), "-movflags", "+faststart", outPath,
       ]);
     }
   } finally {
@@ -1329,7 +1336,7 @@ async function concatTrimmed({ inPaths, outPath, videoCodec, audioCodec, clips, 
   } else {
     args.push("-map", "[aout]");
   }
-  args.push("-c:a", audioCodec, "-movflags", "+faststart", outPath);
+  args.push("-c:a", audioCodec, ...audioBitrateArgs(audioCodec), "-movflags", "+faststart", outPath);
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
@@ -1465,7 +1472,7 @@ async function concatTransition({ inPaths, outPath, videoCodec, audioCodec, tran
     "-filter_complex", graph.join(";"),
     "-map", `[${vLabel}]`, "-map", `[${aLabel}]`,
     "-c:v", videoCodec, "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "medium",
-    "-c:a", audioCodec, "-movflags", "+faststart", outPath,
+    "-c:a", audioCodec, ...audioBitrateArgs(audioCodec), "-movflags", "+faststart", outPath,
   );
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
@@ -3768,7 +3775,7 @@ export async function reverseClip({ input, output, audio = true, crf = 23 }) {
   const args = ["-y", "-i", inPath];
   if (meta.video) args.push("-vf", "reverse", "-c:v", "libx264", "-crf", String(c), "-preset", "medium");
   if (meta.audio) {
-    if (reverseAudio) args.push("-af", "areverse", "-c:a", audioCodec);
+    if (reverseAudio) args.push("-af", "areverse", "-c:a", audioCodec, ...audioBitrateArgs(audioCodec));
     else args.push("-c:a", "copy");
   }
   args.push(outPath);
@@ -3873,7 +3880,7 @@ export async function chromaKey({ input, output, color = "00FF00", similarity = 
     }
     args = ["-y", "-i", inPath, "-vf", `${keyFilter},format=yuva444p10le`,
       "-c:v", "prores_ks", "-profile:v", "4444"];
-    if (meta.audio) args.push("-c:a", "aac");
+    if (meta.audio) args.push("-c:a", "aac", ...audioBitrateArgs("aac"));
     args.push(outPath);
   } else {
     // Composite mode: flat yuv420p output, .mp4 (libx264) or .webm (VP9).
@@ -4830,7 +4837,7 @@ export async function convert({ input, output, videoCodec = null, audioCodec = n
   } else {
     args.push("-c:v", "copy");
   }
-  if (audioCodec) args.push("-c:a", audioCodec);
+  if (audioCodec) args.push("-c:a", audioCodec, ...audioBitrateArgs(audioCodec));
   else args.push("-c:a", "copy");
   args.push(outPath);
   await run(FFMPEG, args);
@@ -5218,12 +5225,12 @@ export async function silence({ input, output = null, thresholdDb = -40, minDura
   if (meta.video) {
     args.push("-map", "[vout]", "-map", "[aout]",
       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "medium",
-      "-c:a", "aac", "-movflags", "+faststart");
+      "-c:a", "aac", ...audioBitrateArgs("aac"), "-movflags", "+faststart");
   } else {
     const ext = path.extname(outPath).slice(1).toLowerCase();
     const codec = AUDIO_FORMATS[ext];
     if (!codec) throw new MediaKitError(`audio-only input needs an audio output format (.mp3/.aac/.wav/.ogg/.opus/.flac), got .${ext || "(none)"}`, "INVALID_ARG");
-    args.push("-map", "[aout]", "-c:a", codec);
+    args.push("-map", "[aout]", "-c:a", codec, ...audioBitrateArgs(codec));
   }
   args.push(outPath);
   await run(FFMPEG, args);
@@ -5452,12 +5459,12 @@ export async function cutWords({ input, output = null, wordsFile, remove = null,
   if (meta.video) {
     args.push("-map", "[vout]", "-map", "[aout]",
       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "medium",
-      "-c:a", "aac", "-movflags", "+faststart");
+      "-c:a", "aac", ...audioBitrateArgs("aac"), "-movflags", "+faststart");
   } else {
     const ext = path.extname(outPath).slice(1).toLowerCase();
     const codec = AUDIO_FORMATS[ext];
     if (!codec) throw new MediaKitError(`audio-only input needs an audio output format (.mp3/.aac/.wav/.ogg/.opus/.flac), got .${ext || "(none)"}`, "INVALID_ARG");
-    args.push("-map", "[aout]", "-c:a", codec);
+    args.push("-map", "[aout]", "-c:a", codec, ...audioBitrateArgs(codec));
   }
   args.push(outPath);
   await run(FFMPEG, args);
@@ -6593,15 +6600,15 @@ export async function pictureInPicture({
     audioArgs = ["-map", "0:a?", "-c:a", "copy"];
   } else if (audio === "pip") {
     if (!pipAudio) throw new MediaKitError("pip audio=pip needs audio in the pip video", "INVALID_ARG");
-    audioArgs = ["-map", "1:a", "-c:a", "aac"];
+    audioArgs = ["-map", "1:a", "-c:a", "aac", "-b:a", "192k"];
   } else {
     if (mainAudio && pipAudio) {
       audioFilter = "[0:a][1:a]amix=inputs=2:normalize=0[aout]";
-      audioArgs = ["-map", "[aout]", "-c:a", "aac"];
+      audioArgs = ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k"];
     } else if (mainAudio) {
       audioArgs = ["-map", "0:a", "-c:a", "copy"];
     } else if (pipAudio) {
-      audioArgs = ["-map", "1:a", "-c:a", "aac"];
+      audioArgs = ["-map", "1:a", "-c:a", "aac", "-b:a", "192k"];
     } else {
       audioArgs = [];
     }
@@ -9070,9 +9077,19 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
     emitProgress("captions", 0);
     if (plan.captions) {
       const bv = plan.styleValues?.burn_captions ?? { font_size: null, margin_v: null, style: "background" };
+      // Locked burn values are tuned for the manifest size
+      // (1080x1920): scale them to the actual render height, or the
+      // preview's subtitles render 2x too big and climb over the
+      // text layers (measured turn 54: 60px/500px on a 540x960
+      // preview put 6 lines across y=0-540, R mean 42.9 in the
+      // 300-450 band that must stay dark). A null stays null, so
+      // burnCaptions' own height-relative defaults still apply.
+      const burnScale = opts.height / plan.height;
       await burnCaptions({
         input: muxedPath, output: finalPath, captions: plan.captions.path,
-        fontSize: bv.font_size ?? null, marginV: bv.margin_v ?? null, style: bv.style ?? "background",
+        fontSize: bv.font_size == null ? null : Math.max(8, Math.round(bv.font_size * burnScale)),
+        marginV: bv.margin_v == null ? null : Math.max(0, Math.round(bv.margin_v * burnScale)),
+        style: bv.style ?? "background",
       });
     } else {
       await copyFile(muxedPath, finalPath);
