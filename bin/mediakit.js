@@ -18,8 +18,8 @@ const COMMANDS = {
     options: [],
   },
   trim: {
-    usage: "mediakit trim <input> --start <s|MM:SS> (--duration <s|MM:SS> | --end <s|MM:SS>) -o <output> [--stream-copy] [--snap] [--smart-cut] [--dry-run]",
-    desc: "Cut a clip. Re-encodes by default (frame-accurate); --stream-copy is fast but keyframe-only. --snap (with --stream-copy) moves start/end onto the nearest keyframes. --smart-cut (with --stream-copy) keeps the exact start: only the head up to the next keyframe is re-encoded, the rest is copied. --dry-run prints the exact ffmpeg command(s) that would run (three for --smart-cut) and writes no file. Times accept seconds or MM:SS.",
+    usage: "mediakit trim <input> --start <s|MM:SS> (--duration <s|MM:SS> | --end <s|MM:SS>) -o <output> [--stream-copy] [--snap] [--smart-cut] [--no-check-frames] [--dry-run]",
+    desc: "Cut a clip. Re-encodes by default (frame-accurate); --stream-copy is fast but keyframe-only. --snap (with --stream-copy) moves start/end onto the nearest keyframes. --smart-cut (with --stream-copy) keeps the exact start: only the head up to the next keyframe is re-encoded, the rest is copied. Every video trim verifies the cut by default: 3 output frames (head/middle/tail) are compared against the source at the requested times and the result reports cut_verified plus mean_abs_diff per frame; --no-check-frames skips the verification (audio-only inputs have nothing to check). --dry-run prints the exact ffmpeg command(s) that would run (three for --smart-cut) and writes no file. Times accept seconds or MM:SS.",
     args: [{ name: "input", required: true }],
     options: [
       ["--start", "Start time in seconds or MM:SS (default 0)"],
@@ -28,6 +28,7 @@ const COMMANDS = {
       ["--stream-copy", "Copy streams without re-encoding"],
       ["--snap", "Snap start/end to the nearest keyframes (needs --stream-copy)"],
       ["--smart-cut", "Exact start with stream copy: re-encode only the head up to the next keyframe (needs --stream-copy, refuses --snap)"],
+      ["--no-check-frames", "Skip the 3-frame cut verification"],
       ["--dry-run", "Print the exact ffmpeg command(s) and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
@@ -931,6 +932,7 @@ async function main() {
           streamCopy: opts.stream_copy === true,
           snapToKeyframe: opts.snap === true,
           smartCut: opts.smart_cut === true,
+          checkFrames: opts.check_frames !== false,
           dryRun: opts.dry_run === true,
         });
         break;

@@ -512,7 +512,125 @@ const SMART_CUT_AUDIO_ENCODERS = {
   vorbis: "libvorbis", flac: "flac", pcm_s16le: "pcm_s16le", ac3: "ac3",
 };
 
-async function smartCutTrim({ inPath, outPath, s, dur, dryRun = false }) {
+// Check frames (idea: edigeh/broll-mcp's "frame-accurate cuts
+// verified ±0.1s + 3 check frames", lượt 65 — AutoCut cuts by
+// transcript and never verifies the cut landed; MediaKit does).
+// After a video trim, compare 3 frames of the output (head /
+// middle / tail) against the source frames at the REQUESTED cut
+// times, using the same frameDiffMean the loopable seam check uses
+// (mean abs gray diff, 0-255). A frame matches when the diff is at
+// most max(5, normal_step): 5 covers re-encode noise (measured
+// 0.05-0.54 on testsrc and a natural clip, vs 10.9+ for a 3.5s
+// slip), and the normal_step floor covers fast content where even
+// neighbouring frames differ by more than 5 — there a 1-frame slip
+// is indistinguishable from re-encode noise anyway, so the check
+// only rules out gross mis-cuts. Times are exact frame pts
+// (idx/fps), so the trim window always contains exactly that frame. The check
+// compares against the REQUESTED start, so a snap that moved the
+// cut shows up as mismatched frames — while a plain stream-copy on
+// ffmpeg 8.1.2 keeps the keyframe at negative pts and the content
+// lands exactly, so it verifies (measured 2026-11-15: copy@0.05
+// PSNR inf vs source@3.55). LIMIT: on frozen/static content every
+// frame matches even a slipped cut (normal_step ~ 0) — run `motion`
+// first if the source may be frozen.
+const CHECK_FRAMES_BASE_THRESHOLD = 5;
+
+async function checkTrimFrames({ inPath, outPath, requestedStart, durationActual, outMeta }) {
+  if (!outMeta.video) {
+    return { check_frames: null, check_frames_note: "audio-only input has no video frames to check" };
+  }
+  const dur = durationActual;
+  if (!Number.isFinite(dur) || dur <= 0) {
+    return { check_frames: null, check_frames_note: "could not measure the output duration, so no frames were checked" };
+  }
+  const inMeta = await probe(inPath);
+  const fps = outMeta.video.fps ?? inMeta.video?.fps ?? null;
+  const step = fps ? 1 / fps : 0.04;
+  const srcDur = inMeta.duration_seconds;
+  // Check times: exact frame pts (idx/fps, full precision — never
+  // rounded to 4 decimals, or the window can slip past the frame it
+  // should contain) of the second frame / middle frame / last frame,
+  // deduped for short clips. The first frame is skipped: on some
+  // sources it carries encoder warm-up artefacts.
+  let tOuts;
+  if (fps) {
+    const n = Math.max(1, Math.round(dur * fps));
+    const idxs = [...new Set([1, Math.floor((n - 1) / 2), n - 1].map((i) => Math.min(Math.max(i, 0), n - 1)))].sort((a, b) => a - b);
+    tOuts = idxs.map((i) => i * step);
+  } else {
+    tOuts = [...new Set([0.05, dur / 2, dur - 0.05].map((t) => +Math.min(Math.max(t, 0), dur).toFixed(4)))].sort((a, b) => a - b);
+  }
+  const labels = tOuts.length === 1 ? ["middle"] : tOuts.length === 2 ? ["head", "tail"] : ["head", "middle", "tail"];
+  // Baseline: how much one frame step changes on the source itself.
+  const midSrc = Number.isFinite(srcDur)
+    ? Math.min(Math.max(requestedStart + dur / 2, 0), Math.max(0, srcDur - 2 * step))
+    : requestedStart + dur / 2;
+  const normalStep = fps ? await frameDiffMean(inPath, midSrc, midSrc + step, fps) : null;
+  const threshold = +(Math.max(CHECK_FRAMES_BASE_THRESHOLD, normalStep ?? 0).toFixed(2));
+  const frames = [];
+  let measureNote = null;
+  for (let k = 0; k < tOuts.length; k++) {
+    const tOut = tOuts[k];
+    // Stream-copy outputs can have a ragged tail: -t stops on DTS,
+    // so the last 1-3 frames near the cut can be missing even though
+    // duration_actual says they should exist (measured 2026-11-15:
+    // a snap cut's frames jump 8.3333 -> 8.4667). If the window is
+    // empty, step back one frame at a time (max 3) and keep the
+    // source time aligned to the frame actually measured.
+    let diff = null; let usedTOut = tOut; let usedTSrc = requestedStart + tOut; let usedClamped = false;
+    for (let back = 0; back <= 3 && diff === null; back++) {
+      const t = tOut - back * step;
+      if (t < 0) break;
+      // Clamp the source time inside the source so the measurement
+      // stays defined when the requested end runs past the source
+      // (e.g. a snap whose actual end is longer than the source).
+      let s = requestedStart + t;
+      let c = false;
+      if (Number.isFinite(srcDur) && s > srcDur - step) { s = Math.max(0, srcDur - step); c = true; }
+      diff = await frameDiffMean(outPath, t, s, fps, inPath);
+      if (diff !== null) { usedTOut = t; usedTSrc = s; usedClamped = c; }
+    }
+    if (diff === null) measureNote = `frame measurement failed at ${labels[k]} (output ${+tOut.toFixed(3)}s vs source ${+(requestedStart + tOut).toFixed(3)}s)`;
+    frames.push({
+      position: labels[k],
+      output_time: +usedTOut.toFixed(3),
+      source_time: +usedTSrc.toFixed(3),
+      ...(usedClamped ? { source_time_clamped: true } : {}),
+      mean_abs_diff: diff,
+      matches: diff !== null && diff <= threshold,
+    });
+  }
+  const matched = frames.filter((f) => f.matches).length;
+  const result = {
+    check_frames: frames,
+    check_frames_match: `${matched}/${frames.length}`,
+    cut_verified: frames.length > 0 && matched === frames.length,
+    match_threshold: threshold,
+    normal_step: normalStep,
+  };
+  if (normalStep !== null && normalStep < 1) {
+    result.check_frames_note = `source barely changes frame-to-frame (normal_step ${normalStep}), so this check only rules out gross mis-cuts — a small slip would still match; run motion first if the source may be frozen`;
+  } else if (measureNote) {
+    result.check_frames_note = measureNote;
+  }
+  return result;
+}
+
+// Shared by trim() and smartCutTrim(): run the 3-frame check (or
+// record why it was skipped) and spread the result into the trim
+// result. `outMeta` is the output probe the caller already has;
+// dry-run callers never reach here (no file exists to check).
+async function withCheckFrames(base, { inPath, outPath, requestedStart, checkFrames, outMeta }) {
+  if (!checkFrames) {
+    return { ...base, check_frames: null, check_frames_note: "check frames skipped (check_frames=false)" };
+  }
+  return {
+    ...base,
+    ...(await checkTrimFrames({ inPath, outPath, requestedStart, durationActual: base.duration_actual ?? base.duration_seconds, outMeta })),
+  };
+}
+
+async function smartCutTrim({ inPath, outPath, s, dur, dryRun = false, checkFrames = true }) {
   const meta = await probe(inPath);
   if (!meta.video) throw new MediaKitError("smart_cut needs a video input (audio-only files cut exactly with a plain re-encode trim)", "INVALID_ARG");
   const reqEnd = s + dur;
@@ -535,13 +653,13 @@ async function smartCutTrim({ inPath, outPath, s, dur, dryRun = false }) {
     await run(FFMPEG, exactArgs);
     const info = await fileInfo(outPath);
     const out = await probe(outPath);
-    return {
+    return withCheckFrames({
       operation: "trim", input: inPath, output: outPath,
       start: s, duration_seconds: dur, stream_copy: true,
       smart_cut: true, mode: "keyframe-exact", next_keyframe: exact, head_reencoded_seconds: 0,
       ...info, duration_actual: out.duration_seconds,
       duration_error_seconds: +(out.duration_seconds - dur).toFixed(3),
-    };
+    }, { inPath, outPath, requestedStart: s, checkFrames, outMeta: out });
   }
   const nextKf = kfs.find((t) => t > s + 0.001) ?? null;
   const headDur = nextKf === null ? dur : +(nextKf - s).toFixed(3);
@@ -574,7 +692,7 @@ async function smartCutTrim({ inPath, outPath, s, dur, dryRun = false }) {
     await run(FFMPEG, args);
     const info = await fileInfo(outPath);
     const out = await probe(outPath);
-    return {
+    return withCheckFrames({
       operation: "trim", input: inPath, output: outPath,
       start: s, duration_seconds: dur, stream_copy: false,
       smart_cut: true, mode: "full-reencode",
@@ -582,7 +700,7 @@ async function smartCutTrim({ inPath, outPath, s, dur, dryRun = false }) {
       reason: nextKf === null ? "no keyframe after the requested start" : "the next keyframe is past the requested end, so the whole clip is inside one GOP",
       ...info, duration_actual: out.duration_seconds,
       duration_error_seconds: +(out.duration_seconds - dur).toFixed(3),
-    };
+    }, { inPath, outPath, requestedStart: s, checkFrames, outMeta: out });
   }
   // Head bitrate: stream bitrate x1.2; fall back to size/duration.
   let headBitrate = meta.video.bit_rate ? Math.floor(meta.video.bit_rate * 1.2) : null;
@@ -645,7 +763,7 @@ async function smartCutTrim({ inPath, outPath, s, dur, dryRun = false }) {
   }
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
-  return {
+  return withCheckFrames({
     operation: "trim", input: inPath, output: outPath,
     start: s, duration_seconds: dur, stream_copy: true,
     smart_cut: true, mode: "smart-cut", next_keyframe: nextKf,
@@ -653,10 +771,10 @@ async function smartCutTrim({ inPath, outPath, s, dur, dryRun = false }) {
     head_bitrate_bps: headBitrate,
     ...info, duration_actual: out.duration_seconds,
     duration_error_seconds: +(out.duration_seconds - dur).toFixed(3),
-  };
+  }, { inPath, outPath, requestedStart: s, checkFrames, outMeta: out });
 }
 
-export async function trim({ input, output, start = 0, duration = null, end = null, streamCopy = false, snapToKeyframe = false, smartCut = false, dryRun = false }) {
+export async function trim({ input, output, start = 0, duration = null, end = null, streamCopy = false, snapToKeyframe = false, smartCut = false, dryRun = false, checkFrames = true }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const s = parseTime(start, "start");
@@ -679,7 +797,7 @@ export async function trim({ input, output, start = 0, duration = null, end = nu
   if (smartCut) {
     if (!streamCopy) throw new MediaKitError("smart_cut needs stream_copy (it is a stream-copy cut with an exact start)", "INVALID_ARG");
     if (snapToKeyframe) throw new MediaKitError("smart_cut and snap_to_keyframe cannot be combined (smart_cut already lands the start exactly)", "INVALID_ARG");
-    return smartCutTrim({ inPath, outPath, s, dur, dryRun });
+    return smartCutTrim({ inPath, outPath, s, dur, dryRun, checkFrames });
   }
 
   // snapToKeyframe only makes sense for stream copy: re-encode cuts are
@@ -723,7 +841,9 @@ export async function trim({ input, output, start = 0, duration = null, end = nu
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const meta = await probe(outPath);
-  return {
+  // The check compares against the REQUESTED start, so a snap that
+  // moved the cut shows up as mismatched frames.
+  return withCheckFrames({
     operation: "trim", input: inPath, output: outPath,
     start: sActual, duration_seconds: durActual, stream_copy: streamCopy,
     ...(snapToKeyframe ? {
@@ -731,7 +851,7 @@ export async function trim({ input, output, start = 0, duration = null, end = nu
       snapped, keyframe_start: kfStart, keyframe_end: kfEnd,
     } : {}),
     ...info, duration_actual: meta.duration_seconds,
-  };
+  }, { inPath, outPath, requestedStart: s, checkFrames, outMeta: meta });
 }
 
 // ---------------------------------------------------------------- fit
@@ -7920,8 +8040,8 @@ export const BATCH_OPERATIONS = {
     run: (input, output, a) => fitDuration({ input, output, duration: a.duration, method: a.method ?? "speed", maxFps: a.max_fps ?? null }),
   },
   trim: {
-    args: ["start", "end", "duration", "stream_copy", "snap_to_keyframe", "smart_cut"],
-    run: (input, output, a) => trim({ input, output, start: a.start ?? 0, duration: a.duration ?? null, end: a.end ?? null, streamCopy: a.stream_copy ?? false, snapToKeyframe: a.snap_to_keyframe ?? false, smartCut: a.smart_cut ?? false }),
+    args: ["start", "end", "duration", "stream_copy", "snap_to_keyframe", "smart_cut", "check_frames"],
+    run: (input, output, a) => trim({ input, output, start: a.start ?? 0, duration: a.duration ?? null, end: a.end ?? null, streamCopy: a.stream_copy ?? false, snapToKeyframe: a.snap_to_keyframe ?? false, smartCut: a.smart_cut ?? false, checkFrames: a.check_frames ?? true }),
   },
   silence: {
     args: ["threshold_db", "min_duration", "margin"],

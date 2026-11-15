@@ -1671,6 +1671,60 @@ checkOk(/cannot be combined/.test(smartSnap), "trim smart_cut + snap_to_keyframe
 const smartAudio = await callExpectThrow("trim", { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-trim-smartcut-audio.mp3"), start: 1, duration: 2, stream_copy: true, smart_cut: true });
 checkOk(/needs a video input/.test(smartAudio), "trim smart_cut refuses audio-only input", smartAudio.slice(0, 120));
 
+// check_frames (idea: broll-mcp, lượt 65): every video trim verifies
+// the cut — 3 output frames vs the source at the requested times.
+// Fixture test/trim-check-source.mp4 is testsrc 10s/30fps with
+// keyframes only at 0 and 8.333, so a cut at 3.5s is off-keyframe.
+const checkSrc = path.join(root, "test/trim-check-source.mp4");
+const checkReencRes = await client.callTool({
+  name: "trim",
+  arguments: { input: checkSrc, output: path.join(root, "outputs/mcp-trim-check-reenc.mp4"), start: 3.5, duration: 2 },
+});
+const checkReenc = JSON.parse(checkReencRes.content[0].text);
+console.log("trim check-frames re-encode:", checkReenc.check_frames_match, "| verified", checkReenc.cut_verified, "| diffs", checkReenc.check_frames.map((f) => f.mean_abs_diff).join(","));
+checkOk(checkReenc.cut_verified === true && checkReenc.check_frames_match === "3/3", "trim check-frames: re-encode cut at 3.5s verifies 3/3", JSON.stringify(checkReenc.check_frames));
+checkOk(checkReenc.check_frames.every((f) => f.mean_abs_diff !== null && f.mean_abs_diff <= 2), "trim check-frames: re-encode diffs are re-encode noise (<= 2)", checkReenc.check_frames.map((f) => f.mean_abs_diff).join(","));
+checkOk(checkReenc.check_frames.map((f) => f.position).join(",") === "head,middle,tail" && checkReenc.match_threshold === 5 && checkReenc.normal_step !== null && checkReenc.normal_step < 1, "trim check-frames: positions head/middle/tail, threshold 5, normal_step < 1 on testsrc", JSON.stringify({ pos: checkReenc.check_frames.map((f) => f.position), thr: checkReenc.match_threshold, ns: checkReenc.normal_step }));
+// Stream copy on ffmpeg 8.1.2 keeps the keyframe at negative pts, so
+// the content lands exactly — bit-identical frames, not a slide.
+const checkCopyRes = await client.callTool({
+  name: "trim",
+  arguments: { input: checkSrc, output: path.join(root, "outputs/mcp-trim-check-copy.mp4"), start: 3.5, duration: 2, stream_copy: true },
+});
+const checkCopy = JSON.parse(checkCopyRes.content[0].text);
+checkOk(checkCopy.cut_verified === true && checkCopy.check_frames.every((f) => f.mean_abs_diff === 0), "trim check-frames: stream-copy cut verifies 3/3 with bit-identical frames (diff 0)", JSON.stringify(checkCopy.check_frames));
+// Smart cut lands exactly too (head re-encoded, tail copied).
+const checkSmartRes = await client.callTool({
+  name: "trim",
+  arguments: { input: checkSrc, output: path.join(root, "outputs/mcp-trim-check-smart.mp4"), start: 3.5, duration: 2, stream_copy: true, smart_cut: true },
+});
+const checkSmart = JSON.parse(checkSmartRes.content[0].text);
+checkOk(checkSmart.cut_verified === true && checkSmart.check_frames_match === "3/3" && checkSmart.check_frames.every((f) => f.mean_abs_diff !== null && f.mean_abs_diff <= 2), "trim check-frames: smart-cut verifies 3/3", JSON.stringify(checkSmart.check_frames));
+// Negative control: a snap that moved the cut 3.5s must FAIL the
+// check — head/middle/tail all mismatch the requested times.
+const checkSnapRes = await client.callTool({
+  name: "trim",
+  arguments: { input: checkSrc, output: path.join(root, "outputs/mcp-trim-check-snap.mp4"), start: 3.5, duration: 2, stream_copy: true, snap_to_keyframe: true },
+});
+const checkSnap = JSON.parse(checkSnapRes.content[0].text);
+console.log("trim check-frames snap (negative):", checkSnap.check_frames_match, "| verified", checkSnap.cut_verified, "| diffs", checkSnap.check_frames.map((f) => f.mean_abs_diff).join(","));
+checkOk(checkSnap.cut_verified === false && checkSnap.check_frames_match === "0/3" && checkSnap.check_frames.every((f) => f.mean_abs_diff === null || f.mean_abs_diff > 5), "trim check-frames: snapped cut fails 0/3 (all frames mismatch the requested times)", JSON.stringify(checkSnap.check_frames));
+// Audio-only has no video frames to check; check_frames=false opts out.
+const checkAudioRes = await client.callTool({
+  name: "trim",
+  arguments: { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-trim-check-audio.mp3"), start: 1, duration: 2 },
+});
+const checkAudio = JSON.parse(checkAudioRes.content[0].text);
+checkOk(checkAudio.check_frames === null && /audio-only/.test(checkAudio.check_frames_note ?? ""), "trim check-frames: audio-only trim reports check_frames null", JSON.stringify({ cf: checkAudio.check_frames, note: checkAudio.check_frames_note }));
+const checkOffRes = await client.callTool({
+  name: "trim",
+  arguments: { input: checkSrc, output: path.join(root, "outputs/mcp-trim-check-off.mp4"), start: 3.5, duration: 2, check_frames: false },
+});
+const checkOff = JSON.parse(checkOffRes.content[0].text);
+checkOk(checkOff.check_frames === null && /skipped/.test(checkOff.check_frames_note ?? ""), "trim check-frames=false skips the verification", JSON.stringify({ cf: checkOff.check_frames, note: checkOff.check_frames_note }));
+const checkCliOff = await runCliJson(["trim", checkSrc, "--start", "3.5", "--duration", "2", "--no-check-frames", "-o", path.join(root, "outputs/mcp-trim-check-cli-off.mp4")]);
+checkOk(checkCliOff.check_frames === null, "CLI trim --no-check-frames skips the verification", JSON.stringify(checkCliOff.check_frames));
+
 // fit: 10s source -> 5s by speed (factor 2x), verified on disk below.
 const fitRes = await client.callTool({
   name: "fit",
@@ -2415,7 +2469,7 @@ const findSourceRes = await client.callTool({
   arguments: { directory: path.join(root, "test"), name: "source" },
 });
 const findSourceJson = JSON.parse(findSourceRes.content[0].text);
-checkOk(findSourceJson.total_matches === 6, "find 'source' matches 6 files (source, source2, silence-source, scenes-source, quiet-source, rich-source)", `got ${findSourceJson.total_matches}`);
+checkOk(findSourceJson.total_matches === 7, "find 'source' matches 7 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source)", `got ${findSourceJson.total_matches}`);
 
 const findMp3Res = await client.callTool({
   name: "find",
