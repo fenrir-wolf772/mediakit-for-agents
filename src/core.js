@@ -1127,6 +1127,45 @@ export async function extractAudio({ input, output, format = null, whisper = fal
   };
 }
 
+// ---------------------------------------------------------------- frame capture
+// One frame at one exact timestamp, the vcsi accurate-seek way:
+// input-seek to at most 2s before the target (lands on a keyframe),
+// then output-seek the rest — the decoder walks forward to the real
+// frame at t instead of handing back the keyframe before t (what a
+// bare `-ss t -i` does) or whatever frame the `fps` filter's rounding
+// lands on (lượt 69 probe: `frames --count 2` on a 25.878s film
+// reported frame-002 at 12.939s but its pixels were shot 3, ~24s —
+// PSNR 15.0 vs the true 12.939s frame). The capture is the first
+// frame at-or-after t (frames only exist at discrete PTS, so a t
+// between two frames lands on the later one — e.g. 5.019s on a
+// 30fps clip is the 5.033s frame, not the 5.000s one). Every
+// frame-grabbing tool below goes through this helper, so a reported
+// timestamp is the frame's real timestamp. `labelFile` is a text file drawtext reads
+// (avoids inline-text escaping); the caller owns the file.
+
+function prettyTimestamp(t) {
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = (t % 60).toFixed(1).padStart(4, "0");
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${String(m).padStart(2, "0")}:${s}`;
+}
+
+async function captureFrameAt(inPath, t, outPath, { width = null, labelFile = null } = {}) {
+  const pre = Math.min(2, t);
+  const post = +(t - pre).toFixed(3);
+  const vf = [];
+  if (width !== null) vf.push(`scale=${width}:-2`);
+  if (labelFile) {
+    const esc = labelFile.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
+    const fs = Math.max(12, Math.round((width ?? 320) / 16));
+    vf.push(`drawtext=fontfile=${TITLECARD_FONT}:textfile=${esc}:fontsize=${fs}:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=4:x=8:y=8`);
+  }
+  const args = ["-y", "-ss", String(pre), "-i", inPath, "-ss", String(post), "-frames:v", "1"];
+  if (vf.length) args.push("-vf", vf.join(","));
+  args.push("-q:v", "2", outPath);
+  await run(FFMPEG, args);
+}
+
 // ---------------------------------------------------------------- extract_frame
 
 export async function extractFrame({ input, output, timestamp = 0 }) {
@@ -1137,7 +1176,12 @@ export async function extractFrame({ input, output, timestamp = 0 }) {
   if (![".png", ".jpg", ".jpeg", ".webp"].includes(ext)) {
     throw new MediaKitError(`frame output must be .png/.jpg/.webp, got ${ext || "(no extension)"}`, "INVALID_ARG");
   }
-  await run(FFMPEG, ["-y", "-ss", String(t), "-i", inPath, "-frames:v", "1", "-q:v", "2", outPath]);
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("extract_frame needs a video input", "INVALID_ARG");
+  if (meta.duration_seconds !== null && t >= meta.duration_seconds) {
+    throw new MediaKitError(`timestamp ${t}s is at/past the end of the file (${meta.duration_seconds}s)`, "INVALID_ARG");
+  }
+  await captureFrameAt(inPath, t, outPath);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
   return { operation: "extract_frame", input: inPath, output: outPath, timestamp: t, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null };
@@ -1145,38 +1189,69 @@ export async function extractFrame({ input, output, timestamp = 0 }) {
 
 // ---------------------------------------------------------------- thumbnail
 
-export async function thumbnail({ input, output, frames = 6, columns = 3, width = 320, timestamps = true }) {
+export async function thumbnail({ input, output, frames = 6, columns = 3, width = 320, timestamps = true, startDelayPercent = 0, endDelayPercent = 0 }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const n = num(frames, "frames", { min: 1, max: 64, integer: true });
   const cols = num(columns, "columns", { min: 1, max: 8, integer: true });
   const w = num(width, "width", { min: 80, max: 1280, integer: true });
   const showTs = timestamps !== false;
+  const startDelay = num(startDelayPercent, "start_delay_percent", { min: 0, max: 90 });
+  const endDelay = num(endDelayPercent, "end_delay_percent", { min: 0, max: 90 });
+  if (startDelay + endDelay >= 100) {
+    throw new MediaKitError(`start_delay_percent (${startDelay}) + end_delay_percent (${endDelay}) must leave a window to sample`, "INVALID_ARG");
+  }
   const meta = await probe(inPath);
   if (!meta.video) throw new MediaKitError("thumbnail needs a video input", "INVALID_ARG");
+  const duration = meta.duration_seconds;
+  if (duration === null || duration <= 0) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
   const rows = Math.ceil(n / cols);
-  const step = Math.max(1, Math.floor((meta.duration_seconds * (meta.video.fps || 30)) / n));
-  // select N evenly spaced frames, scale, tile into a contact sheet.
-  // Timestamps (default on): drawtext %{pts} labels each tile with the
-  // frame's own timestamp in seconds, so an agent can SEE when each
-  // frame is, not just what it shows (claude-video-studio's
-  // contact_sheet idea). Measured on ffmpeg 8.1.2: %{pts} expands to
-  // "5.000000" but %{pts:hms} renders literally, so plain %{pts} is
-  // used — and it has no colon, so there is no filter-escaping trap.
-  let vf = `select='not(mod(n\\,${step}))',scale=${w}:-2`;
-  if (showTs) {
-    const fs = Math.max(12, Math.round(w / 16));
-    vf += `,drawtext=fontfile=${TITLECARD_FONT}:text='%{pts}':x=8:y=8:fontsize=${fs}:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=4`;
+  // Sampling window, vcsi-style: skip the first start_delay% and the
+  // last end_delay% (intros, credits) and space the tiles evenly
+  // across what is left. Delays default to 0, so the window is the
+  // whole file and the timestamps match the old i*D/n contract.
+  const winStart = duration * startDelay / 100;
+  const winEnd = duration * (1 - endDelay / 100);
+  const tileTimes = Array.from({ length: n }, (_, i) => +((winStart + (i * (winEnd - winStart)) / n).toFixed(3)));
+  // Each tile is captured at its own exact timestamp (captureFrameAt),
+  // labelled with that timestamp in MM:SS.d — never with %{pts}, whose
+  // value follows the filter's frame-picking, not the reported time.
+  // Tiles are PNGs in a temp dir, then tiled in one pass; a partial
+  // last row is padded with black tiles so `tile` always sees a full
+  // grid (it only emits on a complete grid or at EOF — padding keeps
+  // both paths identical).
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-thumbnail-"));
+  try {
+    const cells = cols * rows;
+    for (let i = 0; i < n; i++) {
+      const tilePath = path.join(tmpDir, `tile-${String(i + 1).padStart(3, "0")}.png`);
+      let labelFile = null;
+      if (showTs) {
+        labelFile = path.join(tmpDir, `label-${i}.txt`);
+        await writeFile(labelFile, prettyTimestamp(tileTimes[i]), "utf8");
+      }
+      await captureFrameAt(inPath, tileTimes[i], tilePath, { width: w, labelFile });
+    }
+    if (n < cells) {
+      for (let i = n; i < cells; i++) {
+        const black = path.join(tmpDir, `tile-${String(i + 1).padStart(3, "0")}.png`);
+        const first = path.join(tmpDir, "tile-001.png");
+        const size = await probe(first);
+        await run(FFMPEG, ["-y", "-f", "lavfi", "-i", `color=c=black:s=${size.video.width}x${size.video.height}:d=0.1`, "-frames:v", "1", black]);
+      }
+    }
+    await run(FFMPEG, ["-y", "-framerate", "1", "-i", path.join(tmpDir, "tile-%03d.png"), "-vf", `tile=${cols}x${rows}`, "-frames:v", "1", "-q:v", "2", outPath]);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
-  vf += `,tile=${cols}x${rows}`;
-  await run(FFMPEG, ["-y", "-i", inPath, "-vf", vf, "-frames:v", "1", "-q:v", "2", outPath]);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
-  const fps = meta.video.fps || 30;
   return {
     operation: "thumbnail", input: inPath, output: outPath, frames: n, columns: cols, rows,
     timestamps: showTs,
-    ...(showTs ? { timestamps_seconds: Array.from({ length: n }, (_, i) => +(i * step / fps).toFixed(3)) } : {}),
+    ...(showTs ? { timestamps_seconds: tileTimes } : {}),
+    window_seconds: { start: +winStart.toFixed(3), end: +winEnd.toFixed(3) },
+    ...(startDelay || endDelay ? { start_delay_percent: startDelay, end_delay_percent: endDelay } : {}),
     ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
   };
 }
@@ -1184,7 +1259,9 @@ export async function thumbnail({ input, output, frames = 6, columns = 3, width 
 // ---------------------------------------------------------------- frames
 // Extract N evenly spaced frames as separate image files, so an agent
 // can actually LOOK at a video (ffmpeg-mcp's extract_frames idea):
-// one fps-filter pass, one file per frame, each with its timestamp.
+// one capture per timestamp, one file per frame, each with its
+// timestamp — and the timestamp is now the frame's real time (see
+// captureFrameAt), not the fps filter's guess.
 // Output is a directory; files are frame-001.png, frame-002.png, ...
 // Format tip: for screen recordings or any text-heavy footage use png
 // (default) or webp, not jpg — JPEG chroma subsampling smears 1px
@@ -1212,22 +1289,20 @@ export async function extractFrames({ input, outputDir, count = 6, format = "png
   if (!meta.video) throw new MediaKitError("frames needs a video input", "INVALID_ARG");
   const duration = meta.duration_seconds;
   if (duration === null || duration <= 0) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
-  // fps=N/D emits one frame per interval [i*D/N, (i+1)*D/N) — exactly
-  // N frames, evenly spaced, timestamps i*D/N.
-  let vf = `fps=${n}/${duration}`;
-  if (w !== null) vf += `,scale=${w}:-2`;
-  const pattern = path.join(dir, `frame-%03d.${ext}`);
-  const q = ext === "png" ? [] : ["-q:v", "2"];
-  await run(FFMPEG, ["-y", "-i", inPath, "-vf", vf, ...q, pattern]);
-  const { readdir } = await import("node:fs/promises");
-  const files = (await readdir(dir))
-    .filter((f) => f.startsWith("frame-") && f.endsWith(`.${ext}`))
-    .sort();
+  // One capture per timestamp (captureFrameAt), not one `fps=N/D`
+  // pass: the fps filter's rounding picks whatever frame its grid
+  // lands on, so the file it writes can be seconds away from the
+  // timestamp it is reported under (lượt 69 probe on a 25.878s film:
+  // frame-002 reported 12.939s, pixels from shot 3 at ~24s). Captures
+  // are sequential — each is a short seek + decode, and parallel
+  // ffmpeg runs on this 1.5-CPU box starve each other.
   const frames = [];
-  for (let i = 0; i < files.length; i++) {
-    const fp = path.join(dir, files[i]);
+  for (let i = 0; i < n; i++) {
+    const t = +((i * duration) / n).toFixed(3);
+    const fp = path.join(dir, `frame-${String(i + 1).padStart(3, "0")}.${ext}`);
+    await captureFrameAt(inPath, t, fp, { width: w });
     const info = await fileInfo(fp);
-    frames.push({ file: files[i], path: fp, timestamp_seconds: +(i * duration / n).toFixed(3), ...info });
+    frames.push({ file: path.basename(fp), path: fp, timestamp_seconds: t, ...info });
   }
   return {
     operation: "frames", input: inPath, output_dir: dir,
@@ -6618,11 +6693,11 @@ const TOOL_REQUIREMENTS = {
   resize: { filters: ["scale"] },
   extract_audio: { encoders: ["libmp3lame", "aac", "pcm_s16le", "libvorbis", "libopus", "flac"] },
   extract_frame: {},
-  thumbnail: { filters: ["select", "scale", "tile", "drawtext"] },
+  thumbnail: { filters: ["scale", "tile", "drawtext"] },
   loudness: { filters: ["loudnorm", "acompressor"] },
   qa_report: { filters: ["loudnorm", "blackdetect", "freezedetect", "silencedetect", "astats", "ametadata", "select"] },
   concat: { filters: ["concat", "xfade", "acrossfade", "fps", "scale", "pad"] },
-  frames: { filters: ["fps", "scale"] },
+  frames: { filters: ["scale"] },
   export_gif: { filters: ["palettegen", "paletteuse", "fps", "scale"] },
   burn_captions: { filters: ["subtitles", "ass"] },
   reframe: { filters: ["crop", "scale", "pad", "gblur", "overlay"], encoders: ["libx264"] },

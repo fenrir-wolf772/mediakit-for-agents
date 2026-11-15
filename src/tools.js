@@ -139,7 +139,7 @@ export const TOOL_DEFS = [
 
   {
     name: "extract_frame",
-    description: "Grab a single frame at a timestamp as PNG/JPG/WebP.",
+    description: "Grab a single frame at a timestamp as PNG/JPG/WebP. Frame-accurate: the frame is captured at the exact timestamp (two-stage seek), not the keyframe before it.",
     schema: {
     input: pathSchema,
     output: pathSchema,
@@ -151,16 +151,27 @@ export const TOOL_DEFS = [
 
   {
     name: "thumbnail",
-    description: "Build a contact sheet: N evenly spaced frames tiled into a grid image. Each tile is labelled with its own timestamp in seconds (timestamps=true by default), so the sheet shows WHEN each frame is, not just what it shows — look at it before cutting or publishing.",
+    description: "Build a contact sheet: N evenly spaced frames tiled into a grid image. Each tile is captured at its own exact timestamp and labelled with it (timestamps=true by default), so the sheet shows WHEN each frame is, not just what it shows — look at it before cutting or publishing. start_delay_percent / end_delay_percent skip the first/last slice of the file (intros, credits) before spacing the tiles.",
     schema: {
     input: pathSchema,
     output: pathSchema,
     frames: z.number().int().min(1).max(64).default(6),
     columns: z.number().int().min(1).max(8).default(3),
     width: z.number().int().min(80).max(1280).default(320).describe("Width of each tile in pixels"),
-    timestamps: z.boolean().default(true).describe("Label each tile with its timestamp in seconds (drawtext %{pts}); set false for a clean sheet"),
+    timestamps: z.boolean().default(true).describe("Label each tile with its timestamp (MM:SS.d); set false for a clean sheet"),
+    start_delay_percent: z.number().min(0).max(90).default(0).describe("Skip this percent of the file at the start before spacing tiles (intros)"),
+    end_delay_percent: z.number().min(0).max(90).default(0).describe("Skip this percent of the file at the end before spacing tiles (credits)"),
   },
-    handler: async (a) => safe(() => core.thumbnail(a)),
+    handler: async (a) => safe(() => core.thumbnail({
+      input: a.input,
+      output: a.output,
+      frames: a.frames,
+      columns: a.columns,
+      width: a.width,
+      timestamps: a.timestamps,
+      startDelayPercent: a.start_delay_percent,
+      endDelayPercent: a.end_delay_percent,
+    })),
   },
 
 
@@ -219,7 +230,7 @@ export const TOOL_DEFS = [
 
   {
     name: "frames",
-    description: "Extract N evenly spaced frames as separate image files (frame-001.png, ...) into a directory, each with its timestamp — so you can actually look at what is in a video before cutting it. One frame per interval; timestamps are i * duration / count.",
+    description: "Extract N evenly spaced frames as separate image files (frame-001.png, ...) into a directory, each with its timestamp — so you can actually look at what is in a video before cutting it. One frame per interval; timestamps are i * duration / count, and each frame is captured at its exact timestamp (two-stage seek), so the reported time is the frame's real time.",
     schema: {
     input: pathSchema,
     output_dir: pathSchema.describe("Directory to write the frame files into (created if needed)"),

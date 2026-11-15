@@ -810,10 +810,11 @@ plus a per-check list. Fix the failing items and re-run it; don't
 re-run five tools to find out what is left. `check` is still the
 tool for platform-spec detail (bitrate warnings, safe zones,
 `--content` time ranges); `qa_report` is the last gate. The
-thumbnail sheet labels each tile with its own timestamp in seconds
-(`%{pts}` — measured: `%{pts:hms}` renders literally on ffmpeg
-8.1.2, so plain seconds are used), so read the times off the sheet
-when you decide where to cut.
+thumbnail sheet labels each tile with its own timestamp in `MM:SS.d`
+(each tile is captured at that exact timestamp), so read the times
+off the sheet when you decide where to cut. `--start-delay-percent`
+/ `--end-delay-percent` skip the intro/credits before spacing the
+tiles.
 
 ### 40. One manifest, one finished clip — don't retype a pipeline
 When the same chain of steps belongs on a clip (trim → reframe →

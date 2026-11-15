@@ -91,14 +91,16 @@ const COMMANDS = {
     ],
   },
   thumbnail: {
-    usage: "mediakit thumbnail <input> -o <output.png|jpg> [--frames <n>] [--columns <n>] [--width <px>] [--no-timestamps]",
-    desc: "Build a contact sheet of N evenly spaced frames. Each tile is labelled with its own timestamp in seconds by default — look at it before cutting or publishing.",
+    usage: "mediakit thumbnail <input> -o <output.png|jpg> [--frames <n>] [--columns <n>] [--width <px>] [--no-timestamps] [--start-delay-percent <n>] [--end-delay-percent <n>]",
+    desc: "Build a contact sheet of N evenly spaced frames. Each tile is captured at its exact timestamp and labelled with it by default — look at it before cutting or publishing. --start-delay-percent / --end-delay-percent skip the first/last slice of the file (intros, credits) before spacing the tiles.",
     args: [{ name: "input", required: true }],
     options: [
       ["--frames", "Number of frames (default 6)"],
       ["--columns", "Grid columns (default 3)"],
       ["--width", "Width of each tile in pixels (default 320)"],
       ["--no-timestamps", "Do not label tiles with timestamps"],
+      ["--start-delay-percent", "Skip this percent at the start before spacing tiles (default 0)"],
+      ["--end-delay-percent", "Skip this percent at the end before spacing tiles (default 0)"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -995,6 +997,8 @@ async function main() {
           columns: numOpt(opts, "columns") ?? 3,
           width: numOpt(opts, "width") ?? 320,
           timestamps: opts.timestamps ?? true,
+          startDelayPercent: numOpt(opts, "start_delay_percent") ?? 0,
+          endDelayPercent: numOpt(opts, "end_delay_percent") ?? 0,
         });
         break;
       case "loudness":

@@ -3891,7 +3891,7 @@ checkOk(/only 0 image/.test(batchSlideNoImgText), "batch slideshow refuses a pat
 const qaOf = (j, name) => j.checks.find((c) => c.check === name);
 
 // thumbnail timestamps: on by default. The sheet is 960x360 (6 tiles
-// of 320px, 3 columns) and reports the nominal tile times. The labels
+// of 320px, 3 columns) and reports the actual capture times. The labels
 // are proven on pixels, not assumed: the tile-1 label region differs
 // from the no-timestamp sheet (PSNR 10.8 measured on the fixture) and
 // holds near-white text (YMAX 235 vs 175 without labels).
@@ -3933,6 +3933,82 @@ checkOk(labelPsnr !== null && labelPsnr < 30, "thumbnail timestamps paint labels
 const labelYmax = await regionYmax(path.join(root, "outputs/mcp-thumb-ts.png"), "160:48:0:0");
 const cleanYmax = await regionYmax(path.join(root, "outputs/mcp-thumb-nots.png"), "160:48:0:0");
 checkOk(labelYmax !== null && labelYmax >= 230 && cleanYmax !== null && cleanYmax < 200, "thumbnail label region holds white text (YMAX 235) vs content-only (175)", `ts ${labelYmax} / clean ${cleanYmax}`);
+
+// Mean value of one colour plane of a still image (signalstats on
+// the file itself — the same measurement core.js uses for grade).
+async function imagePlaneMean(file, plane) {
+  try {
+    const { stderr } = await execFileAsync("ffmpeg", ["-nostdin", "-i", file, "-vf", `format=rgb24,extractplanes=${plane},signalstats,metadata=print:key=lavfi.signalstats.YAVG`, "-frames:v", "1", "-f", "null", "-"]);
+    const m = stderr.match(/lavfi\.signalstats\.YAVG=([0-9.]+)/);
+    return m ? parseFloat(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
+// frames timestamps are now the frames' real times (lượt 69 probe:
+// count 2 on a 25.878s film reported 12.939s for a shot-3 frame).
+// scenes-source is red [0,5.033) then blue, so 6 frames at
+// 0/1.673/3.346/5.019/6.693/8.366 must be red,red,red,blue,blue,blue:
+// a capture is the first frame at-or-after its timestamp, and 5.019s
+// falls between frame 150 (5.000s, red) and frame 151 (5.033s, blue),
+// so blue is the correct answer there — not red.
+const framesAccRes = await client.callTool({
+  name: "frames",
+  arguments: { input: path.join(root, "test/scenes-source.mp4"), output_dir: path.join(root, "outputs/mcp-frames-acc"), count: 6, format: "png", width: 320 },
+});
+const framesAccJson = JSON.parse(framesAccRes.content[0].text);
+const accMeans = [];
+for (const f of framesAccJson.frames) {
+  accMeans.push({ r: await imagePlaneMean(f.path, "r"), b: await imagePlaneMean(f.path, "b") });
+}
+console.log("frames accuracy:", JSON.stringify(framesAccJson.frames.map((f) => f.timestamp_seconds)), "| R/B", JSON.stringify(accMeans));
+checkOk(JSON.stringify(framesAccJson.frames.map((f) => f.timestamp_seconds)) === JSON.stringify([0, 1.673, 3.346, 5.019, 6.693, 8.366]) && framesAccJson.extracted === 6, "frames reports 6 timestamps 0..8.366 on scenes-source", JSON.stringify(framesAccJson.frames.map((f) => f.timestamp_seconds)));
+checkOk(accMeans.every((m) => m.r !== null && m.b !== null) && accMeans.slice(0, 3).every((m) => m.r > 180 && m.b < 80) && accMeans.slice(3).every((m) => m.b > 180 && m.r < 80), "frames pixels match their timestamps: first 3 red, last 3 blue (5.019s falls between the red frame at 5.000s and the blue frame at 5.033s)", JSON.stringify(accMeans));
+// extract_frame is frame-accurate too: t=5.5 on moving testsrc must
+// be byte-identical to frame index 165 (5.5s at 30fps), not the
+// keyframe at 5.033s (index 151) a bare input-seek would return.
+await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-i", path.join(root, "test/source.mp4"), "-vf", "select='eq(n\\,165)'", "-frames:v", "1", "-y", path.join(root, "outputs/mcp-ef-ref165.png")]);
+await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-i", path.join(root, "test/source.mp4"), "-vf", "select='eq(n\\,151)'", "-frames:v", "1", "-y", path.join(root, "outputs/mcp-ef-ref151.png")]);
+await client.callTool({
+  name: "extract_frame",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-ef-55.png"), timestamp: 5.5 },
+});
+const efPsnr165 = await cropPsnr(path.join(root, "outputs/mcp-ef-55.png"), path.join(root, "outputs/mcp-ef-ref165.png"), "1280:720:0:0");
+const efPsnr151 = await cropPsnr(path.join(root, "outputs/mcp-ef-55.png"), path.join(root, "outputs/mcp-ef-ref151.png"), "1280:720:0:0");
+checkOk(efPsnr165 === Infinity, "extract_frame t=5.5 is byte-identical to frame index 165", `PSNR vs 165: ${efPsnr165}`);
+checkOk(efPsnr151 !== null && efPsnr151 < 30, "extract_frame t=5.5 is NOT the 5.033s keyframe (index 151)", `PSNR vs 151: ${efPsnr151}`);
+const efPastText = await callExpectThrow("extract_frame", { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-ef-past.png"), timestamp: 99 });
+checkOk(/at\/past the end/.test(efPastText ?? ""), "extract_frame refuses a timestamp past the end", efPastText ?? "");
+// thumbnail start-delay: skip the first 50% of scenes-source and
+// every tile lands in the blue half; the default sheet is mixed.
+const thumbDelayRes = await client.callTool({
+  name: "thumbnail",
+  arguments: { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-thumb-delay.png"), start_delay_percent: 50 },
+});
+const thumbDelayJson = JSON.parse(thumbDelayRes.content[0].text);
+const delayR = await imagePlaneMean(path.join(root, "outputs/mcp-thumb-delay.png"), "r");
+const delayB = await imagePlaneMean(path.join(root, "outputs/mcp-thumb-delay.png"), "b");
+console.log("thumbnail delay:", JSON.stringify(thumbDelayJson.timestamps_seconds), "| sheet R/B", delayR, delayB);
+checkOk(JSON.stringify(thumbDelayJson.timestamps_seconds) === JSON.stringify([5.019, 5.856, 6.693, 7.529, 8.366, 9.202]) && thumbDelayJson.window_seconds?.start === 5.019, "thumbnail start_delay 50%: window starts at 5.019s, all 6 tile times in the blue half", JSON.stringify(thumbDelayJson.timestamps_seconds));
+checkOk(delayB !== null && delayB > 180 && delayR !== null && delayR < 60, "thumbnail delay sheet is blue (all tiles past the cut)", `R ${delayR} / B ${delayB}`);
+const thumbMixRes = await client.callTool({
+  name: "thumbnail",
+  arguments: { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-thumb-mix.png") },
+});
+const thumbMixJson = JSON.parse(thumbMixRes.content[0].text);
+const mixR = await imagePlaneMean(path.join(root, "outputs/mcp-thumb-mix.png"), "r");
+const mixB = await imagePlaneMean(path.join(root, "outputs/mcp-thumb-mix.png"), "b");
+checkOk(thumbMixJson.timestamps_seconds?.[0] === 0 && mixR !== null && mixR > 120 && mixB !== null && mixB > 50, "thumbnail default on scenes-source is mixed red+blue (4 red tiles, 2 blue)", `R ${mixR} / B ${mixB}`);
+const thumbDelayBadText = await callExpectThrow("thumbnail", { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-thumb-bad.png"), start_delay_percent: 60, end_delay_percent: 60 });
+checkOk(/must leave a window/.test(thumbDelayBadText ?? ""), "thumbnail refuses start+end delays that leave no window", thumbDelayBadText ?? "");
+// Partial grid: 5 frames in a 3x2 grid pads the last cell black
+// instead of emitting nothing.
+const thumbPartRes = await client.callTool({
+  name: "thumbnail",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-thumb-part.png"), frames: 5, timestamps: false },
+});
+const thumbPartJson = JSON.parse(thumbPartRes.content[0].text);
+checkOk(thumbPartJson.dimensions === "960x360" && thumbPartJson.rows === 2, "thumbnail 5 frames pads to a full 3x2 sheet (960x360)", JSON.stringify(thumbPartJson.dimensions));
 
 // qa_report on the raw 10s fixture, target any: loudness -21.8 LUFS
 // fails the -16..-12 band, pacing warns (1 shot of 10s), content is
