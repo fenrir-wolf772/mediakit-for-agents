@@ -3934,6 +3934,153 @@ export async function reverseClip({ input, output, audio = true, crf = 23 }) {
   };
 }
 
+// ---------------------------------------------------------------- make_loopable
+// Make a clip loop seamlessly (Zulko/moviepy's MakeLoopable idea,
+// built with the tail-to-head crossfade from a 2026-11-11 dev.to
+// write-up): split into head [0,F], mid [F,D-F], tail [D-F,D];
+// output = mid + seam, where the seam is the tail with the head
+// fading in on top of it (fade on the ALPHA channel + overlay).
+// The output ends on the head's last frame — exactly where mid
+// begins — so when the player jumps back to the start, frame N
+// flows into frame N+1 of the original motion. Cost: the output
+// is F seconds shorter (D-F). Audio gets the same treatment with
+// acrossfade (tri/tri), so the beat does not click at the seam.
+//
+// Why alpha+overlay instead of xfade: after trim+setpts the
+// branches lose their constant-frame-rate metadata and xfade
+// refuses them ("The inputs needs to be a constant frame rate").
+// The alpha version does the same blend and does not care.
+//
+// The result measures the loop on disk: seam_before (mean abs gray
+// difference between the input's last and first frames) vs
+// seam_after (same on the output), plus normal_step (two
+// neighbouring mid frames) as the honest baseline — a good seam
+// lands at the normal step, not at zero. The seam score is
+// best-effort: null when the measurement fails, never fatal.
+async function lastFramePts(file, fps) {
+  try {
+    const { stdout } = await run(FFPROBE, [
+      "-v", "error", "-count_frames", "-select_streams", "v:0",
+      "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", file,
+    ]);
+    const n = parseInt(String(stdout).trim(), 10);
+    if (!Number.isFinite(n) || n < 1 || !fps) return null;
+    return (n - 1) / fps;
+  } catch {
+    return null;
+  }
+}
+
+// Mean absolute gray difference (0-255) between the frames at t1
+// and t2. MEASUREMENT TRAP (caught 2026-11-15, do not "fix" back):
+// `blend=all_mode=difference` on YUV inputs does NOT return
+// |gray1-gray2| — red-vs-blue measures 28 there, while the true
+// mean abs gray difference is 47. Convert both branches to rgb24
+// first and the number matches the definition (verified on
+// red/blue 47, red/red 0). Two-input `-ss` seeking is ALSO out:
+// the same command returned 76 once and nothing the next time
+// (framesync race), and `-sseof` misses the last frame whenever
+// its pts sits more than the offset before the duration. Trim
+// branches in one graph are deterministic.
+async function frameDiffMean(file, t1, t2, fps) {
+  try {
+    const w = fps ? +(1 / fps).toFixed(4) : 0.04;
+    const { stderr } = await run(FFMPEG, [
+      "-hide_banner", "-nostats", "-i", file, "-i", file,
+      "-filter_complex",
+      `[0:v]trim=start=${t1}:end=${+(t1 + w).toFixed(4)},setpts=PTS-STARTPTS,format=rgb24[a];` +
+      `[1:v]trim=start=${t2}:end=${+(t2 + w).toFixed(4)},setpts=PTS-STARTPTS,format=rgb24[b];` +
+      `[a][b]blend=all_mode=difference,format=gray,signalstats,metadata=print:key=lavfi.signalstats.YAVG`,
+      "-frames:v", "1", "-f", "null", "-",
+    ]);
+    const m = stderr.match(/lavfi\.signalstats\.YAVG=([0-9.]+)/);
+    return m ? +parseFloat(m[1]).toFixed(2) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function seamScores(file) {
+  const meta = await probe(file);
+  if (!meta.video || !meta.video.fps || !Number.isFinite(meta.duration_seconds)) {
+    return { seam_score: null, normal_step: null };
+  }
+  const fps = meta.video.fps;
+  const step = 1 / fps;
+  const last = await lastFramePts(file, fps);
+  const seam = last === null ? null : await frameDiffMean(file, last, 0, fps);
+  const mid = meta.duration_seconds / 2;
+  const normal = await frameDiffMean(file, mid, mid + step, fps);
+  return { seam_score: seam, normal_step: normal };
+}
+
+export async function makeLoopable({ input, output, overlap = 0.5, crf = 23 }) {
+  const inPath = await requireInput(input);
+  const outPath = await prepareOutput(output, [inPath]);
+  const F = num(overlap, "overlap", { min: 0.1, max: 3600 });
+  const c = num(crf, "crf", { min: 0, max: 51, integer: true });
+  const meta = await probe(inPath);
+  if (!meta.video && !meta.audio) throw new MediaKitError("make_loopable needs a video or audio input", "INVALID_ARG");
+  const D = meta.duration_seconds;
+  if (!Number.isFinite(D) || D <= 0) throw new MediaKitError("make_loopable needs an input with a known duration", "INVALID_ARG");
+  // The middle section must survive: mid = [F, D-F] is empty when
+  // F >= D/2. The write-up also advises staying under ~D/4 — a
+  // longer crossfade ghosts the picture — but that stays advice in
+  // the docs, not a refusal: a 1s overlap on a 3s clip is legal.
+  if (F >= D / 2) {
+    throw new MediaKitError(`make_loopable --overlap ${F}s must be under half the clip duration (${(D / 2).toFixed(2)}s for this ${D}s input) so a middle section remains`, "INVALID_ARG");
+  }
+  const f = (n) => +n.toFixed(3);
+  const body = f(D - F);
+  const ext = path.extname(outPath).slice(1).toLowerCase();
+  const audioCodec = AUDIO_FORMATS[ext] ?? VIDEO_CONTAINER_AUDIO[ext] ?? "aac";
+  const before = meta.video ? await seamScores(inPath) : { seam_score: null, normal_step: null };
+  const fc = [];
+  if (meta.video) {
+    fc.push(
+      `[0:v]split=3[a][b][c];` +
+      `[a]trim=0:${f(F)},setpts=PTS-STARTPTS[head];` +
+      `[b]trim=${f(F)}:${body},setpts=PTS-STARTPTS[mid];` +
+      `[c]trim=${body}:${f(D)},setpts=PTS-STARTPTS[tail];` +
+      `[head]format=yuva420p,fade=t=in:st=0:d=${f(F)}:alpha=1[hf];` +
+      `[tail][hf]overlay=shortest=1[seam];` +
+      `[mid][seam]concat=n=2:v=1:a=0,format=yuv420p[v]`,
+    );
+  }
+  if (meta.audio) {
+    fc.push(
+      `[0:a]asplit=3[x][y][z];` +
+      `[x]atrim=0:${f(F)},asetpts=PTS-STARTPTS[ah];` +
+      `[y]atrim=${f(F)}:${body},asetpts=PTS-STARTPTS[am];` +
+      `[z]atrim=${body}:${f(D)},asetpts=PTS-STARTPTS[at];` +
+      `[at][ah]acrossfade=d=${f(F)}:c1=tri:c2=tri[as];` +
+      `[am][as]concat=n=2:v=0:a=1[aout]`,
+    );
+  }
+  const args = ["-y", "-i", inPath, "-filter_complex", fc.join(";")];
+  if (meta.video) args.push("-map", "[v]", "-c:v", "libx264", "-crf", String(c), "-preset", "medium");
+  if (meta.audio) args.push("-map", "[aout]", "-c:a", audioCodec, ...audioBitrateArgs(audioCodec));
+  args.push(outPath);
+  await run(FFMPEG, args);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  const after = meta.video ? await seamScores(outPath) : { seam_score: null, normal_step: null };
+  return {
+    operation: "make_loopable", input: inPath, output: outPath,
+    overlap_seconds: F,
+    duration_before_seconds: D,
+    duration_seconds: out.duration_seconds,
+    expected_duration_seconds: body,
+    duration_error_seconds: +(out.duration_seconds - body).toFixed(3),
+    seam_before: before.seam_score,
+    seam_after: after.seam_score,
+    normal_step: after.normal_step,
+    has_audio: !!meta.audio,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+    size_bytes: info.size_bytes,
+  };
+}
+
 // ---------------------------------------------------------------- chroma_key
 // Remove a green/blue screen (ffmpeg-cookbook's chromakey recipe +
 // MakeMyClip's backlog item): `chromakey=color:similarity:blend`
@@ -5814,6 +5961,7 @@ const DOCTOR_FILTERS = [
   "afade",
   "tblend", "signalstats",
   "blend", "split",
+  "fade", "asplit",
 ];
 const DOCTOR_ENCODERS = [
   "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4", "prores_ks",
@@ -5843,6 +5991,7 @@ const TOOL_REQUIREMENTS = {
   check: { filters: ["loudnorm", "blackdetect", "freezedetect", "silencedetect", "astats", "ametadata"] },
   grade: { filters: ["eq", "hue", "colorbalance", "lutrgb"], encoders: ["libx264"] },
   reverse: { filters: ["reverse", "areverse"], encoders: ["libx264", "aac"] },
+  make_loopable: { filters: ["split", "asplit", "trim", "atrim", "setpts", "asetpts", "format", "fade", "overlay", "concat", "acrossfade", "blend", "signalstats"], encoders: ["libx264", "aac"] },
   interpolate: { filters: ["minterpolate"], encoders: ["libx264"] },
   denoise: { filters: ["hqdn3d", "nlmeans"], encoders: ["libx264"] },
   segment: {},
@@ -7213,6 +7362,10 @@ export const BATCH_OPERATIONS = {
   reverse: {
     args: ["audio", "crf"],
     run: (input, output, a) => reverseClip({ input, output, audio: a.audio ?? true, crf: a.crf ?? 23 }),
+  },
+  make_loopable: {
+    args: ["overlap", "crf"],
+    run: (input, output, a) => makeLoopable({ input, output, overlap: a.overlap ?? 0.5, crf: a.crf ?? 23 }),
   },
   grade: {
     args: ["preset", "filter", "crf", "cdl"],

@@ -256,6 +256,16 @@ const COMMANDS = {
       ["-o, --output", "Output file (required)"],
     ],
   },
+  "make-loopable": {
+    usage: "mediakit make-loopable <input> -o <output> [--overlap 0.5] [--crf 23]",
+    desc: "Make a clip loop seamlessly: crossfade the tail into the head, so the end flows back into the start with no jump or audio click. Output is the overlap shorter (10s + 0.5s overlap = 9.5s). Reports seam_before vs seam_after (mean abs gray difference between last and first frames) plus normal_step as the baseline. Works on audio-only input too.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--overlap", "Crossfade length in seconds (default 0.5; 0.3-0.5s for slow motion, 1s for very different start/end poses; must be under half the clip)"],
+      ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["-o, --output", "Output file (required)"],
+    ],
+  },
   reverse: {
     usage: "mediakit reverse <input> -o <output> [--no-audio] [--crf 23]",
     desc: "Play a clip backwards: video frames reversed, audio reversed too by default. Reports whether each stream was actually reversed. Works on audio-only input as well.",
@@ -632,7 +642,7 @@ const COMMANDS = {
   },
   batch: {
     usage: "mediakit batch <operation> --pattern <glob> --input-dir <dir> -o <output-dir> [--args-json '{\"target_lufs\": -14}'] [--jobs 1] [--suffix -loudness] [--no-cache] [--stop-on-error] [--timeout 1800] [--max-files 200] [--dry-run]",
-    desc: "Apply one operation (loudness|resize|reframe|compress|convert|extract-audio|reverse|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|slideshow) to every file matching a glob under a folder, with the same args for all. Outputs are <stem>-<operation>.<ext> under the output dir, mirroring the input tree; a batch-manifest.json records every file's result. Unchanged files are skipped via a content-hash cache; --dry-run lists the planned outputs and writes nothing. cut-words and remove-retakes find each clip's words file as <words-dir>/<stem>.words.json (default: the input's own folder) — a clip with no words file fails its own row only. slideshow is a set operation: the whole matched set of images (2-32) becomes ONE slideshow video (--args-json '{\"output_name\": \"reel.mp4\"}'), and the per-file cache does not apply.",
+    desc: "Apply one operation (loudness|resize|reframe|compress|convert|extract-audio|reverse|make-loopable|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|slideshow) to every file matching a glob under a folder, with the same args for all. Outputs are <stem>-<operation>.<ext> under the output dir, mirroring the input tree; a batch-manifest.json records every file's result. Unchanged files are skipped via a content-hash cache; --dry-run lists the planned outputs and writes nothing. cut-words and remove-retakes find each clip's words file as <words-dir>/<stem>.words.json (default: the input's own folder) — a clip with no words file fails its own row only. slideshow is a set operation: the whole matched set of images (2-32) becomes ONE slideshow video (--args-json '{\"output_name\": \"reel.mp4\"}'), and the per-file cache does not apply.",
     args: [{ name: "operation", required: true }],
     options: [
       ["--pattern", "Glob under --input-dir: **/*.mp4 (any depth), sub/*.mp4 (one folder), or bare *.mp4 (basename at any depth) (required)"],
@@ -673,7 +683,7 @@ const COMMANDS = {
   },
   manifest: {
     usage: "mediakit manifest <manifest.json> [-o <output.mp4>] [--dry-run] [--no-cache] [--keep-intermediates]",
-    desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (slideshow as step 1 only — it builds from images in args, so input should be the first slide image; then trim|resize|reframe|compress|convert|extract-audio|reverse|grade|fit|silence|denoise|interpolate|burn-captions|overlay|chroma-key|cut-words|remove-retakes), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file.",
+    desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (slideshow as step 1 only — it builds from images in args, so input should be the first slide image; then trim|resize|reframe|compress|convert|extract-audio|reverse|make-loopable|grade|fit|silence|denoise|interpolate|burn-captions|overlay|chroma-key|cut-words|remove-retakes), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file.",
     args: [{ name: "manifest", required: true }],
     options: [
       ["--dry-run", "Validate the manifest and list the planned steps without running anything"],
@@ -1023,6 +1033,13 @@ async function main() {
         });
         break;
       }
+      case "make-loopable":
+        result = await core.makeLoopable({
+          input: needInput(), output: needOutput(opts),
+          overlap: numOpt(opts, "overlap") ?? 0.5,
+          crf: numOpt(opts, "crf") ?? 23,
+        });
+        break;
       case "reverse":
         result = await core.reverseClip({
           input: needInput(), output: needOutput(opts),
@@ -1411,7 +1428,7 @@ async function main() {
         break;
       }
       case "batch": {
-        if (!positional[0]) fail("missing operation: loudness|resize|reframe|compress|convert|extract-audio|reverse|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|slideshow");
+        if (!positional[0]) fail("missing operation: loudness|resize|reframe|compress|convert|extract-audio|reverse|make-loopable|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|slideshow");
         if (!opts.pattern) fail("missing required option: --pattern <glob>");
         if (!opts.input_dir) fail("missing required option: --input-dir <dir>");
         const opName = positional[0].replace(/-/g, "_");

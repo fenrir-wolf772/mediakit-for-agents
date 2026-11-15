@@ -1,0 +1,1 @@
+{"input":"scenes-source.mp4","output":"../outputs/mcp-manifest-loopable.mp4","steps":[{"args":{"overlap":1},"tool":"make_loopable"}],"version":1}

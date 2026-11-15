@@ -181,10 +181,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "make_loopable", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 56 tools present");
-checkOk(missing.length === 0, "tools/list has all 56 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 57 tools present");
+checkOk(missing.length === 0, "tools/list has all 57 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -483,6 +483,64 @@ const reverseVideoOnlyJson = JSON.parse(reverseVideoOnlyRes.content[0].text);
 checkOk(reverseVideoOnlyJson.video_reversed === true && reverseVideoOnlyJson.audio_reversed === false && near(reverseVideoOnlyJson.duration_seconds, 10, 0.1), "reverse on video-only input reverses video, no audio to reverse", JSON.stringify(reverseVideoOnlyJson));
 const reverseNoop = await callExpectThrow("reverse", { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-reverse-noop.mp3"), audio: false });
 checkOk(/reverses nothing/.test(reverseNoop), "reverse audio-only + audio=false is refused (nothing to reverse)", reverseNoop.slice(0, 200));
+
+// make_loopable: tail-to-head crossfade so a clip loops with no
+// jump. Fixture test/scenes-source.mp4 is red 5s + blue 5s, so the
+// raw loop point is a hard red/blue cut: seam_before must be large
+// (measured 47 by hand) and seam_after must land near the normal
+// frame step (measured 4 vs step 0). Duration must be exactly D-F.
+const loopRes = await client.callTool({
+  name: "make_loopable",
+  arguments: { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-loopable.mp4"), overlap: 1 },
+});
+const loopJson = JSON.parse(loopRes.content[0].text);
+console.log("make_loopable call:", JSON.stringify(loopJson));
+checkOk(near(loopJson.duration_seconds, 9.039, 0.05) && near(loopJson.duration_error_seconds, 0, 0.05) && loopJson.expected_duration_seconds === 9.039, "make_loopable output is D-overlap (10.039-1 = 9.039s)", JSON.stringify(loopJson.duration_seconds));
+checkOk(loopJson.seam_before !== null && loopJson.seam_before > 30, "make_loopable seam_before is large on the hard red/blue cut", `seam_before=${loopJson.seam_before}`);
+checkOk(loopJson.seam_after !== null && loopJson.seam_after <= 8 && loopJson.seam_after < loopJson.seam_before / 4, "make_loopable seam_after collapses to near the normal step", `seam_after=${loopJson.seam_after} vs before=${loopJson.seam_before}`);
+checkOk(loopJson.normal_step !== null && loopJson.normal_step <= 2, "make_loopable normal_step baseline is ~0 on the flat-color clip", `normal_step=${loopJson.normal_step}`);
+checkOk(loopJson.has_audio === true && loopJson.dimensions === "640x360" && loopJson.size_bytes > 0, "make_loopable keeps audio + dimensions and writes real bytes", JSON.stringify(loopJson));
+// Audio-only: acrossfade only, no video, seam scores null.
+const loopAudioRes = await client.callTool({
+  name: "make_loopable",
+  arguments: { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-loopable-audio.mp3"), overlap: 0.5 },
+});
+const loopAudioJson = JSON.parse(loopAudioRes.content[0].text);
+checkOk(near(loopAudioJson.duration_seconds, 8.5, 0.05) && loopAudioJson.seam_before === null && loopAudioJson.seam_after === null && loopAudioJson.has_audio === true, "make_loopable on audio-only input shortens by the overlap, seam scores null", JSON.stringify(loopAudioJson));
+// Video-only moving content: the ball's seam must land at or below
+// the normal frame step (measured by hand: before 2.92, after 1.26,
+// normal step 1.92).
+const loopBallRes = await client.callTool({
+  name: "make_loopable",
+  arguments: { input: path.join(root, "test/motion-ball.mp4"), output: path.join(root, "outputs/mcp-loopable-ball.mp4"), overlap: 0.5 },
+});
+const loopBallJson = JSON.parse(loopBallRes.content[0].text);
+checkOk(near(loopBallJson.duration_seconds, 5.5, 0.05) && loopBallJson.has_audio === false, "make_loopable on video-only input shortens by the overlap, no audio", JSON.stringify(loopBallJson));
+checkOk(loopBallJson.seam_after !== null && loopBallJson.normal_step !== null && loopBallJson.seam_after <= loopBallJson.normal_step + 1 && loopBallJson.seam_after < loopBallJson.seam_before, "make_loopable on moving content lands the seam at the normal step", `seam ${loopBallJson.seam_before} -> ${loopBallJson.seam_after}, step ${loopBallJson.normal_step}`);
+const loopBigText = await callExpectThrow("make_loopable", { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-loopable-bad.mp4"), overlap: 6 });
+checkOk(/must be under half/.test(loopBigText), "make_loopable refuses overlap >= half the clip", loopBigText.slice(0, 200));
+const loopZeroText = await callExpectThrow("make_loopable", { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-loopable-bad2.mp4"), overlap: 0 });
+checkOk(/overlap/.test(loopZeroText), "make_loopable refuses overlap below 0.1s", loopZeroText.slice(0, 200));
+// Batch + manifest pass-through: make_loopable is a per-file batch
+// op and a manifest step like trim/reverse.
+await rm(path.join(root, "outputs/mcp-batch-loop-in"), { recursive: true, force: true });
+await rm(path.join(root, "outputs/mcp-batch-loop-out"), { recursive: true, force: true });
+await mkdir(path.join(root, "outputs/mcp-batch-loop-in"), { recursive: true });
+await copyFile(path.join(root, "test/source.mp4"), path.join(root, "outputs/mcp-batch-loop-in/source.mp4"));
+await copyFile(path.join(root, "test/source2.mp4"), path.join(root, "outputs/mcp-batch-loop-in/source2.mp4"));
+const loopBatchRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "make_loopable", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-loop-in"), output_dir: path.join(root, "outputs/mcp-batch-loop-out"), args: { overlap: 0.5 }, jobs: 2 },
+});
+const loopBatchJson = JSON.parse(loopBatchRes.content[0].text);
+checkOk(loopBatchJson.succeeded === 2 && loopBatchJson.failed === 0 && loopBatchJson.results.every((r) => r.status === "ok" && near(r.result?.duration_error_seconds, 0, 0.05)), "batch make_loopable succeeds on both files with exact D-overlap durations", JSON.stringify(loopBatchJson.results.map((r) => r.result?.duration_seconds)));
+await rm(path.join(root, "outputs/mcp-manifest-loopable.mp4"), { force: true });
+const loopManifestRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-loopable.json") },
+});
+const loopManifestJson = JSON.parse(loopManifestRes.content[0].text);
+checkOk(loopManifestJson.steps_run === 1 && loopManifestJson.steps.every((s) => s.status === "ok") && near(loopManifestJson.final.duration_seconds, 9.039, 0.05), "manifest make_loopable step runs and final is 9.039s", JSON.stringify(loopManifestJson.final?.duration_seconds));
 
 // chroma_key: green screen out. Fixture test/greenscreen.mp4 is pure
 // green 640x360 with a red 200x140 rect in the middle. Transparent
@@ -3258,7 +3316,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 56 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 56 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 57 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 57 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -4466,7 +4524,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 56 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 57 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -4526,11 +4584,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 56, "GET /mcp reports name/version/transport and 56 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 57, "GET /mcp reports name/version/transport and 57 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 56 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 56 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 57 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 57 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -4554,7 +4612,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 56, "JSON-RPC tools/list returns the same 56 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 57, "JSON-RPC tools/list returns the same 57 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

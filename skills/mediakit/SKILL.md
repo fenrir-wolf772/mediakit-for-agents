@@ -571,6 +571,31 @@ working device reports `gpu.available: false` — listed is not usable, so
 never pick a hardware encoder from the list alone; pick it from
 `working_encoder`, or stay on libx264.
 
+### 33b. A loop is a crossfade, not a copy — and the seam gets a number
+`make-loopable in.mp4 -o loop.mp4 --overlap 1` makes a clip repeat
+without a jump: it splits the clip into head/mid/tail, then lays the
+head fading in over the tail (alpha fade + overlay — `xfade` refuses
+trimmed branches because they lose constant-frame-rate metadata), and
+puts that seam after the mid. The output ends on the head's last frame,
+exactly where the mid begins, so the player jumping back to the start
+flows into the next frame of the original motion. Audio gets the same
+treatment with `acrossfade`, so the beat does not click. The cost is
+length: the output is the overlap shorter (10s + 1s overlap = 9s).
+Default overlap is 0.5s; 0.3–0.5s is enough for slow motion, 1s helps
+when the start and end poses differ a lot, and past about a quarter of
+the clip the crossfade ghosts the picture. The tool measures the loop
+instead of asking you to eyeball it: `seam_before` vs `seam_after`
+(mean abs gray difference between the last and first frames) with
+`normal_step` (two neighbouring mid frames) as the baseline — a good
+seam lands at the normal step. Two measurement traps, both caught the
+hard way: `blend=all_mode=difference` on YUV inputs does NOT return
+the gray difference (red-vs-blue reads 28 there, 47 is the true
+number), so both branches are converted to rgb24 first; and two-input
+`-ss` seeking is non-deterministic (same command returned 76 once and
+nothing the next time), so the seam is measured with trim branches in
+one graph. Works on audio-only input too (acrossfade only, seam scores
+null); in `batch` and `manifest` like any other op.
+
 ### 34. Resources are the map, tools are the hands — and the map never leaves the workspace
 Before guessing a path, read `videos://list` (every media file under
 the workspace root, sorted, capped at 200), then `videos://{file}/metadata`
@@ -973,7 +998,7 @@ cap, no timeout, no verify) — MediaKit's `download` exists so the
 agent never has to.
 
 ### 52. Test a tool over HTTP before wiring up an MCP client — same tools, curl instead of stdio
-`mediakit mcp --http [--port 3000]` serves the same 56 tools over
+`mediakit mcp --http [--port 3000]` serves the same 57 tools over
 HTTP on `127.0.0.1`: `GET /mcp` (metadata), `GET /mcp/tools`
 (every tool + JSON input schema), `POST /mcp/tools/{name}/invoke`
 (`{"arguments": {...}}`), and `POST /` for JSON-RPC 2.0
