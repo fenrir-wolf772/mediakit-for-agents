@@ -715,6 +715,12 @@ const COMMANDS = {
       ["-o, --output", "Output directory for the rerender (kept; without it the rerender is compared then removed)"],
     ],
   },
+  diagnose: {
+    usage: "mediakit diagnose <film.json>",
+    desc: "Director preflight for an assemble film manifest: validate the manifest, then measure what validation cannot — real motion inside each video shot's exact window (a frozen video is an error), source geometry vs the film frame (upscale over 2x or a low fps warns), the visual seam across each transition, voice loudness, caption coverage and gaps, music loop count, sfx tails past the film end, chapter alignment to cuts, and text layers that are too tall or sit in the burned-caption band. Probe-only, writes nothing. A broken manifest reports verdict fail with format_error instead of exiting 2. Run it after writing a film.json and before approve/render; run verify after the render.",
+    args: [{ name: "manifest", required: true }],
+    options: [],
+  },
   manifest: {
     usage: "mediakit manifest <manifest.json> [-o <output.mp4>] [--dry-run] [--no-cache] [--keep-intermediates]",
     desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (slideshow as step 1 only — it builds from images in args, so input should be the first slide image; then trim|resize|reframe|compress|convert|extract-audio|reverse|boomerang|make-loopable|freeze|grade|fit|silence|denoise|interpolate|burn-captions|overlay|chroma-key|cut-words|remove-retakes), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file.",
@@ -746,7 +752,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 60 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 61 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -1551,6 +1557,13 @@ async function main() {
           receipt: positional[0],
           rerender: opts.rerender === true,
           outputDir: opts.output ?? null,
+        });
+        break;
+      }
+      case "diagnose": {
+        if (!positional[0]) fail("missing manifest file: mediakit diagnose <film.json>");
+        result = await core.diagnoseFilm({
+          manifestPath: positional[0],
         });
         break;
       }

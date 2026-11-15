@@ -6364,6 +6364,13 @@ const TOOL_REQUIREMENTS = {
     filters: ["zoompan", "xfade", "scale", "crop", "fps", "trim", "setpts", "format", "subtitles", "sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay", "apad", "drawtext"],
     encoders: ["libx264", "aac"],
   },
+  // diagnose measures motion (tblend/blend/signalstats), loudness
+  // and seam frames on the film's own assets — same filters as
+  // motion + verify, no new capability.
+  diagnose: {
+    filters: ["tblend", "blend", "fps", "split", "trim", "setpts", "geq", "signalstats", "scale", "loudnorm"],
+    encoders: ["libx264"],
+  },
   mix: { filters: ["sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay"], encoders: ["aac", "libmp3lame"] },
   overlay: { filters: ["overlay", "format", "scale", "colorchannelmixer"], encoders: ["libx264"] },
   scenes: { filters: ["select"] },
@@ -10331,6 +10338,279 @@ export async function verifyRender({ receipt, rerender = false, outputDir = null
     summary: verdict === "pass"
       ? (mode === "rerender" ? "Rerender is byte-identical and all inputs match the receipt — the render reproduces." : "All inputs and the output match the receipt — nothing moved.")
       : `${bad.length} of ${items.length} checks differ, first: ${firstDifference}.`,
+  };
+}
+
+// ---------------------------------------------------------------- diagnose
+// Director preflight for a film manifest (heristop/leclap's `diagnose`
+// idea, turn 64): validate is the FORMAT gate — it throws on the
+// first hard error and says nothing about quality. Diagnose is the
+// JUDGEMENT gate — it runs validate, then measures what validate
+// cannot: real motion inside each video shot's exact window, source
+// geometry vs the film frame (upscale / fps), the visual seam across
+// each transition, caption coverage, music loops, sfx tails, chapter
+// alignment and text-layer collisions. Probe-only: nothing is
+// written except temp files under os.tmpdir, removed afterwards.
+// A broken manifest is a FINDING, not a crash — validate errors
+// come back as verdict "fail" with format_error, so an agent can
+// fix the manifest and re-run diagnose in a loop.
+function diagnoseShotBoundaryFrame(shot, atEnd, fps) {
+  // The frame the viewer actually sees at the boundary: for a video
+  // shot the last displayed frame (start + duration − 1 frame) or
+  // the first displayed frame (start); for an image shot the image
+  // itself. Returns { file, at } — file is a path ffmpeg can read
+  // (the image directly, or a temp PNG for a video frame).
+  if (shot.kind === "image") return { file: shot.source, at: null };
+  const t = atEnd ? shot.start + shot.duration - 1 / fps : shot.start;
+  return { file: null, at: +Math.max(0, t).toFixed(3) };
+}
+
+async function diagnoseExtractFrame(source, t, outPng) {
+  await run(FFMPEG, ["-hide_banner", "-nostats", "-ss", String(t), "-i", source, "-frames:v", "1", "-y", outPng]);
+}
+
+async function diagnoseFrameMeanDiff(aPng, bPng) {
+  // Mean absolute luma difference between two frames, 0-255.
+  // blend difference on RGB, then gray + signalstats YAVG — the
+  // same measurement motion uses for a frame step, so a seam score
+  // reads on the same scale as a normal frame step (testsrc step
+  // ~8, a red/blue cut ~47).
+  const { stderr } = await run(FFMPEG, [
+    "-hide_banner", "-nostats", "-i", aPng, "-i", bPng,
+    "-filter_complex", "[0:v][1:v]blend=all_mode=difference,format=gray,signalstats,metadata=print:key=lavfi.signalstats.YAVG",
+    "-f", "null", "-",
+  ]);
+  const m = stderr.match(/lavfi\.signalstats\.YAVG=([0-9.]+)/);
+  if (!m) return null;
+  return +(+m[1]).toFixed(2);
+}
+
+export async function diagnoseFilm({ manifestPath }) {
+  const manifestAbs = await requireInput(manifestPath, "film manifest");
+  let doc;
+  try {
+    doc = JSON.parse(await readFile(manifestAbs, "utf8"));
+  } catch (e) {
+    return {
+      manifest: manifestAbs, verdict: "fail", format_error: `manifest is not valid JSON: ${e.message}`,
+      errors: 1, warnings: 0, first_issue: "manifest is not valid JSON",
+      checks: [{ id: "format", severity: "error", message: `manifest is not valid JSON: ${e.message}` }],
+      summary: "The manifest is not valid JSON — fix it and re-run diagnose.",
+    };
+  }
+  let plan;
+  try {
+    plan = await validateAssembleManifest(doc, manifestAbs);
+  } catch (e) {
+    const msg = e instanceof MediaKitError ? e.message : `cannot validate manifest: ${e.message}`;
+    return {
+      manifest: manifestAbs, verdict: "fail", format_error: msg,
+      errors: 1, warnings: 0, first_issue: msg,
+      checks: [{ id: "format", severity: "error", message: msg }],
+      summary: "The manifest fails validation — fix the format error and re-run diagnose.",
+    };
+  }
+  const checks = [];
+  const add = (id, severity, message, extra = {}) => checks.push({ id, severity, message, ...extra });
+  const built = deriveAssembleHandles(plan.shots, plan.fps);
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-diagnose-"));
+  try {
+    add("timeline", "info",
+      `${plan.shots.length} shots cover ${plan.total_seconds}s (${plan.total_frames} frames @${plan.fps}fps, ${plan.width}x${plan.height}) on a voice of ${plan.voice.duration_seconds}s + ${plan.voice.lead}s lead + ${plan.voice.tail}s tail`,
+      { total_seconds: plan.total_seconds, total_frames: plan.total_frames, shots: plan.shots.length });
+
+    // Voice loudness: the master clock should sit in a range the
+    // -14 LUFS master can reach without strain. A whisper-quiet
+    // voice forces a big gain (noise + pumping); a hot one clips.
+    const voiceFull = await measureLoudnessFull(plan.voice.path);
+    if (voiceFull === null) {
+      add("voice_loudness", "error", "could not measure the voice loudness (loudnorm returned nothing)");
+    } else if (voiceFull.i < -30) {
+      add("voice_loudness", "warn", `voice is very quiet (${voiceFull.i} LUFS, true peak ${voiceFull.tp} dBTP) — the -14 LUFS master will push it hard; gain the voice up or re-record before rendering`, { lufs: voiceFull.i, true_peak_db: voiceFull.tp });
+    } else if (voiceFull.i > -8) {
+      add("voice_loudness", "warn", `voice is hot (${voiceFull.i} LUFS, true peak ${voiceFull.tp} dBTP) — peaks may clip in the -14 LUFS master; turn it down first`, { lufs: voiceFull.i, true_peak_db: voiceFull.tp });
+    } else {
+      add("voice_loudness", "pass", `voice measures ${voiceFull.i} LUFS (true peak ${voiceFull.tp} dBTP, LRA ${voiceFull.lra} LU) — the master can reach -14 LUFS cleanly`, { lufs: voiceFull.i, true_peak_db: voiceFull.tp, lra: voiceFull.lra });
+    }
+
+    // Per-shot motion + geometry, measured on the exact source
+    // window the render will use (handles included).
+    for (const s of built) {
+      if (s.kind === "video") {
+        const meta = await probe(s.source);
+        const upscale = Math.max(plan.width / meta.video.width, plan.height / meta.video.height);
+        if (upscale > 2) {
+          add(`shot_geometry:${s.id}`, "warn", `shot ${s.id} upscales ${upscale.toFixed(2)}x (${meta.video.width}x${meta.video.height} → ${plan.width}x${plan.height}) — the render will soften; use a higher-resolution source or a smaller frame`, { upscale: +upscale.toFixed(2), source_width: meta.video.width, source_height: meta.video.height });
+        } else if (meta.video.fps !== null && meta.video.fps < plan.fps) {
+          add(`shot_geometry:${s.id}`, "warn", `shot ${s.id} is ${meta.video.fps}fps in a ${plan.fps}fps film — frames will duplicate; use a ${plan.fps}fps source or drop the film fps`, { source_fps: meta.video.fps, film_fps: plan.fps });
+        } else {
+          add(`shot_geometry:${s.id}`, "pass", `shot ${s.id} geometry is clean (${meta.video.width}x${meta.video.height} @${meta.video.fps}fps, upscale ${upscale.toFixed(2)}x)`, { upscale: +upscale.toFixed(2), source_fps: meta.video.fps });
+        }
+        const winPath = path.join(tmpDir, `motion-${s.id}.mp4`);
+        await run(FFMPEG, ["-hide_banner", "-nostats", "-ss", String(s.buildStart), "-i", s.source, "-t", String(s.buildSeconds), "-c:v", "libx264", "-crf", "23", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-an", "-y", winPath]);
+        const m = await measureMotion({ input: winPath, threshold: 0.001, minStillSeconds: 2, windowSeconds: 1 });
+        const meanMotion = m.motion_curve.length ? +(m.motion_curve.reduce((a, w) => a + w.motion_fraction, 0) / m.motion_curve.length).toFixed(5) : 0;
+        if (m.verdict === "static") {
+          add(`shot_motion:${s.id}`, "error", `shot ${s.id} is a frozen video (motion ${meanMotion} over ${s.buildSeconds}s) — use an image shot or pick a moving clip`, { mean_motion: meanMotion, motion_verdict: m.verdict });
+        } else if (m.verdict === "mostly-static") {
+          add(`shot_motion:${s.id}`, "warn", `shot ${s.id} is mostly static (motion ${meanMotion} over ${s.buildSeconds}s) — check the clip really moves where it matters`, { mean_motion: meanMotion, motion_verdict: m.verdict });
+        } else {
+          add(`shot_motion:${s.id}`, "pass", `shot ${s.id} moves (mean motion ${meanMotion} over ${s.buildSeconds}s)`, { mean_motion: meanMotion, motion_verdict: m.verdict });
+        }
+      } else if (s.kind === "image") {
+        const meta = await probe(s.source);
+        const upscale = Math.max(plan.width / meta.video.width, plan.height / meta.video.height);
+        if (upscale > 2) {
+          add(`shot_geometry:${s.id}`, "warn", `shot ${s.id} upscales ${upscale.toFixed(2)}x (${meta.video.width}x${meta.video.height} → ${plan.width}x${plan.height}) — the render will soften; use a higher-resolution source or a smaller frame`, { upscale: +upscale.toFixed(2), source_width: meta.video.width, source_height: meta.video.height });
+        } else {
+          add(`shot_geometry:${s.id}`, "pass", `shot ${s.id} geometry is clean (${meta.video.width}x${meta.video.height}, upscale ${upscale.toFixed(2)}x)`, { upscale: +upscale.toFixed(2) });
+        }
+      }
+    }
+
+    // Transition seams: the frames on either side of each join.
+    // A fade between near-identical frames adds nothing (a cut
+    // would do); a huge jump means the fade is doing real work.
+    // Only video/image neighbours have a single readable frame —
+    // canvas_scene and color shots are skipped, not guessed at.
+    for (let i = 1; i < built.length; i++) {
+      const prev = built[i - 1];
+      const next = built[i];
+      if (!next.transition) continue;
+      if (!["video", "image"].includes(prev.kind) || !["video", "image"].includes(next.kind)) continue;
+      const prevSide = diagnoseShotBoundaryFrame(prev, true, plan.fps);
+      const nextSide = diagnoseShotBoundaryFrame(next, false, plan.fps);
+      const prevPng = prevSide.file ?? path.join(tmpDir, `seam-${next.id}-prev.png`);
+      const nextPng = nextSide.file ?? path.join(tmpDir, `seam-${next.id}-next.png`);
+      if (!prevSide.file) await diagnoseExtractFrame(prev.source, prevSide.at, prevPng);
+      if (!nextSide.file) await diagnoseExtractFrame(next.source, nextSide.at, nextPng);
+      const seam = await diagnoseFrameMeanDiff(prevPng, nextPng);
+      if (seam === null) {
+        add(`transition_seam:${next.id}`, "warn", `transition into shot ${next.id} (${next.transition.type} ${next.transition.duration_seconds}s): could not measure the seam frames`);
+      } else if (seam < 2) {
+        add(`transition_seam:${next.id}`, "warn", `transition into shot ${next.id} joins near-identical frames (seam ${seam}) — a plain cut would do; the ${next.transition.type} adds nothing`, { seam });
+      } else if (seam > 200) {
+        add(`transition_seam:${next.id}`, "info", `transition into shot ${next.id} crosses a hard visual jump (seam ${seam}) — the ${next.transition.type} is doing real work`, { seam });
+      } else {
+        add(`transition_seam:${next.id}`, "pass", `transition into shot ${next.id} has a real but gentle seam (${seam})`, { seam });
+      }
+    }
+
+    // Captions: how much of the film actually has words on screen,
+    // and whether any silence between cues swallows a whole beat.
+    if (plan.captions) {
+      const capExt = path.extname(plan.captions.path).toLowerCase();
+      if (capExt === ".ass") {
+        add("captions_coverage", "info", `captions are .ass (${plan.captions.cue_count ?? "unknown"} cues) — coverage is not measured for styled captions`);
+      } else {
+        const { cues } = parseCaptions(await readFile(plan.captions.path, "utf8"), capExt.slice(1));
+        const covered = cues.reduce((a, c) => a + (c.endMs - c.startMs) / 1000, 0);
+        const coverage = plan.total_seconds > 0 ? +(covered / plan.total_seconds).toFixed(2) : 0;
+        let largestGap = 0;
+        for (let j = 1; j < cues.length; j++) largestGap = Math.max(largestGap, (cues[j].startMs - cues[j - 1].endMs) / 1000);
+        if (coverage < 0.5) {
+          add("captions_coverage", "warn", `captions cover only ${Math.round(coverage * 100)}% of the film (${cues.length} cues, ${covered.toFixed(1)}s of ${plan.total_seconds}s) — half the film has no words on screen`, { coverage, cue_count: cues.length });
+        } else if (largestGap > 3) {
+          add("captions_coverage", "warn", `captions cover ${Math.round(coverage * 100)}% of the film but leave a ${largestGap.toFixed(1)}s gap with no words — check the voice really pauses there`, { coverage, cue_count: cues.length, largest_gap_seconds: +largestGap.toFixed(2) });
+        } else {
+          add("captions_coverage", "pass", `captions cover ${Math.round(coverage * 100)}% of the film (${cues.length} cues, largest gap ${largestGap.toFixed(1)}s)`, { coverage, cue_count: cues.length, largest_gap_seconds: +largestGap.toFixed(2) });
+        }
+      }
+    }
+
+    // Music: a bed shorter than the film loops; too many loops and
+    // the listener hears the seam.
+    if (plan.music) {
+      const musicMeta = await probe(plan.music.path);
+      const musicDur = musicMeta.duration_seconds;
+      if (musicDur === null) {
+        add("music_loop", "warn", "could not measure the music duration — the loop count is unknown");
+      } else {
+        const loops = Math.ceil(plan.total_seconds / musicDur);
+        if (loops > 3) {
+          add("music_loop", "warn", `music (${musicDur}s) loops ${loops}x over the ${plan.total_seconds}s film — the loop seam will be audible; use a longer bed`, { loops, music_seconds: musicDur });
+        } else {
+          add("music_loop", "pass", `music (${musicDur}s) covers the film in ${loops} loop${loops === 1 ? "" : "s"}`, { loops, music_seconds: musicDur });
+        }
+      }
+    }
+
+    // SFX: a tail that runs past the film end is clipped, silently.
+    if (plan.sfx.length) {
+      const clipped = [];
+      for (const s of plan.sfx) {
+        const meta = await probe(s.file);
+        const dur = meta.duration_seconds;
+        if (dur !== null && s.at_seconds + dur > plan.total_seconds + 0.05) {
+          clipped.push(`${path.basename(s.file)} at ${s.at_seconds}s runs ${(s.at_seconds + dur - plan.total_seconds).toFixed(2)}s past the film end`);
+        }
+      }
+      if (clipped.length) {
+        add("sfx_tail", "warn", `sfx tail is clipped: ${clipped.join("; ")}`, { clipped: clipped.length });
+      } else {
+        add("sfx_tail", "pass", `${plan.sfx.length} sfx entr${plan.sfx.length === 1 ? "y" : "ies"} all end inside the film`);
+      }
+    }
+
+    // Chapters should land on cuts: a chapter that starts mid-shot
+    // drops the viewer into the middle of a thought.
+    if (plan.chapters.length) {
+      const boundaries = [0];
+      let acc = 0;
+      for (const s of plan.shots) { acc += s.duration; boundaries.push(+acc.toFixed(3)); }
+      let worst = null;
+      for (const c of plan.chapters) {
+        const dist = Math.min(...boundaries.map((b) => Math.abs(b - c.at_seconds)));
+        if (!worst || dist > worst.dist) worst = { chapter: c, dist };
+      }
+      if (worst.dist > 1) {
+        add("chapters_alignment", "warn", `chapter "${worst.chapter.title}" at ${worst.chapter.at_seconds}s lands ${worst.dist.toFixed(2)}s from the nearest cut — it starts mid-shot; move it to a shot boundary`, { worst_distance_seconds: +worst.dist.toFixed(2) });
+      } else {
+        add("chapters_alignment", "pass", `${plan.chapters.length} chapters all land within 1s of a cut (worst ${worst.dist.toFixed(2)}s)`, { worst_distance_seconds: +worst.dist.toFixed(2) });
+      }
+    }
+
+    // Text layers: a block taller than 4 wrapped lines crowds the
+    // frame, and a bottom layer sits exactly where the burned
+    // captions live (~500px from the bottom — the bounce floor was
+    // moved to 0.62H for the same reason).
+    const textIssues = [];
+    for (const s of plan.shots) {
+      for (const [j, layer] of (s.textLayers ?? []).entries()) {
+        if (layer.lines.length > 4) textIssues.push(`shot ${s.id} text[${j}] wraps to ${layer.lines.length} lines — shorten the copy or shrink the size`);
+        if (layer.position === "bottom" && plan.captions) textIssues.push(`shot ${s.id} text[${j}] sits at the bottom, in the burned-caption band — move it to top or center`);
+      }
+    }
+    if (textIssues.length) {
+      for (const msg of textIssues) add("text_layer", "warn", msg);
+    } else if (plan.shots.some((s) => (s.textLayers ?? []).length)) {
+      add("text_layer", "pass", "text layers fit: no tall blocks, none in the caption band");
+    }
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+  const errors = checks.filter((c) => c.severity === "error").length;
+  const warnings = checks.filter((c) => c.severity === "warn").length;
+  const verdict = errors ? "fail" : warnings ? "warn" : "pass";
+  const firstIssue = checks.find((c) => c.severity === "error" || c.severity === "warn")?.message ?? null;
+  return {
+    manifest: manifestAbs,
+    title: plan.title,
+    verdict,
+    total_seconds: plan.total_seconds,
+    total_frames: plan.total_frames,
+    fps: plan.fps,
+    dimensions: `${plan.width}x${plan.height}`,
+    shots: plan.shots.length,
+    errors,
+    warnings,
+    first_issue: firstIssue,
+    checks,
+    summary: verdict === "pass"
+      ? "Preflight clean — the film should render as written."
+      : verdict === "warn"
+        ? `${warnings} warning${warnings === 1 ? "" : "s"} to look at before rendering; first: ${firstIssue}`
+        : `${errors} error${errors === 1 ? "" : "s"} — fix before rendering; first: ${firstIssue}`,
   };
 }
 

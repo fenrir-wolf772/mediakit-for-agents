@@ -661,6 +661,25 @@ copy, concat), one for the rest. The plan is computed from real probes
 that prints the wrong cut is a bug, not a guess — read the command
 before you run it.
 
+### 33f. Diagnose the film before you render it — validate is format, diagnose is judgement
+`assemble --mode validate` is the format gate: it throws on the first
+hard error and says nothing about quality. `diagnose <film.json>` is
+the judgement gate — run it after writing the manifest and before
+`approve`/`render` (and `verify` after the render). It measures what
+validation cannot: real motion inside each video shot's exact window
+(a frozen video is an error, not a warning — a still wearing a video's
+clothes), source geometry vs the film frame (upscale over 2x softens,
+a source fps below the film fps duplicates frames), the visual seam
+across each transition (near-identical frames mean the transition
+adds nothing — a cut would do), voice loudness (warns below −30 or
+above −8 LUFS), caption coverage and gaps, music loop count (over 3x
+the seam will be heard), sfx tails past the film end, chapters that
+land mid-shot, and text layers that wrap past 4 lines or sit at the
+bottom in the burned-caption band. Probe-only, writes nothing. A
+broken manifest returns verdict `fail` with `format_error` instead of
+throwing, so fix the manifest and re-run diagnose in a loop — a `warn`
+verdict is still renderable, a `fail` is not.
+
 ### 34. Resources are the map, tools are the hands — and the map never leaves the workspace
 Before guessing a path, read `videos://list` (every media file under
 the workspace root, sorted, capped at 200), then `videos://{file}/metadata`
@@ -1063,7 +1082,7 @@ cap, no timeout, no verify) — MediaKit's `download` exists so the
 agent never has to.
 
 ### 52. Test a tool over HTTP before wiring up an MCP client — same tools, curl instead of stdio
-`mediakit mcp --http [--port 3000]` serves the same 60 tools over
+`mediakit mcp --http [--port 3000]` serves the same 61 tools over
 HTTP on `127.0.0.1`: `GET /mcp` (metadata), `GET /mcp/tools`
 (every tool + JSON input schema), `POST /mcp/tools/{name}/invoke`
 (`{"arguments": {...}}`), and `POST /` for JSON-RPC 2.0

@@ -181,10 +181,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 60 tools present");
-checkOk(missing.length === 0, "tools/list has all 60 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 61 tools present");
+checkOk(missing.length === 0, "tools/list has all 61 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -3504,7 +3504,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 60 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 60 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 61 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 61 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -4139,7 +4139,7 @@ checkOk(assembleFinalProbe?.streams?.find((s) => s.codec_type === "video")?.widt
 checkOk(assembleFinalLufs !== null && near(assembleFinalLufs, -14, 0.5), "assemble final measures -14 LUFS independently", `LUFS=${assembleFinalLufs}`);
 const assembleReceipt = JSON.parse(await readFile(path.join(assembleOut, "assemble-receipt.json"), "utf8"));
 checkOk(assembleReceipt.approval === "approved" && assembleReceipt.final?.sha256?.length === 64 && assembleReceipt.qa?.checks?.every((c) => c.status === "pass"), "assemble receipt records approval + SHA-256 + an all-pass qa_report", JSON.stringify(assembleReceipt.qa?.checks?.map((c) => `${c.check}:${c.status}`)));
-checkOk(typeof assembleReceipt.fingerprint_parts?.manifest === "string" && assembleReceipt.fingerprint_parts.manifest.length === 64 && assembleReceipt.inputs?.voice?.endsWith("mix-voice.mp3") && assembleReceipt.inputs?.shots?.s1?.source?.endsWith("kenburns.png") && assembleReceipt.mediakit_version === "0.1.0" && assembleReceipt.ffmpeg_version === "8.1.2", "assemble receipt records fingerprint_parts + input paths + versions (verify evidence)", JSON.stringify({ parts: Object.keys(assembleReceipt.fingerprint_parts ?? {}), inputs: Object.keys(assembleReceipt.inputs ?? {}) }));
+checkOk(typeof assembleReceipt.fingerprint_parts?.manifest === "string" && assembleReceipt.fingerprint_parts.manifest.length === 64 && assembleReceipt.inputs?.voice?.endsWith("mix-voice.mp3") && assembleReceipt.inputs?.shots?.s1?.source?.endsWith("kenburns.png") && assembleReceipt.mediakit_version === "0.1.0" && assembleReceipt.ffmpeg_version === doctorJson.ffmpeg_version, "assemble receipt records fingerprint_parts + input paths + versions (verify evidence)", JSON.stringify({ parts: Object.keys(assembleReceipt.fingerprint_parts ?? {}), inputs: Object.keys(assembleReceipt.inputs ?? {}), ffmpeg_version: assembleReceipt.ffmpeg_version }));
 // verify: check mode on the receipt just rendered — every input and
 // the output must match, since nothing has moved since the render.
 const verifyReceiptPath = path.join(assembleOut, "assemble-receipt.json");
@@ -4216,6 +4216,55 @@ const verifyRerenderRes = await client.callTool({ name: "verify", arguments: { r
 const verifyRerenderJson = JSON.parse(verifyRerenderRes.content[0].text);
 checkOk(verifyRerenderJson.verdict === "pass" && verifyRerenderJson.mode === "rerender" && verifyRerenderJson.rerender_removed === true && verifyRerenderJson.items?.find((i) => i.name === "output_bytes")?.status === "matched", "verify --rerender passes: the re-render is byte-identical and the temp dir is removed", JSON.stringify({ verdict: verifyRerenderJson.verdict, removed: verifyRerenderJson.rerender_removed, first: verifyRerenderJson.first_difference }));
 checkOk(existsSync(path.join(verifyTinyOut, "final.mp4")) && readdirSync(verifyTinyOut).filter((n) => n.startsWith(".mediakit-verify-rerender-")).length === 0, "verify rerender keeps the original final.mp4 and leaves no rerender temp dir behind", readdirSync(verifyTinyOut).join(", "));
+
+// diagnose (turn 64): director preflight — validate + measured
+// judgement, probe-only. Fixtures: assemble-diagnose-pass.json (1
+// moving video shot, 1280x720, no extras) must pass clean;
+// assemble-diagnose-frozen.json (scenes-source: red 5s + blue 5s,
+// static) must fail on shot motion; assemble-film.json must warn
+// on the 2.67x upscale; the transitions film must measure real
+// seams; a shots-sum mismatch must fail with format_error instead
+// of throwing; a bottom text layer over burned captions must warn.
+const diagPassStage = await stageAssembleManifest("assemble-diagnose-pass.json");
+const diagPassRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagPassStage.manifestPath } });
+const diagPassJson = JSON.parse(diagPassRes.content[0].text);
+checkOk(diagPassJson.verdict === "pass" && diagPassJson.errors === 0 && diagPassJson.warnings === 0 && diagPassJson.total_seconds === 10 && diagPassJson.total_frames === 300, "diagnose passes a clean film (1 moving video shot, 1280x720, 10s/300f)", JSON.stringify({ verdict: diagPassJson.verdict, checks: diagPassJson.checks?.map((c) => `${c.id}:${c.severity}`) }));
+checkOk(diagPassJson.checks?.find((c) => c.id === "shot_motion:s1")?.motion_verdict === "moving" && diagPassJson.checks?.find((c) => c.id === "shot_motion:s1")?.mean_motion > 0.01 && diagPassJson.checks?.find((c) => c.id === "voice_loudness")?.lufs === -22.14, "diagnose measures real motion (testsrc moving, mean > 0.01) and voice loudness (-22.14 LUFS) on the pass film", JSON.stringify(diagPassJson.checks?.filter((c) => c.id.startsWith("shot_motion") || c.id === "voice_loudness")));
+const diagFrozenStage = await stageAssembleManifest("assemble-diagnose-frozen.json");
+const diagFrozenRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagFrozenStage.manifestPath } });
+const diagFrozenJson = JSON.parse(diagFrozenRes.content[0].text);
+checkOk(diagFrozenJson.verdict === "fail" && diagFrozenJson.errors === 1 && diagFrozenJson.checks?.find((c) => c.id === "shot_motion:fs1")?.severity === "error" && diagFrozenJson.checks?.find((c) => c.id === "shot_motion:fs1")?.motion_verdict === "static", "diagnose fails a frozen video shot (scenes-source reads static) with an error, not a warning", JSON.stringify(diagFrozenJson.checks?.map((c) => `${c.id}:${c.severity}`)));
+const diagFilmStage = await stageAssembleManifest("assemble-film.json");
+const diagFilmRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagFilmStage.manifestPath } });
+const diagFilmJson = JSON.parse(diagFilmRes.content[0].text);
+checkOk(diagFilmJson.verdict === "warn" && diagFilmJson.warnings === 3 && diagFilmJson.checks?.filter((c) => c.id.startsWith("shot_geometry:") && c.severity === "warn").length === 3 && diagFilmJson.checks?.find((c) => c.id === "shot_geometry:s2")?.upscale === 2.67, "diagnose warns on the 2.67x upscale of all three image/video shots in the vertical film (verdict warn, 3 warnings)", JSON.stringify(diagFilmJson.checks?.map((c) => `${c.id}:${c.severity}`)));
+checkOk(diagFilmJson.checks?.find((c) => c.id === "captions_coverage")?.coverage === 0.8 && diagFilmJson.checks?.find((c) => c.id === "music_loop")?.loops === 2 && diagFilmJson.checks?.find((c) => c.id === "shot_motion:s2")?.motion_verdict === "moving", "diagnose measures captions coverage 0.8, music loops 2 and moving video on the full film", JSON.stringify(diagFilmJson.checks?.filter((c) => ["captions_coverage", "music_loop", "shot_motion:s2"].includes(c.id))));
+const diagTransStage = await stageAssembleManifest("assemble-film-transitions.json");
+const diagTransRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagTransStage.manifestPath } });
+const diagTransJson = JSON.parse(diagTransRes.content[0].text);
+checkOk(diagTransJson.checks?.find((c) => c.id === "transition_seam:s2")?.severity === "pass" && diagTransJson.checks?.find((c) => c.id === "transition_seam:s2")?.seam > 50 && diagTransJson.checks?.find((c) => c.id === "transition_seam:s3")?.severity === "pass", "diagnose measures real transition seams (fade image→video and dissolve video→image both pass with seam > 50)", JSON.stringify(diagTransJson.checks?.filter((c) => c.id.startsWith("transition_seam"))));
+// A format failure is a finding, not a throw: shots that do not
+// sum to the voice timeline come back as verdict fail +
+// format_error, so the caller can fix the manifest and re-run.
+const diagBadStage = await stageAssembleManifest("assemble-film.json");
+const diagBadDoc = JSON.parse(await readFile(diagBadStage.manifestPath, "utf8"));
+diagBadDoc.shots[0].duration = 3;
+await writeFile(diagBadStage.manifestPath, JSON.stringify(diagBadDoc), "utf8");
+const diagBadRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagBadStage.manifestPath } });
+const diagBadJson = JSON.parse(diagBadRes.content[0].text);
+checkOk(diagBadJson.verdict === "fail" && /shots cover/.test(diagBadJson.format_error ?? "") && diagBadJson.checks?.[0]?.id === "format", "diagnose returns verdict fail with format_error (not a throw) when the shots do not sum to the voice timeline", JSON.stringify({ verdict: diagBadJson.verdict, format_error: diagBadJson.format_error }));
+// A bottom text layer over burned captions warns.
+const diagTextStage = await stageAssembleManifest("assemble-film.json");
+const diagTextDoc = JSON.parse(await readFile(diagTextStage.manifestPath, "utf8"));
+diagTextDoc.shots[0].text = [{ text: "Hello from the bottom", position: "bottom", size: 64 }];
+await writeFile(diagTextStage.manifestPath, JSON.stringify(diagTextDoc), "utf8");
+const diagTextRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagTextStage.manifestPath } });
+const diagTextJson = JSON.parse(diagTextRes.content[0].text);
+checkOk(diagTextJson.checks?.some((c) => c.id === "text_layer" && c.severity === "warn" && /caption band/.test(c.message)), "diagnose warns on a bottom text layer sitting in the burned-caption band", JSON.stringify(diagTextJson.checks?.filter((c) => c.id === "text_layer")));
+checkOk(diagTextJson.verdict === "warn" && diagTextJson.warnings === 4, "the bottom-text film still warns overall (3 upscale + 1 text layer)", JSON.stringify({ verdict: diagTextJson.verdict, warnings: diagTextJson.warnings }));
+const diagDoctorRes = await client.callTool({ name: "doctor", arguments: {} });
+const diagDoctorJson = JSON.parse(diagDoctorRes.content[0].text);
+checkOk(diagDoctorJson.tools?.diagnose?.available === true, "doctor reports diagnose as available", JSON.stringify(diagDoctorJson.tools?.diagnose));
 // Transitions: the same film with a fade into s2, a dissolve into
 // s3 and a fade into s4. Total duration and frame count must stay
 // exactly 10s / 300 frames — the transitions are centered on the
@@ -4754,7 +4803,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 60 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 61 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -4814,11 +4863,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 60, "GET /mcp reports name/version/transport and 60 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 61, "GET /mcp reports name/version/transport and 61 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 60 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 60 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 61 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 61 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -4842,7 +4891,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 60, "JSON-RPC tools/list returns the same 60 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 61, "JSON-RPC tools/list returns the same 61 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

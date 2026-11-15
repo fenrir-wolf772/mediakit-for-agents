@@ -1409,4 +1409,28 @@ export const TOOL_DEFS = [
     outputDir: a.output_dir ?? null,
   })),
   },
+
+  // Director preflight for a film manifest (heristop/leclap's
+  // `diagnose` idea, turn 64): validate is the format gate (it
+  // throws on the first hard error); diagnose is the judgement
+  // gate — it runs validate, then measures what validate cannot:
+  // real motion inside each video shot's exact window, source
+  // geometry vs the film frame (upscale / fps), the visual seam
+  // across each transition, caption coverage, music loops, sfx
+  // tails, chapter alignment and text-layer collisions. Probe-only,
+  // nothing is written. A broken manifest comes back as verdict
+  // "fail" with format_error instead of throwing, so an agent can
+  // fix the manifest and re-run diagnose in a loop. Run it after
+  // writing a film.json and before approve/render; run verify after
+  // the render.
+  {
+    name: "diagnose",
+    description: "Director preflight for an assemble film manifest: validate the manifest, then measure what validation cannot — real motion inside each video shot's exact window (a frozen video is an error), source geometry vs the film frame (upscale over 2x or a low fps warns), the visual seam across each transition (near-identical frames warn), voice loudness, caption coverage and gaps, music loop count, sfx tails past the film end, chapter alignment to cuts, and text layers that are too tall or sit in the burned-caption band. Probe-only, writes nothing. Returns a pass/warn/fail verdict with one check per finding and the first issue. A broken manifest returns verdict fail with format_error instead of throwing.",
+    schema: {
+    manifest_path: pathSchema.describe("Path to the film manifest JSON file (same schema as assemble)"),
+  },
+    handler: async (a) => safe(() => core.diagnoseFilm({
+    manifestPath: a.manifest_path,
+  })),
+  },
 ];
