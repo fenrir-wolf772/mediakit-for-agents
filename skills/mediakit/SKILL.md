@@ -737,7 +737,11 @@ that file started. A second identical run re-encodes nothing — if it
 does, something changed: the input bytes, the args, or the cached
 output. A mistyped arg fails every file identically and aborts after
 three leading failures in sequential mode — that is the guard working,
-not a broken folder. Keep the output dir outside the input tree when
+not a broken folder. `hook` is the probe-only operation: it writes no
+file, so a row's `output` is null and the ranked windows come back in
+the row's `result` — batch is how you find the best hook in every clip
+in a folder in one call, and the cache stores the result (the key
+already covers the input bytes) instead of a file. Keep the output dir outside the input tree when
 you can (files under it are never treated as inputs), and use
 `--dry-run` first when the glob is new, so you see the planned outputs
 before anything encodes. `slideshow` is the exception: a set operation
@@ -848,7 +852,12 @@ stream, then trim, reframe, grade it. A changed URL re-runs the step
 (the URL is in the cache key); an unchanged manifest re-fetches
 nothing. `download` is deliberately NOT a batch operation: batch maps
 one operation over files matching a glob, and a download's input is a
-URL, not a file. HLS (`.m3u8`) / DASH (`.mpd`) downloads are re-muxed
+URL, not a file. `hook` is the probe-only step: it analyzes the chain
+file at that point and passes it through unchanged — put it before the
+`trim` that cuts the winning window, and the step result records WHY
+the cut lands where it does (ranked windows + scores) in the manifest
+receipt. Its cache entry stores only the result; there is no file to
+verify, and the key already covers the input bytes. HLS (`.m3u8`) / DASH (`.mpd`) downloads are re-muxed
 with `-c copy`, never re-encoded; the size cap for a playlist is
 enforced after the fetch, since its total size is unknowable until
 the last segment arrives — so keep `max_size_mb` tight on playlists

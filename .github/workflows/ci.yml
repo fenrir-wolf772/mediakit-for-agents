@@ -153,6 +153,12 @@ jobs:
           node bin/mediakit.js motion test/motion-fade-slow.mp4 | grep '"verdict": "static"'
           node bin/mediakit.js motion test/motion-fade-slow.mp4 --lag-seconds 2 | grep '"verdict": "moving"'
           node bin/mediakit.js hook test/hook-source.mp4 --duration 10 | grep '"start": 15'
+          node bin/mediakit.js batch hook --pattern 'hook-source.mp4' --input-dir test -o outputs/ci-batch-hook --args-json '{"duration": 10}' | grep '"succeeded": 1'
+          node bin/mediakit.js batch hook --pattern 'hook-source.mp4' --input-dir test -o outputs/ci-batch-hook --args-json '{"duration": 10}' | grep '"cached": 1'
+          printf '%s' '{"version":1,"input":"../test/hook-source.mp4","output":"ci-manifest-hook.mp4","steps":[{"tool":"hook","args":{"duration":10}},{"tool":"trim","args":{"start":15,"end":25}}]}' > outputs/ci-manifest-hook.json
+          node bin/mediakit.js manifest outputs/ci-manifest-hook.json | grep '"steps_run": 2'
+          node bin/mediakit.js manifest outputs/ci-manifest-hook.json | grep '"cache_hits": 2'
+          ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-manifest-hook.mp4 | grep '^10'
           node bin/mediakit.js download https://raw.githubusercontent.com/fenrir-wolf772/mediakit-for-agents/main/test/source.mp4 -o outputs/ci-download.mp4 | grep '"size_bytes": 243932'
           test -f outputs/ci-download.mp4.provenance.json && grep -q 'mediakit-for-agents/provenance/1' outputs/ci-download.mp4.provenance.json && grep -q '"label": "unknown"' outputs/ci-download.mp4.provenance.json
           node bin/mediakit.js download ftp://example.com/clip.mp4 -o outputs/ci-download-ftp.mp4 2>&1 | grep -q 'http(s) URL'

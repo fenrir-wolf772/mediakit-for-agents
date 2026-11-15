@@ -1517,6 +1517,59 @@ checkOk(hookShortJson.hook.start === 0 && hookShortJson.hook.end === 9 && hookSh
 const hookBadText = await callExpectThrow("hook", { input: path.join(root, "test/mix-voice.mp3"), duration: 25 });
 checkOk(/less than or equal to 20/.test(hookBadText), "hook refuses --duration over 20", hookBadText.slice(0, 120));
 
+// hook in batch + manifest (lượt 69): hook is the first probe-only
+// operation — no file is written, so a batch row's output is null
+// and the ranked windows come back in the row's result; a manifest
+// hook step analyzes the chain file and passes it through unchanged,
+// so the next trim can cut the window the step just found.
+await rm(path.join(root, "outputs/mcp-batch-hook-in"), { recursive: true, force: true });
+await rm(path.join(root, "outputs/mcp-batch-hook-out"), { recursive: true, force: true });
+await mkdir(path.join(root, "outputs/mcp-batch-hook-in"), { recursive: true });
+await copyFile(path.join(root, "test/hook-source.mp4"), path.join(root, "outputs/mcp-batch-hook-in/hook-source.mp4"));
+await copyFile(path.join(root, "test/source.mp4"), path.join(root, "outputs/mcp-batch-hook-in/source.mp4"));
+const hookBatchRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "hook", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-hook-in"), output_dir: path.join(root, "outputs/mcp-batch-hook-out"), args: { duration: 10 }, jobs: 2 },
+});
+const hookBatchJson = JSON.parse(hookBatchRes.content[0].text);
+console.log("batch hook:", JSON.stringify(hookBatchJson.results.map((r) => ({ status: r.status, output: r.output, hook: r.result?.hook }))), "| suffix", hookBatchJson.output_suffix);
+checkOk(hookBatchJson.succeeded === 2 && hookBatchJson.failed === 0 && hookBatchJson.output_suffix === null && hookBatchJson.results.every((r) => r.status === "ok" && r.output === null), "batch hook succeeds on both files with no output file (output null, suffix null)", JSON.stringify(hookBatchJson.results.map((r) => r.output)));
+checkOk(hookBatchJson.results[0].result.hook.start === 15 && near(hookBatchJson.results[0].result.hook.score, 0.943, 0.01) && hookBatchJson.results[1].result.hook.start === 0 && hookBatchJson.results[1].result.hook.end === 10, "batch hook rows carry the ranked windows (hook-source 15-25 @0.94, source whole 10s file)", JSON.stringify(hookBatchJson.results.map((r) => r.result?.hook)));
+const hookBatchCacheRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "hook", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-hook-in"), output_dir: path.join(root, "outputs/mcp-batch-hook-out"), args: { duration: 10 }, jobs: 2 },
+});
+const hookBatchCacheJson = JSON.parse(hookBatchCacheRes.content[0].text);
+checkOk(hookBatchCacheJson.cached === 2 && hookBatchCacheJson.succeeded === 0 && hookBatchCacheJson.results.every((r) => r.status === "cached" && r.result.hook.start !== undefined), "batch hook second run serves both rows from the result cache (no file to verify, key covers input bytes)", JSON.stringify(hookBatchCacheJson.results.map((r) => r.status)));
+const hookBatchDryRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "hook", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-hook-in"), output_dir: path.join(root, "outputs/mcp-batch-hook-out"), args: { duration: 10 }, dry_run: true },
+});
+const hookBatchDryJson = JSON.parse(hookBatchDryRes.content[0].text);
+checkOk(hookBatchDryJson.dry_run === true && hookBatchDryJson.results.every((r) => r.status === "planned" && r.output === null), "batch hook dry-run plans with null outputs and writes nothing", JSON.stringify(hookBatchDryJson.results.map((r) => r.output)));
+await rm(path.join(root, "outputs/mcp-manifest-hook.mp4"), { force: true });
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const hookManifestRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-hook.json") },
+});
+const hookManifestJson = JSON.parse(hookManifestRes.content[0].text);
+console.log("manifest hook:", JSON.stringify(hookManifestJson.steps.map((s) => ({ tool: s.tool, status: s.status, output: s.output, hook: s.result?.hook }))), "| final", hookManifestJson.final?.duration_seconds);
+checkOk(hookManifestJson.steps_run === 2 && hookManifestJson.steps.every((s) => s.status === "ok") && hookManifestJson.steps[0].tool === "hook" && hookManifestJson.steps[0].result.hook.start === 15 && near(hookManifestJson.final.duration_seconds, 10, 0.05), "manifest hook step records the 15-25 window, then trim cuts it (final 10s)", JSON.stringify(hookManifestJson.steps.map((s) => s.result?.hook ?? s.result?.duration_seconds)));
+checkOk(hookManifestJson.steps[0].output === hookManifestJson.input && hookManifestJson.steps[1].output !== hookManifestJson.steps[0].output, "manifest hook step passes the chain file through (its output is the input it analyzed)", hookManifestJson.steps[0].output);
+const hookManifestCacheRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-hook.json") },
+});
+const hookManifestCacheJson = JSON.parse(hookManifestCacheRes.content[0].text);
+checkOk(hookManifestCacheJson.cache_hits === 2 && hookManifestCacheJson.steps.every((s) => s.status === "cached") && hookManifestCacheJson.steps[0].result.hook.start === 15, "manifest hook re-run serves both steps from cache (hook result cached, trim file cached)", JSON.stringify(hookManifestCacheJson.steps.map((s) => s.status)));
+const hookManifestDryRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-hook.json"), dry_run: true },
+});
+const hookManifestDryJson = JSON.parse(hookManifestDryRes.content[0].text);
+checkOk(hookManifestDryJson.dry_run === true && hookManifestDryJson.steps[0].output === hookManifestDryJson.input && hookManifestDryJson.steps[1].input === hookManifestDryJson.input, "manifest hook dry-run plans the hook step as a pass-through (output = input)", JSON.stringify(hookManifestDryJson.steps.map((s) => s.output)));
+
 // motion --adaptive: two-pass calibration to the clip's own quiet
 // quarter (floor = p25 of the curve, threshold = min(max(fixed,
 // floor * factor), max(cap, fixed))). Light grain on a static shot

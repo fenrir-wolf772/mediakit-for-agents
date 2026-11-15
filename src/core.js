@@ -8247,6 +8247,20 @@ export const BATCH_OPERATIONS = {
     }),
     extraHash: async (input, a) => hashSidecar(cutWordsFileFor(input, a.words_dir)),
   },
+  // hook in batch is the first PROBE-ONLY batch operation: it writes
+  // no file, so there is no output path, no suffix and no output to
+  // verify in the cache — the ranked windows come back in the row's
+  // `result`, and the cache stores that result (the key already
+  // covers the input bytes + operation + args, so a hit can only come
+  // from an identical input). batch() branches on spec.probeOnly for
+  // all of this: items get output null, the cache skips the
+  // size+sha256 output check, and the summary reports
+  // output_suffix null.
+  hook: {
+    probeOnly: true,
+    args: ["duration", "step", "top", "threshold_db"],
+    run: (input, output, a) => findHook({ input, duration: a.duration ?? 15, step: a.step ?? 0.5, top: a.top ?? 3, thresholdDb: a.threshold_db ?? -40 }),
+  },
   // slideshow in batch is a SET operation, not a per-file one: the
   // whole matched set becomes ONE slideshow (batch() branches on it
   // before the per-file loop, so this run is only ever called from
@@ -8287,6 +8301,10 @@ const BATCH_MANIFEST_FILENAME = "batch-manifest.json";
 // to .mp3) and loudness with an explicit --format (the file's
 // container must match the codec the tool was told to write).
 function batchOutputExt(operation, inputExt, args) {
+  // hook is probe-only: it never changes the file, so the chain
+  // extension passes through unchanged (the batch path never calls
+  // this for hook — a probe-only item's output is null).
+  if (operation === "hook") return inputExt;
   if (operation === "slideshow") return "mp4";
   // download: the URL's extension wins when it names a media file
   // (a signed URL with no extension falls back to the input — for a
@@ -8427,11 +8445,15 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
   // Parallelism capped like ffmpeg-skill's batch.py: min(N, cpus, 8).
   const jobCount = Math.min(num(jobs, "jobs", { min: 1, max: 8, integer: true }), os.cpus().length, 8);
   const timeout = num(timeoutSeconds, "timeout_seconds", { min: 1, max: 86400 });
-  const suffix = outputSuffix === null || outputSuffix === undefined ? `-${operation}` : String(outputSuffix);
-  if (!/^[A-Za-z0-9._-]{0,32}$/.test(suffix)) throw new MediaKitError(`batch output suffix must be 0-32 chars of [A-Za-z0-9._-], got: ${suffix}`, "INVALID_ARG");
+  // A probe-only operation writes no file, so there is no suffix to
+  // validate and no overwrite to guard against — the summary reports
+  // output_suffix: null.
+  const probeOnly = spec.probeOnly === true;
+  const suffix = probeOnly ? null : (outputSuffix === null || outputSuffix === undefined ? `-${operation}` : String(outputSuffix));
+  if (!probeOnly && !/^[A-Za-z0-9._-]{0,32}$/.test(suffix)) throw new MediaKitError(`batch output suffix must be 0-32 chars of [A-Za-z0-9._-], got: ${suffix}`, "INVALID_ARG");
   const outDirAbs = path.resolve(String(outputDir));
   await assertInsideWorkdir(outDirAbs, "output directory");
-  if (suffix === "" && path.resolve(inDir) === outDirAbs) {
+  if (!probeOnly && suffix === "" && path.resolve(inDir) === outDirAbs) {
     throw new MediaKitError("batch with an empty suffix would overwrite its inputs — use a suffix or a different output directory", "INVALID_ARG");
   }
 
@@ -8509,6 +8531,9 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
   const selected = files.slice(0, max);
   const items = selected.map((f) => {
     const rel = path.relative(inDir, f);
+    // A probe-only item has no output file — its row carries the
+    // analysis in `result` instead.
+    if (probeOnly) return { input: f, relative: rel.split(path.sep).join("/"), output: null, outputRelative: null };
     const ext = batchOutputExt(operation, path.extname(f).slice(1).toLowerCase(), args);
     const outRel = path.join(path.dirname(rel), `${path.basename(f, path.extname(f))}${suffix}.${ext}`);
     return { input: f, relative: rel.split(path.sep).join("/"), output: path.join(outDirAbs, outRel), outputRelative: outRel.split(path.sep).join("/") };
@@ -8572,6 +8597,14 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
         const key = await cacheKeyFor(item);
         const hit = cacheData.entries[key];
         if (hit) {
+          // A probe-only hit has no output file to verify: the key
+          // already covers the input bytes + operation + args, so a
+          // hit can only come from an identical input — the stored
+          // result IS the cache.
+          if (probeOnly && hit.result !== undefined) {
+            results[i] = { input: item.input, output: null, status: "cached", result: hit.result };
+            continue;
+          }
           try {
             const st = await stat(hit.output);
             if (st.size === hit.output_size_bytes && (await hashFile(hit.output)) === hit.output_sha256) {
@@ -8604,13 +8637,19 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
         results[i] = { input: item.input, output: item.output, status: "ok", elapsed_ms: elapsedMs, result: r };
         invalidArgStreak = 0;
         if (cache) {
-          try {
-            const st = await stat(item.output);
-            cacheData.entries[item.cacheKey] = {
-              output: item.output, output_size_bytes: st.size,
-              output_sha256: await hashFile(item.output), result: r,
-            };
-          } catch { /* cache write is best-effort; the file itself is done */ }
+          // A probe-only result is stored bare — there is no output
+          // file whose size + sha256 could verify it.
+          if (probeOnly) {
+            cacheData.entries[item.cacheKey] = { result: r };
+          } else {
+            try {
+              const st = await stat(item.output);
+              cacheData.entries[item.cacheKey] = {
+                output: item.output, output_size_bytes: st.size,
+                output_sha256: await hashFile(item.output), result: r,
+              };
+            } catch { /* cache write is best-effort; the file itself is done */ }
+          }
         }
       } catch (e) {
         const code = e instanceof MediaKitError ? e.code : "ERROR";
@@ -8696,8 +8735,13 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
 // manifest's `input` may be omitted entirely (there is no local file
 // to start from; the extension then seeds from the manifest output
 // unless the URL names one). Multi-input tools (concat, mix, mux,
-// pip) and probe-only tools (probe, check, keyframes...) are not
-// chainable steps — a manifest is one pipeline through one file.
+// pip) and probe-only tools that only describe a file (probe, check,
+// keyframes...) are not chainable steps — a manifest is one pipeline
+// through one file. hook is the probe-only exception: it analyzes the
+// chain file at that point and passes it through unchanged, so the
+// director can record WHY the next trim cuts where it does — its
+// step result carries the ranked windows, its output is the file it
+// analyzed, and the cache stores the result with no file to verify.
 export const MANIFEST_STEPS = {
   ...BATCH_OPERATIONS,
   denoise: {
@@ -8926,7 +8970,9 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
     // No directory is created, no file is written.
     let cur = inputAbs;
     const planned = steps.map((s, i) => {
-      const out = path.join(outDir, `.mediakit-manifest-tmp-plan`, `step-${String(i).padStart(2, "0")}-${s.tool}.${chainExts[i]}`);
+      // A probe-only step passes the chain file through unchanged:
+      // its "output" is the input it analyzed, not a new file.
+      const out = s.spec.probeOnly ? cur : path.join(outDir, `.mediakit-manifest-tmp-plan`, `step-${String(i).padStart(2, "0")}-${s.tool}.${chainExts[i]}`);
       const row = { index: i, tool: s.tool, args: s.args, input: cur, output: out, status: "planned" };
       cur = out;
       return row;
@@ -9002,39 +9048,59 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
       if (cache) {
         const entry = cacheIndex[key];
         if (entry) {
-          try {
-            const st = await stat(cacheFile);
-            if (st.size === entry.output_size_bytes && (await hashFile(cacheFile)) === entry.output_sha256) hit = entry;
-          } catch { /* cached intermediate gone or changed: re-run */ }
+          // Probe-only entries store no file: the key covers the
+          // input bytes + tool + args, so a matching key IS the
+          // verification — there is nothing on disk to re-check.
+          if (s.spec.probeOnly) {
+            if (entry.result !== undefined) hit = entry;
+          } else {
+            try {
+              const st = await stat(cacheFile);
+              if (st.size === entry.output_size_bytes && (await hashFile(cacheFile)) === entry.output_sha256) hit = entry;
+            } catch { /* cached intermediate gone or changed: re-run */ }
+          }
         }
       }
       if (hit) {
-        await copyFile(cacheFile, stepOut);
-        cacheHits++;
-        stepResults.push({ index: s.index, tool: s.tool, args: s.args, status: "cached", output: stepOut, result: hit.result });
+        if (s.spec.probeOnly) {
+          cacheHits++;
+          stepResults.push({ index: s.index, tool: s.tool, args: s.args, status: "cached", output: curInput, result: hit.result });
+        } else {
+          await copyFile(cacheFile, stepOut);
+          cacheHits++;
+          stepResults.push({ index: s.index, tool: s.tool, args: s.args, status: "cached", output: stepOut, result: hit.result });
+        }
       } else {
         const stepStarted = Date.now();
         let r;
         try {
-          r = await s.spec.run(curInput, stepOut, s.resolved);
+          r = await s.spec.run(curInput, s.spec.probeOnly ? null : stepOut, s.resolved);
         } catch (e) {
           const code = e instanceof MediaKitError ? e.code : "ERROR";
           throw new MediaKitError(`manifest step ${s.index + 1} (${s.tool}) failed: ${e.message} [${code}] — intermediates kept in ${tmpDir}`, code);
         }
-        stepResults.push({ index: s.index, tool: s.tool, args: s.args, status: "ok", elapsed_ms: Date.now() - stepStarted, output: stepOut, result: r });
+        stepResults.push({ index: s.index, tool: s.tool, args: s.args, status: "ok", elapsed_ms: Date.now() - stepStarted, output: s.spec.probeOnly ? curInput : stepOut, result: r });
         if (cache) {
-          try {
-            await copyFile(stepOut, cacheFile);
-            const st = await stat(cacheFile);
-            cacheIndex[key] = {
-              output: cacheFile, output_size_bytes: st.size,
-              output_sha256: await hashFile(cacheFile), result: r,
-            };
-            await saveCacheIndex();
-          } catch { /* cache write is best-effort; the step itself is done */ }
+          if (s.spec.probeOnly) {
+            try {
+              cacheIndex[key] = { result: r };
+              await saveCacheIndex();
+            } catch { /* cache write is best-effort; the step itself is done */ }
+          } else {
+            try {
+              await copyFile(stepOut, cacheFile);
+              const st = await stat(cacheFile);
+              cacheIndex[key] = {
+                output: cacheFile, output_size_bytes: st.size,
+                output_sha256: await hashFile(cacheFile), result: r,
+              };
+              await saveCacheIndex();
+            } catch { /* cache write is best-effort; the step itself is done */ }
+          }
         }
       }
-      curInput = stepOut;
+      // A probe-only step passes the chain file through unchanged.
+      if (!s.spec.probeOnly) curInput = stepOut;
     }
   } catch (e) {
     // Intermediates are kept on failure so the broken step can be
