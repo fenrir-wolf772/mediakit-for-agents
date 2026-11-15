@@ -153,6 +153,7 @@ jobs:
           node bin/mediakit.js motion test/motion-fade-slow.mp4 | grep '"verdict": "static"'
           node bin/mediakit.js motion test/motion-fade-slow.mp4 --lag-seconds 2 | grep '"verdict": "moving"'
           node bin/mediakit.js download https://raw.githubusercontent.com/fenrir-wolf772/mediakit-for-agents/main/test/source.mp4 -o outputs/ci-download.mp4 | grep '"size_bytes": 243932'
+          test -f outputs/ci-download.mp4.provenance.json && grep -q 'mediakit-for-agents/provenance/1' outputs/ci-download.mp4.provenance.json && grep -q '"label": "unknown"' outputs/ci-download.mp4.provenance.json
           node bin/mediakit.js download ftp://example.com/clip.mp4 -o outputs/ci-download-ftp.mp4 2>&1 | grep -q 'http(s) URL'
           node bin/mediakit.js mcp --http --port 3101 > outputs/ci-http.log 2>&1 &
           HTTP_PID=$!
@@ -181,6 +182,11 @@ jobs:
           node bin/mediakit.js diagnose test/assemble-diagnose-pass.json | grep '"verdict": "pass"'
           node bin/mediakit.js diagnose test/assemble-diagnose-frozen.json | grep '"verdict": "fail"'
           node bin/mediakit.js diagnose test/assemble-film.json | grep '"verdict": "warn"'
+          node bin/mediakit.js chapters --words-file test/chapters-words.json | grep '"count": 3'
+          node bin/mediakit.js chapters --words-file test/chapters-words.json --max-chapters 2 | grep '"merged_segments": 1'
+          node bin/mediakit.js chapters test/mix-voice.mp3 --min-gap 0.9 | grep '"count": 3'
+          node bin/mediakit.js chapters --words-file test/chapters-words.json -o outputs/ci-chapters.json | grep '"output":'
+          node -e "const c=require('./outputs/ci-chapters.json'); if(c.chapters[0].title!=='Welcome to the show'||c.chapters[0].at!==0) process.exit(1)"
           JOBID=$(node bin/mediakit.js assemble test/assemble-chapters.json --mode render --force --async -o outputs/ci-assemble-async | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).job_id))")
           for i in $(seq 1 60); do node bin/mediakit.js job $JOBID | grep -q '"status": "done"' && break; sleep 5; done
           node bin/mediakit.js job $JOBID | grep '"status": "done"'

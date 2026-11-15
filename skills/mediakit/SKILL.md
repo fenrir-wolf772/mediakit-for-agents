@@ -680,6 +680,34 @@ broken manifest returns verdict `fail` with `format_error` instead of
 throwing, so fix the manifest and re-run diagnose in a loop — a `warn`
 verdict is still renderable, a `fail` is not.
 
+### 33g. Chapters come from measured pauses — never guess a timecode
+A chapter list is only useful when its times are measured, not
+guessed. `chapters` builds one two ways, exactly one source per call:
+`--words-file <talk.words.json>` (from `transcribe
+--word-timestamps`) splits the transcript wherever the gap between two
+words reaches `--min-gap` (default 2s) and titles each chapter from
+the first `--title-words` words spoken in it (default 4, capitalised,
+trailing punctuation stripped); `<input>` (a media file with audio)
+runs `silencedetect` and starts a chapter at each speech segment that
+follows a silence of at least `--min-gap`, titled `Part 1..N` (no
+words to name from). The first chapter is always at 0 — YouTube
+requires the first chapter at 0:00, so when the first word/speech
+starts later the chapter is clamped to 0 and reported
+(`first_chapter_clamped_to_zero`). Over `--max-chapters` (default 32,
+the assemble cap) the closest neighbours merge first — the smallest
+pause is the least likely boundary. The result is the assemble
+manifest shape `{title, at}`, so it drops straight into `film.json`'s
+`chapters`; `-o <chapters.json>` also writes that JSON to a file.
+Probe-only unless `-o` is given. Measure the boundary you care
+about first: a silence that measures 0.998s does not split at
+`--min-gap 1` — check `silence --detect-only` when a chapter is
+missing. And a download's provenance is the same idea for footage:
+every `download` writes `<output>.provenance.json` next to the file
+(source URL, final URL, redirects, content-type, SHA-256, versions) —
+the license is recorded as `unknown` unless the server stated one,
+never guessed from a filename or a domain; check the source before
+publishing.
+
 ### 34. Resources are the map, tools are the hands — and the map never leaves the workspace
 Before guessing a path, read `videos://list` (every media file under
 the workspace root, sorted, capped at 200), then `videos://{file}/metadata`
@@ -1082,7 +1110,7 @@ cap, no timeout, no verify) — MediaKit's `download` exists so the
 agent never has to.
 
 ### 52. Test a tool over HTTP before wiring up an MCP client — same tools, curl instead of stdio
-`mediakit mcp --http [--port 3000]` serves the same 61 tools over
+`mediakit mcp --http [--port 3000]` serves the same 62 tools over
 HTTP on `127.0.0.1`: `GET /mcp` (metadata), `GET /mcp/tools`
 (every tool + JSON input schema), `POST /mcp/tools/{name}/invoke`
 (`{"arguments": {...}}`), and `POST /` for JSON-RPC 2.0

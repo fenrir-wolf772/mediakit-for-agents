@@ -1433,4 +1433,36 @@ export const TOOL_DEFS = [
     manifestPath: a.manifest_path,
   })),
   },
+
+  // Auto-chapters for a long talk / film (op7418/Youtube-clipper idea,
+  // turn 64): split a transcript on long pauses, or split audio on
+  // silence, and name each chapter from the first words spoken in it.
+  // The first chapter is always at 0 (YouTube requires it); over 32
+  // chapters the closest neighbours merge first. Output is the
+  // assemble manifest shape {title, at}, so it drops straight into
+  // film.json's "chapters".
+  {
+    name: "chapters",
+    description: "Generate chapter markers for a long talk or film from measured pauses, not guesses. Two modes, exactly one: words_file (a transcribe --word-timestamps JSON) splits the transcript wherever the gap between two words reaches min_gap (default 2s) and titles each chapter from the first words spoken in it; input (a media file with audio) runs silencedetect and starts a chapter at each speech segment that follows a silence of at least min_gap, titled Part 1..N. The first chapter is always at 0 (YouTube requires the first chapter at 0:00) — when the first word/speech starts later the chapter is clamped to 0 and reported. Over max_chapters (default 32, the assemble cap) the closest neighbours merge first. Returns chapters in the assemble manifest shape {title, at}; pass output to also write that JSON to a file.",
+    schema: {
+    words_file: pathSchema.optional().describe("Transcript words JSON from transcribe --word-timestamps ({words:[{start,end,word}]}) — one of words_file / input"),
+    input: pathSchema.optional().describe("Media file with an audio stream — one of words_file / input; chapters start at speech after a silence"),
+    min_gap: z.number().min(0.1).max(3600).default(2).describe("Pause length in seconds that starts a new chapter (default 2)"),
+    title_words: z.number().int().min(1).max(8).default(4).describe("Words taken from the start of each segment for its title (words mode only, default 4)"),
+    max_chapters: z.number().int().min(1).max(32).default(32).describe("Chapter cap (default 32, the assemble cap); over it the closest neighbours merge first"),
+    threshold_db: z.number().min(-90).max(0).default(-40).describe("Silence threshold in dBFS (input mode only, default -40)"),
+    min_duration: z.number().min(0.05).max(60).default(0.5).describe("Shortest silence that counts, in seconds (input mode only, default 0.5)"),
+    output: pathSchema.optional().describe("Optional .json file to write {chapters:[{title, at}]} into (assemble manifest shape)"),
+  },
+    handler: async (a) => safe(() => core.autoChapters({
+    wordsFile: a.words_file ?? null,
+    input: a.input ?? null,
+    minGap: a.min_gap ?? 2,
+    titleWords: a.title_words ?? 4,
+    maxChapters: a.max_chapters ?? 32,
+    thresholdDb: a.threshold_db ?? -40,
+    minDuration: a.min_duration ?? 0.5,
+    output: a.output ?? null,
+  })),
+  },
 ];

@@ -721,6 +721,20 @@ const COMMANDS = {
     args: [{ name: "manifest", required: true }],
     options: [],
   },
+  chapters: {
+    usage: "mediakit chapters [--words-file <words.json> | <input>] [--min-gap 2] [--title-words 4] [--max-chapters 32] [-o <chapters.json>]",
+    desc: "Generate chapter markers from measured pauses, not guesses. --words-file (a transcribe --word-timestamps JSON) splits the transcript wherever the gap between two words reaches --min-gap (default 2s) and titles each chapter from the first words spoken in it; <input> (a media file with audio) runs silencedetect and starts a chapter at each speech segment that follows a silence of at least --min-gap, titled Part 1..N. The first chapter is always at 0 (YouTube requires it). Over --max-chapters (default 32, the assemble cap) the closest neighbours merge first. Returns chapters in the assemble manifest shape {title, at}; -o also writes that JSON to a file. Probe-only unless -o is given.",
+    args: [{ name: "input", required: false }],
+    options: [
+      ["--words-file", "Transcript words JSON from transcribe --word-timestamps (alternative to <input>)"],
+      ["--min-gap", "Pause length in seconds that starts a new chapter (default 2)"],
+      ["--title-words", "Words taken from the start of each segment for its title, words mode only (default 4)"],
+      ["--max-chapters", "Chapter cap 1-32 (default 32); over it the closest neighbours merge first"],
+      ["--threshold-db", "Silence threshold in dBFS, input mode only (default -40)"],
+      ["--min-duration", "Shortest silence that counts in seconds, input mode only (default 0.5)"],
+      ["-o, --output", "Optional .json file to write {chapters:[{title, at}]} into"],
+    ],
+  },
   manifest: {
     usage: "mediakit manifest <manifest.json> [-o <output.mp4>] [--dry-run] [--no-cache] [--keep-intermediates]",
     desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (slideshow as step 1 only — it builds from images in args, so input should be the first slide image; then trim|resize|reframe|compress|convert|extract-audio|reverse|boomerang|make-loopable|freeze|grade|fit|silence|denoise|interpolate|burn-captions|overlay|chroma-key|cut-words|remove-retakes), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file.",
@@ -752,7 +766,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 61 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 62 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -1564,6 +1578,21 @@ async function main() {
         if (!positional[0]) fail("missing manifest file: mediakit diagnose <film.json>");
         result = await core.diagnoseFilm({
           manifestPath: positional[0],
+        });
+        break;
+      }
+      case "chapters": {
+        if (opts.words_file && positional[0]) fail("chapters takes exactly one source: --words-file <words.json> OR <input>, not both");
+        if (!opts.words_file && !positional[0]) fail("chapters needs a source: mediakit chapters --words-file <words.json> OR mediakit chapters <input>");
+        result = await core.autoChapters({
+          wordsFile: opts.words_file ?? null,
+          input: positional[0] ?? null,
+          minGap: numOpt(opts, "min_gap") ?? 2,
+          titleWords: numOpt(opts, "title_words") ?? 4,
+          maxChapters: numOpt(opts, "max_chapters") ?? 32,
+          thresholdDb: numOpt(opts, "threshold_db") ?? -40,
+          minDuration: numOpt(opts, "min_duration") ?? 0.5,
+          output: opts.output ?? null,
         });
         break;
       }

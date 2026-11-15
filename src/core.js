@@ -2152,6 +2152,140 @@ export async function generateSrt({ cues = null, words = null, output }) {
   };
 }
 
+// ---------------------------------------------------------------- chapters
+// Auto-chapters for a long talk / film (the op7418/Youtube-clipper
+// idea from turn 64, via edigeh/broll-mcp's lesson that a chapter list
+// is only useful when its times are measured, not guessed): split a
+// transcript on long pauses, or split audio on silence, and name each
+// chapter from the first words spoken in it. Two modes, exactly one:
+//   - words_file: a transcribe --word-timestamps JSON
+//     ({words:[{start,end,word}]}) — a new chapter starts after a gap
+//     >= min_gap between two words.
+//   - input: a media file with audio — silencedetect finds the pauses
+//     and a new chapter starts at each speech segment that follows a
+//     silence >= min_gap; titles are "Part 1..N" (no words to name from).
+// The first chapter is always at 0 (YouTube requires the first chapter
+// at 0:00) — when the first word/speech starts later the chapter is
+// clamped to 0 and reported. assemble caps chapters at 32, so this
+// tool does too: an over-long list merges the closest neighbours
+// first. Output is the assemble manifest shape {title, at} so the
+// result drops straight into film.json's "chapters" — pass --output
+// to also write that JSON to a file.
+const CHAPTERS_MAX = 32;
+
+function chapterTitleFromWords(words, titleWords) {
+  const take = words.slice(0, titleWords).map((w) => w.word);
+  const t = take.join(" ").replace(/[.,!?;:]+$/, "");
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+
+export async function autoChapters({ wordsFile = null, input = null, minGap = 2, titleWords = 4, maxChapters = 32, thresholdDb = -40, minDuration = 0.5, output = null }) {
+  const gap = num(minGap, "min_gap", { min: 0.1, max: 3600 });
+  const titleN = num(titleWords, "title_words", { min: 1, max: 8, integer: true });
+  const maxC = num(maxChapters, "max_chapters", { min: 1, max: CHAPTERS_MAX, integer: true });
+  if ((wordsFile && input) || (!wordsFile && !input)) {
+    throw new MediaKitError("chapters needs exactly one source: --words-file <words.json> or an <input> media file", "INVALID_ARG");
+  }
+  let segments; // [{start, end, words?}]
+  let durationSeconds;
+  let mode;
+  let source;
+  if (wordsFile) {
+    mode = "words";
+    const wordsPath = await requireInput(wordsFile, "words file");
+    source = wordsPath;
+    let raw;
+    try {
+      raw = JSON.parse(await readFile(wordsPath, "utf8"));
+    } catch (e) {
+      throw new MediaKitError(`chapters could not parse the words file as JSON: ${e.message}`, "INVALID_ARG");
+    }
+    let words;
+    try {
+      words = normalizeTranscriptWords(raw, "words file");
+    } catch (e) {
+      throw new MediaKitError(e.message.replace(/^cut_words/, "chapters"), e.code ?? "INVALID_ARG");
+    }
+    const groups = [];
+    let cur = [words[0]];
+    for (let i = 1; i < words.length; i++) {
+      if (words[i].start - words[i - 1].end >= gap) { groups.push(cur); cur = [words[i]]; }
+      else cur.push(words[i]);
+    }
+    groups.push(cur);
+    segments = groups.map((ws) => ({ start: ws[0].start, end: ws[ws.length - 1].end, words: ws }));
+    durationSeconds = +words[words.length - 1].end.toFixed(3);
+  } else {
+    mode = "silence";
+    let detected;
+    try {
+      detected = await detectSilence(input, { thresholdDb, minDuration });
+    } catch (e) {
+      throw new MediaKitError(e.message.replace(/^silence needs/, "chapters needs"), e.code ?? "INVALID_ARG");
+    }
+    source = detected.input;
+    durationSeconds = detected.duration_seconds;
+    // Speech is the complement of the silences; a chapter starts at
+    // each speech segment whose preceding silence lasted >= min_gap.
+    const speech = [];
+    let cursor = 0;
+    let prevSilence = 0;
+    for (const s of detected.silences) {
+      if (s.start > cursor) speech.push({ start: cursor, end: s.start, silenceBefore: prevSilence });
+      prevSilence = s.duration;
+      cursor = Math.max(cursor, s.end);
+    }
+    if (cursor < durationSeconds) speech.push({ start: cursor, end: durationSeconds, silenceBefore: prevSilence });
+    if (speech.length === 0) {
+      throw new MediaKitError("chapters found no speech — the whole file is silence (lower --threshold-db or check the input)", "INVALID_ARG");
+    }
+    segments = speech.filter((seg, i) => i === 0 || seg.silenceBefore >= gap);
+  }
+  // Over the cap: merge the closest neighbours first (the smallest
+  // pause is the least likely chapter boundary), until it fits.
+  let merged = 0;
+  while (segments.length > maxC) {
+    let bi = 0;
+    let bg = Infinity;
+    for (let i = 0; i < segments.length - 1; i++) {
+      const g = segments[i + 1].start - segments[i].end;
+      if (g < bg) { bg = g; bi = i; }
+    }
+    const a = segments[bi];
+    const b = segments[bi + 1];
+    segments[bi] = { start: a.start, end: b.end, ...(a.words ? { words: [...a.words, ...b.words] } : {}) };
+    segments.splice(bi + 1, 1);
+    merged++;
+  }
+  const firstStart = segments[0].start;
+  const clamped = firstStart > 0;
+  const chapters = segments.map((seg, i) => ({
+    title: mode === "words" ? chapterTitleFromWords(seg.words, titleN) : `Part ${i + 1}`,
+    at: i === 0 ? 0 : +seg.start.toFixed(3),
+  }));
+  const base = {
+    operation: "chapters",
+    mode,
+    source,
+    chapters,
+    count: chapters.length,
+    segments_found: segments.length + merged,
+    merged_segments: merged,
+    min_gap_seconds: gap,
+    duration_seconds: durationSeconds,
+    first_chapter_clamped_to_zero: clamped,
+    ...(clamped ? { first_segment_starts_at_seconds: +firstStart.toFixed(3) } : {}),
+  };
+  if (output === null || output === undefined) return base;
+  const outPath = await prepareOutput(output, [source]);
+  if (path.extname(outPath).toLowerCase() !== ".json") {
+    throw new MediaKitError(`chapters output must end in .json, got ${path.extname(outPath) || "(no extension)"}`, "INVALID_ARG");
+  }
+  await writeFile(outPath, JSON.stringify({ chapters }, null, 2), "utf8");
+  const info = await fileInfo(outPath);
+  return { ...base, output: outPath, ...info };
+}
+
 // ---------------------------------------------------------------- publish_kit
 // Thumbnail & Publishing Kit (stickman-video-director's finishing step,
 // as a tool instead of prose): from a finished video + a 1280x720
@@ -4883,12 +5017,17 @@ export async function downloadMedia({ url, output, maxSizeMb = DOWNLOAD_DEFAULT_
       await unlink(outPath).catch(() => {});
       throw new MediaKitError("downloaded file has no video or audio stream — deleted", "DOWNLOAD_FAILED");
     }
+    const provenance = await writeDownloadProvenance({
+      outPath, url: url.trim(), finalUrl: current.href, redirects,
+      contentType: contentType || null, playlist: null, media, sizeBytes: info.size_bytes,
+    });
     return {
       operation: "download",
       url: url.trim(),
       final_url: current.href,
       redirects,
       output: outPath,
+      provenance,
       size_bytes: info.size_bytes,
       size_human: info.size_human,
       content_type: contentType || null,
@@ -4969,6 +5108,10 @@ async function downloadPlaylistMedia({ url, urlExt, output, maxBytes, maxMb, tim
     await unlink(outPath).catch(() => {});
     throw new MediaKitError("downloaded playlist has no video or audio stream — deleted", "DOWNLOAD_FAILED");
   }
+  const provenance = await writeDownloadProvenance({
+    outPath, url, finalUrl: url, redirects: null,
+    contentType: null, playlist: urlExt, media, sizeBytes: info.size_bytes,
+  });
   return {
     operation: "download",
     url,
@@ -4976,6 +5119,7 @@ async function downloadPlaylistMedia({ url, urlExt, output, maxBytes, maxMb, tim
     redirects: null,
     playlist: urlExt,
     output: outPath,
+    provenance,
     size_bytes: info.size_bytes,
     size_human: info.size_human,
     content_type: null,
@@ -4987,6 +5131,32 @@ async function downloadPlaylistMedia({ url, urlExt, output, maxBytes, maxMb, tim
       audio: media.audio,
     },
   };
+}
+
+// Provenance by design (edigeh/broll-mcp's rule, turn 65): every
+// successful download writes a provenance record next to the file, so
+// a clip never exists without its record. The record holds what the
+// server actually stated — URL, final URL, redirects, content-type,
+// SHA-256, sizes, versions — and the license is "unknown" unless the
+// server said otherwise: a license is never guessed from a filename
+// or a domain. Check the source before publishing.
+async function writeDownloadProvenance({ outPath, url, finalUrl, redirects, contentType, playlist, media, sizeBytes }) {
+  const sha256 = createHash("sha256").update(await readFile(outPath)).digest("hex");
+  const record = {
+    schema: "mediakit-for-agents/provenance/1",
+    file: path.basename(outPath),
+    sha256,
+    size_bytes: sizeBytes,
+    source: { url, final_url: finalUrl, redirects, content_type: contentType, playlist: playlist ?? null },
+    license: { label: "unknown", commercial_use: "unknown", note: "No license was published with this download — check the source before publishing." },
+    retrieved_at: new Date().toISOString(),
+    mediakit_version: MEDIAKIT_VERSION,
+    ffmpeg_version: await ffmpegVersionString(),
+    media: { format: media.format, duration_seconds: media.duration_seconds, video: media.video ?? null, audio: media.audio ?? null },
+  };
+  const provPath = `${outPath}.provenance.json`;
+  await writeFile(provPath, JSON.stringify(record, null, 2), "utf8");
+  return provPath;
 }
 
 // ---------------------------------------------------------------- slideshow
@@ -6374,6 +6544,9 @@ const TOOL_REQUIREMENTS = {
   mix: { filters: ["sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay"], encoders: ["aac", "libmp3lame"] },
   overlay: { filters: ["overlay", "format", "scale", "colorchannelmixer"], encoders: ["libx264"] },
   scenes: { filters: ["select"] },
+  // chapters only needs silencedetect, and only in input mode — the
+  // words-file mode is pure JSON and needs no ffmpeg capability.
+  chapters: { filters: ["silencedetect"] },
   motion: { filters: ["tblend", "blend", "fps", "split", "trim", "setpts", "geq", "signalstats", "scale"] },
   keyframes: {},
   fit: { filters: ["setpts", "atempo", "fps"], encoders: ["libx264", "aac"] },

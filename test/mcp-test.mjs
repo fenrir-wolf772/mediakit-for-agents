@@ -181,10 +181,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 61 tools present");
-checkOk(missing.length === 0, "tools/list has all 61 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 62 tools present");
+checkOk(missing.length === 0, "tools/list has all 62 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -3504,7 +3504,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 61 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 61 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 62 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 62 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -4265,6 +4265,43 @@ checkOk(diagTextJson.verdict === "warn" && diagTextJson.warnings === 4, "the bot
 const diagDoctorRes = await client.callTool({ name: "doctor", arguments: {} });
 const diagDoctorJson = JSON.parse(diagDoctorRes.content[0].text);
 checkOk(diagDoctorJson.tools?.diagnose?.available === true, "doctor reports diagnose as available", JSON.stringify(diagDoctorJson.tools?.diagnose));
+
+// Chapters (turn 65): auto-chapters from measured pauses. The
+// fixture has 3 word groups (gaps 3.0s and 4.2s) starting at 1.5s,
+// so the first chapter clamps to 0 and titles come from the words.
+const chapWordsRes = await client.callTool({ name: "chapters", arguments: { words_file: path.join(root, "test/chapters-words.json") } });
+const chapWords = JSON.parse(chapWordsRes.content[0].text);
+checkOk(chapWords.mode === "words" && chapWords.count === 3 && chapWords.chapters?.[0]?.title === "Welcome to the show" && chapWords.chapters[0].at === 0 && chapWords.chapters?.[1]?.title === "Today we build chapters" && chapWords.chapters[1].at === 6 && chapWords.chapters?.[2]?.title === "And now the finale" && chapWords.chapters[2].at === 12 && chapWords.first_chapter_clamped_to_zero === true && chapWords.first_segment_starts_at_seconds === 1.5 && chapWords.merged_segments === 0, "chapters from words: 3 chapters at 0/6/12 with titles from the first words, first clamped to 0", JSON.stringify(chapWords.chapters));
+const chapMergeRes = await client.callTool({ name: "chapters", arguments: { words_file: path.join(root, "test/chapters-words.json"), max_chapters: 2 } });
+const chapMerge = JSON.parse(chapMergeRes.content[0].text);
+checkOk(chapMerge.count === 2 && chapMerge.merged_segments === 1 && chapMerge.segments_found === 3 && chapMerge.chapters?.[0]?.title === "Welcome to the show" && chapMerge.chapters?.[1]?.at === 12, "chapters merges the closest neighbours first over the cap (3 -> 2, smallest gap 3.0s merged)", JSON.stringify(chapMerge.chapters));
+const chapTitleRes = await client.callTool({ name: "chapters", arguments: { words_file: path.join(root, "test/chapters-words.json"), title_words: 2 } });
+const chapTitle = JSON.parse(chapTitleRes.content[0].text);
+checkOk(chapTitle.chapters?.[0]?.title === "Welcome to" && chapTitle.chapters?.[1]?.title === "Today we", "chapters title_words=2 takes two words per title", JSON.stringify(chapTitle.chapters));
+const chapOutPath = path.join(root, "outputs/mcp-chapters.json");
+const chapOutRes = await client.callTool({ name: "chapters", arguments: { words_file: path.join(root, "test/chapters-words.json"), output: chapOutPath } });
+const chapOut = JSON.parse(chapOutRes.content[0].text);
+const chapOutFile = JSON.parse(await readFile(chapOutPath, "utf8"));
+checkOk(chapOut.output === chapOutPath && Array.isArray(chapOutFile.chapters) && chapOutFile.chapters.length === 3 && chapOutFile.chapters[0].title === "Welcome to the show" && chapOutFile.chapters[0].at === 0, "chapters --output writes the assemble-shape {chapters:[{title, at}]} JSON to disk", JSON.stringify(chapOutFile).slice(0, 200));
+// Silence mode: mix-voice has tone [0,2),[4,6),[7,9) — silences
+// measure 1.997s and 0.998s, so min_gap 0.9 splits all three.
+const chapSilRes = await client.callTool({ name: "chapters", arguments: { input: path.join(root, "test/mix-voice.mp3"), min_gap: 0.9 } });
+const chapSil = JSON.parse(chapSilRes.content[0].text);
+checkOk(chapSil.mode === "silence" && chapSil.count === 3 && chapSil.chapters?.[0]?.title === "Part 1" && chapSil.chapters[0].at === 0 && near(chapSil.chapters?.[1]?.at, 4.017, 0.01) && near(chapSil.chapters?.[2]?.at, 7.012, 0.01), "chapters from silence: 3 speech segments at 0/4.017/7.012 titled Part 1..3", JSON.stringify(chapSil.chapters));
+const chapSilGapRes = await client.callTool({ name: "chapters", arguments: { input: path.join(root, "test/mix-voice.mp3"), min_gap: 1.9 } });
+const chapSilGap = JSON.parse(chapSilGapRes.content[0].text);
+checkOk(chapSilGap.count === 2 && chapSilGap.chapters?.[1]?.title === "Part 2", "chapters min_gap 1.9 keeps only the 1.997s pause as a boundary (the 0.998s pause does not split; min_gap 2 would keep neither — the pause measures 1.997s, not 2.000s)", JSON.stringify(chapSilGap.chapters));
+const chapBothText = await callExpectThrow("chapters", { words_file: path.join(root, "test/chapters-words.json"), input: path.join(root, "test/mix-voice.mp3") });
+checkOk(/exactly one source/.test(chapBothText ?? ""), "chapters refuses words_file + input together", chapBothText ?? "");
+const chapNoneText = await callExpectThrow("chapters", {});
+checkOk(/exactly one source/.test(chapNoneText ?? ""), "chapters refuses no source at all", chapNoneText ?? "");
+const chapBadWordsPath = path.join(root, "outputs/mcp-chapters-bad.json");
+await writeFile(chapBadWordsPath, "{\"words\": [{\"start\": 0}]}", "utf8");
+const chapBadText = await callExpectThrow("chapters", { words_file: chapBadWordsPath });
+checkOk(/chapters/.test(chapBadText ?? ""), "chapters refuses a malformed words file with its own name on the error", chapBadText ?? "");
+const chapDoctorRes = await client.callTool({ name: "doctor", arguments: {} });
+const chapDoctor = JSON.parse(chapDoctorRes.content[0].text);
+checkOk(chapDoctor.tools?.chapters?.available === true, "doctor reports chapters as available", JSON.stringify(chapDoctor.tools?.chapters));
 // Transitions: the same film with a fade into s2, a dissolve into
 // s3 and a fade into s4. Total duration and frame count must stay
 // exactly 10s / 300 frames — the transitions are centered on the
@@ -4729,6 +4766,16 @@ checkOk(/timed out after 1s/.test(dlSlowText ?? ""), "download times out after t
 const dlDoctorRes = await client.callTool({ name: "doctor", arguments: {} });
 const dlDoctor = JSON.parse(dlDoctorRes.content[0].text);
 checkOk(dlDoctor.tools?.download?.available === true, "doctor reports download available (pure Node fetch + ffprobe, no ffmpeg filter needed)", JSON.stringify(dlDoctor.tools?.download));
+// Download provenance (turn 65, broll-mcp idea): the happy-path
+// download above must have left a record next to the file, with the
+// file's real sha256 and an honestly-unknown license.
+const dlProvPath = path.join(root, "outputs/mcp-download.mp4.provenance.json");
+const dlProv = JSON.parse(await readFile(dlProvPath, "utf8"));
+const dlProvSha = createHash("sha256").update(await readFile(path.join(root, "outputs/mcp-download.mp4"))).digest("hex");
+checkOk(dlProv.schema === "mediakit-for-agents/provenance/1" && dlProv.sha256 === dlProvSha && dlProv.size_bytes === downloadFixture.length && dlProv.source?.url?.endsWith("/source.mp4") && dlProv.source?.redirects === 0 && dlProv.license?.label === "unknown" && dlProv.license?.commercial_use === "unknown" && dlProv.mediakit_version === "0.1.0" && typeof dlProv.ffmpeg_version === "string" && dlProv.media?.duration_seconds === 10, "download writes a provenance record next to the file: real sha256, source URL, unknown license (never guessed)", JSON.stringify(dlProv).slice(0, 300));
+checkOk(dlHappy.provenance === dlProvPath, "download result reports the provenance path", dlHappy.provenance ?? "");
+const dlHlsProv = JSON.parse(await readFile(path.join(root, "outputs/mcp-download-hls.mp4.provenance.json"), "utf8"));
+checkOk(dlHlsProv.source?.playlist === "m3u8" && dlHlsProv.license?.label === "unknown" && typeof dlHlsProv.sha256 === "string", "an HLS download also writes provenance (playlist=m3u8, license unknown)", JSON.stringify(dlHlsProv.source));
 
 // manifest download step: the URL in step 1 IS the input, so the
 // manifest omits `input` entirely — download, then trim the fetched
@@ -4803,7 +4850,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 61 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 62 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -4863,11 +4910,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 61, "GET /mcp reports name/version/transport and 61 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 62, "GET /mcp reports name/version/transport and 62 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 61 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 61 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 62 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 62 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -4891,7 +4938,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 61, "JSON-RPC tools/list returns the same 61 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 62, "JSON-RPC tools/list returns the same 62 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));
