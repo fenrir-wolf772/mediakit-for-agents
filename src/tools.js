@@ -1387,6 +1387,33 @@ export const TOOL_DEFS = [
   },
 
 
+  // Find the best hook window in a clip (sonic-match-mcp's
+  // hook_window idea, measured from the footage instead of a script):
+  // a sliding window scored on audio energy (astats RMS per frame),
+  // speech coverage (silencedetect) and scene cuts (a window that
+  // opens on a cut scores higher). The director's opening-shot
+  // picker — run it on raw footage before cutting the first 15
+  // seconds of a Short.
+  {
+    name: "hook",
+    description: "Find the best hook window in a clip (probe-only, writes no file): slide a window of duration seconds across the file and score each candidate on three measured signals — mean audio energy (astats RMS per frame, binned and normalized against the file's own loudest bin), speech coverage (silencedetect complement), and scene cuts (a window opening on a cut, plus cuts inside it, reads as a new beat). Score is 0.5*energy + 0.3*speech + 0.2*cut, fixed weights so two runs rank the same way; the top windows are greedy non-overlapping, so they are alternatives, not the same window shifted by one step. Returns the ranked candidates with the score breakdown, the per-step energy curve, pacing from real cuts (slow/medium/fast-cut), and a suggested_trim command that cuts the winning window. Video-only input scores on cuts alone; audio-only on energy+speech. Files over 20 minutes are refused (the astats log would exceed the capture buffer).",
+    schema: {
+    input: pathSchema,
+    duration: z.number().min(4).max(20).default(15).describe("Hook window length in seconds, 4-20 (default 15 — the sonic-match 12-20s hook range)"),
+    step: z.number().min(0.25).max(2).default(0.5).describe("Slide step in seconds (default 0.5)"),
+    top: z.number().int().min(1).max(5).default(3).describe("How many ranked windows to return (default 3)"),
+    threshold_db: z.number().min(-90).max(0).default(-40).describe("Silence threshold in dB for speech coverage (default -40)"),
+  },
+    handler: async (a) => safe(() => core.findHook({
+    input: a.input,
+    duration: a.duration,
+    step: a.step,
+    top: a.top,
+    thresholdDb: a.threshold_db,
+  })),
+  },
+
+
   // Verify an assemble render against its receipt (heristop/leclap's
   // `verify` idea, turn 63): the receipt (assemble-receipt.json, written
   // next to final.mp4 by every full render) records per-input digests,

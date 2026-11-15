@@ -152,13 +152,14 @@ jobs:
           node bin/mediakit.js motion test/motion-noise-light.mp4 --adaptive | grep '"verdict": "static"'
           node bin/mediakit.js motion test/motion-fade-slow.mp4 | grep '"verdict": "static"'
           node bin/mediakit.js motion test/motion-fade-slow.mp4 --lag-seconds 2 | grep '"verdict": "moving"'
+          node bin/mediakit.js hook test/hook-source.mp4 --duration 10 | grep '"start": 15'
           node bin/mediakit.js download https://raw.githubusercontent.com/fenrir-wolf772/mediakit-for-agents/main/test/source.mp4 -o outputs/ci-download.mp4 | grep '"size_bytes": 243932'
           test -f outputs/ci-download.mp4.provenance.json && grep -q 'mediakit-for-agents/provenance/1' outputs/ci-download.mp4.provenance.json && grep -q '"label": "unknown"' outputs/ci-download.mp4.provenance.json
           node bin/mediakit.js download ftp://example.com/clip.mp4 -o outputs/ci-download-ftp.mp4 2>&1 | grep -q 'http(s) URL'
           node bin/mediakit.js mcp --http --port 3101 > outputs/ci-http.log 2>&1 &
           HTTP_PID=$!
           sleep 2
-          curl -fsS http://127.0.0.1:3101/mcp | grep '"tools": 62'
+          curl -fsS http://127.0.0.1:3101/mcp | grep '"tools": 63'
           curl -fsS http://127.0.0.1:3101/mcp/tools | grep -c '"name": "probe"'
           curl -fsS -X POST http://127.0.0.1:3101/mcp/tools/probe/invoke -H 'content-type: application/json' -d '{"arguments": {"input": "test/source.mp4"}}' | grep '"duration_seconds": 10'
           curl -fsS -X POST http://127.0.0.1:3101/ -H 'content-type: application/json' -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}' | grep -c '"name": "download"'

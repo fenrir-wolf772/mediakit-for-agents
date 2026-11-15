@@ -631,6 +631,17 @@ const COMMANDS = {
       ["--lag-seconds", "Compare frames this many whole seconds apart instead of adjacent frames (default 0). Still intervals are corrected to clip time"],
     ],
   },
+  hook: {
+    usage: "mediakit hook <input> [--duration 15] [--step 0.5] [--top 3] [--threshold-db -40]",
+    desc: "Find the best hook window in a clip: slide a --duration window across the file and score each candidate on measured audio energy (astats RMS), speech coverage (silencedetect) and scene cuts (a window opening on a cut scores higher). Returns the ranked top windows with the score breakdown, the per-step energy curve, pacing from real cuts, and a suggested trim command for the winner. Probe-only, writes no file. The director's opening-shot picker.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--duration", "Hook window length in seconds, 4-20 (default 15)"],
+      ["--step", "Slide step in seconds, 0.25-2 (default 0.5)"],
+      ["--top", "How many ranked windows to return, 1-5 (default 3)"],
+      ["--threshold-db", "Silence threshold in dB for speech coverage (default -40)"],
+    ],
+  },
   mux: {
     usage: "mediakit mux <video> <audio> -o <output> [--audio-offset <s>] [--shortest] [--dry-run]",
     desc: "Replace a video's audio track with an external audio file, stream-copying both (no re-encode). --audio-offset shifts the new audio (positive = audio later, negative = video later). --dry-run prints the ffmpeg command and writes no file.",
@@ -767,7 +778,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 62 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 63 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -1461,6 +1472,15 @@ async function main() {
           adaptiveFactor: numOpt(opts, "adaptive_factor") ?? 2,
           adaptiveCap: numOpt(opts, "adaptive_cap") ?? 0.005,
           lagSeconds: numOpt(opts, "lag_seconds") ?? 0,
+        });
+        break;
+      case "hook":
+        result = await core.findHook({
+          input: needInput(),
+          duration: numOpt(opts, "duration") ?? 15,
+          step: numOpt(opts, "step") ?? 0.5,
+          top: numOpt(opts, "top") ?? 3,
+          thresholdDb: numOpt(opts, "threshold_db") ?? -40,
         });
         break;
       case "mux": {

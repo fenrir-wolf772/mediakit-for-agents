@@ -6664,6 +6664,7 @@ const TOOL_REQUIREMENTS = {
   mix: { filters: ["sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay"], encoders: ["aac", "libmp3lame"] },
   overlay: { filters: ["overlay", "format", "scale", "colorchannelmixer"], encoders: ["libx264"] },
   scenes: { filters: ["select"] },
+  hook: { filters: ["astats", "ametadata", "silencedetect", "select"] },
   // chapters only needs silencedetect, and only in input mode — the
   // words-file mode is pure JSON and needs no ffmpeg capability.
   chapters: { filters: ["silencedetect"] },
@@ -7642,6 +7643,159 @@ export async function detectScenes({ input, threshold = 0.3 }) {
     scene_changes: changes,
     count: changes.length,
     segments,
+  };
+}
+
+// ---------------------------------------------------------------- hook
+// Find the best hook window in a clip (sonic-match-mcp's hook_window
+// idea, measured from the footage instead of a script): slide a
+// window of --duration across the file and score each candidate on
+// three measured signals — mean audio energy (astats RMS per frame,
+// binned and normalized against the file's own loudest bin), speech
+// coverage (silencedetect complement), and scene cuts (a window that
+// opens on a cut, plus cuts inside it, reads as a new beat). The
+// score is 0.5*energy + 0.3*speech + 0.2*cut; the weights are fixed
+// so two runs on the same file rank the same way. Top candidates are
+// greedy non-overlapping (overlap under half the hook length), so
+// the list is alternatives, not the same window shifted by one step.
+// Probe-only: no file is written. The suggested_trim is a real
+// command that cuts the winning window. Video-only input scores on
+// cuts alone (energy/speech 0, noted in warnings); audio-only scores
+// on energy+speech (cuts 0). astats prints ~2 log lines per audio
+// frame (~11 KB/s), and run() caps stderr at 16 MB, so files over
+// 20 minutes are refused with a clear error instead of dying on a
+// buffer limit — hook is a short-form tool anyway.
+const HOOK_ENERGY_FLOOR_DB = -60;
+const HOOK_MAX_DURATION_SECONDS = 1200;
+
+async function energyCurveDb(input, step) {
+  const { stderr } = await run(FFMPEG, [
+    "-i", input, "-vn",
+    "-af", "astats=metadata=1:reset=1,ametadata=mode=print:key=lavfi.astats.Overall.RMS_level",
+    "-f", "null", "-",
+  ]);
+  const bins = new Map();
+  let lastPts = null;
+  for (const line of stderr.split("\n")) {
+    const pts = line.match(/pts_time:([0-9.]+)/);
+    if (pts) { lastPts = parseFloat(pts[1]); continue; }
+    const rms = line.match(/lavfi\.astats\.Overall\.RMS_level=(-?[0-9.]+|-inf)/);
+    if (rms && lastPts !== null) {
+      const db = rms[1] === "-inf" ? HOOK_ENERGY_FLOOR_DB : parseFloat(rms[1]);
+      const bin = Math.floor(lastPts / step);
+      const acc = bins.get(bin) ?? { sum: 0, n: 0 };
+      acc.sum += Number.isFinite(db) ? db : HOOK_ENERGY_FLOOR_DB;
+      acc.n += 1;
+      bins.set(bin, acc);
+    }
+  }
+  return [...bins.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([bin, acc]) => ({ t: +(bin * step).toFixed(3), energy_db: +(acc.sum / acc.n).toFixed(2) }));
+}
+
+export async function findHook({ input, duration = 15, step = 0.5, top = 3, thresholdDb = -40 }) {
+  const inPath = await requireInput(input);
+  const hookDur = num(duration, "duration", { min: 4, max: 20 });
+  const stepSec = num(step, "step", { min: 0.25, max: 2 });
+  const topN = num(top, "top", { min: 1, max: 5, integer: true });
+  const threshold = num(thresholdDb, "threshold_db", { min: -90, max: 0 });
+  const meta = await probe(inPath);
+  const total = meta.duration_seconds;
+  if (total === null) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
+  if (total > HOOK_MAX_DURATION_SECONDS) {
+    throw new MediaKitError(`hook refuses files over ${HOOK_MAX_DURATION_SECONDS}s (astats log would exceed the capture buffer) — trim a section first`, "INVALID_ARG");
+  }
+  const warnings = [];
+  // Energy curve (audio only) and speech coverage (silence complement).
+  let energyBins = [];
+  let silences = [];
+  let speechSeconds = 0;
+  if (meta.audio) {
+    energyBins = await energyCurveDb(inPath, stepSec);
+    const det = await detectSilence(inPath, { thresholdDb: threshold, minDuration: 0.25 });
+    silences = det.silences;
+    speechSeconds = total - silences.reduce((a, s) => a + (s.end - s.start), 0);
+  } else {
+    warnings.push("no audio stream — scored on scene cuts only (energy/speech 0)");
+  }
+  // Scene cuts (video only).
+  let cuts = [];
+  if (meta.video) {
+    cuts = (await detectScenes({ input: inPath })).scene_changes;
+  } else {
+    warnings.push("no video stream — no scene cuts to score");
+  }
+  const maxDb = energyBins.length ? Math.max(...energyBins.map((b) => b.energy_db)) : null;
+  // All-silent file: maxDb sits on the floor, span is 0 — every bin
+  // is 0 energy, not NaN (caught in review before any test ran).
+  const energySpan = maxDb === null ? 0 : maxDb - HOOK_ENERGY_FLOOR_DB;
+  const binCount = Math.max(1, Math.ceil(total / stepSec));
+  const curve = [];
+  for (let i = 0; i < binCount; i++) {
+    const t = +(i * stepSec).toFixed(3);
+    const binEnd = Math.min(total, t + stepSec);
+    const found = energyBins.find((b) => Math.abs(b.t - t) < 0.001);
+    const db = found ? found.energy_db : null;
+    const energy = db === null || energySpan <= 0 ? 0
+      : +Math.min(1, Math.max(0, (db - HOOK_ENERGY_FLOOR_DB) / energySpan)).toFixed(3);
+    const silenceOverlap = silences.reduce((a, s) => a + Math.max(0, Math.min(s.end, binEnd) - Math.max(s.start, t)), 0);
+    const speech = meta.audio ? +Math.min(1, Math.max(0, 1 - silenceOverlap / (binEnd - t))).toFixed(3) : 0;
+    curve.push({ t, energy_db: db, energy, speech });
+  }
+  const binAt = (t) => curve[Math.min(curve.length - 1, Math.floor(t / stepSec))];
+  const meanOver = (start, end, key) => {
+    let sum = 0; let n = 0;
+    for (let t = start; t < end - 0.001; t += stepSec) { sum += binAt(t)[key]; n++; }
+    return n ? sum / n : 0;
+  };
+  const scored = [];
+  const effDur = Math.min(hookDur, total);
+  if (effDur >= total - 0.001) {
+    scored.push({ start: 0, end: +total.toFixed(3) });
+  } else {
+    for (let s = 0; s + effDur <= total + 0.001; s += stepSec) {
+      scored.push({ start: +s.toFixed(3), end: +(s + effDur).toFixed(3) });
+    }
+  }
+  for (const w of scored) {
+    const energy = +meanOver(w.start, w.end, "energy").toFixed(3);
+    const speech = +meanOver(w.start, w.end, "speech").toFixed(3);
+    const cutsInside = cuts.filter((c) => c > w.start && c < w.end).length;
+    const startsNearCut = cuts.some((c) => Math.abs(c - w.start) <= 0.75);
+    const cutScore = +(0.6 * (startsNearCut ? 1 : 0) + 0.4 * (Math.min(cutsInside, 3) / 3)).toFixed(3);
+    w.energy = energy;
+    w.speech = speech;
+    w.cuts_inside = cutsInside;
+    w.starts_near_cut = startsNearCut;
+    w.cut_score = cutScore;
+    w.score = +(0.5 * energy + 0.3 * speech + 0.2 * cutScore).toFixed(3);
+  }
+  scored.sort((a, b) => b.score - a.score || a.start - b.start);
+  const candidates = [];
+  for (const w of scored) {
+    if (candidates.length >= topN) break;
+    const overlaps = candidates.some((p) => Math.min(p.end, w.end) - Math.max(p.start, w.start) >= effDur / 2);
+    if (!overlaps) candidates.push(w);
+  }
+  const best = candidates[0];
+  const cutsPerMinute = meta.video ? +(cuts.length / (total / 60)).toFixed(1) : null;
+  const pacing = cutsPerMinute === null ? null : cutsPerMinute < 6 ? "slow" : cutsPerMinute <= 20 ? "medium" : "fast-cut";
+  if (effDur < hookDur) warnings.push(`file is ${total}s, shorter than --duration ${hookDur}s — the whole file is the only window`);
+  return {
+    operation: "hook",
+    input: inPath,
+    duration_seconds: total,
+    hook_duration_seconds: effDur,
+    step_seconds: stepSec,
+    speech_coverage: meta.audio ? +Math.min(1, Math.max(0, speechSeconds / total)).toFixed(3) : null,
+    energy_curve: curve,
+    cuts_per_minute: cutsPerMinute,
+    pacing,
+    candidates,
+    hook: best,
+    suggested_trim: `mediakit trim ${inPath} -o hook.mp4 --start ${best.start} --end ${best.end}`,
+    warnings,
   };
 }
 

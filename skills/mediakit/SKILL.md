@@ -1110,7 +1110,7 @@ cap, no timeout, no verify) — MediaKit's `download` exists so the
 agent never has to.
 
 ### 52. Test a tool over HTTP before wiring up an MCP client — same tools, curl instead of stdio
-`mediakit mcp --http [--port 3000]` serves the same 62 tools over
+`mediakit mcp --http [--port 3000]` serves the same 63 tools over
 HTTP on `127.0.0.1`: `GET /mcp` (metadata), `GET /mcp/tools`
 (every tool + JSON input schema), `POST /mcp/tools/{name}/invoke`
 (`{"arguments": {...}}`), and `POST /` for JSON-RPC 2.0
@@ -1182,6 +1182,28 @@ still shorter than lag+1s produces no pair fully inside it, and a
 still in the final lag seconds has no later frame to compare
 against — use lag 1 when you need short freezes. Lag energy is not
 comparable with adjacent-frame energy of the same clip.
+
+### 55. Pick the opening shot by measurement — `hook` finds where the clip gets loud
+A Short lives or dies in its first seconds, and the loudest moment
+is rarely at 0:00. `hook <clip> [--duration 15]` slides a window of
+that length across the file and scores each candidate on three
+measured signals — mean audio energy (astats RMS per frame, binned
+and normalized against the clip's own loudest bin), speech coverage
+(the silencedetect complement: a window full of talk beats one full
+of dead air), and scene cuts (a window that opens on a cut scores
+higher, plus cuts inside it). The score is 0.5×energy + 0.3×speech
++ 0.2×cut with fixed weights, so two runs rank the same way, and the
+top windows are greedy non-overlapping — alternatives, not the same
+window shifted one step. The result carries the ranked candidates
+with the score breakdown, the per-step energy curve, pacing from
+real cuts (slow/medium/fast-cut), and a `suggested_trim` command
+that cuts the winning window. Run it on raw footage before cutting
+the opening of a Short, then trim the winner and check it with
+`motion` — a loud window that is also a still is a title card, not
+a hook. Video-only input scores on cuts alone (energy/speech 0, and
+the warnings say so); audio-only on energy+speech. Files over 20
+minutes are refused: the astats log behind the curve would exceed
+the capture buffer, so trim a section first.
 
 ## Workflow: vertical captioned clip from a landscape source
 

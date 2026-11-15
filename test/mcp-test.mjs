@@ -181,10 +181,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 62 tools present");
-checkOk(missing.length === 0, "tools/list has all 62 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 63 tools present");
+checkOk(missing.length === 0, "tools/list has all 63 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -1470,6 +1470,53 @@ checkOk(motionHighThJson.verdict === "static" && motionHighThJson.still_interval
 const motionAudioOnly = await callExpectThrow("motion", { input: path.join(root, "test/mix-voice.mp3") });
 checkOk(/needs a video input/.test(motionAudioOnly), "motion refuses audio-only input", motionAudioOnly.slice(0, 120));
 
+// hook: best opening window from measured energy + speech + cuts.
+// Fixture test/hook-source.mp4 is 30s: quiet red [0,15) then loud
+// blue [15,30) with the cut at 15s, so the 10s hook must open on
+// the cut — [15,25) scores ~0.94 while a quiet window scores ~0.20.
+// The energy curve must also show the step: loud bins ~20 dB above
+// the quiet ones (checked independently with volumedetect below).
+const hookRes = await client.callTool({
+  name: "hook",
+  arguments: { input: path.join(root, "test/hook-source.mp4"), duration: 10, step: 0.5, top: 3 },
+});
+const hookJson = JSON.parse(hookRes.content[0].text);
+console.log("hook call:", JSON.stringify(hookJson.hook), "| candidates", hookJson.candidates.map((c) => `${c.start}-${c.end}:${c.score}`).join(" "), "| pacing", hookJson.pacing);
+checkOk(hookJson.hook.start === 15 && hookJson.hook.end === 25 && hookJson.hook.starts_near_cut === true && hookJson.hook.cuts_inside === 1 && near(hookJson.hook.score, 0.943, 0.01), "hook opens on the loud cut at 15s (score ~0.94)", JSON.stringify(hookJson.hook));
+checkOk(hookJson.candidates.length === 3 && hookJson.candidates[0].score > hookJson.candidates[1].score && hookJson.candidates[1].score > hookJson.candidates[2].score && hookJson.candidates[2].score < 0.25, "hook ranks 3 non-overlapping windows, quiet last (<0.25)", JSON.stringify(hookJson.candidates.map((c) => c.score)));
+checkOk(near(hookJson.speech_coverage, 0.5, 0.02) && hookJson.pacing === "slow" && hookJson.cuts_per_minute === 2 && hookJson.energy_curve.length === 61, "hook reports speech 0.5, pacing slow (2 cuts/min), 61 curve bins", `speech=${hookJson.speech_coverage} pacing=${hookJson.pacing} bins=${hookJson.energy_curve.length}`);
+checkOk(typeof hookJson.suggested_trim === "string" && hookJson.suggested_trim.includes("--start 15 --end 25"), "hook suggests a trim command for the winning window", hookJson.suggested_trim);
+// Independent check of the energy step: the winning window really
+// is ~20 dB louder than the quiet half (not just the tool's word).
+const hookLoudVol = await meanVolume(path.join(root, "test/hook-source.mp4"), 15, 10);
+const hookQuietVol = await meanVolume(path.join(root, "test/hook-source.mp4"), 0, 10);
+checkOk(hookLoudVol !== null && hookQuietVol !== null && hookLoudVol - hookQuietVol > 15, "hook window is really louder: volumedetect gap >15 dB", `loud=${hookLoudVol} quiet=${hookQuietVol}`);
+// Audio-only: mix-voice has tone [0,2),[4,6),[7,9) — the 4s hook
+// must land on the densest stretch (start 4 or 4.5, 3s of tone).
+const hookAudioRes = await client.callTool({
+  name: "hook",
+  arguments: { input: path.join(root, "test/mix-voice.mp3"), duration: 4, step: 0.5, top: 2 },
+});
+const hookAudioJson = JSON.parse(hookAudioRes.content[0].text);
+console.log("hook audio-only:", JSON.stringify(hookAudioJson.hook), "| speech_cov", hookAudioJson.speech_coverage);
+checkOk((hookAudioJson.hook.start === 4 || hookAudioJson.hook.start === 4.5) && hookAudioJson.hook.speech >= 0.7 && hookAudioJson.hook.score > 0.5 && near(hookAudioJson.speech_coverage, 0.667, 0.02) && hookAudioJson.pacing === null, "hook on audio-only lands on the densest 4s (start 4/4.5, speech 0.667)", JSON.stringify(hookAudioJson.hook));
+// Video-only: no audio to score — cuts only, warning says so.
+const hookVideoRes = await client.callTool({
+  name: "hook",
+  arguments: { input: path.join(root, "test/content-video-only.mp4"), duration: 4 },
+});
+const hookVideoJson = JSON.parse(hookVideoRes.content[0].text);
+checkOk(hookVideoJson.warnings.some((w) => /no audio stream/.test(w)) && hookVideoJson.hook.score === 0 && hookVideoJson.energy_curve.every((b) => b.energy === 0), "hook on video-only scores 0 and warns about no audio", JSON.stringify(hookVideoJson.warnings));
+// Short file: duration longer than the file -> whole file, warning.
+const hookShortRes = await client.callTool({
+  name: "hook",
+  arguments: { input: path.join(root, "test/mix-voice.mp3"), duration: 15, top: 1 },
+});
+const hookShortJson = JSON.parse(hookShortRes.content[0].text);
+checkOk(hookShortJson.hook.start === 0 && hookShortJson.hook.end === 9 && hookShortJson.warnings.some((w) => /shorter than --duration/.test(w)), "hook on a file shorter than --duration returns the whole file + warning", JSON.stringify(hookShortJson.hook));
+const hookBadText = await callExpectThrow("hook", { input: path.join(root, "test/mix-voice.mp3"), duration: 25 });
+checkOk(/less than or equal to 20/.test(hookBadText), "hook refuses --duration over 20", hookBadText.slice(0, 120));
+
 // motion --adaptive: two-pass calibration to the clip's own quiet
 // quarter (floor = p25 of the curve, threshold = min(max(fixed,
 // floor * factor), max(cap, fixed))). Light grain on a static shot
@@ -2469,7 +2516,7 @@ const findSourceRes = await client.callTool({
   arguments: { directory: path.join(root, "test"), name: "source" },
 });
 const findSourceJson = JSON.parse(findSourceRes.content[0].text);
-checkOk(findSourceJson.total_matches === 7, "find 'source' matches 7 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source)", `got ${findSourceJson.total_matches}`);
+checkOk(findSourceJson.total_matches === 8, "find 'source' matches 8 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source, hook-source)", `got ${findSourceJson.total_matches}`);
 
 const findMp3Res = await client.callTool({
   name: "find",
@@ -3558,7 +3605,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 62 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 62 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 63 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 63 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -4962,7 +5009,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 62 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 63 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -5022,11 +5069,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 62, "GET /mcp reports name/version/transport and 62 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 63, "GET /mcp reports name/version/transport and 63 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 62 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 62 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 63 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 63 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -5050,7 +5097,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 62, "JSON-RPC tools/list returns the same 62 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 63, "JSON-RPC tools/list returns the same 63 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));
