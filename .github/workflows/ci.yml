@@ -179,6 +179,8 @@ jobs:
           node bin/mediakit.js assemble test/assemble-preset.json --mode validate | grep '"preset": "vertical"'
           node bin/mediakit.js assemble test/assemble-preset-override.json --mode validate | grep '"width": 720'
           node bin/mediakit.js assemble test/assemble-template.json --mode validate | grep '"template": "bounce"'
+          node bin/mediakit.js assemble test/assemble-brand.json --mode validate | grep '"brand": "warm-story"'
+          node bin/mediakit.js assemble test/assemble-brand-style.json --mode validate | grep '"style": "warm-story"'
           node bin/mediakit.js diagnose test/assemble-diagnose-pass.json | grep '"verdict": "pass"'
           node bin/mediakit.js diagnose test/assemble-diagnose-frozen.json | grep '"verdict": "fail"'
           node bin/mediakit.js diagnose test/assemble-film.json | grep '"verdict": "warn"'

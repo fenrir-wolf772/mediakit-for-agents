@@ -91,6 +91,22 @@ pictures — pictures fit the voice:
   the aspect ratio is never silently defaulted.
 - `style` is optional; when given it must be one of the locked ids
   in `styles.json` and it sets the caption burn values.
+- `brand` is optional: one of `amber-teal`, `warm-story`,
+  `minimal-line` — the full table lives in
+  `skills/shorts-video/brands.json`. One id paints the whole film
+  in a channel's look: its palette fills template color params
+  the shot did not pass (`title-card` bg1/accent/fg, `bounce`
+  bg/color, `slide-in` bg/card/fg, `rings` bg/color), its `text`
+  color and `text_size` fill a text layer's missing `color`/`size`,
+  and its `style` fills the caption style when neither an explicit
+  `style` nor a preset sets one (resolution order: explicit >
+  preset > brand). An explicit value always wins and is reported
+  in `brand_overrides`; brand-filled fields are listed in
+  `brand_applied`. The resolved brand (id + palette + text size +
+  style) is part of the fingerprint, so editing `brands.json`
+  re-approves the film. Unknown brand ids fail validation. A
+  brand never touches a `color` shot's color — that stays
+  explicit, shot by shot.
 - `voice` is required: `path` plus `lead`/`tail` in seconds (default
   0). `music` is optional (`volume` 0–1, `duck_db` 0–24). `sfx` is
   optional, at most 16, each `{file, at, volume}` with `at` inside

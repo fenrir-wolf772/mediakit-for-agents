@@ -9080,6 +9080,97 @@ export function resolveSceneTemplateParams(template, rawParams, label) {
 
 function assembleEvenDown(n) { return n % 2 ? n - 1 : n; }
 
+// Brand profiles: one named id paints the whole film in a
+// channel's look — palette + text size + caption style — instead
+// of retyping colors on every shot. Same pattern as assemble
+// presets and scene templates: a JSON registry
+// (skills/shorts-video/brands.json), ids locked in code, no
+// embedded fallback — a missing or corrupt registry fails loudly,
+// because a brand that silently resolved to different colors
+// would ship the wrong look. A brand only fills what the
+// manifest leaves out: an explicit value always wins and is
+// reported in brand_overrides; brand-filled fields are listed in
+// brand_applied. Resolution order for the caption style is
+// explicit > preset > brand. Palette keys: background (shot
+// backgrounds), primary (the brand's main color), accent (the
+// second color), text (default text-layer color), on_primary
+// (text meant to sit ON the primary color — picked per brand so
+// a light card never gets light text).
+export const ASSEMBLE_BRAND_IDS = ["amber-teal", "warm-story", "minimal-line"];
+const ASSEMBLE_BRANDS_PATH = fileURLToPath(new URL("../skills/shorts-video/brands.json", import.meta.url));
+const ASSEMBLE_BRAND_PALETTE_KEYS = ["background", "primary", "accent", "text", "on_primary"];
+let cachedAssembleBrands = null;
+export async function getAssembleBrands() {
+  if (cachedAssembleBrands) return cachedAssembleBrands;
+  let doc;
+  try {
+    doc = JSON.parse(await readFile(ASSEMBLE_BRANDS_PATH, "utf8"));
+  } catch {
+    throw new MediaKitError("assemble brand library missing: skills/shorts-video/brands.json not found next to the package", "PRESET_LIBRARY_MISSING");
+  }
+  if (!doc || !Array.isArray(doc.brands) || doc.brands.length === 0) {
+    throw new MediaKitError("assemble brand library has no brands: skills/shorts-video/brands.json", "PRESET_LIBRARY_INVALID");
+  }
+  const byId = {};
+  for (const b of doc.brands) {
+    if (typeof b?.id !== "string" || !b.id) throw new MediaKitError("assemble brand library: brand without an id", "PRESET_LIBRARY_INVALID");
+    if (byId[b.id]) throw new MediaKitError(`assemble brand library: duplicate brand id "${b.id}"`, "PRESET_LIBRARY_INVALID");
+    if (!b.palette || typeof b.palette !== "object" || Array.isArray(b.palette)) {
+      throw new MediaKitError(`assemble brand library: brand "${b.id}" needs a palette object`, "PRESET_LIBRARY_INVALID");
+    }
+    for (const key of ASSEMBLE_BRAND_PALETTE_KEYS) {
+      const v = b.palette[key];
+      if (typeof v !== "string" || !/^[0-9a-fA-F]{6}$/.test(v)) {
+        throw new MediaKitError(`assemble brand library: brand "${b.id}" palette.${key} must be a 6-digit hex color, got: ${JSON.stringify(v)}`, "PRESET_LIBRARY_INVALID");
+      }
+    }
+    const textSize = Number(b.text_size);
+    if (!Number.isInteger(textSize) || textSize < 8 || textSize > 400) {
+      throw new MediaKitError(`assemble brand library: brand "${b.id}" has bad text_size ${b.text_size}`, "PRESET_LIBRARY_INVALID");
+    }
+    if (b.style !== null && b.style !== undefined && !SHORTS_STYLE_IDS.includes(b.style)) {
+      throw new MediaKitError(`assemble brand library: brand "${b.id}" has unknown style ${JSON.stringify(b.style)}`, "PRESET_LIBRARY_INVALID");
+    }
+    byId[b.id] = {
+      id: b.id, name: b.name ?? b.id, description: b.description ?? "",
+      palette: Object.fromEntries(ASSEMBLE_BRAND_PALETTE_KEYS.map((k) => [k, b.palette[k].toUpperCase()])),
+      text_size: textSize, style: b.style ?? null,
+    };
+  }
+  const ids = Object.keys(byId).sort();
+  if (JSON.stringify(ids) !== JSON.stringify([...ASSEMBLE_BRAND_IDS].sort())) {
+    throw new MediaKitError(`assemble brand library ids (${ids.join(", ")}) do not match ASSEMBLE_BRAND_IDS (${ASSEMBLE_BRAND_IDS.join(", ")}); update both together`, "PRESET_LIBRARY_INVALID");
+  }
+  cachedAssembleBrands = byId;
+  return byId;
+}
+
+export async function resolveAssembleBrand(brand) {
+  if (brand === null || brand === undefined) return null;
+  if (typeof brand !== "string" || !brand.trim()) {
+    throw new MediaKitError(`assemble brand must be one of ${ASSEMBLE_BRAND_IDS.join(", ")}, got: ${JSON.stringify(brand)}`, "INVALID_ARG");
+  }
+  const brands = await getAssembleBrands();
+  const found = brands[brand];
+  if (!found) {
+    throw new MediaKitError(`assemble brand must be one of ${ASSEMBLE_BRAND_IDS.join(", ")}, got: ${brand}`, "INVALID_ARG");
+  }
+  return found;
+}
+
+// Which template color param a brand palette key fills, per
+// template. Only color params are mapped — numbers and strings
+// stay the template's own defaults, and a shot's explicit param
+// always wins. bg2 of title-card is deliberately unmapped: the
+// gradient's second stop keeps the template default so the card
+// keeps its depth instead of going flat.
+const BRAND_TEMPLATE_COLOR_MAP = {
+  "title-card": { bg1: "background", accent: "primary", fg: "text" },
+  bounce: { bg: "background", color: "primary" },
+  "slide-in": { bg: "background", card: "primary", fg: "on_primary" },
+  rings: { bg: "background", color: "accent" },
+};
+
 // Transition handles, in frames. A transition of F frames is
 // centered on its cut: floor(F/2) frames come from the previous
 // shot's tail (its outgoing handle, shown after the cut) and the
@@ -9155,13 +9246,14 @@ function planAssembleVideo(shots, fps) {
 // — those need libass, which assemble does not use for layers.
 const ASSEMBLE_TEXT_POSITIONS = ["top", "center", "bottom"];
 const ASSEMBLE_MAX_TEXT_LAYERS = 4;
-function parseAssembleTextLayers(raw, label, id, duration, width, height) {
+function parseAssembleTextLayers(raw, label, id, duration, width, height, brandDefaults = null) {
   if (raw === undefined || raw === null) return [];
   const list = Array.isArray(raw) ? raw : [raw];
   if (list.length > ASSEMBLE_MAX_TEXT_LAYERS) {
     throw new MediaKitError(`${label} (${id}): at most ${ASSEMBLE_MAX_TEXT_LAYERS} text layers, got ${list.length}`, "INVALID_ARG");
   }
-  const defaultSize = Math.round(Math.min(width, height) / 12);
+  const defaultSize = brandDefaults?.size ?? Math.round(Math.min(width, height) / 12);
+  const defaultColor = brandDefaults?.color ?? "FFFFFF";
   return list.map((entry, j) => {
     const llabel = `${label} (${id}) text[${j}]`;
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
@@ -9182,7 +9274,7 @@ function parseAssembleTextLayers(raw, label, id, duration, width, height) {
       ? defaultSize
       : num(entry.size, `${llabel} size`, { min: 8, max: 400, integer: true });
     const color = entry.color === undefined || entry.color === null
-      ? "FFFFFF"
+      ? defaultColor
       : String(entry.color).trim().replace(/^#/, "");
     if (!/^[0-9a-fA-F]{6}$/.test(color)) {
       throw new MediaKitError(`${llabel} color must be a 6-digit hex like FFFFFF, got: ${entry.color}`, "INVALID_ARG");
@@ -9246,9 +9338,25 @@ async function validateAssembleManifest(doc, manifestAbs) {
     throw new MediaKitError(`assemble width/height must be even (got ${width}x${height})`, "INVALID_ARG");
   }
   const fps = assembleOptNum(pickPresetField("fps", doc.fps, 30), 30, "fps", { min: 1, max: 120, integer: true });
-  const style = pickPresetField("style", doc.style === undefined || doc.style === null ? null : String(doc.style), null);
+  let style = pickPresetField("style", doc.style === undefined || doc.style === null ? null : String(doc.style), null);
   if (style !== null && !SHORTS_STYLE_IDS.includes(style)) {
     throw new MediaKitError(`assemble style must be one of ${SHORTS_STYLE_IDS.join(", ")}, got: ${style}`, "INVALID_ARG");
+  }
+  // Brand profile (optional): one id paints the whole film —
+  // palette + text size + caption style. Resolution order for
+  // the style is explicit > preset > brand; the brand only fills
+  // what is still empty, and every field it fills or loses to an
+  // explicit/preset value is reported below.
+  const brand = await resolveAssembleBrand(doc.brand ?? null);
+  const brandApplied = [];
+  const brandOverrides = [];
+  if (brand) {
+    if (style === null && brand.style) {
+      style = brand.style;
+      brandApplied.push("style");
+    } else if (style !== null && brand.style && style !== brand.style) {
+      brandOverrides.push("style");
+    }
   }
   const styleValues = await assembleStyleValues(style);
   if (!doc.voice || typeof doc.voice !== "object" || Array.isArray(doc.voice)) {
@@ -9413,6 +9521,22 @@ async function validateAssembleManifest(doc, manifestAbs) {
           throw new MediaKitError(`${label} (${id}): template "${tpl.id}" takes no assets (it draws everything in code)`, "INVALID_ARG");
         }
         shot.params = resolveSceneTemplateParams(tpl, raw.params, `${label} (${id})`);
+        // Brand palette fills the template's color params the shot
+        // did not pass explicitly (explicit params win, like the
+        // preset rule) — recorded in brand_applied/overrides.
+        if (brand) {
+          const colorMap = BRAND_TEMPLATE_COLOR_MAP[tpl.id] ?? {};
+          const passed = raw.params ?? {};
+          for (const [param, key] of Object.entries(colorMap)) {
+            const brandValue = `#${brand.palette[key]}`;
+            if (passed[param] === undefined || passed[param] === null) {
+              shot.params[param] = brandValue;
+              brandApplied.push(`${label} (${id}) template.${tpl.id}.${param}`);
+            } else if (String(passed[param]).replace(/^#/, "").toUpperCase() !== brand.palette[key]) {
+              brandOverrides.push(`${label} (${id}) template.${tpl.id}.${param}`);
+            }
+          }
+        }
       } else {
         if (!hasScene) throw new MediaKitError(`${label} (${id}): canvas_scene shot needs a scene (JS module path) or a template (one of ${SCENE_TEMPLATE_IDS.join(", ")})`, "INVALID_ARG");
         scenePath = await requireInput(resolveRel(raw.scene), `${label} (${id}) scene`);
@@ -9469,8 +9593,20 @@ async function validateAssembleManifest(doc, manifestAbs) {
       }
     }
     // Per-shot text layers (any kind): parsed + validated here so
-    // a bad layer fails validate, not mid-render.
-    shot.textLayers = parseAssembleTextLayers(raw.text, label, id, duration, width, height);
+    // a bad layer fails validate, not mid-render. The brand fills
+    // a layer's missing color/size with its palette text / text
+    // size; an explicit value that differs is a brand override.
+    shot.textLayers = parseAssembleTextLayers(raw.text, label, id, duration, width, height, brand ? { color: brand.palette.text, size: brand.text_size } : null);
+    if (brand && raw.text !== undefined && raw.text !== null) {
+      const rawLayers = Array.isArray(raw.text) ? raw.text : [raw.text];
+      rawLayers.forEach((entry, j) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return;
+        if (entry.color === undefined || entry.color === null) brandApplied.push(`${label} (${id}) text[${j}].color`);
+        else if (String(entry.color).replace(/^#/, "").toUpperCase() !== brand.palette.text) brandOverrides.push(`${label} (${id}) text[${j}].color`);
+        if (entry.size === undefined || entry.size === null) brandApplied.push(`${label} (${id}) text[${j}].size`);
+        else if (entry.size !== brand.text_size) brandOverrides.push(`${label} (${id}) text[${j}].size`);
+      });
+    }
     // Transition into this shot (the join from the previous shot).
     // Parsed here, cross-shot rules checked after the loop, when
     // both neighbors exist.
@@ -9574,6 +9710,10 @@ async function validateAssembleManifest(doc, manifestAbs) {
   const captionsHash = captions ? await hashFile(captions.path) : null;
   const assetHashes = {};
   for (const s of shots) if (s.assetHash) assetHashes[s.id] = s.assetHash;
+  // The resolved brand (not just its id) goes into the
+  // fingerprint: editing brands.json re-approves the film, the
+  // same way editing a scene file does.
+  const brandResolved = brand ? { id: brand.id, palette: brand.palette, text_size: brand.text_size, style: brand.style } : null;
   const fingerprint = createHash("sha256").update(stableStringify({
     renderer: ASSEMBLE_VERSION,
     manifest: manifestHash,
@@ -9585,14 +9725,16 @@ async function validateAssembleManifest(doc, manifestAbs) {
     style: styleValues ? stableStringify(styleValues.burn_captions) : null,
     width, height, fps,
     preset: preset ? preset.id : null,
+    brand: brandResolved,
   })).digest("hex");
   return {
     manifest: manifestAbs, manifestDir, title, width, height, fps, style, styleValues,
     preset: preset ? preset.id : null, preset_applied: presetApplied, preset_overrides: presetOverrides,
+    brand: brand ? brand.id : null, brand_applied: brandApplied, brand_overrides: brandOverrides,
     voice: { path: voicePath, lead, tail, duration_seconds: voiceDuration },
     total_seconds: totalSeconds, total_frames: totalFrames,
     music, sfx, captions, shots, chapters, warnings, fingerprint,
-    fingerprint_parts: { manifest: manifestHash, voice: voiceHash, music: musicHash, sfx: sfxHashes, captions: captionsHash, assets: assetHashes },
+    fingerprint_parts: { manifest: manifestHash, voice: voiceHash, music: musicHash, sfx: sfxHashes, captions: captionsHash, assets: assetHashes, brand: brandResolved ? stableStringify(brandResolved) : null },
   };
 }
 
@@ -9910,7 +10052,7 @@ async function requireAssembleApproval(plan, force) {
   if (approval.fingerprint !== plan.fingerprint) {
     const changed = [];
     const parts = approval.fingerprint_parts ?? {};
-    for (const k of ["manifest", "voice", "music", "captions"]) {
+    for (const k of ["manifest", "voice", "music", "captions", "brand"]) {
       if (JSON.stringify(parts[k] ?? null) !== JSON.stringify(plan.fingerprint_parts[k] ?? null)) changed.push(k);
     }
     if (JSON.stringify(parts.assets ?? {}) !== JSON.stringify(plan.fingerprint_parts.assets ?? {})) changed.push("assets");
@@ -9951,6 +10093,9 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
     preset: plan.preset,
     preset_applied: plan.preset_applied,
     preset_overrides: plan.preset_overrides,
+    brand: plan.brand,
+    brand_applied: plan.brand_applied,
+    brand_overrides: plan.brand_overrides,
     total_seconds: plan.total_seconds,
     total_frames: plan.total_frames,
     fingerprint: plan.fingerprint,
@@ -10355,6 +10500,7 @@ function verifyPartsDiff(oldParts, newParts, paths) {
     return s.source ?? s.scene ?? (s.color ? `color ${s.color}` : id);
   };
   items.push(verifyItem("manifest", oldParts?.manifest, newParts?.manifest, { path: paths?.manifest ?? null }));
+  items.push(verifyItem("brand", oldParts?.brand ?? null, newParts?.brand ?? null, { path: paths?.manifest ?? null }));
   items.push(verifyItem("voice", oldParts?.voice, newParts?.voice, { path: paths?.voice ?? null }));
   items.push(verifyItem("music", oldParts?.music ?? null, newParts?.music ?? null, { path: paths?.music ?? null }));
   items.push(verifyItem("captions", oldParts?.captions ?? null, newParts?.captions ?? null, { path: paths?.captions ?? null }));

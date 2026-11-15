@@ -1,0 +1,1 @@
+{"brand":"nope","preset":"vertical","shots":[{"duration":2.0,"id":"s1","kind":"canvas_scene","params":{"text":"BRAND"},"template":"title-card"},{"duration":2.0,"id":"s2","kind":"canvas_scene","params":{"count":4},"template":"rings"}],"title":"Bad brand demo","version":1,"voice":{"lead":0.5,"path":"canvas-voice.mp3","tail":0.5}}

@@ -4540,6 +4540,64 @@ const assembleTemplateRender2Res = await client.callTool({ name: "assemble", arg
 const assembleTemplateRender2Json = JSON.parse(assembleTemplateRender2Res.content[0].text);
 checkOk(assembleTemplateRender2Json.cache_hits === 2, "assemble second template render reuses both template segments from the cache", `cache_hits=${assembleTemplateRender2Json.cache_hits}`);
 
+// Brand profiles (turn 66): one `"brand"` id paints the whole
+// film — palette fills template colors + text-layer color/size,
+// its style fills the caption style when no preset or explicit
+// style sets one. Fixture test/assemble-brand.json: preset
+// vertical + brand warm-story, title-card 2s (text param only)
+// + rings 2s (count only), text layers: one bare, one explicit
+// red. The preset's clean-bold style wins over the brand's
+// warm-story; the bare layer takes the brand's cream text at 56px.
+const assembleBrandStage = await stageAssembleManifest("assemble-brand.json");
+const assembleBrandOut = path.join(assembleBrandStage.dir, "out");
+const assembleBrandValidateRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleBrandStage.manifestPath, mode: "validate" } });
+const assembleBrandValidateJson = JSON.parse(assembleBrandValidateRes.content[0].text);
+checkOk(assembleBrandValidateJson.brand === "warm-story" && assembleBrandValidateJson.style === "clean-bold" && assembleBrandValidateJson.preset === "vertical" && assembleBrandValidateJson.brand_applied?.includes("shot 1 (s1) template.title-card.bg1") && assembleBrandValidateJson.brand_applied?.includes("shot 1 (s1) template.title-card.accent") && assembleBrandValidateJson.brand_applied?.includes("shot 1 (s1) template.title-card.fg") && assembleBrandValidateJson.brand_applied?.includes("shot 1 (s1) text[0].color") && assembleBrandValidateJson.brand_applied?.includes("shot 1 (s1) text[0].size") && assembleBrandValidateJson.brand_applied?.includes("shot 2 (s2) template.rings.bg") && assembleBrandValidateJson.brand_applied?.includes("shot 2 (s2) template.rings.color") && assembleBrandValidateJson.brand_overrides?.includes("style") && assembleBrandValidateJson.brand_overrides?.includes("shot 1 (s1) text[1].color"), "assemble brand warm-story fills template colors + text color/size and reports applied/overrides (preset style wins over the brand style)", JSON.stringify({ brand: assembleBrandValidateJson.brand, applied: assembleBrandValidateJson.brand_applied, overrides: assembleBrandValidateJson.brand_overrides }));
+checkOk(assembleBrandValidateJson.shots?.[0]?.params?.bg1 === "#1C1917" && assembleBrandValidateJson.shots?.[0]?.params?.accent === "#B45309" && assembleBrandValidateJson.shots?.[0]?.params?.fg === "#FFF7ED" && assembleBrandValidateJson.shots?.[0]?.params?.bg2 === "#1E3A5F" && assembleBrandValidateJson.shots?.[1]?.params?.bg === "#1C1917" && assembleBrandValidateJson.shots?.[1]?.params?.color === "#D97706", "assemble brand palette lands in the template params (title-card bg1/accent/fg, rings bg/color) while bg2 keeps the template default", JSON.stringify(assembleBrandValidateJson.shots?.map((s) => s.params)));
+checkOk(assembleBrandValidateJson.shots?.[0]?.text_layers?.[0]?.color === "FFF7ED" && assembleBrandValidateJson.shots?.[0]?.text_layers?.[0]?.size === 56 && assembleBrandValidateJson.shots?.[0]?.text_layers?.[1]?.color === "FF0000" && assembleBrandValidateJson.shots?.[0]?.text_layers?.[1]?.size === 56, "assemble brand text defaults: bare layer takes cream 56px, explicit red keeps its color but still takes the brand size", JSON.stringify(assembleBrandValidateJson.shots?.[0]?.text_layers));
+// No preset: the brand's own style fills the caption style.
+const assembleBrandStyleStage = await stageAssembleManifest("assemble-brand-style.json");
+const assembleBrandStyleRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleBrandStyleStage.manifestPath, mode: "validate" } });
+const assembleBrandStyleJson = JSON.parse(assembleBrandStyleRes.content[0].text);
+checkOk(assembleBrandStyleJson.brand === "warm-story" && assembleBrandStyleJson.style === "warm-story" && assembleBrandStyleJson.brand_applied?.includes("style") && assembleBrandStyleJson.brand_overrides?.length === 0, "assemble brand style fills the caption style when no preset or explicit style sets one", JSON.stringify({ style: assembleBrandStyleJson.style, applied: assembleBrandStyleJson.brand_applied }));
+const assembleBadBrandText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-brand.json"), mode: "validate" });
+checkOk(/must be one of amber-teal, warm-story, minimal-line/.test(assembleBadBrandText ?? ""), "assemble validate refuses an unknown brand id", assembleBadBrandText ?? "");
+// The fingerprint moves when only the brand changes: validate the
+// same staged film twice, once per brand id.
+const assembleBrandFpRes1 = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleBrandStage.manifestPath, mode: "validate" } });
+const assembleBrandFp1 = JSON.parse(assembleBrandFpRes1.content[0].text).fingerprint;
+const assembleBrandFpDoc = JSON.parse(await readFile(assembleBrandStage.manifestPath, "utf8"));
+assembleBrandFpDoc.brand = "amber-teal";
+await writeFile(assembleBrandStage.manifestPath, JSON.stringify(assembleBrandFpDoc), "utf8");
+const assembleBrandFpRes2 = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleBrandStage.manifestPath, mode: "validate" } });
+const assembleBrandFp2Json = JSON.parse(assembleBrandFpRes2.content[0].text);
+checkOk(assembleBrandFp1 !== assembleBrandFp2Json.fingerprint && assembleBrandFp2Json.brand === "amber-teal", "assemble fingerprint changes when only the brand id changes (the resolved palette is in the fingerprint)", `${assembleBrandFp1?.slice(0, 12)} vs ${assembleBrandFp2Json.fingerprint?.slice(0, 12)}`);
+// Render proof: the brand background is really on the frames —
+// corner pixels of both the title-card shot (0.5s) and the rings
+// shot (3.0s) measure warm-story's #1C1917 (28/25/23, ±5).
+// (Restore the staged film to warm-story first: the fingerprint
+// check above switched it to amber-teal.)
+assembleBrandFpDoc.brand = "warm-story";
+await writeFile(assembleBrandStage.manifestPath, JSON.stringify(assembleBrandFpDoc), "utf8");
+const assembleBrandRenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleBrandStage.manifestPath, mode: "render", output_dir: assembleBrandOut, force: true } }, undefined, { timeout: 300000 });
+const assembleBrandRenderJson = JSON.parse(assembleBrandRenderRes.content[0].text);
+const assembleBrandFinalPath = path.join(assembleBrandOut, "final.mp4");
+const assembleBrandFinalProbe = await probeStreams(assembleBrandFinalPath);
+const assembleBrandFinalFrames = await countFrames(assembleBrandFinalPath);
+const assembleBrandFinalLufs = await measureLufs(assembleBrandFinalPath);
+checkOk(assembleBrandRenderJson.brand === "warm-story" && assembleBrandRenderJson.approval === "forced" && near(parseFloat(assembleBrandFinalProbe?.format?.duration), 4, 0.15) && assembleBrandFinalFrames === 120, "assemble brand film renders 4s with exactly 120 frames and the brand echoed in the receipt", `duration=${assembleBrandFinalProbe?.format?.duration} frames=${assembleBrandFinalFrames}`);
+checkOk(assembleBrandFinalLufs !== null && near(assembleBrandFinalLufs, -14, 0.5), "assemble brand final measures -14 LUFS independently", `LUFS=${assembleBrandFinalLufs}`);
+const assembleBrandCornerR1 = await planeMean(assembleBrandFinalPath, "20:20:0:0", "r", 0.5);
+const assembleBrandCornerG1 = await planeMean(assembleBrandFinalPath, "20:20:0:0", "g", 0.5);
+const assembleBrandCornerB1 = await planeMean(assembleBrandFinalPath, "20:20:0:0", "b", 0.5);
+const assembleBrandCornerR2 = await planeMean(assembleBrandFinalPath, "20:20:0:0", "r", 3.0);
+const assembleBrandCornerG2 = await planeMean(assembleBrandFinalPath, "20:20:0:0", "g", 3.0);
+const assembleBrandCornerB2 = await planeMean(assembleBrandFinalPath, "20:20:0:0", "b", 3.0);
+checkOk(near(assembleBrandCornerR1, 28, 5) && near(assembleBrandCornerG1, 25, 5) && near(assembleBrandCornerB1, 23, 5) && near(assembleBrandCornerR2, 28, 5) && near(assembleBrandCornerG2, 25, 5) && near(assembleBrandCornerB2, 23, 5), "assemble brand background is really on the frames: corner pixels are warm-story #1C1917 in both shots", `s1 ${assembleBrandCornerR1}/${assembleBrandCornerG1}/${assembleBrandCornerB1} s2 ${assembleBrandCornerR2}/${assembleBrandCornerG2}/${assembleBrandCornerB2}`);
+const assembleBrandVerifyRes = await client.callTool({ name: "verify", arguments: { receipt: path.join(assembleBrandOut, "assemble-receipt.json") } });
+const assembleBrandVerifyJson = JSON.parse(assembleBrandVerifyRes.content[0].text);
+checkOk(assembleBrandVerifyJson.verdict === "pass" && assembleBrandVerifyJson.items?.some((i) => i.name === "brand" && i.status === "matched"), "verify on the brand film receipt passes with the brand item matched", JSON.stringify(assembleBrandVerifyJson.items?.map((i) => `${i.name}:${i.status}`)));
+
 // Transition offsets must be full precision: a cut at 50 frames
 // puts the second xfade offset at 44/30 = 1.4666...s, and rounding
 // it to 4 decimals (1.4667) overshoots by 33us — enough for the

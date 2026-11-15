@@ -146,7 +146,13 @@ built-in scene template first (`"template": "bounce"` +
 `params`, registry in `scene-templates.json`: `title-card`,
 `bounce`, `slide-in`, `rings`) and write a custom scene file
 only when no template fits — template params merge over
-defaults, unknown names fail validate.
+defaults, unknown names fail validate. For one channel look
+across the whole film, set `"brand"` in the manifest
+(`amber-teal`, `warm-story`, `minimal-line`, registry in
+`brands.json`): its palette fills template colors and text-layer
+color/size, and its style fills the caption style when no preset
+or explicit style sets one — explicit values always win and are
+reported in `brand_overrides`.
 
 ## Common failures
 
