@@ -181,10 +181,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "make_loopable", "freeze", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 58 tools present");
-checkOk(missing.length === 0, "tools/list has all 58 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 59 tools present");
+checkOk(missing.length === 0, "tools/list has all 59 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -606,6 +606,83 @@ const freezeManifestRes = await client.callTool({
 });
 const freezeManifestJson = JSON.parse(freezeManifestRes.content[0].text);
 checkOk(freezeManifestJson.steps_run === 1 && freezeManifestJson.steps.every((s) => s.status === "ok") && near(freezeManifestJson.final.duration_seconds, 12.039, 0.05), "manifest freeze step runs and final is 12.039s", JSON.stringify(freezeManifestJson.final?.duration_seconds));
+
+// boomerang: forward + reverse ping-pong. Fixture
+// test/scenes-source.mp4 is red 5s + blue 5s (10.039s, 300 frames
+// at 30fps): the output must be 2D - 1/fps = 20.045s with 599
+// frames (2x300 - 1 pivot frame dropped, not 600), red at t=1,
+// blue 1s into the reversed half (t=11), red again near the end
+// (t=19). seam_diff must land at the normal step, not at 0 (a
+// duplicated pivot frame would read 0 on flat color AND on moving
+// content the seam would be a repeated frame, not a neighbour).
+const boomRes = await client.callTool({
+  name: "boomerang",
+  arguments: { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-boomerang.mp4") },
+});
+const boomJson = JSON.parse(boomRes.content[0].text);
+console.log("boomerang call:", JSON.stringify(boomJson));
+checkOk(near(boomJson.duration_seconds, 20.045, 0.05) && near(boomJson.duration_error_seconds, 0, 0.05) && boomJson.expected_duration_seconds === 20.045, "boomerang output is 2D - 1/fps (2x10.039 - 0.033 = 20.045s)", JSON.stringify(boomJson.duration_seconds));
+checkOk(near(boomJson.pivot_seconds, 0.0333, 0.001), "boomerang reports the 1-frame pivot (1/30s)", JSON.stringify(boomJson.pivot_seconds));
+checkOk(boomJson.seam_diff !== null && boomJson.seam_diff <= 2 && boomJson.normal_step !== null && boomJson.normal_step <= 2, "boomerang seam lands at the normal step on the flat-color clip", `seam=${boomJson.seam_diff} step=${boomJson.normal_step}`);
+checkOk(boomJson.video_reversed === true && boomJson.audio_reversed === true && boomJson.has_audio === true && boomJson.dimensions === "640x360" && boomJson.size_bytes > 0, "boomerang reverses video + audio and keeps dimensions/bytes", JSON.stringify(boomJson));
+// Independent: ffprobe counts 599 frames (2x300 - 1 pivot), and the
+// pixels prove the direction: red, blue, red.
+const { stdout: boomFramesOut } = await execFileAsync("ffprobe", ["-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", path.join(root, "outputs/mcp-boomerang.mp4")]);
+checkOk(parseInt(boomFramesOut.trim(), 10) === 599, "ffprobe independently counts 599 frames on the boomerang file (2x300 - 1 pivot)", boomFramesOut.trim());
+const boomFirstR = await planeMean(path.join(root, "outputs/mcp-boomerang.mp4"), "640:360:0:0", "r", 1);
+const boomFirstB = await planeMean(path.join(root, "outputs/mcp-boomerang.mp4"), "640:360:0:0", "b", 1);
+const boomMidR = await planeMean(path.join(root, "outputs/mcp-boomerang.mp4"), "640:360:0:0", "r", 11);
+const boomMidB = await planeMean(path.join(root, "outputs/mcp-boomerang.mp4"), "640:360:0:0", "b", 11);
+const boomLastR = await planeMean(path.join(root, "outputs/mcp-boomerang.mp4"), "640:360:0:0", "r", 19);
+const boomLastB = await planeMean(path.join(root, "outputs/mcp-boomerang.mp4"), "640:360:0:0", "b", 19);
+console.log("boomerang pixels: t=1 R/B =", boomFirstR, boomFirstB, "| t=11 R/B =", boomMidR, boomMidB, "| t=19 R/B =", boomLastR, boomLastB);
+checkOk(boomFirstR > 200 && boomFirstB < 10, "boomerang starts red (forward half)", `t=1 R=${boomFirstR} B=${boomFirstB}`);
+checkOk(boomMidB > 200 && boomMidR < 10, "boomerang reversed half starts blue (was red at the end of forward)", `t=11 R=${boomMidR} B=${boomMidB}`);
+checkOk(boomLastR > 200 && boomLastB < 10, "boomerang ends red (reversed half returns to the start)", `t=19 R=${boomLastR} B=${boomLastB}`);
+// Audio-only: no video frame to pivot on, so forward + reversed
+// whole (2D = 18s); the reversed half's silence gaps must mirror:
+// original [2,4),[6,7) -> reversed [14,16),[11,12).
+const boomAudioRes = await client.callTool({
+  name: "boomerang",
+  arguments: { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-boomerang-audio.mp3") },
+});
+const boomAudioJson = JSON.parse(boomAudioRes.content[0].text);
+checkOk(near(boomAudioJson.duration_seconds, 18, 0.1) && boomAudioJson.pivot_seconds === 0 && boomAudioJson.seam_diff === null && boomAudioJson.normal_step === null && boomAudioJson.has_audio === true, "boomerang on audio-only input is 2D whole, no pivot, seam scores null", JSON.stringify(boomAudioJson));
+const { stderr: boomSdErr } = await execFileAsync("ffmpeg", ["-v", "info", "-i", path.join(root, "outputs/mcp-boomerang-audio.mp3"), "-af", "silencedetect=noise=-40dB:d=0.5", "-f", "null", "-"]);
+const boomSdStarts = [...boomSdErr.matchAll(/silence_start: ([\d.]+)/g)].map((m) => parseFloat(m[1]));
+console.log("boomerang audio silence starts:", boomSdStarts.join(", "));
+checkOk(boomSdStarts.some((t) => near(t, 11, 0.15)) && boomSdStarts.some((t) => near(t, 14, 0.15)), "boomerang audio silence gaps mirror into the reversed half ([11,12) and [14,16))", `starts at ${boomSdStarts.join(", ")}`);
+// Video-only moving content: the ball's seam must land at the
+// normal frame step (measured by hand: seam 2.91, step 2.92).
+const boomBallRes = await client.callTool({
+  name: "boomerang",
+  arguments: { input: path.join(root, "test/motion-ball.mp4"), output: path.join(root, "outputs/mcp-boomerang-ball.mp4") },
+});
+const boomBallJson = JSON.parse(boomBallRes.content[0].text);
+checkOk(near(boomBallJson.duration_seconds, 11.967, 0.05) && boomBallJson.has_audio === false, "boomerang on video-only input is 2D - 1/fps, no audio", JSON.stringify(boomBallJson.duration_seconds));
+checkOk(boomBallJson.seam_diff !== null && boomBallJson.normal_step !== null && boomBallJson.seam_diff <= boomBallJson.normal_step + 1, "boomerang on moving content lands the seam at the normal step", `seam ${boomBallJson.seam_diff}, step ${boomBallJson.normal_step}`);
+const boomNoop = await callExpectThrow("boomerang", { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-boomerang-noop.mp3"), audio: false });
+checkOk(/reverses nothing/.test(boomNoop), "boomerang audio-only + audio=false is refused (nothing to reverse)", boomNoop.slice(0, 200));
+// Batch + manifest pass-through: boomerang is a per-file batch op
+// and a manifest step like reverse.
+await rm(path.join(root, "outputs/mcp-batch-boom-in"), { recursive: true, force: true });
+await rm(path.join(root, "outputs/mcp-batch-boom-out"), { recursive: true, force: true });
+await mkdir(path.join(root, "outputs/mcp-batch-boom-in"), { recursive: true });
+await copyFile(path.join(root, "test/source.mp4"), path.join(root, "outputs/mcp-batch-boom-in/source.mp4"));
+await copyFile(path.join(root, "test/source2.mp4"), path.join(root, "outputs/mcp-batch-boom-in/source2.mp4"));
+const boomBatchRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "boomerang", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-boom-in"), output_dir: path.join(root, "outputs/mcp-batch-boom-out"), args: {}, jobs: 2 },
+});
+const boomBatchJson = JSON.parse(boomBatchRes.content[0].text);
+checkOk(boomBatchJson.succeeded === 2 && boomBatchJson.failed === 0 && boomBatchJson.results.every((r) => r.status === "ok" && near(r.result?.duration_error_seconds, 0, 0.05)), "batch boomerang succeeds on both files with exact 2D - 1/fps durations", JSON.stringify(boomBatchJson.results.map((r) => r.result?.duration_seconds)));
+await rm(path.join(root, "outputs/mcp-manifest-boomerang.mp4"), { force: true });
+const boomManifestRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-boomerang.json") },
+});
+const boomManifestJson = JSON.parse(boomManifestRes.content[0].text);
+checkOk(boomManifestJson.steps_run === 1 && boomManifestJson.steps.every((s) => s.status === "ok") && near(boomManifestJson.final.duration_seconds, 20.045, 0.05), "manifest boomerang step runs and final is 20.045s", JSON.stringify(boomManifestJson.final?.duration_seconds));
 
 // chroma_key: green screen out. Fixture test/greenscreen.mp4 is pure
 // green 640x360 with a red 200x140 rect in the middle. Transparent
@@ -3381,7 +3458,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 58 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 58 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 59 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 59 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -4589,7 +4666,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 58 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 59 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -4649,11 +4726,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 58, "GET /mcp reports name/version/transport and 58 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 59, "GET /mcp reports name/version/transport and 59 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 58 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 58 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 59 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 59 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -4677,7 +4754,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 58, "JSON-RPC tools/list returns the same 58 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 59, "JSON-RPC tools/list returns the same 59 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

@@ -618,6 +618,25 @@ frame is picked by index with `select='eq(n,299)'`; and inside that
 quoted expression the comma needs NO backslash — `eq(n\\,299)` makes the
 expression parser see one escaped comma and fails.
 
+### 33d. A boomerang drops the pivot frame — or the peak plays twice
+`boomerang in.mp4 -o out.mp4` plays a clip forward then backwards, so
+a bounce, swing or wave returns to where it started with no cut. The
+naive version ends the forward half on the last frame and starts the
+reversed half on that same frame, so the peak frame plays twice and
+the motion visibly stutters at the turn — moviepy v2.2.1 fixed
+exactly this clipping in TimeMirror. The tool trims one frame at the
+pivot: the reversed video branch drops its first frame
+(`trim=start_frame=1`, the original's last frame) and the reversed
+audio branch drops one video-frame of audio (`atrim=start=1/fps`) at
+the same point, so the output is 2D − 1/fps. Audio-only input has no
+video frame to pivot on, so it plays forward + reversed whole (2D).
+The tool measures the seam instead of asking you to eyeball it:
+`seam_diff` (output frame just before the seam vs just after it)
+against `normal_step` (two neighbouring mid-forward frames) — a good
+seam lands at the normal step, and the frame count (2N−1) is the
+honest proof the pivot frame was dropped, since duration alone
+cannot tell a duplicated frame from an adjacent one.
+
 ### 34. Resources are the map, tools are the hands — and the map never leaves the workspace
 Before guessing a path, read `videos://list` (every media file under
 the workspace root, sorted, capped at 200), then `videos://{file}/metadata`
@@ -1020,7 +1039,7 @@ cap, no timeout, no verify) — MediaKit's `download` exists so the
 agent never has to.
 
 ### 52. Test a tool over HTTP before wiring up an MCP client — same tools, curl instead of stdio
-`mediakit mcp --http [--port 3000]` serves the same 58 tools over
+`mediakit mcp --http [--port 3000]` serves the same 59 tools over
 HTTP on `127.0.0.1`: `GET /mcp` (metadata), `GET /mcp/tools`
 (every tool + JSON input schema), `POST /mcp/tools/{name}/invoke`
 (`{"arguments": {...}}`), and `POST /` for JSON-RPC 2.0

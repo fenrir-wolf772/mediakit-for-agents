@@ -1,0 +1,1 @@
+{"input":"scenes-source.mp4","output":"../outputs/mcp-manifest-boomerang.mp4","steps":[{"args":{},"tool":"boomerang"}],"version":1}

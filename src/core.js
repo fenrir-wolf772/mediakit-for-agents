@@ -4227,6 +4227,106 @@ export async function freezeFrame({ input, output, at = null, hold = 2, crf = 23
   };
 }
 
+// ---------------------------------------------------------------- boomerang
+// Play a clip forward then backwards — the ping-pong loop
+// (Zulko/moviepy's TimeSymmetrize/TimeMirror idea): output = the
+// clip followed by its own reverse, so a bounce, a swing or a
+// wave returns to where it started with no cut. The seam is where
+// the naive version breaks: the forward half ends on the last
+// frame and the reversed half starts on that same frame, so the
+// peak frame plays twice and the motion visibly stutters —
+// moviepy v2.2.1 fixed exactly this clipping in TimeMirror by
+// trimming one frame at the pivot. This tool does the same: the
+// reversed video branch drops its first frame
+// (`trim=start_frame=1`, the original's last frame) and the
+// reversed audio branch drops one video-frame of audio
+// (`atrim=start=1/fps`) at the same point, so the output is
+// 2D - 1/fps and the seam joins two neighbouring frames, not a
+// repeated one. Audio-only input has no video frame to pivot on,
+// so it plays forward + reversed whole (2D) with no audio trim.
+// The result measures the seam on disk: seam_diff (output frame
+// just before the seam vs just after it) against normal_step
+// (two neighbouring mid-forward frames) — a good seam lands at
+// the normal step, and the frame count (2N-1) is the honest
+// proof the pivot frame was really dropped, since duration alone
+// cannot tell a duplicated frame from an adjacent one.
+export async function boomerangClip({ input, output, audio = true, crf = 23 }) {
+  const inPath = await requireInput(input);
+  const outPath = await prepareOutput(output, [inPath]);
+  const c = num(crf, "crf", { min: 0, max: 51, integer: true });
+  const meta = await probe(inPath);
+  if (!meta.video && !meta.audio) throw new MediaKitError("boomerang needs a video or audio input", "INVALID_ARG");
+  const reverseAudio = audio !== false && !!meta.audio;
+  if (!meta.video && !reverseAudio) {
+    throw new MediaKitError("boomerang with --no-audio on an audio-only input reverses nothing (there is no video to reverse)", "INVALID_ARG");
+  }
+  const D = meta.duration_seconds;
+  if (!Number.isFinite(D) || D <= 0) throw new MediaKitError("boomerang needs an input with a known duration", "INVALID_ARG");
+  const fps = meta.video?.fps ?? null;
+  // The reversed branch must keep at least one frame after the
+  // pivot trim, so the clip needs at least 2 video frames.
+  if (meta.video && (!fps || D < 2 / fps)) {
+    throw new MediaKitError(`boomerang needs a clip of at least 2 frames (${fps ? (2 / fps).toFixed(3) : "?"}s at this frame rate), got ${D}s`, "INVALID_ARG");
+  }
+  const pivot = meta.video ? 1 / fps : 0;
+  const expected = meta.video ? 2 * D - pivot : 2 * D;
+  const f = (n) => +n.toFixed(4);
+  const ext = path.extname(outPath).slice(1).toLowerCase();
+  const audioCodec = AUDIO_FORMATS[ext] ?? VIDEO_CONTAINER_AUDIO[ext] ?? "aac";
+  const fc = [];
+  if (meta.video) {
+    fc.push(
+      `[0:v]split=2[fwd][rs];` +
+      `[rs]reverse,trim=start_frame=1,setpts=PTS-STARTPTS[rev];` +
+      `[fwd]setpts=PTS-STARTPTS[fwd0];` +
+      `[fwd0][rev]concat=n=2:v=1:a=0[v]`,
+    );
+  }
+  if (meta.audio) {
+    // Audio-only has no video pivot: reverse the whole audio.
+    const atrim = meta.video ? `atrim=start=${f(pivot)},` : "";
+    fc.push(
+      `[0:a]asplit=2[af][ar];` +
+      `[ar]areverse,${atrim}asetpts=PTS-STARTPTS[ar2];` +
+      `[af][ar2]concat=n=2:v=0:a=1[aout]`,
+    );
+  }
+  const args = ["-y", "-i", inPath, "-filter_complex", fc.join(";")];
+  if (meta.video) args.push("-map", "[v]", "-c:v", "libx264", "-crf", String(c), "-preset", "medium");
+  if (meta.audio) {
+    if (reverseAudio) args.push("-map", "[aout]", "-c:a", audioCodec, ...audioBitrateArgs(audioCodec));
+    else args.push("-c:a", "copy");
+  }
+  args.push(outPath);
+  await run(FFMPEG, args);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  let seamDiff = null;
+  let normalStep = null;
+  if (meta.video) {
+    const step = 1 / fps;
+    seamDiff = await frameDiffMean(outPath, D - step, D, fps);
+    const mid = D / 2;
+    normalStep = await frameDiffMean(outPath, mid, mid + step, fps);
+  }
+  return {
+    operation: "boomerang", input: inPath, output: outPath,
+    duration_before_seconds: D,
+    duration_seconds: out.duration_seconds,
+    expected_duration_seconds: +expected.toFixed(3),
+    duration_error_seconds: +(out.duration_seconds - expected).toFixed(3),
+    pivot_seconds: +pivot.toFixed(4),
+    seam_diff: seamDiff,
+    normal_step: normalStep,
+    video_reversed: !!meta.video,
+    audio_reversed: reverseAudio,
+    audio_codec: reverseAudio ? audioCodec : (meta.audio ? "copy" : null),
+    has_audio: !!meta.audio,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+    size_bytes: info.size_bytes,
+  };
+}
+
 // ---------------------------------------------------------------- chroma_key
 // Remove a green/blue screen (ffmpeg-cookbook's chromakey recipe +
 // MakeMyClip's backlog item): `chromakey=color:similarity:blend`
@@ -6138,6 +6238,7 @@ const TOOL_REQUIREMENTS = {
   check: { filters: ["loudnorm", "blackdetect", "freezedetect", "silencedetect", "astats", "ametadata"] },
   grade: { filters: ["eq", "hue", "colorbalance", "lutrgb"], encoders: ["libx264"] },
   reverse: { filters: ["reverse", "areverse"], encoders: ["libx264", "aac"] },
+  boomerang: { filters: ["split", "reverse", "trim", "setpts", "concat", "asplit", "areverse", "atrim", "asetpts", "blend", "signalstats"], encoders: ["libx264", "aac"] },
   make_loopable: { filters: ["split", "asplit", "trim", "atrim", "setpts", "asetpts", "format", "fade", "overlay", "concat", "acrossfade", "blend", "signalstats"], encoders: ["libx264", "aac"] },
   freeze: { filters: ["split", "asplit", "trim", "atrim", "setpts", "asetpts", "loop", "concat", "fps", "format", "volume", "apad", "blend", "signalstats"], encoders: ["libx264", "aac"] },
   interpolate: { filters: ["minterpolate"], encoders: ["libx264"] },
@@ -7510,6 +7611,10 @@ export const BATCH_OPERATIONS = {
   reverse: {
     args: ["audio", "crf"],
     run: (input, output, a) => reverseClip({ input, output, audio: a.audio ?? true, crf: a.crf ?? 23 }),
+  },
+  boomerang: {
+    args: ["audio", "crf"],
+    run: (input, output, a) => boomerangClip({ input, output, audio: a.audio ?? true, crf: a.crf ?? 23 }),
   },
   make_loopable: {
     args: ["overlap", "crf"],

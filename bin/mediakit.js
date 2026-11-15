@@ -287,6 +287,16 @@ const COMMANDS = {
       ["-o, --output", "Output file (required)"],
     ],
   },
+  boomerang: {
+    usage: "mediakit boomerang <input> -o <output> [--no-audio] [--crf 23]",
+    desc: "Play a clip forward then backwards — the ping-pong loop. The peak frame is not played twice: the reversed half drops its first frame (moviepy TimeMirror fix) and the reversed audio drops one video-frame of audio, so the output is 2D - 1/fps (audio-only input plays forward + reversed whole, 2D). Reports seam_diff vs normal_step measured on disk. Works on audio-only input too.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--no-audio", "Keep the audio playing forward under the ping-pong video (reverses nothing on audio-only input)"],
+      ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["-o, --output", "Output file (required)"],
+    ],
+  },
   "chroma-key": {
     usage: "mediakit chroma-key <input> -o <output.mov> [--color 00FF00] [--similarity 0.1] [--blend 0] [--background <image|hex>] [--crf 23]",
     desc: "Remove a green/blue screen. Without --background the output keeps transparency and MUST be .mov (ProRes 4444) — .mp4 has no alpha, and this ffmpeg build drops VP9 alpha in .webm. With --background (an image file or a hex color) the subject is composited onto it and the output is a flat .mp4/.webm. Reports the alpha measured on disk (middle frame): full-frame mean, corner (~0 for a full-screen key) and center (~255 on the subject).",
@@ -653,7 +663,7 @@ const COMMANDS = {
   },
   batch: {
     usage: "mediakit batch <operation> --pattern <glob> --input-dir <dir> -o <output-dir> [--args-json '{\"target_lufs\": -14}'] [--jobs 1] [--suffix -loudness] [--no-cache] [--stop-on-error] [--timeout 1800] [--max-files 200] [--dry-run]",
-    desc: "Apply one operation (loudness|resize|reframe|compress|convert|extract-audio|reverse|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|slideshow) to every file matching a glob under a folder, with the same args for all. Outputs are <stem>-<operation>.<ext> under the output dir, mirroring the input tree; a batch-manifest.json records every file's result. Unchanged files are skipped via a content-hash cache; --dry-run lists the planned outputs and writes nothing. cut-words and remove-retakes find each clip's words file as <words-dir>/<stem>.words.json (default: the input's own folder) — a clip with no words file fails its own row only. slideshow is a set operation: the whole matched set of images (2-32) becomes ONE slideshow video (--args-json '{\"output_name\": \"reel.mp4\"}'), and the per-file cache does not apply.",
+    desc: "Apply one operation (loudness|resize|reframe|compress|convert|extract-audio|reverse|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|slideshow) to every file matching a glob under a folder, with the same args for all. Outputs are <stem>-<operation>.<ext> under the output dir, mirroring the input tree; a batch-manifest.json records every file's result. Unchanged files are skipped via a content-hash cache; --dry-run lists the planned outputs and writes nothing. cut-words and remove-retakes find each clip's words file as <words-dir>/<stem>.words.json (default: the input's own folder) — a clip with no words file fails its own row only. slideshow is a set operation: the whole matched set of images (2-32) becomes ONE slideshow video (--args-json '{\"output_name\": \"reel.mp4\"}'), and the per-file cache does not apply.",
     args: [{ name: "operation", required: true }],
     options: [
       ["--pattern", "Glob under --input-dir: **/*.mp4 (any depth), sub/*.mp4 (one folder), or bare *.mp4 (basename at any depth) (required)"],
@@ -694,7 +704,7 @@ const COMMANDS = {
   },
   manifest: {
     usage: "mediakit manifest <manifest.json> [-o <output.mp4>] [--dry-run] [--no-cache] [--keep-intermediates]",
-    desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (slideshow as step 1 only — it builds from images in args, so input should be the first slide image; then trim|resize|reframe|compress|convert|extract-audio|reverse|make-loopable|freeze|grade|fit|silence|denoise|interpolate|burn-captions|overlay|chroma-key|cut-words|remove-retakes), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file.",
+    desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (slideshow as step 1 only — it builds from images in args, so input should be the first slide image; then trim|resize|reframe|compress|convert|extract-audio|reverse|boomerang|make-loopable|freeze|grade|fit|silence|denoise|interpolate|burn-captions|overlay|chroma-key|cut-words|remove-retakes), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file.",
     args: [{ name: "manifest", required: true }],
     options: [
       ["--dry-run", "Validate the manifest and list the planned steps without running anything"],
@@ -1061,6 +1071,13 @@ async function main() {
         break;
       case "reverse":
         result = await core.reverseClip({
+          input: needInput(), output: needOutput(opts),
+          audio: opts.audio !== false,
+          crf: numOpt(opts, "crf") ?? 23,
+        });
+        break;
+      case "boomerang":
+        result = await core.boomerangClip({
           input: needInput(), output: needOutput(opts),
           audio: opts.audio !== false,
           crf: numOpt(opts, "crf") ?? 23,
@@ -1447,7 +1464,7 @@ async function main() {
         break;
       }
       case "batch": {
-        if (!positional[0]) fail("missing operation: loudness|resize|reframe|compress|convert|extract-audio|reverse|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|slideshow");
+        if (!positional[0]) fail("missing operation: loudness|resize|reframe|compress|convert|extract-audio|reverse|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|slideshow");
         if (!opts.pattern) fail("missing required option: --pattern <glob>");
         if (!opts.input_dir) fail("missing required option: --input-dir <dir>");
         const opName = positional[0].replace(/-/g, "_");
