@@ -1032,6 +1032,19 @@ both modes — no magnitude threshold can separate it from real
 motion. Do not port PySceneDetect's adaptive *ratio* (score over a
 rolling local average) to this verdict: it detects cuts, and a
 smoothly moving ball scores ratio ~1.0 against its neighbours.
+Some motion is too slow for one frame step: a 10s fade-in from
+black reads `static` (energy 0.00043 — the per-frame level change
+is under the >2-level binarization) and a creeping zoom reads
+0.002. Pass `--lag-seconds N` (whole seconds, 1–30, less than the
+clip duration): the curve then compares frames N seconds apart, so
+the same fade reads `moving` with energy ~1.0 at lag 2 and the zoom
+is amplified 11x. The value at second k is the change between
+second k and second k+N; still intervals are corrected to clip time
+(end + lag, clamped to the duration). Two blind spots to know: a
+still shorter than lag+1s produces no pair fully inside it, and a
+still in the final lag seconds has no later frame to compare
+against — use lag 1 when you need short freezes. Lag energy is not
+comparable with adjacent-frame energy of the same clip.
 
 ## Workflow: vertical captioned clip from a landscape source
 

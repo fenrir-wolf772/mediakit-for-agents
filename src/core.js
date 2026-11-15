@@ -5813,6 +5813,7 @@ const DOCTOR_FILTERS = [
   "chromakey", "zoompan",
   "afade",
   "tblend", "signalstats",
+  "blend", "split",
 ];
 const DOCTOR_ENCODERS = [
   "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4", "prores_ks",
@@ -5861,7 +5862,7 @@ const TOOL_REQUIREMENTS = {
   mix: { filters: ["sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay"], encoders: ["aac", "libmp3lame"] },
   overlay: { filters: ["overlay", "format", "scale", "colorchannelmixer"], encoders: ["libx264"] },
   scenes: { filters: ["select"] },
-  motion: { filters: ["tblend", "geq", "signalstats", "scale"] },
+  motion: { filters: ["tblend", "blend", "fps", "split", "trim", "setpts", "geq", "signalstats", "scale"] },
   keyframes: {},
   fit: { filters: ["setpts", "atempo", "fps"], encoders: ["libx264", "aac"] },
   pip: { filters: ["overlay", "format", "scale", "colorchannelmixer", "amix"], encoders: ["libx264"] },
@@ -6859,11 +6860,30 @@ export async function detectScenes({ input, threshold = 0.3 }) {
 // 1 (tblend needs a pair), so frames_analyzed = total frames - 1.
 // Metadata prints only at info level: never add -v error here (same
 // trap as the loudnorm/astats parsers).
-// --adaptive calibrates the threshold to the clip (see the pass-2
-// block below): light grain on a static shot (measured 0.00074-
-// 0.00126) reads still instead of flickering across the fixed 0.001,
-// while a bouncing ball (slowest second 0.00695) still reads moving.
-export async function measureMotion({ input, threshold = 0.001, minStillSeconds = 2, windowSeconds = 1, adaptive = false, adaptiveFactor = 2, adaptiveCap = 0.005 }) {
+// --lag-seconds N (integer 1-30, default 0 = off) compares frames N
+// seconds apart instead of adjacent frames, so motion too slow for
+// one frame step becomes visible: a 10s fade-in from black reads
+// 0.00043 adjacent (verdict static — the per-frame level change is
+// under the >2-level binarization) but ~1.0 at lag 2 (51 levels over
+// 2s). The graph samples one frame per second (fps=1), splits it,
+// delays one copy by N seconds, and diffs the pair with blend (NOT
+// tblend: tblend blends successive frames of ONE stream and takes a
+// single input — the two-stream diff needs blend). The value at
+// second k is the fraction of pixels that changed between second k
+// and second k+N, so the curve is "change over the last N seconds
+// ending at k+N", not "change during second k". Consequences, all
+// deliberate: a still run [s0, s1) in lag mode means the picture was
+// still over [s0, s1+N) — the flush corrects the end by +N (clamped
+// to the duration) and min_still_seconds applies to the corrected
+// length; a still shorter than N+1s produces no pair fully inside
+// it and is not reported in lag mode (use lag 1 for short freezes);
+// a still in the final N seconds has no later frame to compare
+// against and is not reported. frames_analyzed counts lag pairs
+// (one per second minus N), and motion_energy is the mean lag
+// fraction — not comparable with the adjacent-frame energy of the
+// same clip. Lag mode and --adaptive compose: the adaptive floor is
+// taken from the lag curve.
+export async function measureMotion({ input, threshold = 0.001, minStillSeconds = 2, windowSeconds = 1, adaptive = false, adaptiveFactor = 2, adaptiveCap = 0.005, lagSeconds = 0 }) {
   const inPath = await requireInput(input);
   const t = num(threshold, "threshold", { min: 0, max: 0.5 });
   const adapt = adaptive === true;
@@ -6871,10 +6891,17 @@ export async function measureMotion({ input, threshold = 0.001, minStillSeconds 
   const cap = adapt ? num(adaptiveCap, "adaptive_cap", { min: 0.0005, max: 0.05 }) : 0.005;
   const minStill = num(minStillSeconds, "min_still_seconds", { min: 0.5, max: 60 });
   const win = num(windowSeconds, "window_seconds", { min: 0.25, max: 5 });
+  const lag = num(lagSeconds, "lag_seconds", { min: 0, max: 30, integer: true });
   const meta = await probe(inPath);
   if (!meta.video) throw new MediaKitError("motion needs a video input", "INVALID_ARG");
   const duration = meta.duration_seconds;
-  const vf = "scale=160:-2,format=gray,tblend=all_mode=difference,geq=lum='if(gt(lum(X,Y)\\,2)\\,255\\,0)',signalstats,metadata=print:key=lavfi.signalstats.YAVG";
+  if (lag > 0) {
+    if (duration == null) throw new MediaKitError("motion --lag-seconds needs a clip with a known duration", "INVALID_ARG");
+    if (lag >= duration) throw new MediaKitError(`lag_seconds (${lag}) must be less than the clip duration (${duration}s)`, "INVALID_ARG");
+  }
+  const vf = lag === 0
+    ? "scale=160:-2,format=gray,tblend=all_mode=difference,geq=lum='if(gt(lum(X,Y)\\,2)\\,255\\,0)',signalstats,metadata=print:key=lavfi.signalstats.YAVG"
+    : `scale=160:-2,format=gray,fps=1,split[a][b];[a]trim=start=${lag},setpts=PTS-STARTPTS[a2];[b]trim=end=${+(duration - lag).toFixed(3)},setpts=PTS-STARTPTS[b2];[b2][a2]blend=all_mode=difference,geq=lum='if(gt(lum(X,Y)\\,2)\\,255\\,0)',signalstats,metadata=print:key=lavfi.signalstats.YAVG`;
   const { stderr } = await run(FFMPEG, [
     "-hide_banner", "-nostats", "-i", inPath, "-vf", vf, "-f", "null", "-",
   ]);
@@ -6939,12 +6966,20 @@ export async function measureMotion({ input, threshold = 0.001, minStillSeconds 
   let runStart = null;
   let runEnd = null;
   const flushRun = () => {
-    if (runStart !== null && runEnd - runStart >= minStill - 1e-9) {
-      stillIntervals.push({
-        start_seconds: +runStart.toFixed(3),
-        end_seconds: +runEnd.toFixed(3),
-        duration_seconds: +(runEnd - runStart).toFixed(3),
-      });
+    // In lag mode the value at second k compares frames k and k+lag,
+    // so a still run [s0, s1) in lag time means the picture was still
+    // over [s0, s1+lag) in clip time — correct the end (clamped to
+    // the duration) and apply min_still_seconds to the corrected
+    // length. In adjacent mode the run is already in clip time.
+    if (runStart !== null) {
+      const end = lag ? Math.min(runEnd + lag, duration ?? runEnd + lag) : runEnd;
+      if (end - runStart >= minStill - 1e-9) {
+        stillIntervals.push({
+          start_seconds: +runStart.toFixed(3),
+          end_seconds: +end.toFixed(3),
+          duration_seconds: +(end - runStart).toFixed(3),
+        });
+      }
     }
     runStart = null;
     runEnd = null;
@@ -6989,6 +7024,7 @@ export async function measureMotion({ input, threshold = 0.001, minStillSeconds 
     adaptive: adaptiveInfo,
     min_still_seconds: minStill,
     window_seconds: win,
+    lag_seconds: lag,
     duration_seconds: duration,
     dimensions: meta.video ? `${meta.video.width}x${meta.video.height}` : null,
     frames_analyzed: frames.length,

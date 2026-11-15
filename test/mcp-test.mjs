@@ -1322,6 +1322,64 @@ checkOk(/greater than or equal to 1/.test(motionAdaptBadFactor), "motion adaptiv
 const motionAdaptBadCap = await callExpectThrow("motion", { input: path.join(root, "test/motion-noise-light.mp4"), adaptive: true, adaptive_cap: 0 });
 checkOk(/greater than or equal to 0\.0005/.test(motionAdaptBadCap), "motion adaptive refuses cap 0 (zod schema; CLI refuses with the core message)", motionAdaptBadCap.slice(0, 120));
 
+// motion --lag-seconds: compare frames N seconds apart instead of
+// adjacent frames, so motion too slow for one frame step becomes
+// visible. The headline fixture is a 10s fade-in from black: the
+// per-frame level change (+0.85 levels) sits under the >2-level
+// binarization, so adjacent mode calls it static (energy 0.00043);
+// at lag 2 the accumulated change is 51 levels and every pixel
+// flips (energy 1.0). A creeping zoom (zoompan 0.0001/frame) is
+// amplified 11x by lag 2 (0.00211 -> 0.02321). Still intervals in
+// lag mode are corrected to clip time (end + lag, clamped): the
+// freeze fixture is really testsrc [0,4) + red static [4,7) +
+// testsrc [7,10), and lag 1 reports the true [4,7] — adjacent mode
+// reports [5,7] because window [4,5) holds the freeze-onset
+// transient. A still in the final lag seconds, or shorter than
+// lag+1s, is not reported in lag mode.
+const motionFadeAdjRes = await client.callTool({
+  name: "motion",
+  arguments: { input: path.join(root, "test/motion-fade-slow.mp4") },
+});
+const motionFadeAdjJson = JSON.parse(motionFadeAdjRes.content[0].text);
+console.log("motion fade adjacent:", motionFadeAdjJson.verdict, "| energy", motionFadeAdjJson.motion_energy);
+checkOk(motionFadeAdjJson.verdict === "static" && motionFadeAdjJson.motion_energy < 0.001 && motionFadeAdjJson.lag_seconds === 0, "motion: slow 10s fade-in reads static adjacent (energy 0.00043 < 0.001)", `energy=${motionFadeAdjJson.motion_energy} verdict=${motionFadeAdjJson.verdict}`);
+const motionFadeLagRes = await client.callTool({
+  name: "motion",
+  arguments: { input: path.join(root, "test/motion-fade-slow.mp4"), lag_seconds: 2 },
+});
+const motionFadeLagJson = JSON.parse(motionFadeLagRes.content[0].text);
+console.log("motion fade lag2:", motionFadeLagJson.verdict, "| energy", motionFadeLagJson.motion_energy, "| frames", motionFadeLagJson.frames_analyzed, "| curve", motionFadeLagJson.motion_curve.map((w) => w.motion_fraction).join(","));
+checkOk(motionFadeLagJson.verdict === "moving" && motionFadeLagJson.motion_energy > 0.9 && motionFadeLagJson.frames_analyzed === 8 && motionFadeLagJson.motion_curve.length === 8 && motionFadeLagJson.lag_seconds === 2 && motionFadeLagJson.still_intervals.length === 0, "motion lag: same fade reads moving at lag 2 (energy ~1.0, 8 lag pairs, no still)", `energy=${motionFadeLagJson.motion_energy} verdict=${motionFadeLagJson.verdict}`);
+const motionZoomAdjRes = await client.callTool({
+  name: "motion",
+  arguments: { input: path.join(root, "test/motion-zoom-slow2.mp4") },
+});
+const motionZoomAdjJson = JSON.parse(motionZoomAdjRes.content[0].text);
+const motionZoomLagRes = await client.callTool({
+  name: "motion",
+  arguments: { input: path.join(root, "test/motion-zoom-slow2.mp4"), lag_seconds: 2 },
+});
+const motionZoomLagJson = JSON.parse(motionZoomLagRes.content[0].text);
+console.log("motion zoom-slow adjacent vs lag2:", motionZoomAdjJson.motion_energy, "->", motionZoomLagJson.motion_energy);
+checkOk(motionZoomLagJson.verdict === "moving" && motionZoomLagJson.motion_energy > 0.02 && motionZoomLagJson.motion_energy > 5 * motionZoomAdjJson.motion_energy, "motion lag: creeping zoom amplified 11x by lag 2 (0.00211 -> 0.02321)", `adjacent=${motionZoomAdjJson.motion_energy} lag2=${motionZoomLagJson.motion_energy}`);
+const motionFreezeLagRes = await client.callTool({
+  name: "motion",
+  arguments: { input: path.join(root, "test/content-freeze.mp4"), lag_seconds: 1 },
+});
+const motionFreezeLagJson = JSON.parse(motionFreezeLagRes.content[0].text);
+console.log("motion freeze lag1:", motionFreezeLagJson.verdict, "| still", JSON.stringify(motionFreezeLagJson.still_intervals), "| moving_fraction", motionFreezeLagJson.moving_fraction);
+checkOk(motionFreezeLagJson.verdict === "mostly-static" && motionFreezeLagJson.still_intervals.length === 1 && motionFreezeLagJson.still_intervals[0].start_seconds === 4 && motionFreezeLagJson.still_intervals[0].end_seconds === 7 && motionFreezeLagJson.still_intervals[0].duration_seconds === 3 && motionFreezeLagJson.moving_fraction === 0.7, "motion lag: freeze reports true [4,7] at lag 1 (end corrected +lag, not adjacent [5,7])", JSON.stringify(motionFreezeLagJson.still_intervals));
+const motionStaticLagRes = await client.callTool({
+  name: "motion",
+  arguments: { input: path.join(root, "test/static-clip.mp4"), lag_seconds: 2 },
+});
+const motionStaticLagJson = JSON.parse(motionStaticLagRes.content[0].text);
+checkOk(motionStaticLagJson.verdict === "static" && motionStaticLagJson.still_intervals.length === 1 && motionStaticLagJson.still_intervals[0].start_seconds === 0 && motionStaticLagJson.still_intervals[0].end_seconds === 3 && motionStaticLagJson.frames_analyzed === 1, "motion lag: static clip still [0,3] at lag 2 (corrected end clamped to duration, 1 lag pair)", JSON.stringify(motionStaticLagJson.still_intervals));
+const motionLagTooLong = await callExpectThrow("motion", { input: path.join(root, "test/source.mp4"), lag_seconds: 10 });
+checkOk(/must be less than the clip duration/.test(motionLagTooLong), "motion lag refuses lag >= duration", motionLagTooLong.slice(0, 120));
+const motionLagFraction = await callExpectThrow("motion", { input: path.join(root, "test/source.mp4"), lag_seconds: 0.5 });
+checkOk(/integer/i.test(motionLagFraction), "motion lag refuses fractional lag_seconds (zod int; CLI refuses with the core message)", motionLagFraction.slice(0, 120));
+
 const keyframesRes = await client.callTool({
   name: "keyframes",
   arguments: { input: path.join(root, "test/source.mp4") },

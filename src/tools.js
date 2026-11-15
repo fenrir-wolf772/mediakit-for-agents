@@ -1290,12 +1290,13 @@ export const TOOL_DEFS = [
 
   {
     name: "motion",
-    description: "Measure real movement in a video (probe-only, writes no file): per-second curve of the fraction of pixels that changed between adjacent frames, plus still intervals and a verdict (moving / mostly-static / static). Use it as the director's motion gate — a shot that looks alive in the timeline but scores 0.0000 is a still wearing a video's clothes. A static title card measures 0.0000-0.0001, a bouncing ball 0.003-0.009, testsrc 0.06; the default still threshold 0.001 splits movement from encoder noise with a wide margin. Pass adaptive:true to calibrate the threshold to the clip instead: the threshold becomes min(max(threshold, p25-of-curve * adaptive_factor), max(adaptive_cap, threshold)) (defaults factor 2.0, cap 0.005), so light grain on a static shot (0.0007-0.0013) reads still while a bouncing ball (slowest second 0.007) still reads moving — the cap sits in the measured gap between grain and the slowest real motion.",
+    description: "Measure real movement in a video (probe-only, writes no file): per-second curve of the fraction of pixels that changed between adjacent frames, plus still intervals and a verdict (moving / mostly-static / static). Use it as the director's motion gate — a shot that looks alive in the timeline but scores 0.0000 is a still wearing a video's clothes. A static title card measures 0.0000-0.0001, a bouncing ball 0.003-0.009, testsrc 0.06; the default still threshold 0.001 splits movement from encoder noise with a wide margin. Pass adaptive:true to calibrate the threshold to the clip instead: the threshold becomes min(max(threshold, p25-of-curve * adaptive_factor), max(adaptive_cap, threshold)) (defaults factor 2.0, cap 0.005), so light grain on a static shot (0.0007-0.0013) reads still while a bouncing ball (slowest second 0.007) still reads moving — the cap sits in the measured gap between grain and the slowest real motion. Pass lag_seconds to catch motion too slow for one frame step: the curve then compares frames N seconds apart (value at second k = change between second k and second k+N), so a 10s fade-in from black reads 0.00043 adjacent (static) but ~1.0 at lag 2. Still intervals in lag mode are corrected to clip time (end + lag, clamped to the duration); a still shorter than lag+1s, or one in the final lag seconds, is not reported — use lag 1 for short freezes.",
     schema: {
     input: pathSchema,
     threshold: z.number().min(0).max(0.5).default(0.001).describe("Still threshold on the moved-pixel fraction (0-0.5, default 0.001 = 0.1% of pixels; a window below it counts as still)"),
     min_still_seconds: z.number().min(0.5).max(60).default(2).describe("A still interval must last at least this long to be reported (default 2s; shorter still blips are ignored)"),
     window_seconds: z.number().min(0.25).max(5).default(1).describe("Curve window in seconds (default 1)"),
+    lag_seconds: z.number().int().min(0).max(30).default(0).describe("Compare frames this many whole seconds apart instead of adjacent frames (default 0 = adjacent). Catches motion too slow for one frame step — a slow fade, a creeping zoom — at the cost of 1-second curve resolution; still intervals are corrected to clip time"),
     adaptive: z.boolean().default(false).describe("Calibrate the still threshold to this clip's own quiet quarter instead of using the fixed threshold (default false)"),
     adaptive_factor: z.number().min(1).max(10).default(2).describe("Adaptive mode: multiply the clip's 25th-percentile motion by this (default 2.0)"),
     adaptive_cap: z.number().min(0.0005).max(0.05).default(0.005).describe("Adaptive mode: the calibrated threshold never exceeds this (default 0.005 — sits between light grain and the slowest real motion)"),
@@ -1308,6 +1309,7 @@ export const TOOL_DEFS = [
     adaptive: a.adaptive,
     adaptiveFactor: a.adaptive_factor,
     adaptiveCap: a.adaptive_cap,
+    lagSeconds: a.lag_seconds,
   })),
   },
 ];

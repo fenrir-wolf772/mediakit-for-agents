@@ -585,13 +585,14 @@ const COMMANDS = {
     options: [],
   },
   motion: {
-    usage: "mediakit motion <input> [--threshold 0.001] [--min-still-seconds 2] [--window 1]",
-    desc: "Measure real movement: per-second curve of the fraction of pixels that changed between adjacent frames, still intervals, and a verdict (moving / mostly-static / static). Probe-only, writes no file. The director's motion gate for a shot.",
+    usage: "mediakit motion <input> [--threshold 0.001] [--min-still-seconds 2] [--window 1] [--lag-seconds 0]",
+    desc: "Measure real movement: per-second curve of the fraction of pixels that changed between adjacent frames, still intervals, and a verdict (moving / mostly-static / static). --lag-seconds N compares frames N seconds apart instead, catching motion too slow for one frame step (a slow fade, a creeping zoom). Probe-only, writes no file. The director's motion gate for a shot.",
     args: [{ name: "input", required: true }],
     options: [
       ["--threshold", "Still threshold on the moved-pixel fraction 0-0.5 (default 0.001 = 0.1% of pixels)"],
       ["--min-still-seconds", "A still interval must last at least this long to be reported (default 2)"],
       ["--window", "Curve window in seconds (default 1)"],
+      ["--lag-seconds", "Compare frames this many whole seconds apart instead of adjacent frames (default 0). Still intervals are corrected to clip time"],
     ],
   },
   mux: {
@@ -1367,6 +1368,7 @@ async function main() {
           adaptive: opts.adaptive === true,
           adaptiveFactor: numOpt(opts, "adaptive_factor") ?? 2,
           adaptiveCap: numOpt(opts, "adaptive_cap") ?? 0.005,
+          lagSeconds: numOpt(opts, "lag_seconds") ?? 0,
         });
         break;
       case "mux": {
