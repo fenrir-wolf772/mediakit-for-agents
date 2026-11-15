@@ -637,6 +637,30 @@ seam lands at the normal step, and the frame count (2N−1) is the
 honest proof the pivot frame was dropped, since duration alone
 cannot tell a duplicated frame from an adjacent one.
 
+### 33e. Verify a render against its receipt — and dry-run a cut before you render it
+Every full `assemble` render writes `assemble-receipt.json` next to
+`final.mp4`: per-input digests (manifest, voice, music, captions,
+sfx, shot assets), the combined fingerprint, the output sha256 and
+measured duration/frames/dimensions/LUFS. `verify <receipt>` re-hashes
+everything on disk and reports `matched`/`changed`/`missing` per item
+with a `pass`/`fail` verdict and the first difference — run it on any
+render you must trust (report videos, deliveries) and whenever a file
+has been edited since the render: a swapped voice fails on `voice`,
+a zeroed hash fails on `output_bytes`. `verify --rerender` re-runs
+assemble from the recorded manifest and compares the new receipt
+against the old one — on this machine renders are byte-identical, so
+it is a real reproducibility proof (across machines only the measured
+properties are comparable). The rerender reuses the content-addressed
+shot cache, so it proves join/audio/mux determinism + cache integrity;
+delete `.mediakit-assemble-cache` next to the manifest to force fresh
+shot builds. Before any cut, `trim`/`resize`/`convert`/`crop` all
+take `--dry-run`: the exact ffmpeg command(s) that would run, no file
+written — three commands for `trim --smart-cut` (head re-encode, tail
+copy, concat), one for the rest. The plan is computed from real probes
+(the keyframe list for `--snap`, the GOP for `--gop`), so a dry-run
+that prints the wrong cut is a bug, not a guess — read the command
+before you run it.
+
 ### 34. Resources are the map, tools are the hands — and the map never leaves the workspace
 Before guessing a path, read `videos://list` (every media file under
 the workspace root, sorted, capped at 200), then `videos://{file}/metadata`
@@ -1039,7 +1063,7 @@ cap, no timeout, no verify) — MediaKit's `download` exists so the
 agent never has to.
 
 ### 52. Test a tool over HTTP before wiring up an MCP client — same tools, curl instead of stdio
-`mediakit mcp --http [--port 3000]` serves the same 59 tools over
+`mediakit mcp --http [--port 3000]` serves the same 60 tools over
 HTTP on `127.0.0.1`: `GET /mcp` (metadata), `GET /mcp/tools`
 (every tool + JSON input schema), `POST /mcp/tools/{name}/invoke`
 (`{"arguments": {...}}`), and `POST /` for JSON-RPC 2.0

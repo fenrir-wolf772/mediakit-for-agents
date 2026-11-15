@@ -1,0 +1,1 @@
+{"fps":30,"height":960,"shots":[{"duration":3.0,"id":"rings","kind":"canvas_scene","params":{"color":"#38BDF8","count":3},"template":"rings"}],"title":"Verify tiny film","version":1,"voice":{"lead":0.5,"path":"verify-voice.mp3","tail":0.5},"width":540}

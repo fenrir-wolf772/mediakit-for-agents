@@ -18,8 +18,8 @@ const COMMANDS = {
     options: [],
   },
   trim: {
-    usage: "mediakit trim <input> --start <s|MM:SS> (--duration <s|MM:SS> | --end <s|MM:SS>) -o <output> [--stream-copy] [--snap] [--smart-cut]",
-    desc: "Cut a clip. Re-encodes by default (frame-accurate); --stream-copy is fast but keyframe-only. --snap (with --stream-copy) moves start/end onto the nearest keyframes. --smart-cut (with --stream-copy) keeps the exact start: only the head up to the next keyframe is re-encoded, the rest is copied. Times accept seconds or MM:SS.",
+    usage: "mediakit trim <input> --start <s|MM:SS> (--duration <s|MM:SS> | --end <s|MM:SS>) -o <output> [--stream-copy] [--snap] [--smart-cut] [--dry-run]",
+    desc: "Cut a clip. Re-encodes by default (frame-accurate); --stream-copy is fast but keyframe-only. --snap (with --stream-copy) moves start/end onto the nearest keyframes. --smart-cut (with --stream-copy) keeps the exact start: only the head up to the next keyframe is re-encoded, the rest is copied. --dry-run prints the exact ffmpeg command(s) that would run (three for --smart-cut) and writes no file. Times accept seconds or MM:SS.",
     args: [{ name: "input", required: true }],
     options: [
       ["--start", "Start time in seconds or MM:SS (default 0)"],
@@ -28,6 +28,7 @@ const COMMANDS = {
       ["--stream-copy", "Copy streams without re-encoding"],
       ["--snap", "Snap start/end to the nearest keyframes (needs --stream-copy)"],
       ["--smart-cut", "Exact start with stream copy: re-encode only the head up to the next keyframe (needs --stream-copy, refuses --snap)"],
+      ["--dry-run", "Print the exact ffmpeg command(s) and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -43,26 +44,28 @@ const COMMANDS = {
     ],
   },
   crop: {
-    usage: "mediakit crop <input> --width <px> --height <px> [--x <px>] [--y <px>] -o <output>",
-    desc: "Crop a video to a rectangle.",
+    usage: "mediakit crop <input> --width <px> --height <px> [--x <px>] [--y <px>] -o <output> [--dry-run]",
+    desc: "Crop a video to a rectangle. --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--width", "Crop width in pixels (required)"],
       ["--height", "Crop height in pixels (required)"],
       ["--x", "Left offset (default 0)"],
       ["--y", "Top offset (default 0)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
   resize: {
-    usage: "mediakit resize <input> [--width <px>] [--height <px>] [--preset 360p|480p|720p|1080p|2160p] [--no-keep-aspect] -o <output>",
-    desc: "Resize a video. With --keep-aspect (default) the missing dimension follows the aspect ratio. --preset fits the frame inside a named box (e.g. 720p = 1280x720) and never upscales; it cannot be combined with --width/--height.",
+    usage: "mediakit resize <input> [--width <px>] [--height <px>] [--preset 360p|480p|720p|1080p|2160p] [--no-keep-aspect] -o <output> [--dry-run]",
+    desc: "Resize a video. With --keep-aspect (default) the missing dimension follows the aspect ratio. --preset fits the frame inside a named box (e.g. 720p = 1280x720) and never upscales; it cannot be combined with --width/--height. --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--width", "Target width in pixels"],
       ["--height", "Target height in pixels"],
       ["--preset", "Named preset: 360p (640x360), 480p (854x480), 720p (1280x720), 1080p (1920x1080), 2160p (3840x2160)"],
       ["--no-keep-aspect", "Stretch to exact dimensions (needs both --width and --height)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -408,8 +411,8 @@ const COMMANDS = {
     ],
   },
   convert: {
-    usage: "mediakit convert <input> -o <output> [--video-codec <c>] [--audio-codec <c>] [--crf <n>] [--preset <p>] [--gop <frames>] [--gop-seconds <s>]",
-    desc: "Change container or codec. Omit a codec to stream-copy that stream. --gop / --gop-seconds sets an exact keyframe interval on re-encode (measured on the output file).",
+    usage: "mediakit convert <input> -o <output> [--video-codec <c>] [--audio-codec <c>] [--crf <n>] [--preset <p>] [--gop <frames>] [--gop-seconds <s>] [--dry-run]",
+    desc: "Change container or codec. Omit a codec to stream-copy that stream. --gop / --gop-seconds sets an exact keyframe interval on re-encode (measured on the output file). --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--video-codec", "libx264 | libx265 | vp9 | av1 | mpeg4 | copy"],
@@ -418,6 +421,7 @@ const COMMANDS = {
       ["--preset", "Encoding preset (default medium)"],
       ["--gop", "Keyframe interval in frames (needs --video-codec re-encode)"],
       ["--gop-seconds", "Keyframe interval in seconds (from source fps; needs --video-codec re-encode)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -702,6 +706,15 @@ const COMMANDS = {
       ["--cancel", "Cancel a queued or running job (give the job id)"],
     ],
   },
+  verify: {
+    usage: "mediakit verify <assemble-receipt.json> [--rerender] [-o <output-dir>]",
+    desc: "Verify an assemble render against its receipt (assemble-receipt.json, written next to final.mp4 by a full render): re-hash every input (manifest, voice, music, captions, sfx, shot assets) and the output file, re-measure duration/frames/dimensions/LUFS, and report matched/changed/missing per item with a pass/fail verdict and the first difference. --rerender re-runs assemble from the recorded manifest (force) and compares the new receipt against the old one — on this machine renders are byte-identical, so it proves the render reproduces. Without -o the rerender goes to a temp directory next to the receipt and is removed after the comparison.",
+    args: [{ name: "receipt", required: true }],
+    options: [
+      ["--rerender", "Re-run assemble from the recorded manifest and compare receipts"],
+      ["-o, --output", "Output directory for the rerender (kept; without it the rerender is compared then removed)"],
+    ],
+  },
   manifest: {
     usage: "mediakit manifest <manifest.json> [-o <output.mp4>] [--dry-run] [--no-cache] [--keep-intermediates]",
     desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (slideshow as step 1 only — it builds from images in args, so input should be the first slide image; then trim|resize|reframe|compress|convert|extract-audio|reverse|boomerang|make-loopable|freeze|grade|fit|silence|denoise|interpolate|burn-captions|overlay|chroma-key|cut-words|remove-retakes), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file.",
@@ -733,7 +746,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 55 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 60 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -898,6 +911,7 @@ async function main() {
           streamCopy: opts.stream_copy === true,
           snapToKeyframe: opts.snap === true,
           smartCut: opts.smart_cut === true,
+          dryRun: opts.dry_run === true,
         });
         break;
       }
@@ -916,6 +930,7 @@ async function main() {
           input: needInput(), output: needOutput(opts),
           width: numOpt(opts, "width"), height: numOpt(opts, "height"),
           x: numOpt(opts, "x") ?? 0, y: numOpt(opts, "y") ?? 0,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "resize":
@@ -924,6 +939,7 @@ async function main() {
           width: numOpt(opts, "width") ?? null, height: numOpt(opts, "height") ?? null,
           keepAspect: opts.keep_aspect !== false,
           preset: opts.preset ?? null,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "extract-audio":
@@ -1035,6 +1051,7 @@ async function main() {
           preset: opts.preset ?? "medium",
           gop: numOpt(opts, "gop") ?? null,
           gopSeconds: numOpt(opts, "gop_seconds") ?? null,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "grade": {
@@ -1526,6 +1543,15 @@ async function main() {
         if (typeof opts.cancel === "string") { result = await core.cancelJob(opts.cancel); break; }
         if (!positional[0]) fail("missing job id: mediakit job <job-id> [--list] [--cancel <job-id>]");
         result = await core.getJob(positional[0]);
+        break;
+      }
+      case "verify": {
+        if (!positional[0]) fail("missing receipt file: mediakit verify <assemble-receipt.json> [--rerender] [-o <output-dir>]");
+        result = await core.verifyRender({
+          receipt: positional[0],
+          rerender: opts.rerender === true,
+          outputDir: opts.output ?? null,
+        });
         break;
       }
       case "manifest": {

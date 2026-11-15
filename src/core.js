@@ -117,6 +117,19 @@ function run(cmd, args, { timeoutMs = 300_000 } = {}) {
   });
 }
 
+// Quote one argv element for display in dry-run plans (same rule
+// mix() uses inline): bare when safe, single-quoted otherwise.
+function quoteArg(s) {
+  const str = String(s);
+  return (/^[A-Za-z0-9_@%+=:,./-]+$/.test(str) ? str : `'${str.replace(/'/g, `'\\''`)}'`);
+}
+
+// Render an ffmpeg argv as the exact shell command a dry-run plan
+// shows — the command a real run would execute, nothing more.
+function formatCommand(args) {
+  return `${FFMPEG} ${args.map(quoteArg).join(" ")}`;
+}
+
 /** Resolve a path, require it to exist, and return the absolute path. */
 export async function requireInput(p, label = "input") {
   if (typeof p !== "string" || !p.trim()) {
@@ -499,7 +512,7 @@ const SMART_CUT_AUDIO_ENCODERS = {
   vorbis: "libvorbis", flac: "flac", pcm_s16le: "pcm_s16le", ac3: "ac3",
 };
 
-async function smartCutTrim({ inPath, outPath, s, dur }) {
+async function smartCutTrim({ inPath, outPath, s, dur, dryRun = false }) {
   const meta = await probe(inPath);
   if (!meta.video) throw new MediaKitError("smart_cut needs a video input (audio-only files cut exactly with a plain re-encode trim)", "INVALID_ARG");
   const reqEnd = s + dur;
@@ -509,7 +522,17 @@ async function smartCutTrim({ inPath, outPath, s, dur }) {
   // Exact keyframe: no re-encode at all, plain stream copy.
   const exact = kfs.find((t) => Math.abs(t - s) < 0.001);
   if (exact !== undefined) {
-    await run(FFMPEG, ["-y", "-ss", String(s), "-i", inPath, "-t", String(dur), "-c", "copy", outPath]);
+    const exactArgs = ["-y", "-ss", String(s), "-i", inPath, "-t", String(dur), "-c", "copy", outPath];
+    if (dryRun) {
+      return {
+        operation: "trim", dry_run: true, input: inPath, output: outPath,
+        start: s, duration_seconds: dur, stream_copy: true,
+        smart_cut: true, mode: "keyframe-exact", next_keyframe: exact, head_reencoded_seconds: 0,
+        commands: [formatCommand(exactArgs)],
+        note: "Dry run: no file written. The start lands exactly on a keyframe, so the plan is one stream-copy command.",
+      };
+    }
+    await run(FFMPEG, exactArgs);
     const info = await fileInfo(outPath);
     const out = await probe(outPath);
     return {
@@ -537,6 +560,17 @@ async function smartCutTrim({ inPath, outPath, s, dur }) {
       else args.push("-c:a", "copy");
     }
     args.push("-fps_mode", "passthrough", outPath);
+    if (dryRun) {
+      return {
+        operation: "trim", dry_run: true, input: inPath, output: outPath,
+        start: s, duration_seconds: dur, stream_copy: false,
+        smart_cut: true, mode: "full-reencode",
+        next_keyframe: nextKf, head_reencoded_seconds: dur,
+        reason: nextKf === null ? "no keyframe after the requested start" : "the next keyframe is past the requested end, so the whole clip is inside one GOP",
+        commands: [formatCommand(args)],
+        note: "Dry run: no file written. The whole clip sits inside one GOP, so the plan is a single re-encode.",
+      };
+    }
     await run(FFMPEG, args);
     const info = await fileInfo(outPath);
     const out = await probe(outPath);
@@ -575,7 +609,6 @@ async function smartCutTrim({ inPath, outPath, s, dur }) {
       else headArgs.push("-c:a", "copy");
     }
     headArgs.push("-fps_mode", "passthrough", headPath);
-    await run(FFMPEG, headArgs);
     // Tail end cut: plain `-t` on a stream copy overshoots by up to
     // a few frames on B-frame sources (measured 2026-11-15: -t 3.5
     // gave 107 frames / 3.567s) because the stop check runs on DTS
@@ -585,11 +618,27 @@ async function smartCutTrim({ inPath, outPath, s, dur }) {
     const tailArgs = ["-y", "-ss", String(tailStart), "-i", inPath, "-t", String(tailDur)];
     if (meta.video.fps) tailArgs.push("-frames:v", String(Math.max(1, Math.round(tailDur * meta.video.fps))));
     tailArgs.push("-c", "copy", tailPath);
-    await run(FFMPEG, tailArgs);
     await writeFile(listPath, `file '${headPath}'\nfile '${tailPath}'\n`, "utf8");
     const joinArgs = ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy"];
     if (["mp4", "mov", "m4v"].includes(ext)) joinArgs.push("-movflags", "+faststart");
     joinArgs.push(outPath);
+    if (dryRun) {
+      // The head/tail paths name a temp directory a real run creates
+      // fresh each time — the three commands are otherwise exact, in
+      // order: re-encode the head, stream-copy the tail, concat.
+      await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      return {
+        operation: "trim", dry_run: true, input: inPath, output: outPath,
+        start: s, duration_seconds: dur, stream_copy: true,
+        smart_cut: true, mode: "smart-cut", next_keyframe: nextKf,
+        head_reencoded_seconds: headDur,
+        head_bitrate_bps: headBitrate,
+        commands: [formatCommand(headArgs), formatCommand(tailArgs), formatCommand(joinArgs)],
+        note: "Dry run: no file written. Three commands, in order: re-encode the head up to the next keyframe, stream-copy the tail, concat the two.",
+      };
+    }
+    await run(FFMPEG, headArgs);
+    await run(FFMPEG, tailArgs);
     await run(FFMPEG, joinArgs);
   } finally {
     await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
@@ -607,7 +656,7 @@ async function smartCutTrim({ inPath, outPath, s, dur }) {
   };
 }
 
-export async function trim({ input, output, start = 0, duration = null, end = null, streamCopy = false, snapToKeyframe = false, smartCut = false }) {
+export async function trim({ input, output, start = 0, duration = null, end = null, streamCopy = false, snapToKeyframe = false, smartCut = false, dryRun = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const s = parseTime(start, "start");
@@ -630,7 +679,7 @@ export async function trim({ input, output, start = 0, duration = null, end = nu
   if (smartCut) {
     if (!streamCopy) throw new MediaKitError("smart_cut needs stream_copy (it is a stream-copy cut with an exact start)", "INVALID_ARG");
     if (snapToKeyframe) throw new MediaKitError("smart_cut and snap_to_keyframe cannot be combined (smart_cut already lands the start exactly)", "INVALID_ARG");
-    return smartCutTrim({ inPath, outPath, s, dur });
+    return smartCutTrim({ inPath, outPath, s, dur, dryRun });
   }
 
   // snapToKeyframe only makes sense for stream copy: re-encode cuts are
@@ -659,6 +708,18 @@ export async function trim({ input, output, start = 0, duration = null, end = nu
   const args = streamCopy
     ? ["-y", "-ss", String(sActual), "-i", inPath, "-t", String(durActual), "-c", "copy", outPath]
     : ["-y", "-i", inPath, "-ss", String(sActual), "-t", String(durActual), outPath];
+  if (dryRun) {
+    return {
+      operation: "trim", dry_run: true, input: inPath, output: outPath,
+      start: sActual, duration_seconds: durActual, stream_copy: streamCopy,
+      ...(snapToKeyframe ? {
+        requested_start: s, requested_end: +(s + dur).toFixed(3),
+        snapped, keyframe_start: kfStart, keyframe_end: kfEnd,
+      } : {}),
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. Probes (and the keyframe list for --snap) are read-only; they ran to compute the cut.",
+    };
+  }
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const meta = await probe(outPath);
@@ -781,7 +842,7 @@ export async function fitDuration({ input, output, duration, method = "speed", m
 
 // ---------------------------------------------------------------- crop
 
-export async function crop({ input, output, width, height, x = 0, y = 0 }) {
+export async function crop({ input, output, width, height, x = 0, y = 0, dryRun = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const w = num(width, "width", { min: 2, integer: true });
@@ -792,7 +853,17 @@ export async function crop({ input, output, width, height, x = 0, y = 0 }) {
   if (meta.video && (cx + w > meta.video.width || cy + h > meta.video.height)) {
     throw new MediaKitError(`crop ${w}x${h}+${cx}+${cy} exceeds source ${meta.video.width}x${meta.video.height}`, "INVALID_ARG");
   }
-  await run(FFMPEG, ["-y", "-i", inPath, "-vf", `crop=${w}:${h}:${cx}:${cy}`, "-c:a", "copy", outPath]);
+  const args = ["-y", "-i", inPath, "-vf", `crop=${w}:${h}:${cx}:${cy}`, "-c:a", "copy", outPath];
+  if (dryRun) {
+    return {
+      operation: "crop", dry_run: true, input: inPath, output: outPath,
+      width: w, height: h, x: cx, y: cy,
+      dimensions: `${w}x${h}`,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written.",
+    };
+  }
+  await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
   return { operation: "crop", input: inPath, output: outPath, width: w, height: h, x: cx, y: cy, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null };
@@ -811,7 +882,7 @@ export const RESIZE_PRESETS = {
   "2160p": [3840, 2160],
 };
 
-export async function resize({ input, output, width = null, height = null, keepAspect = true, preset = null }) {
+export async function resize({ input, output, width = null, height = null, keepAspect = true, preset = null, dryRun = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   if (preset !== null && preset !== undefined) {
@@ -833,7 +904,18 @@ export async function resize({ input, output, width = null, height = null, keepA
     const factor = Math.min(boxW / srcW, boxH / srcH, 1);
     const even = (n) => Math.max(2, Math.round(n / 2) * 2);
     const tw = even(srcW * factor), th = even(srcH * factor);
-    await run(FFMPEG, ["-y", "-i", inPath, "-vf", `scale=${tw}:${th}`, "-c:a", "copy", outPath]);
+    const presetArgs = ["-y", "-i", inPath, "-vf", `scale=${tw}:${th}`, "-c:a", "copy", outPath];
+    if (dryRun) {
+      return {
+        operation: "resize", dry_run: true, input: inPath, output: outPath, preset,
+        preset_box: `${boxW}x${boxH}`, scaled_down: factor < 1,
+        source_dimensions: `${srcW}x${srcH}`,
+        dimensions: `${tw}x${th}`,
+        commands: [formatCommand(presetArgs)],
+        note: "Dry run: no file written.",
+      };
+    }
+    await run(FFMPEG, presetArgs);
     const info = await fileInfo(outPath);
     const out = await probe(outPath);
     return {
@@ -857,7 +939,17 @@ export async function resize({ input, output, width = null, height = null, keepA
     if (w === null || h === null) throw new MediaKitError("keep_aspect=false needs both width and height", "INVALID_ARG");
     scale = `scale=${w}:${h}`;
   }
-  await run(FFMPEG, ["-y", "-i", inPath, "-vf", scale, "-c:a", "copy", outPath]);
+  const plainArgs = ["-y", "-i", inPath, "-vf", scale, "-c:a", "copy", outPath];
+  if (dryRun) {
+    return {
+      operation: "resize", dry_run: true, input: inPath, output: outPath,
+      width: w, height: h, keep_aspect: keepAspect,
+      scale_filter: scale,
+      commands: [formatCommand(plainArgs)],
+      note: "Dry run: no file written.",
+    };
+  }
+  await run(FFMPEG, plainArgs);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
   return { operation: "resize", input: inPath, output: outPath, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null };
@@ -5328,7 +5420,7 @@ const VIDEO_CODECS = { libx264: "mp4", libx265: "mp4", vp9: "webm", av1: "mp4", 
 // so the GOP there is a maximum, not an exact spacing. The result
 // measures the keyframes on the output file (count + gap stats), so
 // the spacing is verified, not assumed.
-export async function convert({ input, output, videoCodec = null, audioCodec = null, crf = 23, preset = "medium", gop = null, gopSeconds = null }) {
+export async function convert({ input, output, videoCodec = null, audioCodec = null, crf = 23, preset = "medium", gop = null, gopSeconds = null, dryRun = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const c = num(crf, "crf", { min: 0, max: 51, integer: true });
@@ -5375,6 +5467,15 @@ export async function convert({ input, output, videoCodec = null, audioCodec = n
   if (audioCodec) args.push("-c:a", audioCodec, ...audioBitrateArgs(audioCodec));
   else args.push("-c:a", "copy");
   args.push(outPath);
+  if (dryRun) {
+    return {
+      operation: "convert", dry_run: true, input: inPath, output: outPath,
+      video_codec: videoCodec ?? "copy", audio_codec: audioCodec ?? "copy",
+      gop_frames: gopFrames, gop_seconds: gopSecondsOut, keyframes: null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. The keyframe spacing is measured on the real output, so it reports null here.",
+    };
+  }
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
@@ -6254,6 +6355,12 @@ const TOOL_REQUIREMENTS = {
   package: {},
   publish_kit: {},
   assemble: {
+    filters: ["zoompan", "xfade", "scale", "crop", "fps", "trim", "setpts", "format", "subtitles", "sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay", "apad", "drawtext"],
+    encoders: ["libx264", "aac"],
+  },
+  // verify re-runs assemble on --rerender and measures loudness on
+  // check, so it needs assemble's capabilities.
+  verify: {
     filters: ["zoompan", "xfade", "scale", "crop", "fps", "trim", "setpts", "format", "subtitles", "sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay", "apad", "drawtext"],
     encoders: ["libx264", "aac"],
   },
@@ -7794,6 +7901,19 @@ async function hashFile(file) {
     s.on("end", resolve);
   });
   return h.digest("hex");
+}
+
+// ffmpeg version string for receipts (leclap's render manifest
+// records the toolchain, so a rerender on a different ffmpeg build
+// can be told apart from a real drift instead of silently failing
+// the byte comparison). Null when ffmpeg cannot be run.
+async function ffmpegVersionString() {
+  try {
+    const { stdout } = await run(FFMPEG, ["-version"]);
+    return (stdout.match(/ffmpeg version (\S+)/) || [])[1] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 // JSON with sorted keys, so the same args hash the same way no
@@ -9893,6 +10013,28 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       ...base,
       approval: approvalStatus,
       output: finalPath,
+      // Render manifest digests (leclap's render-manifest idea):
+      // per-input content hashes + the paths they were read from, so
+      // `verify` can re-hash every input and name exactly which one
+      // changed instead of only reporting that the combined
+      // fingerprint moved. The fingerprint itself is the same
+      // combined hash the approval gate uses.
+      fingerprint_parts: plan.fingerprint_parts,
+      inputs: {
+        manifest: manifestAbs,
+        voice: plan.voice.path,
+        music: plan.music?.path ?? null,
+        captions: plan.captions?.path ?? null,
+        sfx: plan.sfx.map((s) => s.file),
+        shots: Object.fromEntries(plan.shots.map((s) => [s.id, {
+          ...(s.source ? { source: s.source } : {}),
+          ...(s.scene ? { scene: s.scene } : {}),
+          ...(s.assets ? { assets: s.assets } : {}),
+          ...(s.color ? { color: s.color } : {}),
+        }])),
+      },
+      mediakit_version: MEDIAKIT_VERSION,
+      ffmpeg_version: await ffmpegVersionString(),
       cache_hits: cacheHits,
       chapters: plan.chapters,
       shots_run: renderShots.length,
@@ -9943,6 +10085,253 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       try { await rm(tmpDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
     }
   }
+}
+
+// ---------------------------------------------------------------- verify
+// Verify an assemble render against its receipt (heristop/leclap's
+// `verify` idea, adapted to MediaKit's assemble receipt): the receipt
+// records per-input digests, the combined fingerprint, the output
+// sha256 and measured properties. Check mode re-hashes everything on
+// disk and names the first thing that moved; --rerender re-runs
+// assemble from the recorded manifest (force, so no approval is
+// needed — the receipt IS the approval record) and compares the new
+// receipt against the old one. On this machine renders are
+// byte-identical (measured turn 63: two renders of the same film,
+// same sha256), so the output-bytes comparison is real; across
+// machines only the measured properties are comparable (a different
+// ffmpeg build or encoder gives different bytes — leclap's own caveat).
+// One honest limit: rerender reuses the content-addressed shot cache
+// (each cached segment is verified by size + sha256 on read), so it
+// proves join/audio/mux determinism + cache integrity, not a fresh
+// build of every shot — delete .mediakit-assemble-cache first to
+// force fresh shot builds.
+
+const VERIFY_TOLERANCE = { duration_seconds: 0.05, lufs: 0.5 };
+
+async function verifyFileExists(p) {
+  try {
+    await access(p, fsConstants.R_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// One comparison item: {name, status, expected?, actual?, path?,
+// detail?}. Status matched/changed/missing/unknown. "absent" inputs
+// (music null on both sides) report matched with actual null.
+function verifyItem(name, expected, actual, { path: p = null, detail = null } = {}) {
+  if (expected === undefined || expected === null) {
+    if (actual === undefined || actual === null) return { name, status: "matched", expected: null, actual: null, ...(p ? { path: p } : {}) };
+    return { name, status: "changed", expected: null, actual, ...(p ? { path: p } : {}), ...(detail ? { detail } : {}) };
+  }
+  if (actual === undefined || actual === null) return { name, status: "changed", expected, actual: null, ...(p ? { path: p } : {}), ...(detail ? { detail } : {}) };
+  if (expected === actual) return { name, status: "matched", expected, actual, ...(p ? { path: p } : {}) };
+  return { name, status: "changed", expected, actual, ...(p ? { path: p } : {}), ...(detail ? { detail } : {}) };
+}
+
+async function verifyOutputFile(outPath, finalRec) {
+  const items = [];
+  if (!(await verifyFileExists(outPath))) {
+    items.push({ name: "output", status: "missing", path: outPath, detail: "the rendered file is gone" });
+    return items;
+  }
+  const sha = await hashFile(outPath);
+  items.push(verifyItem("output_bytes", finalRec.sha256, sha, { path: outPath }));
+  const meta = await probe(outPath);
+  if (finalRec.duration_seconds !== null && finalRec.duration_seconds !== undefined) {
+    const actual = meta.duration_seconds;
+    items.push(actual !== null && Math.abs(actual - finalRec.duration_seconds) <= VERIFY_TOLERANCE.duration_seconds
+      ? { name: "duration_seconds", status: "matched", expected: finalRec.duration_seconds, actual }
+      : { name: "duration_seconds", status: "changed", expected: finalRec.duration_seconds, actual });
+  }
+  if (finalRec.dimensions) {
+    const actual = meta.video ? `${meta.video.width}x${meta.video.height}` : null;
+    items.push(verifyItem("dimensions", finalRec.dimensions, actual));
+  }
+  if (finalRec.frames !== null && finalRec.frames !== undefined) {
+    const actual = await countVideoFrames(outPath);
+    items.push(verifyItem("frames", finalRec.frames, actual));
+  }
+  if (finalRec.loudness_lufs !== null && finalRec.loudness_lufs !== undefined) {
+    const actual = meta.audio ? await measureLoudness(outPath) : null;
+    items.push(actual !== null && Math.abs(actual - finalRec.loudness_lufs) <= VERIFY_TOLERANCE.lufs
+      ? { name: "loudness_lufs", status: "matched", expected: finalRec.loudness_lufs, actual }
+      : { name: "loudness_lufs", status: "changed", expected: finalRec.loudness_lufs, actual });
+  }
+  return items;
+}
+
+// Diff two fingerprint_parts objects into per-input items, in the
+// fixed order the report uses (manifest first, so the first
+// difference is the most upstream cause). `paths` is the receipt's
+// recorded inputs map, used only to name files.
+function verifyPartsDiff(oldParts, newParts, paths) {
+  const items = [];
+  const shotPaths = paths?.shots ?? {};
+  const shotLabel = (id) => {
+    const s = shotPaths[id];
+    if (!s) return id;
+    return s.source ?? s.scene ?? (s.color ? `color ${s.color}` : id);
+  };
+  items.push(verifyItem("manifest", oldParts?.manifest, newParts?.manifest, { path: paths?.manifest ?? null }));
+  items.push(verifyItem("voice", oldParts?.voice, newParts?.voice, { path: paths?.voice ?? null }));
+  items.push(verifyItem("music", oldParts?.music ?? null, newParts?.music ?? null, { path: paths?.music ?? null }));
+  items.push(verifyItem("captions", oldParts?.captions ?? null, newParts?.captions ?? null, { path: paths?.captions ?? null }));
+  const oldSfx = oldParts?.sfx ?? [];
+  const newSfx = newParts?.sfx ?? [];
+  const sfxPaths = paths?.sfx ?? [];
+  for (let i = 0; i < Math.max(oldSfx.length, newSfx.length); i++) {
+    items.push(verifyItem(`sfx[${i}]`, oldSfx[i] ?? null, newSfx[i] ?? null, { path: sfxPaths[i] ?? null }));
+  }
+  const oldAssets = oldParts?.assets ?? {};
+  const newAssets = newParts?.assets ?? {};
+  for (const id of Object.keys({ ...oldAssets, ...newAssets }).sort()) {
+    items.push(verifyItem(`asset:${id}`, oldAssets[id] ?? null, newAssets[id] ?? null, { path: shotLabel(id) }));
+  }
+  return items;
+}
+
+export async function verifyRender({ receipt, rerender = false, outputDir = null }) {
+  const receiptAbs = await requireInput(receipt, "receipt");
+  let rec;
+  try {
+    rec = JSON.parse(await readFile(receiptAbs, "utf8"));
+  } catch (e) {
+    throw new MediaKitError(`verify needs a readable assemble receipt JSON, got: ${e.message}`, "INVALID_ARG");
+  }
+  if (!rec || typeof rec !== "object" || rec.operation !== "assemble" || typeof rec.manifest !== "string" || typeof rec.output !== "string" || !rec.final || typeof rec.final.sha256 !== "string" || typeof rec.fingerprint !== "string") {
+    throw new MediaKitError("verify needs an assemble render receipt (assemble-receipt.json from a full render) — this file is missing manifest/output/final.sha256/fingerprint", "INVALID_ARG");
+  }
+  const receiptDir = path.dirname(receiptAbs);
+
+  // Fresh fingerprint parts from the manifest as it stands on disk
+  // now. A missing input is reported by name from the receipt's
+  // recorded paths instead of failing the whole verify with a bare
+  // INPUT_NOT_FOUND — the point of verify is to SAY what moved.
+  let freshParts = null;
+  let freshFingerprint = null;
+  let manifestError = null;
+  const missingInputs = [];
+  const recordedInputs = rec.inputs ?? null;
+  if (recordedInputs) {
+    const checkPaths = [
+      ["manifest", recordedInputs.manifest],
+      ["voice", recordedInputs.voice],
+      ["music", recordedInputs.music],
+      ["captions", recordedInputs.captions],
+      ...(Array.isArray(recordedInputs.sfx) ? recordedInputs.sfx.map((p, i) => [`sfx[${i}]`, p]) : []),
+      ...Object.entries(recordedInputs.shots ?? {}).flatMap(([id, s]) => [
+        [`asset:${id}`, s.source ?? null],
+        [`asset:${id}`, s.scene ?? null],
+        ...Object.entries(s.assets ?? {}).map(([n, p]) => [`asset:${id}:${n}`, p]),
+      ]),
+    ];
+    for (const [name, p] of checkPaths) {
+      if (p && !(await verifyFileExists(p))) missingInputs.push({ name, path: p });
+    }
+  }
+  if (missingInputs.some((m) => m.name === "manifest")) {
+    manifestError = "manifest file is missing";
+  } else {
+    try {
+      const raw = await readFile(rec.manifest, "utf8");
+      const doc = JSON.parse(raw);
+      const plan = await validateAssembleManifest(doc, path.resolve(rec.manifest));
+      freshParts = plan.fingerprint_parts;
+      freshFingerprint = plan.fingerprint;
+    } catch (e) {
+      manifestError = e instanceof MediaKitError ? e.message : `cannot re-validate manifest: ${e.message}`;
+    }
+  }
+
+  const mode = rerender ? "rerender" : "check";
+  let items = [];
+  let rerenderReceipt = null;
+  let rerenderRemoved = false;
+  if (!rerender) {
+    // Check mode: inputs vs the receipt's recorded digests, then the
+    // output file vs the recorded bytes + measurements.
+    if (rec.fingerprint_parts && freshParts) {
+      items = verifyPartsDiff(rec.fingerprint_parts, freshParts, recordedInputs);
+    } else if (freshFingerprint !== null) {
+      items = [verifyItem("fingerprint", rec.fingerprint, freshFingerprint, { path: rec.manifest, ...(manifestError ? { detail: manifestError } : {}) })];
+    } else if (manifestError && !missingInputs.some((m) => m.name === "manifest")) {
+      // The manifest file is there but no longer validates (edited
+      // into an invalid film, or an input it needs is unreadable):
+      // that is a manifest change, not an unknown fingerprint.
+      items = [{ name: "manifest", status: "changed", path: rec.manifest, detail: manifestError }];
+    } else if (missingInputs.some((m) => m.name === "manifest")) {
+      // The manifest itself is gone: name it first, so the first
+      // difference is the missing manifest, not the fingerprint that
+      // could not be recomputed without it.
+      items = [{ name: "manifest", status: "missing", path: rec.manifest, detail: "manifest file is missing" }];
+    } else {
+      items = [{ name: "fingerprint", status: "unknown", path: rec.manifest, detail: manifestError ?? "manifest could not be re-validated" }];
+    }
+    for (const m of missingInputs) {
+      const it = items.find((x) => x.name === m.name);
+      if (it) { it.status = "missing"; it.path = m.path; }
+      else items.push({ name: m.name, status: "missing", path: m.path });
+    }
+    items.push(...await verifyOutputFile(rec.output, rec.final));
+  } else {
+    // Rerender mode: render the recorded manifest again (force — the
+    // receipt is the approval record) and compare receipts.
+    const outDirAbs = outputDir
+      ? await prepareOutputDir(outputDir)
+      : await prepareOutputDir(path.join(receiptDir, `.mediakit-verify-rerender-${process.pid}`));
+    try {
+      rerenderReceipt = await assemble({ manifestPath: rec.manifest, mode: "render", outputDir: outDirAbs, force: true });
+    } catch (e) {
+      throw new MediaKitError(`verify rerender failed: ${e.message}`, e.code ?? "VERIFY_RERENDER_FAILED");
+    }
+    if (rec.fingerprint_parts && rerenderReceipt.fingerprint_parts) {
+      items = verifyPartsDiff(rec.fingerprint_parts, rerenderReceipt.fingerprint_parts, recordedInputs);
+    } else {
+      items = [verifyItem("fingerprint", rec.fingerprint, rerenderReceipt.fingerprint)];
+    }
+    for (const m of missingInputs) {
+      const it = items.find((x) => x.name === m.name);
+      if (it) { it.status = "missing"; it.path = m.path; }
+    }
+    items.push(...await verifyOutputFile(rerenderReceipt.output, rec.final));
+    // The rerendered file itself is also checked against the OLD
+    // receipt's output bytes — that is the byte-reproducibility proof.
+    // (verifyOutputFile above already compared the rerendered file's
+    // bytes + measurements against the old receipt.)
+    if (!outputDir) {
+      try { await rm(outDirAbs, { recursive: true, force: true }); rerenderRemoved = true; } catch { /* best-effort */ }
+    }
+  }
+
+  const bad = items.filter((i) => i.status !== "matched");
+  const firstDifference = bad.length ? bad[0].name : null;
+  const verdict = bad.length ? "fail" : "pass";
+  return {
+    operation: "verify",
+    mode,
+    receipt: receiptAbs,
+    manifest: rec.manifest,
+    output: rec.output,
+    verdict,
+    ...(rerender ? {
+      rerender_output: rerenderReceipt?.output ?? null,
+      rerender_removed: rerenderRemoved,
+      rerender_fingerprint: rerenderReceipt?.fingerprint ?? null,
+      note: "Rerender reuses the content-addressed shot cache (segments verified by size + sha256 on read), so it proves join/audio/mux determinism + cache integrity. Delete .mediakit-assemble-cache next to the manifest to force fresh shot builds.",
+    } : {}),
+    ...(manifestError && mode === "check" ? { manifest_error: manifestError } : {}),
+    mediakit_version: MEDIAKIT_VERSION,
+    ffmpeg_version: rec.ffmpeg_version ?? null,
+    first_difference: firstDifference,
+    changed: bad.length,
+    total: items.length,
+    items,
+    summary: verdict === "pass"
+      ? (mode === "rerender" ? "Rerender is byte-identical and all inputs match the receipt — the render reproduces." : "All inputs and the output match the receipt — nothing moved.")
+      : `${bad.length} of ${items.length} checks differ, first: ${firstDifference}.`,
+  };
 }
 
 // ---------------------------------------------------------------- render jobs

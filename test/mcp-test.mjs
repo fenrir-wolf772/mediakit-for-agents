@@ -6,7 +6,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "node:url";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { copyFile, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
@@ -181,10 +181,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 59 tools present");
-checkOk(missing.length === 0, "tools/list has all 59 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 60 tools present");
+checkOk(missing.length === 0, "tools/list has all 60 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -535,6 +535,12 @@ const loopBatchRes = await client.callTool({
 const loopBatchJson = JSON.parse(loopBatchRes.content[0].text);
 checkOk(loopBatchJson.succeeded === 2 && loopBatchJson.failed === 0 && loopBatchJson.results.every((r) => r.status === "ok" && near(r.result?.duration_error_seconds, 0, 0.05)), "batch make_loopable succeeds on both files with exact D-overlap durations", JSON.stringify(loopBatchJson.results.map((r) => r.result?.duration_seconds)));
 await rm(path.join(root, "outputs/mcp-manifest-loopable.mp4"), { force: true });
+// A stale manifest-cache entry would serve this step as "cached"
+// (steps_run 0) instead of running it — wipe the cache first so the
+// assert below measures a fresh run (caught 2026-11-15: the step
+// output was byte-correct at 9.039s but the assert failed on the
+// cached status).
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
 const loopManifestRes = await client.callTool({
   name: "manifest",
   arguments: { manifest_path: path.join(root, "test/manifest-loopable.json") },
@@ -600,6 +606,10 @@ const freezeBatchRes = await client.callTool({
 const freezeBatchJson = JSON.parse(freezeBatchRes.content[0].text);
 checkOk(freezeBatchJson.succeeded === 2 && freezeBatchJson.failed === 0 && freezeBatchJson.results.every((r) => r.status === "ok" && near(r.result?.duration_error_seconds, 0, 0.05)), "batch freeze succeeds on both files with exact D+hold durations", JSON.stringify(freezeBatchJson.results.map((r) => r.result?.duration_seconds)));
 await rm(path.join(root, "outputs/mcp-manifest-freeze.mp4"), { force: true });
+// Same cache wipe as the loopable manifest test above: a stale
+// entry would serve the step as "cached" (steps_run 0) and fail the
+// assert even though the output is correct.
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
 const freezeManifestRes = await client.callTool({
   name: "manifest",
   arguments: { manifest_path: path.join(root, "test/manifest-freeze.json") },
@@ -677,6 +687,8 @@ const boomBatchRes = await client.callTool({
 const boomBatchJson = JSON.parse(boomBatchRes.content[0].text);
 checkOk(boomBatchJson.succeeded === 2 && boomBatchJson.failed === 0 && boomBatchJson.results.every((r) => r.status === "ok" && near(r.result?.duration_error_seconds, 0, 0.05)), "batch boomerang succeeds on both files with exact 2D - 1/fps durations", JSON.stringify(boomBatchJson.results.map((r) => r.result?.duration_seconds)));
 await rm(path.join(root, "outputs/mcp-manifest-boomerang.mp4"), { force: true });
+// Same cache wipe as the loopable/freeze manifest tests above.
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
 const boomManifestRes = await client.callTool({
   name: "manifest",
   arguments: { manifest_path: path.join(root, "test/manifest-boomerang.json") },
@@ -2795,6 +2807,40 @@ const muxDryRes = await client.callTool({
 const muxDryJson = JSON.parse(muxDryRes.content[0].text);
 checkOk(muxDryJson.dry_run === true && Array.isArray(muxDryJson.command) && muxDryJson.command.includes("-itsoffset") === false, "mux dry-run returns the ffmpeg command", JSON.stringify(muxDryJson).slice(0, 200));
 checkOk(!existsSync(muxDryPath), "mux dry-run writes no file", muxDryPath);
+// dry-run on the single-encode tools (turn 63): trim, resize,
+// convert, crop — each prints the exact ffmpeg command(s) and
+// writes no file. The smart-cut plan lists three commands in order.
+const dryTrimPath = path.join(root, "outputs/mcp-dry-trim.mp4");
+const dryTrimRes = await client.callTool({ name: "trim", arguments: { input: path.join(root, "test/source.mp4"), output: dryTrimPath, start: 1, duration: 2, dry_run: true } });
+const dryTrimJson = JSON.parse(dryTrimRes.content[0].text);
+checkOk(dryTrimJson.dry_run === true && dryTrimJson.commands?.length === 1 && dryTrimJson.commands[0].includes("-ss 1") && dryTrimJson.commands[0].includes("-t 2") && dryTrimJson.start === 1 && dryTrimJson.duration_seconds === 2, "trim dry-run prints one command with the exact seek + length", JSON.stringify(dryTrimJson.commands));
+checkOk(!existsSync(dryTrimPath), "trim dry-run writes no file", dryTrimPath);
+const dryTrimSnapRes = await client.callTool({ name: "trim", arguments: { input: path.join(root, "test/source.mp4"), output: dryTrimPath, start: 1, duration: 3, stream_copy: true, snap_to_keyframe: true, dry_run: true } });
+const dryTrimSnapJson = JSON.parse(dryTrimSnapRes.content[0].text);
+checkOk(dryTrimSnapJson.dry_run === true && dryTrimSnapJson.snapped === true && dryTrimSnapJson.keyframe_start === 0 && dryTrimSnapJson.keyframe_end === 8.333 && dryTrimSnapJson.commands?.[0]?.includes("-ss 0"), "trim dry-run with --snap reports the snapped keyframes in the plan", JSON.stringify(dryTrimSnapJson).slice(0, 200));
+const dryTrimSmartRes = await client.callTool({ name: "trim", arguments: { input: path.join(root, "test/source.mp4"), output: dryTrimPath, start: 1, duration: 9, stream_copy: true, smart_cut: true, dry_run: true } });
+const dryTrimSmartJson = JSON.parse(dryTrimSmartRes.content[0].text);
+checkOk(dryTrimSmartJson.dry_run === true && dryTrimSmartJson.mode === "smart-cut" && dryTrimSmartJson.commands?.length === 3 && dryTrimSmartJson.commands[0].includes("-b:v") && dryTrimSmartJson.commands[1].includes("-c copy") && dryTrimSmartJson.commands[2].includes("-f concat"), "trim dry-run with --smart-cut lists three commands (head re-encode, tail copy, concat)", JSON.stringify(dryTrimSmartJson.commands?.map((c) => c.slice(0, 80))));
+checkOk(!existsSync(dryTrimPath), "trim dry-run (smart-cut) writes no file and leaves no temp dir", dryTrimPath);
+const dryResizePath = path.join(root, "outputs/mcp-dry-resize.mp4");
+const dryResizeRes = await client.callTool({ name: "resize", arguments: { input: path.join(root, "test/source.mp4"), output: dryResizePath, preset: "720p", dry_run: true } });
+const dryResizeJson = JSON.parse(dryResizeRes.content[0].text);
+checkOk(dryResizeJson.dry_run === true && dryResizeJson.dimensions === "1280x720" && dryResizeJson.commands?.[0]?.includes("scale=1280:720"), "resize dry-run prints the scale command for the preset box", JSON.stringify(dryResizeJson.commands));
+checkOk(!existsSync(dryResizePath), "resize dry-run writes no file", dryResizePath);
+const dryConvertPath = path.join(root, "outputs/mcp-dry-convert.mp4");
+const dryConvertRes = await client.callTool({ name: "convert", arguments: { input: path.join(root, "test/source.mp4"), output: dryConvertPath, video_codec: "libx264", gop: 60, dry_run: true } });
+const dryConvertJson = JSON.parse(dryConvertRes.content[0].text);
+checkOk(dryConvertJson.dry_run === true && dryConvertJson.gop_frames === 60 && dryConvertJson.keyframes === null && dryConvertJson.commands?.[0]?.includes("-g 60"), "convert dry-run prints the GOP command and reports keyframes null (measured on real output only)", JSON.stringify(dryConvertJson.commands));
+checkOk(!existsSync(dryConvertPath), "convert dry-run writes no file", dryConvertPath);
+const dryCropPath = path.join(root, "outputs/mcp-dry-crop.mp4");
+const dryCropRes = await client.callTool({ name: "crop", arguments: { input: path.join(root, "test/source.mp4"), output: dryCropPath, width: 640, height: 360, dry_run: true } });
+const dryCropJson = JSON.parse(dryCropRes.content[0].text);
+checkOk(dryCropJson.dry_run === true && dryCropJson.dimensions === "640x360" && dryCropJson.commands?.[0]?.includes("crop=640:360:0:0"), "crop dry-run prints the crop filter command", JSON.stringify(dryCropJson.commands));
+checkOk(!existsSync(dryCropPath), "crop dry-run writes no file", dryCropPath);
+// CLI dry-run: trim through the real CLI prints the same plan.
+const dryCliTrim = await runCli(["trim", path.join(root, "test/source.mp4"), "--start", "1", "--duration", "2", "-o", dryTrimPath, "--dry-run"]);
+const dryCliTrimJson = JSON.parse(dryCliTrim.out);
+checkOk(dryCliTrim.code === 0 && dryCliTrimJson.dry_run === true && dryCliTrimJson.commands?.length === 1 && !existsSync(dryTrimPath), "CLI trim --dry-run prints the plan and writes no file", dryCliTrim.out.slice(0, 150));
 // Errors: audio file as the video, video file as the audio, offset out of range.
 const muxBadVideoRes = await client.callTool({
   name: "mux",
@@ -3458,7 +3504,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 59 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 59 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 60 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 60 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -4093,6 +4139,31 @@ checkOk(assembleFinalProbe?.streams?.find((s) => s.codec_type === "video")?.widt
 checkOk(assembleFinalLufs !== null && near(assembleFinalLufs, -14, 0.5), "assemble final measures -14 LUFS independently", `LUFS=${assembleFinalLufs}`);
 const assembleReceipt = JSON.parse(await readFile(path.join(assembleOut, "assemble-receipt.json"), "utf8"));
 checkOk(assembleReceipt.approval === "approved" && assembleReceipt.final?.sha256?.length === 64 && assembleReceipt.qa?.checks?.every((c) => c.status === "pass"), "assemble receipt records approval + SHA-256 + an all-pass qa_report", JSON.stringify(assembleReceipt.qa?.checks?.map((c) => `${c.check}:${c.status}`)));
+checkOk(typeof assembleReceipt.fingerprint_parts?.manifest === "string" && assembleReceipt.fingerprint_parts.manifest.length === 64 && assembleReceipt.inputs?.voice?.endsWith("mix-voice.mp3") && assembleReceipt.inputs?.shots?.s1?.source?.endsWith("kenburns.png") && assembleReceipt.mediakit_version === "0.1.0" && assembleReceipt.ffmpeg_version === "8.1.2", "assemble receipt records fingerprint_parts + input paths + versions (verify evidence)", JSON.stringify({ parts: Object.keys(assembleReceipt.fingerprint_parts ?? {}), inputs: Object.keys(assembleReceipt.inputs ?? {}) }));
+// verify: check mode on the receipt just rendered — every input and
+// the output must match, since nothing has moved since the render.
+const verifyReceiptPath = path.join(assembleOut, "assemble-receipt.json");
+const verifyCheckRes = await client.callTool({ name: "verify", arguments: { receipt: verifyReceiptPath } });
+const verifyCheckJson = JSON.parse(verifyCheckRes.content[0].text);
+checkOk(verifyCheckJson.verdict === "pass" && verifyCheckJson.mode === "check" && verifyCheckJson.changed === 0 && verifyCheckJson.first_difference === null && verifyCheckJson.items?.every((i) => i.status === "matched"), "verify check passes on a fresh render receipt (all inputs + output match)", JSON.stringify(verifyCheckJson.items?.map((i) => `${i.name}:${i.status}`)));
+checkOk(verifyCheckJson.items?.some((i) => i.name === "voice" && i.status === "matched") && verifyCheckJson.items?.some((i) => i.name === "asset:s2" && i.status === "matched") && verifyCheckJson.items?.some((i) => i.name === "output_bytes" && i.status === "matched") && verifyCheckJson.items?.some((i) => i.name === "frames" && i.status === "matched"), "verify check names voice, shot assets, output bytes and frames as separate items", JSON.stringify(verifyCheckJson.items?.map((i) => i.name)));
+// verify negatives: a receipt with a zeroed output hash must fail on
+// output_bytes, and one pointing at a missing manifest must fail on
+// the manifest — both without touching the real fixtures.
+const verifyFakeShaPath = path.join(root, `outputs/mcp-verify-fake-sha-${process.pid}.json`);
+const verifyFakeShaDoc = { ...assembleReceipt, final: { ...assembleReceipt.final, sha256: "0".repeat(64) } };
+await writeFile(verifyFakeShaPath, JSON.stringify(verifyFakeShaDoc), "utf8");
+const verifyFakeShaRes = await client.callTool({ name: "verify", arguments: { receipt: verifyFakeShaPath } });
+const verifyFakeShaJson = JSON.parse(verifyFakeShaRes.content[0].text);
+checkOk(verifyFakeShaJson.verdict === "fail" && verifyFakeShaJson.first_difference === "output_bytes" && verifyFakeShaJson.items?.find((i) => i.name === "output_bytes")?.status === "changed", "verify check fails on a zeroed output hash (first difference: output_bytes)", JSON.stringify(verifyFakeShaJson.first_difference));
+const verifyFakeManifestPath = path.join(root, `outputs/mcp-verify-fake-manifest-${process.pid}.json`);
+const verifyFakeManifestDoc = { ...assembleReceipt, manifest: "/tmp/no-such-film-xyz.json", inputs: { ...assembleReceipt.inputs, manifest: "/tmp/no-such-film-xyz.json" } };
+await writeFile(verifyFakeManifestPath, JSON.stringify(verifyFakeManifestDoc), "utf8");
+const verifyFakeManifestRes = await client.callTool({ name: "verify", arguments: { receipt: verifyFakeManifestPath } });
+const verifyFakeManifestJson = JSON.parse(verifyFakeManifestRes.content[0].text);
+checkOk(verifyFakeManifestJson.verdict === "fail" && verifyFakeManifestJson.first_difference === "manifest" && verifyFakeManifestJson.items?.find((i) => i.name === "manifest")?.status === "missing", "verify check fails on a missing manifest (first difference: manifest)", JSON.stringify(verifyFakeManifestJson.first_difference));
+const verifyBadReceiptText = await callExpectThrow("verify", { receipt: path.join(root, "test/source.mp4") });
+checkOk(/assemble receipt/.test(verifyBadReceiptText ?? ""), "verify refuses a file that is not an assemble receipt", (verifyBadReceiptText ?? "").slice(0, 160));
 const assembleRender2Res = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleStage.manifestPath, mode: "render", output_dir: assembleOut } }, undefined, { timeout: 300000 });
 const assembleRender2Json = JSON.parse(assembleRender2Res.content[0].text);
 checkOk(assembleRender2Json.cache_hits === 4, "assemble second render reuses all 4 shot segments from the cache", `cache_hits=${assembleRender2Json.cache_hits}`);
@@ -4128,6 +4199,23 @@ const assembleNoMusicRes = await client.callTool({ name: "assemble", arguments: 
 const assembleNoMusicJson = JSON.parse(assembleNoMusicRes.content[0].text);
 const assembleNoMusicProbe = await probeStreams(path.join(assembleNoMusicOut, "preview.mp4"));
 checkOk(assembleNoMusicJson.preview_seconds === 3 && assembleNoMusicProbe?.streams?.some((s) => s.codec_type === "audio") && near(parseFloat(assembleNoMusicProbe?.format?.duration), 3, 0.15), "assemble preview without music renders 3s with an audio track (loudness path)", JSON.stringify(assembleNoMusicJson).slice(0, 150));
+// verify --rerender on a tiny film (3s, 1 rings shot, 540x960):
+// render once, then re-render from the recorded manifest and
+// compare — on this machine the output must be byte-identical
+// (measured turn 63: two renders of the same film, same sha256).
+const verifyTinyStage = await stageAssembleManifest("assemble-tiny.json");
+const verifyTinyOut = path.join(verifyTinyStage.dir, "out");
+const verifyTinyRenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: verifyTinyStage.manifestPath, mode: "render", output_dir: verifyTinyOut, force: true } }, undefined, { timeout: 300000 });
+const verifyTinyRenderJson = JSON.parse(verifyTinyRenderRes.content[0].text);
+checkOk(verifyTinyRenderJson.final?.frames === 90 && verifyTinyRenderJson.final?.dimensions === "540x960" && near(parseFloat(verifyTinyRenderJson.final?.duration_seconds), 3, 0.05), "tiny film renders 3s / 90 frames / 540x960 (verify fixture)", JSON.stringify(verifyTinyRenderJson.final));
+const verifyTinyReceiptPath = path.join(verifyTinyOut, "assemble-receipt.json");
+const verifyTinyCheckRes = await client.callTool({ name: "verify", arguments: { receipt: verifyTinyReceiptPath } });
+const verifyTinyCheckJson = JSON.parse(verifyTinyCheckRes.content[0].text);
+checkOk(verifyTinyCheckJson.verdict === "pass" && verifyTinyCheckJson.items?.some((i) => i.name === "asset:rings" && i.status === "matched"), "verify check passes on the tiny film receipt (template shot asset matches)", JSON.stringify(verifyTinyCheckJson.items?.map((i) => `${i.name}:${i.status}`)));
+const verifyRerenderRes = await client.callTool({ name: "verify", arguments: { receipt: verifyTinyReceiptPath, rerender: true } }, undefined, { timeout: 300000 });
+const verifyRerenderJson = JSON.parse(verifyRerenderRes.content[0].text);
+checkOk(verifyRerenderJson.verdict === "pass" && verifyRerenderJson.mode === "rerender" && verifyRerenderJson.rerender_removed === true && verifyRerenderJson.items?.find((i) => i.name === "output_bytes")?.status === "matched", "verify --rerender passes: the re-render is byte-identical and the temp dir is removed", JSON.stringify({ verdict: verifyRerenderJson.verdict, removed: verifyRerenderJson.rerender_removed, first: verifyRerenderJson.first_difference }));
+checkOk(existsSync(path.join(verifyTinyOut, "final.mp4")) && readdirSync(verifyTinyOut).filter((n) => n.startsWith(".mediakit-verify-rerender-")).length === 0, "verify rerender keeps the original final.mp4 and leaves no rerender temp dir behind", readdirSync(verifyTinyOut).join(", "));
 // Transitions: the same film with a fade into s2, a dissolve into
 // s3 and a fade into s4. Total duration and frame count must stay
 // exactly 10s / 300 frames — the transitions are centered on the
@@ -4666,7 +4754,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 59 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 60 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -4726,11 +4814,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 59, "GET /mcp reports name/version/transport and 59 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 60, "GET /mcp reports name/version/transport and 60 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 59 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 59 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 60 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 60 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -4754,7 +4842,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 59, "JSON-RPC tools/list returns the same 59 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 60, "JSON-RPC tools/list returns the same 60 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

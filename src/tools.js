@@ -41,7 +41,7 @@ export const TOOL_DEFS = [
 
   {
     name: "trim",
-    description: "Cut a clip out of a media file. Give start (seconds) plus duration OR end. Re-encodes by default for frame-accurate cuts; set stream_copy=true for fast lossless cuts (keyframe boundaries only). With stream_copy, set snap_to_keyframe=true to move start down / end up to the nearest keyframes so the cut lands exactly (see the keyframes tool first), or smart_cut=true to keep the exact start instead: only the head up to the next keyframe is re-encoded (source bitrate x1.2), the rest is stream-copied — exact start, near-lossless speed.",
+    description: "Cut a clip out of a media file. Give start (seconds) plus duration OR end. Re-encodes by default for frame-accurate cuts; set stream_copy=true for fast lossless cuts (keyframe boundaries only). With stream_copy, set snap_to_keyframe=true to move start down / end up to the nearest keyframes so the cut lands exactly (see the keyframes tool first), or smart_cut=true to keep the exact start instead: only the head up to the next keyframe is re-encoded (source bitrate x1.2), the rest is stream-copied — exact start, near-lossless speed. Set dry_run=true to print the exact ffmpeg command(s) that would run and write no file.",
     schema: {
     input: pathSchema,
     output: pathSchema.describe("Output file path"),
@@ -51,6 +51,7 @@ export const TOOL_DEFS = [
     stream_copy: z.boolean().default(false).describe("Copy streams without re-encoding (fast, keyframe-accurate only)"),
     snap_to_keyframe: z.boolean().default(false).describe("With stream_copy only: snap start/end to the nearest keyframes (start down, end up)"),
     smart_cut: z.boolean().default(false).describe("With stream_copy only: exact start by re-encoding only the head up to the next keyframe (source bitrate x1.2); refuses snap_to_keyframe"),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command(s) that would run (one for a plain cut, three for smart_cut: head re-encode, tail copy, concat) and write no file"),
   },
     handler: async (a) => safe(() => core.trim({
     input: a.input,
@@ -61,13 +62,14 @@ export const TOOL_DEFS = [
     streamCopy: a.stream_copy,
     snapToKeyframe: a.snap_to_keyframe,
     smartCut: a.smart_cut,
+    dryRun: a.dry_run,
   })),
   },
 
 
   {
     name: "crop",
-    description: "Crop a video to a rectangle. width/height/x/y in pixels; must fit inside the source frame.",
+    description: "Crop a video to a rectangle. width/height/x/y in pixels; must fit inside the source frame. Set dry_run=true to print the exact ffmpeg command and write no file.",
     schema: {
     input: pathSchema,
     output: pathSchema,
@@ -75,14 +77,23 @@ export const TOOL_DEFS = [
     height: z.number().int().min(2),
     x: z.number().int().min(0).default(0),
     y: z.number().int().min(0).default(0),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
-    handler: async (a) => safe(() => core.crop(a)),
+    handler: async (a) => safe(() => core.crop({
+    input: a.input,
+    output: a.output,
+    width: a.width,
+    height: a.height,
+    x: a.x,
+    y: a.y,
+    dryRun: a.dry_run,
+  })),
   },
 
 
   {
     name: "resize",
-    description: "Resize a video. Give width and/or height; with keep_aspect (default) the other dimension follows the aspect ratio and is rounded to an even number. Or give preset (360p/480p/720p/1080p/2160p): the frame is fit inside that box, preserving aspect, and never upscaled.",
+    description: "Resize a video. Give width and/or height; with keep_aspect (default) the other dimension follows the aspect ratio and is rounded to an even number. Or give preset (360p/480p/720p/1080p/2160p): the frame is fit inside that box, preserving aspect, and never upscaled. Set dry_run=true to print the exact ffmpeg command and write no file.",
     schema: {
     input: pathSchema,
     output: pathSchema,
@@ -90,6 +101,7 @@ export const TOOL_DEFS = [
     height: z.number().int().min(2).optional(),
     keep_aspect: z.boolean().default(true),
     preset: z.enum(["360p", "480p", "720p", "1080p", "2160p"]).optional().describe("Named preset box: 360p=640x360, 480p=854x480, 720p=1280x720, 1080p=1920x1080, 2160p=3840x2160; fit inside, never upscale; cannot combine with width/height"),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
     handler: async (a) => safe(() => core.resize({
     input: a.input,
@@ -98,6 +110,7 @@ export const TOOL_DEFS = [
     height: a.height ?? null,
     keepAspect: a.keep_aspect,
     preset: a.preset ?? null,
+    dryRun: a.dry_run,
   })),
   },
 
@@ -597,7 +610,7 @@ export const TOOL_DEFS = [
 
   {
     name: "convert",
-    description: "Change container or codec. Omit video_codec/audio_codec to stream-copy that stream. crf 23 is a good default for H.264. gop (frames) or gop_seconds sets an exact keyframe interval on re-encode (scene-cut keyframes disabled for libx264/libx265/mpeg4); the result measures the keyframes on the output file. A GOP is required for keyframe-snapped stream-copy cuts.",
+    description: "Change container or codec. Omit video_codec/audio_codec to stream-copy that stream. crf 23 is a good default for H.264. gop (frames) or gop_seconds sets an exact keyframe interval on re-encode (scene-cut keyframes disabled for libx264/libx265/mpeg4); the result measures the keyframes on the output file. A GOP is required for keyframe-snapped stream-copy cuts. Set dry_run=true to print the exact ffmpeg command and write no file.",
     schema: {
     input: pathSchema,
     output: pathSchema,
@@ -607,6 +620,7 @@ export const TOOL_DEFS = [
     preset: z.string().default("medium"),
     gop: z.number().int().min(1).max(10000).optional().describe("Keyframe interval in frames (needs a video re-encode; mutually exclusive with gop_seconds)"),
     gop_seconds: z.number().min(0.1).max(3600).optional().describe("Keyframe interval in seconds, converted to frames from the source fps (mutually exclusive with gop)"),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file (keyframes report null — they are measured on the real output)"),
   },
     handler: async (a) => safe(() => core.convert({
     input: a.input,
@@ -617,6 +631,7 @@ export const TOOL_DEFS = [
     preset: a.preset,
     gop: a.gop ?? null,
     gopSeconds: a.gop_seconds ?? null,
+    dryRun: a.dry_run,
   })),
   },
 
@@ -1366,6 +1381,32 @@ export const TOOL_DEFS = [
     adaptiveFactor: a.adaptive_factor,
     adaptiveCap: a.adaptive_cap,
     lagSeconds: a.lag_seconds,
+  })),
+  },
+
+
+  // Verify an assemble render against its receipt (heristop/leclap's
+  // `verify` idea, turn 63): the receipt (assemble-receipt.json, written
+  // next to final.mp4 by every full render) records per-input digests,
+  // the combined fingerprint, the output sha256 and measured properties.
+  // Check mode re-hashes everything on disk and names the first thing
+  // that moved (edited voice, swapped clip, deleted output); rerender
+  // mode re-runs assemble from the recorded manifest (force) and
+  // compares the new receipt against the old one — on this machine
+  // renders are byte-identical, so it is a real reproducibility proof.
+  // Across machines only the measured properties are comparable.
+  {
+    name: "verify",
+    description: "Verify an assemble render against its receipt (assemble-receipt.json from a full render): re-hash every input (manifest, voice, music, captions, sfx, shot assets) and the output file, re-measure duration/frames/dimensions/LUFS, and report matched/changed/missing per item with a pass/fail verdict and the first difference. With rerender:true, re-run assemble from the recorded manifest (force) into a temp directory and compare the new receipt against the old one — a byte-identical output plus matching inputs proves the render reproduces. Use it after any render you must trust (report videos, deliveries) and whenever a file has been edited since the render.",
+    schema: {
+    receipt: pathSchema.describe("Path to assemble-receipt.json (written next to final.mp4 by a full assemble render)"),
+    rerender: z.boolean().default(false).describe("Re-run assemble from the recorded manifest and compare the new receipt against the old one (default false = check the files on disk against the receipt only)"),
+    output_dir: pathSchema.optional().describe("Where the rerender goes (rerender mode only). Default: a temp directory next to the receipt, removed after the comparison — pass a directory to keep the rerendered film."),
+  },
+    handler: async (a) => safe(() => core.verifyRender({
+    receipt: a.receipt,
+    rerender: a.rerender === true,
+    outputDir: a.output_dir ?? null,
   })),
   },
 ];
