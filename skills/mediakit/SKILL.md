@@ -596,6 +596,28 @@ nothing the next time), so the seam is measured with trim branches in
 one graph. Works on audio-only input too (acrossfade only, seam scores
 null); in `batch` and `manifest` like any other op.
 
+### 33c. A freeze is an insert, not a still image — and the frame is picked by index
+`freeze in.mp4 -o out.mp4 --at 5 --hold 2` holds one frame still for
+2 seconds: the output is pre [0,at] + hold + post [at,end], so the clip
+grows by exactly the hold and the tail keeps its place. `--at` defaults
+to the end of the clip (hold the last frame — the end-card use). Audio
+in the hold is silence, by decision: audio "keep" would leave the video
+D+hold long against D seconds of audio and force trailing silence to
+fill the gap. The silence is built from the input's own audio (a 10ms
+slice at volume 0, `apad` to the hold) so sample rate and channel layout
+always match the concat. The tool measures the freeze instead of asking
+you to eyeball it: `frozen_frame_diff` (input frame vs output frame
+mid-hold, ~0 when truly frozen) and `post_frame_diff` (the frame after
+the freeze point in the input vs the same frame in the output tail, ~0
+when the tail kept its place; null when the hold sits on the last
+frame). Two traps, both caught the hard way: real PTS sits ~0.3ms off
+nominal frame boundaries, so a time-window trim can silently yield zero
+frames (the output kept the right duration only because the audio
+carried it — `ffprobe -count_frames` is the honest check), so the frozen
+frame is picked by index with `select='eq(n,299)'`; and inside that
+quoted expression the comma needs NO backslash — `eq(n\\,299)` makes the
+expression parser see one escaped comma and fails.
+
 ### 34. Resources are the map, tools are the hands — and the map never leaves the workspace
 Before guessing a path, read `videos://list` (every media file under
 the workspace root, sorted, capped at 200), then `videos://{file}/metadata`
@@ -998,7 +1020,7 @@ cap, no timeout, no verify) — MediaKit's `download` exists so the
 agent never has to.
 
 ### 52. Test a tool over HTTP before wiring up an MCP client — same tools, curl instead of stdio
-`mediakit mcp --http [--port 3000]` serves the same 57 tools over
+`mediakit mcp --http [--port 3000]` serves the same 58 tools over
 HTTP on `127.0.0.1`: `GET /mcp` (metadata), `GET /mcp/tools`
 (every tool + JSON input schema), `POST /mcp/tools/{name}/invoke`
 (`{"arguments": {...}}`), and `POST /` for JSON-RPC 2.0

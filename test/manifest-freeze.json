@@ -1,0 +1,1 @@
+{"input":"scenes-source.mp4","output":"../outputs/mcp-manifest-freeze.mp4","steps":[{"args":{"at":5,"hold":2},"tool":"freeze"}],"version":1}

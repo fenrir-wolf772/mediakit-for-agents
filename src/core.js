@@ -3982,11 +3982,11 @@ async function lastFramePts(file, fps) {
 // (framesync race), and `-sseof` misses the last frame whenever
 // its pts sits more than the offset before the duration. Trim
 // branches in one graph are deterministic.
-async function frameDiffMean(file, t1, t2, fps) {
+async function frameDiffMean(file, t1, t2, fps, file2 = file) {
   try {
     const w = fps ? +(1 / fps).toFixed(4) : 0.04;
     const { stderr } = await run(FFMPEG, [
-      "-hide_banner", "-nostats", "-i", file, "-i", file,
+      "-hide_banner", "-nostats", "-i", file, "-i", file2,
       "-filter_complex",
       `[0:v]trim=start=${t1}:end=${+(t1 + w).toFixed(4)},setpts=PTS-STARTPTS,format=rgb24[a];` +
       `[1:v]trim=start=${t2}:end=${+(t2 + w).toFixed(4)},setpts=PTS-STARTPTS,format=rgb24[b];` +
@@ -4075,6 +4075,152 @@ export async function makeLoopable({ input, output, overlap = 0.5, crf = 23 }) {
     seam_before: before.seam_score,
     seam_after: after.seam_score,
     normal_step: after.normal_step,
+    has_audio: !!meta.audio,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+    size_bytes: info.size_bytes,
+  };
+}
+
+// Total frame count via -count_frames (null when ffprobe cannot
+// count — callers fall back to round(duration * fps)). Same probe
+// lastFramePts uses; split out so freeze can clamp a frame index.
+async function countFrames(file) {
+  try {
+    const { stdout } = await run(FFPROBE, [
+      "-v", "error", "-count_frames", "-select_streams", "v:0",
+      "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", file,
+    ]);
+    const n = parseInt(String(stdout).trim(), 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------- freeze
+// Hold one frame still for N seconds (Zulko/moviepy's Freeze idea):
+// insert a frozen-frame segment at time `at` — output = pre [0,fs]
+// + hold (the frame starting at fs, looped) + post [fs,D], so the
+// clip grows by exactly `hold` seconds and the tail keeps its place
+// in the timeline. `at` defaults to the end of the clip (hold the
+// last frame — the end-card use). The frozen frame is picked by
+// INDEX (select eq(n,frameIdx)), never by a time window — real PTS
+// sits ~0.3ms off nominal boundaries and a time trim can silently
+// yield zero frames (see the trap note inside freezeFrame).
+//
+// Audio in the hold is SILENCE (the open question from lượt 59,
+// decided here): audio "keep" would leave the video D+hold long
+// against D seconds of audio and force trailing silence to fill the
+// gap — confusing. Mute keeps audio and video the same length:
+// [0,fs] + silence(hold) + [fs,D]. The silence is built from the
+// input's own audio (a 10ms slice at volume 0, apad to `hold`) so
+// sample rate / channel layout / format always match the concat —
+// no anullsrc layout guessing for mono vs 5.1.
+//
+// The result measures the freeze on disk: frozen_frame_diff (input
+// frame at fs vs output frame mid-hold, ~0 when truly frozen) and
+// post_frame_diff (input frame fs+step vs output frame fs+hold+step,
+// ~0 when the tail kept its place — null when the hold sits on the
+// last frame and there is no second post frame to compare).
+export async function freezeFrame({ input, output, at = null, hold = 2, crf = 23 }) {
+  const inPath = await requireInput(input);
+  const outPath = await prepareOutput(output, [inPath]);
+  const H = num(hold, "hold", { min: 0.1, max: 30 });
+  const c = num(crf, "crf", { min: 0, max: 51, integer: true });
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("freeze needs a video input (there is no frame to hold in an audio-only file)", "INVALID_ARG");
+  const D = meta.duration_seconds;
+  if (!Number.isFinite(D) || D <= 0) throw new MediaKitError("freeze needs an input with a known duration", "INVALID_ARG");
+  const fps = meta.video.fps;
+  if (!fps || !Number.isFinite(fps) || fps <= 0) throw new MediaKitError("freeze needs a video with a known frame rate", "INVALID_ARG");
+  const atSec = at === null || at === undefined ? D : parseTime(at, "at");
+  if (atSec > D) throw new MediaKitError(`freeze --at ${atSec}s is past the end of this ${D}s clip`, "INVALID_ARG");
+  const f = (n) => +n.toFixed(3);
+  const step = 1 / fps;
+  // Pick the frozen frame BY INDEX, not by time window. MEASUREMENT
+  // TRAP (caught 2026-11-15, do not "fix" back): nominal frame
+  // boundaries do not match real PTS — scenes-source.mp4 has 300
+  // frames, last PTS 9.999674, so trim start=10 silently yields
+  // ZERO frames and the hold branch came out empty (the output
+  // kept the right duration only because the audio carried it;
+  // ffprobe counted 300 frames, not 361). Counting frames once
+  // with -count_frames and selecting eq(n,frameIdx) is PTS-proof.
+  // Pre/post still split by time at fs = frameIdx/fps, which sits
+  // a full frame step away from the neighbouring frames' PTS, so
+  // the ±0.3ms offset cannot flip a boundary.
+  const totalFrames = (await countFrames(inPath)) ?? Math.max(1, Math.round(D * fps));
+  const frameIdx = Math.max(0, Math.min(Math.round(atSec * fps), totalFrames - 1));
+  const fs = frameIdx / fps;
+  const holdFrames = Math.max(1, Math.round(H * fps));
+  const ext = path.extname(outPath).slice(1).toLowerCase();
+  const audioCodec = AUDIO_FORMATS[ext] ?? VIDEO_CONTAINER_AUDIO[ext] ?? "aac";
+  const fc = [];
+  // split counts only the branches that exist: pre is skipped when
+  // frameIdx == 0 (trim 0:0 yields nothing and concat chokes on it).
+  // Post always holds >= 1 frame (the frozen frame itself).
+  // ESCAPING TRAP (caught 2026-11-15): the select expression needs
+  // NO backslash before the comma — the single quotes already
+  // protect it from the graph parser. `eq(n\\,299)` (two literal
+  // backslashes, from `\\\\,` in a template literal) makes the
+  // expression parser see one escaped comma and fails with
+  // "Missing ')' or too many args". Plain `eq(n,299)` works.
+  const holdChain = `select='eq(n,${frameIdx})',setpts=PTS-STARTPTS,loop=loop=${holdFrames - 1}:size=1:start=0,trim=0:${f(H)},setpts=PTS-STARTPTS[holdv]`;
+  if (frameIdx > 0) {
+    fc.push(
+      `[0:v]split=3[vpre][vfrz][vpost];` +
+      `[vpre]trim=0:${f(fs)},setpts=PTS-STARTPTS[pre];` +
+      `[vfrz]${holdChain};` +
+      `[vpost]trim=${f(fs)}:${f(D)},setpts=PTS-STARTPTS[post];` +
+      `[pre][holdv][post]concat=n=3:v=1:a=0,fps=${fps},format=yuv420p[v]`,
+    );
+  } else {
+    fc.push(
+      `[0:v]split=2[vfrz][vpost];` +
+      `[vfrz]${holdChain};` +
+      `[vpost]trim=${f(fs)}:${f(D)},setpts=PTS-STARTPTS[post];` +
+      `[holdv][post]concat=n=2:v=1:a=0,fps=${fps},format=yuv420p[v]`,
+    );
+  }
+  if (meta.audio) {
+    if (frameIdx > 0) {
+      fc.push(
+        `[0:a]asplit=3[apre][asil][apost];` +
+        `[apre]atrim=0:${f(fs)},asetpts=PTS-STARTPTS[apre];` +
+        `[asil]atrim=0:0.01,asetpts=PTS-STARTPTS,volume=0,apad=whole_dur=${f(H)},atrim=0:${f(H)},asetpts=PTS-STARTPTS[sil];` +
+        `[apost]atrim=${f(fs)}:${f(D)},asetpts=PTS-STARTPTS[apost];` +
+        `[apre][sil][apost]concat=n=3:v=0:a=1[aout]`,
+      );
+    } else {
+      fc.push(
+        `[0:a]asplit=2[asil][apost];` +
+        `[asil]atrim=0:0.01,asetpts=PTS-STARTPTS,volume=0,apad=whole_dur=${f(H)},atrim=0:${f(H)},asetpts=PTS-STARTPTS[sil];` +
+        `[apost]atrim=${f(fs)}:${f(D)},asetpts=PTS-STARTPTS[apost];` +
+        `[sil][apost]concat=n=2:v=0:a=1[aout]`,
+      );
+    }
+  }
+  const args = ["-y", "-i", inPath, "-filter_complex", fc.join(";")];
+  args.push("-map", "[v]", "-c:v", "libx264", "-crf", String(c), "-preset", "medium");
+  if (meta.audio) args.push("-map", "[aout]", "-c:a", audioCodec, ...audioBitrateArgs(audioCodec));
+  args.push(outPath);
+  await run(FFMPEG, args);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  const frozen = await frameDiffMean(inPath, fs, fs + H / 2, fps, outPath);
+  const postDiff = frameIdx + 1 < totalFrames ? await frameDiffMean(inPath, fs + step, fs + H + step, fps, outPath) : null;
+  return {
+    operation: "freeze", input: inPath, output: outPath,
+    at_seconds: atSec,
+    frame_seconds: +fs.toFixed(3),
+    frame_index: frameIdx,
+    hold_seconds: H,
+    duration_before_seconds: D,
+    duration_seconds: out.duration_seconds,
+    expected_duration_seconds: +(D + H).toFixed(3),
+    duration_error_seconds: +(out.duration_seconds - (D + H)).toFixed(3),
+    frozen_frame_diff: frozen,
+    post_frame_diff: postDiff,
+    hold_audio: meta.audio ? "silence" : null,
     has_audio: !!meta.audio,
     dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
     size_bytes: info.size_bytes,
@@ -5962,6 +6108,7 @@ const DOCTOR_FILTERS = [
   "tblend", "signalstats",
   "blend", "split",
   "fade", "asplit",
+  "loop",
 ];
 const DOCTOR_ENCODERS = [
   "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4", "prores_ks",
@@ -5992,6 +6139,7 @@ const TOOL_REQUIREMENTS = {
   grade: { filters: ["eq", "hue", "colorbalance", "lutrgb"], encoders: ["libx264"] },
   reverse: { filters: ["reverse", "areverse"], encoders: ["libx264", "aac"] },
   make_loopable: { filters: ["split", "asplit", "trim", "atrim", "setpts", "asetpts", "format", "fade", "overlay", "concat", "acrossfade", "blend", "signalstats"], encoders: ["libx264", "aac"] },
+  freeze: { filters: ["split", "asplit", "trim", "atrim", "setpts", "asetpts", "loop", "concat", "fps", "format", "volume", "apad", "blend", "signalstats"], encoders: ["libx264", "aac"] },
   interpolate: { filters: ["minterpolate"], encoders: ["libx264"] },
   denoise: { filters: ["hqdn3d", "nlmeans"], encoders: ["libx264"] },
   segment: {},
@@ -7366,6 +7514,10 @@ export const BATCH_OPERATIONS = {
   make_loopable: {
     args: ["overlap", "crf"],
     run: (input, output, a) => makeLoopable({ input, output, overlap: a.overlap ?? 0.5, crf: a.crf ?? 23 }),
+  },
+  freeze: {
+    args: ["at", "hold", "crf"],
+    run: (input, output, a) => freezeFrame({ input, output, at: a.at ?? null, hold: a.hold ?? 2, crf: a.crf ?? 23 }),
   },
   grade: {
     args: ["preset", "filter", "crf", "cdl"],

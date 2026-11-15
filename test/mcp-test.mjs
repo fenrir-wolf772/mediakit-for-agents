@@ -181,10 +181,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "make_loopable", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "make_loopable", "freeze", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 57 tools present");
-checkOk(missing.length === 0, "tools/list has all 57 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 58 tools present");
+checkOk(missing.length === 0, "tools/list has all 58 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -541,6 +541,71 @@ const loopManifestRes = await client.callTool({
 });
 const loopManifestJson = JSON.parse(loopManifestRes.content[0].text);
 checkOk(loopManifestJson.steps_run === 1 && loopManifestJson.steps.every((s) => s.status === "ok") && near(loopManifestJson.final.duration_seconds, 9.039, 0.05), "manifest make_loopable step runs and final is 9.039s", JSON.stringify(loopManifestJson.final?.duration_seconds));
+
+// freeze: hold one frame still. Fixture test/scenes-source.mp4 is
+// red 5s + blue 5s (10.039s, 300 frames at 30fps, last PTS
+// 9.999674 — NOT 10.0, so a time-window trim would silently yield
+// zero frames; the tool picks the frame by index). at=5 freezes the
+// last red frame (index 150): duration must be exactly D+hold,
+// frozen_frame_diff ~0 (the hold is truly frozen) and
+// post_frame_diff ~0 (the tail kept its place). Default --at holds
+// the last frame (index 299) and post_frame_diff is null — there is
+// no frame after it to compare.
+const freezeRes = await client.callTool({
+  name: "freeze",
+  arguments: { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-freeze.mp4"), at: 5, hold: 2 },
+});
+const freezeJson = JSON.parse(freezeRes.content[0].text);
+console.log("freeze call:", JSON.stringify(freezeJson));
+checkOk(near(freezeJson.duration_seconds, 12.039, 0.05) && near(freezeJson.duration_error_seconds, 0, 0.05) && freezeJson.expected_duration_seconds === 12.039, "freeze output is D+hold (10.039+2 = 12.039s)", JSON.stringify(freezeJson.duration_seconds));
+checkOk(freezeJson.frame_index === 150 && freezeJson.frame_seconds === 5, "freeze picks frame index 150 at 5s", JSON.stringify(freezeJson.frame_index));
+checkOk(freezeJson.frozen_frame_diff !== null && freezeJson.frozen_frame_diff <= 2, "freeze hold is truly frozen (input frame vs mid-hold frame diff ~0)", `frozen_frame_diff=${freezeJson.frozen_frame_diff}`);
+checkOk(freezeJson.post_frame_diff !== null && freezeJson.post_frame_diff <= 2, "freeze tail kept its place (post frame diff ~0)", `post_frame_diff=${freezeJson.post_frame_diff}`);
+checkOk(freezeJson.hold_audio === "silence" && freezeJson.has_audio === true && freezeJson.dimensions === "640x360" && freezeJson.size_bytes > 0, "freeze mutes audio in the hold and keeps dimensions/bytes", JSON.stringify(freezeJson));
+// Independent: ffprobe counts 360 frames (300 + 60 hold) — the hold
+// is real frames, not audio carrying the duration.
+const { stdout: freezeFramesOut } = await execFileAsync("ffprobe", ["-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", path.join(root, "outputs/mcp-freeze.mp4")]);
+checkOk(parseInt(freezeFramesOut.trim(), 10) === 360, "ffprobe independently counts 360 frames on the frozen file (300 + 60 hold)", freezeFramesOut.trim());
+// Default at: hold the last frame; video-only input works too.
+const freezeEndRes = await client.callTool({
+  name: "freeze",
+  arguments: { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-freeze-end.mp4"), hold: 2 },
+});
+const freezeEndJson = JSON.parse(freezeEndRes.content[0].text);
+checkOk(freezeEndJson.frame_index === 299 && near(freezeEndJson.duration_seconds, 12.039, 0.05) && freezeEndJson.frozen_frame_diff !== null && freezeEndJson.frozen_frame_diff <= 2 && freezeEndJson.post_frame_diff === null, "freeze with no --at holds the last frame (index 299), post diff null", JSON.stringify(freezeEndJson));
+const freezeVonlyRes = await client.callTool({
+  name: "freeze",
+  arguments: { input: path.join(root, "test/content-video-only.mp4"), output: path.join(root, "outputs/mcp-freeze-vonly.mp4"), at: 5, hold: 1 },
+});
+const freezeVonlyJson = JSON.parse(freezeVonlyRes.content[0].text);
+checkOk(near(freezeVonlyJson.duration_seconds, 11, 0.05) && freezeVonlyJson.has_audio === false && freezeVonlyJson.hold_audio === null && freezeVonlyJson.frozen_frame_diff !== null && freezeVonlyJson.frozen_frame_diff <= 2, "freeze on video-only input works, no audio to mute", JSON.stringify(freezeVonlyJson));
+// Refusals: audio-only has no frame; at past the end; hold below 0.1.
+const freezeAudioText = await callExpectThrow("freeze", { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-freeze-bad.mp3"), at: 2, hold: 1 });
+checkOk(/needs a video input/.test(freezeAudioText), "freeze refuses audio-only input (no frame to hold)", freezeAudioText.slice(0, 200));
+const freezePastText = await callExpectThrow("freeze", { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-freeze-bad2.mp4"), at: 99, hold: 1 });
+checkOk(/past the end/.test(freezePastText), "freeze refuses --at past the end of the clip", freezePastText.slice(0, 200));
+const freezeZeroText = await callExpectThrow("freeze", { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-freeze-bad3.mp4"), at: 5, hold: 0 });
+checkOk(/hold/.test(freezeZeroText), "freeze refuses hold below 0.1s", freezeZeroText.slice(0, 200));
+// Batch + manifest pass-through: freeze is a per-file batch op and
+// a manifest step like make_loopable.
+await rm(path.join(root, "outputs/mcp-batch-freeze-in"), { recursive: true, force: true });
+await rm(path.join(root, "outputs/mcp-batch-freeze-out"), { recursive: true, force: true });
+await mkdir(path.join(root, "outputs/mcp-batch-freeze-in"), { recursive: true });
+await copyFile(path.join(root, "test/source.mp4"), path.join(root, "outputs/mcp-batch-freeze-in/source.mp4"));
+await copyFile(path.join(root, "test/source2.mp4"), path.join(root, "outputs/mcp-batch-freeze-in/source2.mp4"));
+const freezeBatchRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "freeze", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-freeze-in"), output_dir: path.join(root, "outputs/mcp-batch-freeze-out"), args: { hold: 1 }, jobs: 2 },
+});
+const freezeBatchJson = JSON.parse(freezeBatchRes.content[0].text);
+checkOk(freezeBatchJson.succeeded === 2 && freezeBatchJson.failed === 0 && freezeBatchJson.results.every((r) => r.status === "ok" && near(r.result?.duration_error_seconds, 0, 0.05)), "batch freeze succeeds on both files with exact D+hold durations", JSON.stringify(freezeBatchJson.results.map((r) => r.result?.duration_seconds)));
+await rm(path.join(root, "outputs/mcp-manifest-freeze.mp4"), { force: true });
+const freezeManifestRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-freeze.json") },
+});
+const freezeManifestJson = JSON.parse(freezeManifestRes.content[0].text);
+checkOk(freezeManifestJson.steps_run === 1 && freezeManifestJson.steps.every((s) => s.status === "ok") && near(freezeManifestJson.final.duration_seconds, 12.039, 0.05), "manifest freeze step runs and final is 12.039s", JSON.stringify(freezeManifestJson.final?.duration_seconds));
 
 // chroma_key: green screen out. Fixture test/greenscreen.mp4 is pure
 // green 640x360 with a red 200x140 rect in the middle. Transparent
@@ -3316,7 +3381,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 57 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 57 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 58 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 58 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -4524,7 +4589,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 57 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 58 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -4584,11 +4649,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 57, "GET /mcp reports name/version/transport and 57 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 58, "GET /mcp reports name/version/transport and 58 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 57 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 57 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 58 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 58 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -4612,7 +4677,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 57, "JSON-RPC tools/list returns the same 57 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 58, "JSON-RPC tools/list returns the same 58 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));
