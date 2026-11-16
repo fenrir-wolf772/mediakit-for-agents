@@ -2766,6 +2766,90 @@ const titleBadBrandJson = JSON.parse(titleBadBrandRes.content[0].text);
 checkOk(titleBadBrandRes.isError === true && /brand must be one of/.test(titleBadBrandJson.error ?? ""),
   "titlecard rejects an unknown brand id", JSON.stringify(titleBadBrandJson));
 
+// Custom brands from a MEDIAKIT_BRANDS file (lượt 81): a file of
+// your own adds brand ids next to the three built-ins — the
+// titlecard paints in the custom palette, built-ins still work,
+// and without the env the custom id is unknown. A second MCP
+// client carries the env (same pattern as the no-ASR client).
+const customBrandsPath = path.join(root, "test/brands-custom.json");
+const brandsTransport = new StdioClientTransport({
+  command: process.execPath,
+  args: [path.join(root, "src/server.js")],
+  stderr: "ignore",
+  env: { ...process.env, MEDIAKIT_BRANDS: customBrandsPath },
+});
+const brandsClient = new Client({ name: "mediakit-test-brands", version: "0.1.0" }, { capabilities: {} });
+await brandsClient.connect(brandsTransport);
+const titleCustomRes = await brandsClient.callTool({
+  name: "titlecard",
+  arguments: { text: "Ink Paper Test", output: path.join(root, "outputs/mcp-titlecard-brand-custom.png"), brand: "ink-paper" },
+});
+const titleCustomJson = JSON.parse(titleCustomRes.content[0].text);
+checkOk(titleCustomJson.brand === "ink-paper" && titleCustomJson.text_color === "082F49" && titleCustomJson.box_color === "22D3EE" && titleCustomJson.font_size === 119,
+  "titlecard --brand ink-paper (MEDIAKIT_BRANDS) resolves to the custom palette, font stays the card default", JSON.stringify({ brand: titleCustomJson.brand, text_color: titleCustomJson.text_color, box_color: titleCustomJson.box_color, font_size: titleCustomJson.font_size }));
+checkOk(JSON.stringify(titleCustomJson.brand_applied) === JSON.stringify(["text_color", "box_color"]) && JSON.stringify(titleCustomJson.brand_overrides) === JSON.stringify([]),
+  "titlecard custom brand reports both colours applied, none overridden", JSON.stringify({ applied: titleCustomJson.brand_applied, overrides: titleCustomJson.brand_overrides }));
+// Pixel proof: the box is cyan 22D3EE (R34 G211 B238). Do NOT use
+// the wide middle band here (the warm-story test does): the canvas
+// outside the box is transparent, so a 500px band dilutes the box
+// mean to G≈39 and no threshold separates cyan from brown. The
+// box spans y 975–1125 for this text (measured on disk) and the
+// text starts ~30px below its top edge, so a 16px strip at y 982
+// is pure box: G 211, R 34, B 238, measured exactly.
+const titleCustomG = await planeMean(path.join(root, "outputs/mcp-titlecard-brand-custom.png"), "1080:16:0:982", "g");
+const titleCustomR = await planeMean(path.join(root, "outputs/mcp-titlecard-brand-custom.png"), "1080:16:0:982", "r");
+console.log("titlecard ink-paper pixels: strip G =", titleCustomG, "R =", titleCustomR);
+checkOk(titleCustomG !== null && titleCustomG > 180 && titleCustomR !== null && titleCustomR < 80, "titlecard custom brand box is really cyan on the pixels (green high, red low)", `got G=${titleCustomG} R=${titleCustomR}`);
+// Built-ins still resolve through the same client, and the custom
+// id is unknown without the env.
+const titleBuiltInRes = await brandsClient.callTool({ name: "titlecard", arguments: { text: "Warm", output: path.join(root, "outputs/mcp-titlecard-brand-builtin.png"), brand: "warm-story" } });
+const titleBuiltInJson = JSON.parse(titleBuiltInRes.content[0].text);
+checkOk(titleBuiltInJson.brand === "warm-story" && titleBuiltInJson.box_color === "B45309", "titlecard built-in brand still resolves when MEDIAKIT_BRANDS is set", JSON.stringify({ brand: titleBuiltInJson.brand, box_color: titleBuiltInJson.box_color }));
+const titleCustomNoEnvRes = await client.callTool({ name: "titlecard", arguments: { text: "Hi", output: path.join(root, "outputs/mcp-titlecard-brand-noenv.png"), brand: "ink-paper" } });
+const titleCustomNoEnvJson = JSON.parse(titleCustomNoEnvRes.content[0].text);
+checkOk(titleCustomNoEnvRes.isError === true && /must be one of amber-teal, warm-story, minimal-line/.test(titleCustomNoEnvJson.error ?? ""), "titlecard custom brand id is unknown without MEDIAKIT_BRANDS (error lists only the built-ins)", JSON.stringify(titleCustomNoEnvJson));
+// intro paints from the same custom registry: background is the
+// brand background, text is the brand text. Duration 2, not 1:
+// the default fades are 0.5 + 0.5 and must stay shorter than the
+// duration, so a 1s intro is refused before it renders.
+const introCustomRes = await brandsClient.callTool({ name: "intro", arguments: { text: "Ink Paper", output: path.join(root, "outputs/mcp-intro-brand-custom.mp4"), duration: 2, brand: "ink-paper" } });
+const introCustomJson = JSON.parse(introCustomRes.content[0].text);
+checkOk(introCustomJson.bg_color === "0B1220" && introCustomJson.text_color === "F8FAFC", "intro --brand ink-paper (MEDIAKIT_BRANDS) takes the custom background + text", JSON.stringify({ bg_color: introCustomJson.bg_color, text_color: introCustomJson.text_color }));
+// doctor reports the custom file: set, path, and the extra id in custom.
+const brandsDoctorRes = await brandsClient.callTool({ name: "doctor", arguments: {} });
+const brandsDoctorJson = JSON.parse(brandsDoctorRes.content[0].text);
+checkOk(brandsDoctorJson.brands_file?.set === true && brandsDoctorJson.brands_file?.path === customBrandsPath && JSON.stringify(brandsDoctorJson.brands_file?.custom) === JSON.stringify(["ink-paper"]) && brandsDoctorJson.ok === true, "doctor reports the MEDIAKIT_BRANDS file with the custom id, ok stays true", JSON.stringify(brandsDoctorJson.brands_file));
+// The same file must not redefine a built-in id, must exist, and
+// must hold valid hex + valid JSON — all four fail through the CLI
+// (env per call via runCliJson) with the file named in the error.
+async function runCliExpectError(args, env = {}) {
+  try {
+    await execFileAsync(process.execPath, [path.join(root, "bin/mediakit.js"), ...args], { env: { ...process.env, ...env }, maxBuffer: 16 * 1024 * 1024 });
+    return null;
+  } catch (e) {
+    return String(e.stderr ?? e.message ?? "");
+  }
+}
+const brandsRedefine = JSON.parse(await readFile(customBrandsPath, "utf8"));
+brandsRedefine.brands[0].id = "amber-teal";
+const brandsRedefinePath = path.join(root, "outputs/mcp-brands-redefine.json");
+await writeFile(brandsRedefinePath, JSON.stringify(brandsRedefine), "utf8");
+const brandsRedefineErr = await runCliExpectError(["titlecard", "X", "-o", path.join(root, "outputs/mcp-titlecard-brand-redefine.png"), "--brand", "amber-teal"], { MEDIAKIT_BRANDS: brandsRedefinePath });
+checkOk(brandsRedefineErr !== null && /redefines a built-in brand id/.test(brandsRedefineErr) && brandsRedefineErr.includes(brandsRedefinePath), "MEDIAKIT_BRANDS file redefining a built-in id is refused, naming the file", (brandsRedefineErr ?? "").slice(0, 200));
+const brandsMissingErr = await runCliExpectError(["titlecard", "X", "-o", path.join(root, "outputs/mcp-titlecard-brand-missing.png"), "--brand", "ink-paper"], { MEDIAKIT_BRANDS: path.join(root, "outputs/does-not-exist-brands.json") });
+checkOk(brandsMissingErr !== null && /MEDIAKIT_BRANDS file not found/.test(brandsMissingErr), "MEDIAKIT_BRANDS pointing at a missing file fails loudly", (brandsMissingErr ?? "").slice(0, 200));
+const brandsBadHex = JSON.parse(await readFile(customBrandsPath, "utf8"));
+brandsBadHex.brands[0].palette.primary = "ZZZZZZ";
+const brandsBadHexPath = path.join(root, "outputs/mcp-brands-badhex.json");
+await writeFile(brandsBadHexPath, JSON.stringify(brandsBadHex), "utf8");
+const brandsBadHexErr = await runCliExpectError(["titlecard", "X", "-o", path.join(root, "outputs/mcp-titlecard-brand-badhex.png"), "--brand", "ink-paper"], { MEDIAKIT_BRANDS: brandsBadHexPath });
+checkOk(brandsBadHexErr !== null && /palette\.primary must be a 6-digit hex color/.test(brandsBadHexErr), "MEDIAKIT_BRANDS file with a bad hex palette value is refused", (brandsBadHexErr ?? "").slice(0, 200));
+const brandsBadJsonPath = path.join(root, "outputs/mcp-brands-badjson.json");
+await writeFile(brandsBadJsonPath, "not json", "utf8");
+const brandsBadJsonErr = await runCliExpectError(["titlecard", "X", "-o", path.join(root, "outputs/mcp-titlecard-brand-badjson.png"), "--brand", "ink-paper"], { MEDIAKIT_BRANDS: brandsBadJsonPath });
+checkOk(brandsBadJsonErr !== null && /not valid JSON/.test(brandsBadJsonErr), "MEDIAKIT_BRANDS file with invalid JSON is refused", (brandsBadJsonErr ?? "").slice(0, 200));
+await brandsClient.close();
+
 // burn_captions: defaults scale with frame height and sit above the
 // platform UI. On 1280x720: font 22px, margin 187px from the bottom.
 // Pixel-verify at t=3.5s (cue 2): the caption band differs a lot
@@ -5686,6 +5770,38 @@ checkOk(near(assembleBrandCornerR1, 28, 5) && near(assembleBrandCornerG1, 25, 5)
 const assembleBrandVerifyRes = await client.callTool({ name: "verify", arguments: { receipt: path.join(assembleBrandOut, "assemble-receipt.json") } });
 const assembleBrandVerifyJson = JSON.parse(assembleBrandVerifyRes.content[0].text);
 checkOk(assembleBrandVerifyJson.verdict === "pass" && assembleBrandVerifyJson.items?.some((i) => i.name === "brand" && i.status === "matched"), "verify on the brand film receipt passes with the brand item matched", JSON.stringify(assembleBrandVerifyJson.items?.map((i) => `${i.name}:${i.status}`)));
+
+// Custom brands in assemble (lượt 81): the same staged film with
+// brand "ink-paper" paints from the MEDIAKIT_BRANDS file, and the
+// fingerprint moves when only the file's palette changes (same id,
+// different colours) — the cache key hashes the file content.
+const assembleCustomStage = await stageAssembleManifest("assemble-brand.json");
+const assembleCustomDoc = JSON.parse(await readFile(assembleCustomStage.manifestPath, "utf8"));
+assembleCustomDoc.brand = "ink-paper";
+await writeFile(assembleCustomStage.manifestPath, JSON.stringify(assembleCustomDoc), "utf8");
+const assembleCustomTransport = new StdioClientTransport({
+  command: process.execPath,
+  args: [path.join(root, "src/server.js")],
+  stderr: "ignore",
+  env: { ...process.env, MEDIAKIT_BRANDS: customBrandsPath },
+});
+const assembleCustomClient = new Client({ name: "mediakit-test-brands-assemble", version: "0.1.0" }, { capabilities: {} });
+await assembleCustomClient.connect(assembleCustomTransport);
+const assembleCustomRes = await assembleCustomClient.callTool({ name: "assemble", arguments: { manifest_path: assembleCustomStage.manifestPath, mode: "validate" } });
+const assembleCustomJson = JSON.parse(assembleCustomRes.content[0].text);
+checkOk(assembleCustomJson.brand === "ink-paper" && assembleCustomJson.style === "clean-bold" && assembleCustomJson.brand_applied?.includes("shot 1 (s1) template.title-card.bg1") && assembleCustomJson.brand_applied?.includes("shot 1 (s1) text[0].color") && assembleCustomJson.brand_applied?.includes("shot 1 (s1) text[0].size") && assembleCustomJson.brand_applied?.includes("shot 2 (s2) template.rings.color"), "assemble brand ink-paper (MEDIAKIT_BRANDS) fills template colors + text color/size and reports applied", JSON.stringify({ brand: assembleCustomJson.brand, applied: assembleCustomJson.brand_applied }));
+checkOk(assembleCustomJson.shots?.[0]?.params?.bg1 === "#0B1220" && assembleCustomJson.shots?.[0]?.params?.accent === "#22D3EE" && assembleCustomJson.shots?.[0]?.params?.fg === "#F8FAFC" && assembleCustomJson.shots?.[1]?.params?.color === "#F472B6" && assembleCustomJson.shots?.[0]?.text_layers?.[0]?.color === "F8FAFC" && assembleCustomJson.shots?.[0]?.text_layers?.[0]?.size === 60, "assemble custom brand palette lands in the template params + text layers (bg1 navy, accent cyan, rings pink, text 60px)", JSON.stringify(assembleCustomJson.shots?.map((s) => s.params)));
+await assembleCustomClient.close();
+// Same brand id, palette edited in the file: the fingerprint must
+// move, or a re-render would silently reuse the old colours.
+const brandsFpPath = path.join(root, "outputs/mcp-brands-fp.json");
+await writeFile(brandsFpPath, await readFile(customBrandsPath, "utf8"), "utf8");
+const assembleFp1 = await runCliJson(["assemble", assembleCustomStage.manifestPath, "--mode", "validate"], { MEDIAKIT_BRANDS: brandsFpPath });
+const brandsFpDoc = JSON.parse(await readFile(brandsFpPath, "utf8"));
+brandsFpDoc.brands[0].palette.primary = "FF0000";
+await writeFile(brandsFpPath, JSON.stringify(brandsFpDoc), "utf8");
+const assembleFp2 = await runCliJson(["assemble", assembleCustomStage.manifestPath, "--mode", "validate"], { MEDIAKIT_BRANDS: brandsFpPath });
+checkOk(assembleFp1.fingerprint !== assembleFp2.fingerprint && assembleFp2.shots?.[0]?.params?.accent === "#FF0000", "assemble fingerprint changes when only the MEDIAKIT_BRANDS palette changes (same id, new colours)", `${assembleFp1.fingerprint?.slice(0, 12)} vs ${assembleFp2.fingerprint?.slice(0, 12)}`);
 
 // Transition offsets must be full precision: a cut at 50 frames
 // puts the second xfade offset at 44/30 = 1.4666...s, and rounding

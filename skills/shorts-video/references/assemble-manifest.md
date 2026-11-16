@@ -93,7 +93,9 @@ pictures — pictures fit the voice:
   in `styles.json` and it sets the caption burn values.
 - `brand` is optional: one of `amber-teal`, `warm-story`,
   `minimal-line` — the full table lives in
-  `skills/shorts-video/brands.json`. One id paints the whole film
+  `skills/shorts-video/brands.json`, or your own ids from a
+  `MEDIAKIT_BRANDS` file (same shape; ids add to the built-ins
+  and can never redefine one). One id paints the whole film
   in a channel's look: its palette fills template color params
   the shot did not pass (`title-card` bg1/accent/fg, `bounce`
   bg/color, `slide-in` bg/card/fg, `rings` bg/color), its `text`
@@ -103,8 +105,8 @@ pictures — pictures fit the voice:
   preset > brand). An explicit value always wins and is reported
   in `brand_overrides`; brand-filled fields are listed in
   `brand_applied`. The resolved brand (id + palette + text size +
-  style) is part of the fingerprint, so editing `brands.json`
-  re-approves the film. Unknown brand ids fail validation. A
+  style) is part of the fingerprint, so editing `brands.json` (or
+  your `MEDIAKIT_BRANDS` file) re-approves the film. Unknown brand ids fail validation. A
   brand never touches a `color` shot's color — that stays
   explicit, shot by shot.
 - `voice` is required: `path` plus `lead`/`tail` in seconds (default

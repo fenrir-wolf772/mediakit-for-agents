@@ -7416,6 +7416,19 @@ export async function doctor() {
     sandbox = { enabled: true, workdir: process.env[WORKDIR_ENV] ?? null, error: err.message };
     allOk = false;
   }
+  // Brand registry: built-ins plus any custom file MEDIAKIT_BRANDS
+  // points at. A set but broken file is a config error, so ok goes
+  // false — same treatment as a broken workdir.
+  let brandsFile = { set: false, path: null, brands: [...ASSEMBLE_BRAND_IDS], custom: [] };
+  try {
+    const brands = await getAssembleBrands();
+    const custom = Object.keys(brands).filter((id) => !ASSEMBLE_BRAND_IDS.includes(id)).sort();
+    const raw = process.env[BRANDS_FILE_ENV]?.trim() || null;
+    brandsFile = { set: raw !== null, path: raw, brands: Object.keys(brands).sort(), custom };
+  } catch (err) {
+    brandsFile = { set: true, path: process.env[BRANDS_FILE_ENV] ?? null, error: err.message };
+    allOk = false;
+  }
   // transcribe is optional (ffmpeg-skill's ASR rule: a speech engine is
   // never required): report the engine state, but a missing engine
   // must not fail ok — everything else still works without it.
@@ -7434,6 +7447,7 @@ export async function doctor() {
     node_version: process.version,
     platform: `${process.platform}-${process.arch}`,
     sandbox,
+    brands_file: brandsFile,
     audit,
     gpu,
     filters,
@@ -10318,37 +10332,44 @@ function assembleEvenDown(n) { return n % 2 ? n - 1 : n; }
 export const ASSEMBLE_BRAND_IDS = ["amber-teal", "warm-story", "minimal-line"];
 const ASSEMBLE_BRANDS_PATH = fileURLToPath(new URL("../skills/shorts-video/brands.json", import.meta.url));
 const ASSEMBLE_BRAND_PALETTE_KEYS = ["background", "primary", "accent", "text", "on_primary"];
-let cachedAssembleBrands = null;
-export async function getAssembleBrands() {
-  if (cachedAssembleBrands) return cachedAssembleBrands;
-  let doc;
-  try {
-    doc = JSON.parse(await readFile(ASSEMBLE_BRANDS_PATH, "utf8"));
-  } catch {
-    throw new MediaKitError("assemble brand library missing: skills/shorts-video/brands.json not found next to the package", "PRESET_LIBRARY_MISSING");
-  }
+// Extra brands from a file of your own: set MEDIAKIT_BRANDS to the
+// path of a JSON file shaped like skills/shorts-video/brands.json
+// ({"brands": [...]}). Its ids ADD to the three built-ins —
+// redefining a built-in id is refused, so a channel's locked look
+// can never be shadowed by a stray file. A custom brand is
+// validated exactly like a built-in (5 hex palette keys, text_size
+// 8-400, style must be a known style id). The cache key includes
+// the file's content hash, so editing the file takes effect on the
+// next call — and the assemble fingerprint already carries the
+// resolved palette, so a palette edit re-approves the film.
+const BRANDS_FILE_ENV = "MEDIAKIT_BRANDS";
+let cachedAssembleBrands = null; // { key, brands }
+function parseBrandDoc(doc, label, forbiddenIds = []) {
   if (!doc || !Array.isArray(doc.brands) || doc.brands.length === 0) {
-    throw new MediaKitError("assemble brand library has no brands: skills/shorts-video/brands.json", "PRESET_LIBRARY_INVALID");
+    throw new MediaKitError(`${label} has no brands`, "PRESET_LIBRARY_INVALID");
   }
   const byId = {};
   for (const b of doc.brands) {
-    if (typeof b?.id !== "string" || !b.id) throw new MediaKitError("assemble brand library: brand without an id", "PRESET_LIBRARY_INVALID");
-    if (byId[b.id]) throw new MediaKitError(`assemble brand library: duplicate brand id "${b.id}"`, "PRESET_LIBRARY_INVALID");
+    if (typeof b?.id !== "string" || !b.id) throw new MediaKitError(`${label}: brand without an id`, "PRESET_LIBRARY_INVALID");
+    if (byId[b.id]) throw new MediaKitError(`${label}: duplicate brand id "${b.id}"`, "PRESET_LIBRARY_INVALID");
+    if (forbiddenIds.includes(b.id)) {
+      throw new MediaKitError(`${label}: brand "${b.id}" redefines a built-in brand id — built-in ids (${ASSEMBLE_BRAND_IDS.join(", ")}) are locked; pick a new id for your brand`, "PRESET_LIBRARY_INVALID");
+    }
     if (!b.palette || typeof b.palette !== "object" || Array.isArray(b.palette)) {
-      throw new MediaKitError(`assemble brand library: brand "${b.id}" needs a palette object`, "PRESET_LIBRARY_INVALID");
+      throw new MediaKitError(`${label}: brand "${b.id}" needs a palette object`, "PRESET_LIBRARY_INVALID");
     }
     for (const key of ASSEMBLE_BRAND_PALETTE_KEYS) {
       const v = b.palette[key];
       if (typeof v !== "string" || !/^[0-9a-fA-F]{6}$/.test(v)) {
-        throw new MediaKitError(`assemble brand library: brand "${b.id}" palette.${key} must be a 6-digit hex color, got: ${JSON.stringify(v)}`, "PRESET_LIBRARY_INVALID");
+        throw new MediaKitError(`${label}: brand "${b.id}" palette.${key} must be a 6-digit hex color, got: ${JSON.stringify(v)}`, "PRESET_LIBRARY_INVALID");
       }
     }
     const textSize = Number(b.text_size);
     if (!Number.isInteger(textSize) || textSize < 8 || textSize > 400) {
-      throw new MediaKitError(`assemble brand library: brand "${b.id}" has bad text_size ${b.text_size}`, "PRESET_LIBRARY_INVALID");
+      throw new MediaKitError(`${label}: brand "${b.id}" has bad text_size ${b.text_size}`, "PRESET_LIBRARY_INVALID");
     }
     if (b.style !== null && b.style !== undefined && !SHORTS_STYLE_IDS.includes(b.style)) {
-      throw new MediaKitError(`assemble brand library: brand "${b.id}" has unknown style ${JSON.stringify(b.style)}`, "PRESET_LIBRARY_INVALID");
+      throw new MediaKitError(`${label}: brand "${b.id}" has unknown style ${JSON.stringify(b.style)}`, "PRESET_LIBRARY_INVALID");
     }
     byId[b.id] = {
       id: b.id, name: b.name ?? b.id, description: b.description ?? "",
@@ -10356,21 +10377,53 @@ export async function getAssembleBrands() {
       text_size: textSize, style: b.style ?? null,
     };
   }
+  return byId;
+}
+export async function getAssembleBrands() {
+  const customPath = process.env[BRANDS_FILE_ENV]?.trim() || null;
+  let customContent = null;
+  if (customPath) {
+    try {
+      customContent = await readFile(path.resolve(customPath), "utf8");
+    } catch {
+      throw new MediaKitError(`MEDIAKIT_BRANDS file not found: ${customPath}`, "PRESET_LIBRARY_MISSING");
+    }
+  }
+  const key = customPath ? `${customPath}\0${createHash("sha256").update(customContent).digest("hex")}` : "";
+  if (cachedAssembleBrands && cachedAssembleBrands.key === key) return cachedAssembleBrands.brands;
+  let doc;
+  try {
+    doc = JSON.parse(await readFile(ASSEMBLE_BRANDS_PATH, "utf8"));
+  } catch {
+    throw new MediaKitError("assemble brand library missing: skills/shorts-video/brands.json not found next to the package", "PRESET_LIBRARY_MISSING");
+  }
+  const byId = parseBrandDoc(doc, "assemble brand library");
   const ids = Object.keys(byId).sort();
   if (JSON.stringify(ids) !== JSON.stringify([...ASSEMBLE_BRAND_IDS].sort())) {
     throw new MediaKitError(`assemble brand library ids (${ids.join(", ")}) do not match ASSEMBLE_BRAND_IDS (${ASSEMBLE_BRAND_IDS.join(", ")}); update both together`, "PRESET_LIBRARY_INVALID");
   }
-  cachedAssembleBrands = byId;
+  if (customPath) {
+    let customDoc;
+    try {
+      customDoc = JSON.parse(customContent);
+    } catch {
+      throw new MediaKitError(`MEDIAKIT_BRANDS file is not valid JSON: ${customPath}`, "PRESET_LIBRARY_INVALID");
+    }
+    Object.assign(byId, parseBrandDoc(customDoc, `MEDIAKIT_BRANDS file ${customPath}`, ASSEMBLE_BRAND_IDS));
+  }
+  cachedAssembleBrands = { key, brands: byId };
   return byId;
 }
 
-// Shared brand registry (skills/shorts-video/brands.json): one id
-// paints a whole film in assemble, and the same id paints the
-// titlecard/intro of that film so the opening card matches the film.
-// `label` names the caller in the error so a bad --brand on titlecard
-// does not blame assemble. Ids are locked in code (ASSEMBLE_BRAND_IDS)
+// Shared brand registry (skills/shorts-video/brands.json, plus any
+// extra brands from the MEDIAKIT_BRANDS file): one id paints a whole
+// film in assemble, and the same id paints the titlecard/intro of
+// that film so the opening card matches the film. `label` names the
+// caller in the error so a bad --brand on titlecard does not blame
+// assemble. Built-in ids are locked in code (ASSEMBLE_BRAND_IDS)
 // and the JSON must match them, so a brand can never silently
-// resolve to different colours.
+// resolve to different colours; custom ids are listed after the
+// built-ins in the error.
 export async function resolveAssembleBrand(brand, label = "assemble brand") {
   if (brand === null || brand === undefined) return null;
   if (typeof brand !== "string" || !brand.trim()) {
@@ -10379,7 +10432,8 @@ export async function resolveAssembleBrand(brand, label = "assemble brand") {
   const brands = await getAssembleBrands();
   const found = brands[brand];
   if (!found) {
-    throw new MediaKitError(`${label} must be one of ${ASSEMBLE_BRAND_IDS.join(", ")}, got: ${brand}`, "INVALID_ARG");
+    const customIds = Object.keys(brands).filter((id) => !ASSEMBLE_BRAND_IDS.includes(id)).sort();
+    throw new MediaKitError(`${label} must be one of ${[...ASSEMBLE_BRAND_IDS, ...customIds].join(", ")}, got: ${brand}`, "INVALID_ARG");
   }
   return found;
 }

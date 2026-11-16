@@ -962,7 +962,9 @@ never rewrites the library. Changing the style after captions are
 burned means re-burning and re-verifying (same rule as the
 style-lock): the old render is not the new style.
 A `--brand <id>` (`amber-teal`, `warm-story` or `minimal-line`,
-same registry as `assemble` in `skills/shorts-video/brands.json`)
+same registry as `assemble` in `skills/shorts-video/brands.json` —
+or your own ids from a `MEDIAKIT_BRANDS` file, which add to the
+built-ins and can never redefine one)
 paints `titlecard` and `intro` in the channel look instead — primary
 is the title-card box, on_primary its text; background is the intro
 background, text its text — so the opening cards match the film

@@ -154,6 +154,7 @@ jobs:
           node bin/mediakit.js titlecard "Warm Story Brand" -o outputs/ci-titlecard-brand-ov.png --brand warm-story --text-color FFFFFF | tr -d ' \n' | grep -F '"brand_overrides":["text_color"]'
           node bin/mediakit.js intro "Welcome Back" -o outputs/ci-intro-style.mp4 --style clean-bold | grep '"bg_color": "F97316"'
           node bin/mediakit.js intro "Welcome Back" -o outputs/ci-intro-brand.mp4 --brand warm-story | grep '"bg_color": "1C1917"'
+          MEDIAKIT_BRANDS=test/brands-custom.json node bin/mediakit.js titlecard "Ink Paper" -o outputs/ci-titlecard-brand-custom.png --brand ink-paper | grep '"box_color": "22D3EE"'
           node bin/mediakit.js chroma-key test/greenscreen.mp4 -o outputs/ci-chroma.mov | grep '"has_alpha": true'
           node bin/mediakit.js chroma-key test/greenscreen.mp4 -o outputs/ci-chroma-bg.mp4 --background 1E40AF | grep '"mode": "composite"'
           node bin/mediakit.js zoom-pan test/kenburns.png -o outputs/ci-zoompan.mp4 --duration 3 --zoom-from 1 --zoom-to 2 --width 640 --height 360 | grep '"frames": 90'

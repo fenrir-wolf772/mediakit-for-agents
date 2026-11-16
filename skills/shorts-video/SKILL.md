@@ -37,7 +37,10 @@ three ids in code).
   (same registry as assemble): primary is the title-card box,
   on_primary its text; background is the intro background, text its
   text. Resolution is explicit > brand > style > default, and the
-  brand never sets the font size.
+  brand never sets the font size. Your own brand ids come from a
+  `MEDIAKIT_BRANDS` file (same shape as `brands.json`): they add to
+  the three built-ins and can never redefine one — `doctor` lists
+  them under `brands_file`.
 - Do not import another style's look into this video, and do not fall
   back to a different style because a tool failed — fix the tool call,
   or say what is blocked.
@@ -162,7 +165,8 @@ only when no template fits — template params merge over
 defaults, unknown names fail validate. For one channel look
 across the whole film, set `"brand"` in the manifest
 (`amber-teal`, `warm-story`, `minimal-line`, registry in
-`brands.json`): its palette fills template colors and text-layer
+`brands.json` — or your own ids from a `MEDIAKIT_BRANDS` file):
+its palette fills template colors and text-layer
 color/size, and its style fills the caption style when no preset
 or explicit style sets one — explicit values always win and are
 reported in `brand_overrides`.
