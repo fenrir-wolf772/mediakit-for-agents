@@ -42,8 +42,15 @@ three ids in code).
 
 ### Step 1 — Source
 If you have a landscape video: `probe` it, note resolution and duration.
-If you are building from stills/script only: generate or collect the
-visuals first (images or a screen recording), then assemble with `concat`.
+`probe` reports the coded size plus `rotation` and the display size —
+trust the display size: a phone clip coded 1920×1080 with rotation 90
+is a 1080×1920 vertical video, not a landscape one, and `check` judges
+it as displayed. If you are building from stills/script only: generate
+or collect the visuals first (images or a screen recording), then
+assemble with `concat`. When joining clips, `concat` stream-copies
+only when the clips are identical down to the video `time_base` — a
+time_base mismatch re-encodes through the filter graph instead (the
+concat demuxer copies timestamps verbatim and stretches the join).
 
 ### Step 2 — Go vertical
 Center-crop to 9:16, then resize to 1080×1920:

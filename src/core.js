@@ -248,6 +248,12 @@ export async function probe(input) {
   const video = data.streams?.find((s) => s.codec_type === "video");
   const audio = data.streams?.find((s) => s.codec_type === "audio");
   const duration = parseFloat(data.format?.duration ?? video?.duration ?? audio?.duration ?? NaN);
+  const rotation = video ? parseRotation(video) : null;
+  // Display size is what a player shows: a phone clip coded 1920x1080
+  // with a 90-degree display matrix is a 1080x1920 vertical video.
+  // Only 90/270 swap the axes; other angles keep the coded size.
+  const displayWidth = video ? ((rotation === 90 || rotation === 270) ? video.height : video.width) : null;
+  const displayHeight = video ? ((rotation === 90 || rotation === 270) ? video.width : video.height) : null;
   return {
     input: inPath,
     format: data.format?.format_name ?? null,
@@ -258,8 +264,12 @@ export async function probe(input) {
       codec: video.codec_name,
       width: video.width,
       height: video.height,
+      rotation,
+      display_width: displayWidth,
+      display_height: displayHeight,
       fps: video.r_frame_rate ? evalFps(video.r_frame_rate) : null,
       pixel_format: video.pix_fmt ?? null,
+      time_base: video.time_base ?? null,
       bit_rate: numOrNull(video.bit_rate),
     } : null,
     audio: audio ? {
@@ -276,6 +286,25 @@ function evalFps(rate) {
   const [a, b] = String(rate).split("/").map(Number);
   if (!a || !b) return null;
   return +(a / b).toFixed(3);
+}
+
+// Rotation a viewer sees, in clockwise degrees (0/90/180/270), or
+// null when the file carries no rotation metadata. Two sources, in
+// order: the Display Matrix side data ffprobe reports for phone files
+// (its `rotation` is counter-clockwise, so flip the sign), then the
+// `rotate` stream tag (already clockwise). A file with no rotation
+// returns null, not 0 — "no metadata" and "explicitly upright" are
+// the same picture, and null keeps the probe output honest about
+// what was actually measured.
+function parseRotation(video) {
+  let deg = null;
+  const matrix = (video.side_data_list ?? []).find(
+    (s) => s.side_data_type === "Display Matrix" && typeof s.rotation === "number");
+  if (matrix) deg = -matrix.rotation;
+  else if (video.tags?.rotate !== undefined && video.tags.rotate !== null) deg = Number(video.tags.rotate);
+  if (deg === null || !Number.isFinite(deg)) return null;
+  const norm = ((Math.round(deg) % 360) + 360) % 360;
+  return norm === 0 ? null : norm;
 }
 
 // ---------------------------------------------------------------- find
@@ -1711,7 +1740,10 @@ export async function loudness({ input, output, targetLufs = -14, format = null,
 // demuxer can stream-copy, which is ~10x faster and lossless. When
 // they differ, fall back to the re-encode demuxer. fast=null means
 // auto-detect, fast=true forces copy (errors with the mismatch
-// reasons), fast=false always re-encodes.
+// reasons), fast=false always re-encodes. "Identical" includes the
+// video time_base: the demuxer copies timestamps verbatim, so a
+// different time_base stretches the join (measured: 10s + 10s with
+// 1/15360 vs 1/90000 stream-copied to 116.9s).
 
 const XFADE_TRANSITIONS = [
   "fade", "fadeblack", "fadewhite", "distance",
@@ -1831,6 +1863,15 @@ export async function concat({ inputs, output, videoCodec = "libx264", audioCode
   if (fast === true && !compat.ok) {
     throw new MediaKitError(`concat --fast needs identical clips, but: ${compat.reasons.join("; ")}`, "INVALID_ARG");
   }
+  // The demuxer copies timestamps verbatim, so even its re-encode
+  // path stretches a clip whose time_base differs (measured
+  // 2026-11-16: 10s + 10s re-encoded through the demuxer came out
+  // 116.9s). Route those joins through the filter graph, which resets
+  // timestamps per clip with setpts — verified to give exactly 20s on
+  // the same pair. Mode stays "reencode"; the reason is reported.
+  if (!useFast && compat.timeBaseMismatch) {
+    return concatTrimmed({ inPaths, outPath, videoCodec, audioCodec, clips, metas, mode: "reencode", fastSkipped: compat.reasons });
+  }
   // Concat demuxer: stream-copy when clips match, re-encode otherwise.
   // The list file is written to a temp file in the output directory.
   const listPath = path.join(path.dirname(outPath), `.mediakit-concat-${Date.now()}.txt`);
@@ -1858,7 +1899,7 @@ export async function concat({ inputs, output, videoCodec = "libx264", audioCode
     operation: "concat", inputs: inPaths, output: outPath, parts: concatParts(clips),
     mode: useFast ? "fast" : "reencode",
     ...(useFast
-      ? { fast_reason: "all clips identical (codec, size, fps, pixel format, audio) — stream-copied without re-encoding" }
+      ? { fast_reason: "all clips identical (codec, size, fps, pixel format, time_base, audio) — stream-copied without re-encoding" }
       : { fast_skipped: compat.reasons.length ? compat.reasons : ["fast mode disabled"] }),
     ...info, duration_seconds: out.duration_seconds,
   };
@@ -1871,7 +1912,7 @@ export async function concat({ inputs, output, videoCodec = "libx264", audioCode
  * demuxer's inpoint/outpoint cannot cut accurately (see the --fast
  * error above), so there is no fast path here.
  */
-async function concatTrimmed({ inPaths, outPath, videoCodec, audioCodec, clips, metas }) {
+async function concatTrimmed({ inPaths, outPath, videoCodec, audioCodec, clips, metas, mode = "trim", fastSkipped = null }) {
   const hasVideo = metas.some((m) => m.video);
   if (hasVideo && metas.some((m) => !m.video)) {
     throw new MediaKitError("concat with per-clip trims needs video in every input (or audio in every input) — mixed video/audio-only clips are not supported", "INVALID_ARG");
@@ -1917,7 +1958,8 @@ async function concatTrimmed({ inPaths, outPath, videoCodec, audioCodec, clips, 
   const out = await probe(outPath);
   return {
     operation: "concat", inputs: inPaths, output: outPath, parts: concatParts(clips),
-    mode: "trim", expected_duration_seconds: expected,
+    mode, expected_duration_seconds: expected,
+    ...(fastSkipped ? { fast_skipped: fastSkipped } : {}),
     ...info, duration_seconds: out.duration_seconds,
     dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
   };
@@ -1932,6 +1974,7 @@ async function concatTrimmed({ inPaths, outPath, videoCodec, audioCodec, clips, 
  */
 function checkConcatCompat(metas) {
   const reasons = [];
+  let timeBaseMismatch = false;
   const base = metas[0];
   const fmt = (m) => (m.format ?? "").split(",")[0];
   const vid = (m) => m.video;
@@ -1950,6 +1993,15 @@ function checkConcatCompat(metas) {
       }
       if (!sameFps(vid(m).fps, vid(base).fps)) reasons.push(`${label}: fps ${vid(m).fps} != ${vid(base).fps}`);
       if (vid(m).pixel_format !== vid(base).pixel_format) reasons.push(`${label}: pixel format ${vid(m).pixel_format} != ${vid(base).pixel_format}`);
+      // Same fps is not the same clock: the concat demuxer copies
+      // timestamps verbatim, so a different time_base stretches the
+      // second clip — measured 2026-11-16: 10s (1/15360) + 10s
+      // (1/90000) stream-copied to 116.9s instead of 20s. Re-encode
+      // instead; the demuxer cannot be trusted to rescale it.
+      if (vid(m).time_base !== vid(base).time_base) {
+        reasons.push(`${label}: time_base ${vid(m).time_base} != ${vid(base).time_base}`);
+        timeBaseMismatch = true;
+      }
     }
     if (!!aud(base) !== !!aud(m)) {
       reasons.push(`${label}: audio presence differs`);
@@ -1959,7 +2011,7 @@ function checkConcatCompat(metas) {
       if (aud(m).channels !== aud(base).channels) reasons.push(`${label}: audio channels ${aud(m).channels} != ${aud(base).channels}`);
     }
   }
-  return { ok: reasons.length === 0, reasons };
+  return { ok: reasons.length === 0, reasons, timeBaseMismatch };
 }
 
 /** concat with an xfade transition between every pair of clips.
@@ -3909,9 +3961,14 @@ export async function check({ input, platform = "tiktok", content = false, conte
     checks.push({ name, expected, actual, pass, ...(hint ? { hint } : {}), ...(severity !== "error" ? { severity } : {}) });
 
   if (meta.video) {
+    // Dimensions are judged as displayed, not as coded: a phone clip
+    // stored 1920x1080 with a 90-degree display matrix IS a 1080x1920
+    // vertical video, and must pass the TikTok rule as one.
+    const dispW = meta.video.display_width ?? meta.video.width;
+    const dispH = meta.video.display_height ?? meta.video.height;
     add("dimensions", `${spec.width}x${spec.height}`,
-      `${meta.video.width}x${meta.video.height}`,
-      meta.video.width === spec.width && meta.video.height === spec.height,
+      `${dispW}x${dispH}`,
+      dispW === spec.width && dispH === spec.height,
       `reframe to ${spec.width}x${spec.height} first`);
     add("video_codec", spec.videoCodecs.join(" or "), meta.video.codec,
       spec.videoCodecs.includes(meta.video.codec),
@@ -3925,7 +3982,7 @@ export async function check({ input, platform = "tiktok", content = false, conte
     const vBits = meta.video.bit_rate
       ?? (meta.bit_rate !== null && meta.audio?.bit_rate ? meta.bit_rate - meta.audio.bit_rate : null)
       ?? meta.bit_rate;
-    const rec = recommendedVideoBitrateMbps(meta.video.width, meta.video.height, meta.video.fps);
+    const rec = recommendedVideoBitrateMbps(dispW, dispH, meta.video.fps);
     if (vBits !== null && vBits !== undefined && rec !== null) {
       const mbps = vBits / 1e6;
       const actual = `${mbps.toFixed(1)} Mbps`;

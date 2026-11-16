@@ -194,6 +194,46 @@ console.log("probe call:", probeRes.content[0].text.slice(0, 200).replace(/\n/g,
 const probeJson = JSON.parse(probeRes.content[0].text);
 checkOk(probeJson.duration_seconds === 10, "probe duration is 10s", `got ${probeJson.duration_seconds}`);
 checkOk(probeJson.video?.width === 1280 && probeJson.video?.height === 720, "probe dimensions are 1280x720", JSON.stringify(probeJson.video));
+// Rotation-aware probe (lượt 73): a phone clip coded 1280x720 with a
+// 90-degree display matrix reports rotation 90 and display 720x1280;
+// an unrotated file reports rotation null and display == coded.
+// time_base is exposed for the concat --fast compat check.
+checkOk(probeJson.video?.rotation === null && probeJson.video?.display_width === 1280 && probeJson.video?.display_height === 720, "probe on an unrotated file reports rotation null and display == coded", JSON.stringify(probeJson.video));
+checkOk(probeJson.video?.time_base === "1/15360", "probe reports video time_base 1/15360 on source", `got ${probeJson.video?.time_base}`);
+const probeRotRes = await client.callTool({
+  name: "probe",
+  arguments: { input: path.join(root, "test/rotated.mp4") },
+});
+const probeRotJson = JSON.parse(probeRotRes.content[0].text);
+console.log("probe rotated call:", JSON.stringify(probeRotJson.video));
+checkOk(probeRotJson.video?.width === 1280 && probeRotJson.video?.height === 720, "probe rotated keeps coded size 1280x720", JSON.stringify(probeRotJson.video));
+checkOk(probeRotJson.video?.rotation === 90, "probe rotated reports rotation 90 (display matrix, clockwise)", `got ${probeRotJson.video?.rotation}`);
+checkOk(probeRotJson.video?.display_width === 720 && probeRotJson.video?.display_height === 1280, "probe rotated reports display size 720x1280 (axes swapped)", JSON.stringify(probeRotJson.video));
+const probeTbRes = await client.callTool({
+  name: "probe",
+  arguments: { input: path.join(root, "test/timescale-90k.mp4") },
+});
+const probeTbJson = JSON.parse(probeTbRes.content[0].text);
+checkOk(probeTbJson.video?.time_base === "1/90000", "probe reports video time_base 1/90000 on the timescale fixture", `got ${probeTbJson.video?.time_base}`);
+// check judges dimensions as displayed: the vertical fixture is coded
+// 1920x1080 but displays 1080x1920, so its dimensions rule passes
+// TikTok; the 720x1280 rotated file reports its display size, not
+// the coded 1280x720.
+const checkVertRes = await client.callTool({
+  name: "check",
+  arguments: { input: path.join(root, "test/rotated-vertical.mp4"), platform: "tiktok" },
+});
+const checkVertJson = JSON.parse(checkVertRes.content[0].text);
+const checkVertDims = checkVertJson.checks?.find((c) => c.name === "dimensions");
+console.log("check rotated-vertical dims:", JSON.stringify(checkVertDims));
+checkOk(checkVertDims?.pass === true && checkVertDims?.actual === "1080x1920", "check passes dimensions on a rotated vertical file (display 1080x1920, coded 1920x1080)", JSON.stringify(checkVertDims));
+const checkRotRes = await client.callTool({
+  name: "check",
+  arguments: { input: path.join(root, "test/rotated.mp4"), platform: "tiktok" },
+});
+const checkRotJson = JSON.parse(checkRotRes.content[0].text);
+const checkRotDims = checkRotJson.checks?.find((c) => c.name === "dimensions");
+checkOk(checkRotDims?.pass === false && checkRotDims?.actual === "720x1280", "check reports display size 720x1280 (not coded 1280x720) on a rotated file", JSON.stringify(checkRotDims));
 
 const trimRes = await client.callTool({
   name: "trim",
@@ -1996,6 +2036,33 @@ const concatFastFailRes = await client.callTool({
 const concatFastFailJson = JSON.parse(concatFastFailRes.content[0].text);
 console.log("concat fast-fail call: isError", concatFastFailRes.isError, "|", concatFastFailJson.error);
 checkOk(concatFastFailRes.isError === true && /size 640x360/.test(concatFastFailJson.error ?? ""), "concat fast=true errors on differing clips with the mismatch", JSON.stringify(concatFastFailJson));
+
+// concat --fast time_base (lượt 73): same codec/size/fps/audio but
+// time_base 1/90000 vs 1/15360 — the demuxer copies timestamps
+// verbatim, so stream-copy (and even demuxer re-encode) stretches
+// 10s+10s to 116.9s. Auto must re-encode through the filter graph
+// and land on exactly 20s; fast=true must refuse naming time_base.
+const concatTbRes = await client.callTool({
+  name: "concat",
+  arguments: {
+    inputs: [path.join(root, "test/source.mp4"), path.join(root, "test/timescale-90k.mp4")],
+    output: path.join(root, "outputs/mcp-concat-timebase.mp4"),
+  },
+});
+const concatTbJson = JSON.parse(concatTbRes.content[0].text);
+console.log("concat time_base auto:", concatTbJson.mode, "| duration", concatTbJson.duration_seconds, "| skipped:", JSON.stringify(concatTbJson.fast_skipped));
+checkOk(concatTbJson.mode === "reencode" && near(concatTbJson.duration_seconds, 20, 0.1), "concat auto on a time_base mismatch re-encodes to exactly 20s (not the demuxer's 116.9s)", JSON.stringify(concatTbJson));
+checkOk(Array.isArray(concatTbJson.fast_skipped) && concatTbJson.fast_skipped.some((r) => r.includes("time_base 1/90000")), "concat auto names the time_base mismatch", JSON.stringify(concatTbJson.fast_skipped));
+const concatTbFastRes = await client.callTool({
+  name: "concat",
+  arguments: {
+    inputs: [path.join(root, "test/source.mp4"), path.join(root, "test/timescale-90k.mp4")],
+    output: path.join(root, "outputs/mcp-concat-timebase-fast.mp4"),
+    fast: true,
+  },
+});
+const concatTbFastJson = JSON.parse(concatTbFastRes.content[0].text);
+checkOk(concatTbFastRes.isError === true && /time_base 1\/90000/.test(concatTbFastJson.error ?? ""), "concat fast=true errors on a time_base mismatch", JSON.stringify(concatTbFastJson));
 
 // concat per-clip trim: {file, start, end} objects (MCP) and
 // path@start-end (CLI). Trims re-encode through the filter graph —

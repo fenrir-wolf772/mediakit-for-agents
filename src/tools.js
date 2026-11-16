@@ -33,7 +33,7 @@ const pathSchema = z.string().min(1).describe("Path to the file (relative or abs
 export const TOOL_DEFS = [
   {
     name: "probe",
-    description: "Inspect a media file with ffprobe: duration, dimensions, codecs, streams.",
+    description: "Inspect a media file with ffprobe: duration, dimensions, codecs, streams. The video block reports the coded size plus rotation (clockwise degrees from the display matrix or rotate tag, null when absent) and the display size — what a player actually shows, so a phone clip coded 1920x1080 with rotation 90 reports display 1080x1920. It also reports time_base, which concat --fast compares before stream-copying.",
     schema: { input: pathSchema },
     handler: async ({ input }) => safe(() => core.probe(input)),
   },
@@ -207,7 +207,7 @@ export const TOOL_DEFS = [
 
   {
     name: "concat",
-    description: "Join 2+ media files into one. By default it probes the clips first: identical clips (codec, size, fps, audio) are stream-copied with no re-encoding (fast, lossless); differing clips are re-encoded so the join still works. Set fast=true to require the stream-copy path (errors with the exact mismatch if clips differ), or fast=false to always re-encode. Set transition (e.g. fade, wipeleft, dissolve, circlecrop) to crossfade between clips instead of a hard cut — clips are normalized to the first clip's size/fps first, and the output is sum(durations) minus (n-1) x transition_duration. Per-clip trim: give an input as {file, start, end} (seconds or MM:SS) — trims always re-encode with exact cuts, and fast=true refuses them (stream-copy cuts snap to keyframes).",
+    description: "Join 2+ media files into one. By default it probes the clips first: identical clips (codec, size, fps, pixel format, time_base, audio) are stream-copied with no re-encoding (fast, lossless); differing clips are re-encoded so the join still works — except a time_base mismatch, which goes through the filter graph instead of the demuxer, because the demuxer copies timestamps verbatim and stretches the join (measured 10s+10s → 116.9s). Set fast=true to require the stream-copy path (errors with the exact mismatch if clips differ), or fast=false to always re-encode. Set transition (e.g. fade, wipeleft, dissolve, circlecrop) to crossfade between clips instead of a hard cut — clips are normalized to the first clip's size/fps first, and the output is sum(durations) minus (n-1) x transition_duration. Per-clip trim: give an input as {file, start, end} (seconds or MM:SS) — trims always re-encode with exact cuts, and fast=true refuses them (stream-copy cuts snap to keyframes).",
     schema: {
     inputs: z.array(z.union([
       z.string().min(1),
