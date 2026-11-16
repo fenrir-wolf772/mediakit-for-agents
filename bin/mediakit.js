@@ -192,33 +192,35 @@ const COMMANDS = {
     ],
   },
   titlecard: {
-    usage: "mediakit titlecard \"<hook text>\" -o <output.png> [--width 1080] [--height 1920] [--font-size <n>] [--text-color <hex>] [--box-color <hex>] [--style clean-bold|minimal-line|warm-story]",
-    desc: "Render a title card PNG: big bold hook on a coloured box, transparent background (overlay it with the overlay tool). --style picks a named locked palette from skills/shorts-video/styles.json; an explicit colour/font overrides just that one locked value.",
+    usage: "mediakit titlecard \"<hook text>\" -o <output.png> [--width 1080] [--height 1920] [--font-size <n>] [--text-color <hex>] [--box-color <hex>] [--style clean-bold|minimal-line|warm-story] [--brand amber-teal|warm-story|minimal-line]",
+    desc: "Render a title card PNG: big bold hook on a coloured box, transparent background (overlay it with the overlay tool). --style picks a named locked palette from skills/shorts-video/styles.json; --brand paints it in the channel look (primary = box, on_primary = text) from skills/shorts-video/brands.json; an explicit colour/font overrides just that one locked value. Resolution: explicit > brand > style > default.",
     args: [{ name: "text", required: true }],
     options: [
       ["--width", "Canvas width in pixels (default 1080, must be even)"],
       ["--height", "Canvas height in pixels (default 1920, must be even)"],
       ["--font-size", "Font size in px (default: ~120px at 1080 wide; with --style, the style's locked size)"],
-      ["--text-color", "Text color name or hex (default FFD60A yellow; with --style, the style's locked text color)"],
-      ["--box-color", "Box color name or hex (default F97316 orange; with --style, the style's locked box color)"],
+      ["--text-color", "Text color name or hex (default FFD60A yellow; with --style, the style's locked text color; with --brand, the brand's on_primary)"],
+      ["--box-color", "Box color name or hex (default F97316 orange; with --style, the style's locked box color; with --brand, the brand's primary)"],
       ["--style", "Named style id: clean-bold | minimal-line | warm-story (locked palette from skills/shorts-video/styles.json)"],
+      ["--brand", "Brand id: amber-teal | warm-story | minimal-line (palette from skills/shorts-video/brands.json; same registry as assemble)"],
       ["-o, --output", "Output PNG file (required)"],
     ],
   },
   intro: {
-    usage: "mediakit intro \"<title>\" -o <output.mp4> [--width 1280] [--height 720] [--duration 3] [--bg-color 0F172A] [--text-color FFFFFF] [--font-size <n>] [--fade-in 0.5] [--fade-out 0.5] [--style clean-bold|minimal-line|warm-story]",
-    desc: "Render a short intro clip: a title on a solid-colour background, fading in and out (silent video). --style picks a named locked palette (box colour becomes the background); an explicit colour/font overrides just that one locked value.",
+    usage: "mediakit intro \"<title>\" -o <output.mp4> [--width 1280] [--height 720] [--duration 3] [--bg-color 0F172A] [--text-color FFFFFF] [--font-size <n>] [--fade-in 0.5] [--fade-out 0.5] [--style clean-bold|minimal-line|warm-story] [--brand amber-teal|warm-story|minimal-line]",
+    desc: "Render a short intro clip: a title on a solid-colour background, fading in and out (silent video). --style picks a named locked palette (box colour becomes the background); --brand paints it in the channel look (background = background, text = text); an explicit colour/font overrides just that one locked value. Resolution: explicit > brand > style > default.",
     args: [{ name: "text", required: true }],
     options: [
       ["--width", "Canvas width in pixels (default 1280, must be even)"],
       ["--height", "Canvas height in pixels (default 720, must be even)"],
       ["--duration", "Clip length in seconds (default 3)"],
-      ["--bg-color", "Background color name or hex (default 0F172A dark navy; with --style, the style's locked box color)"],
-      ["--text-color", "Text color name or hex (default FFFFFF white; with --style, the style's locked text color)"],
+      ["--bg-color", "Background color name or hex (default 0F172A dark navy; with --style, the style's locked box color; with --brand, the brand's background)"],
+      ["--text-color", "Text color name or hex (default FFFFFF white; with --style, the style's locked text color; with --brand, the brand's text)"],
       ["--font-size", "Font size in px (default: ~100px at 1280 wide; with --style, the style's locked size)"],
       ["--fade-in", "Text fade-in in seconds (default 0.5, 0 = none)"],
       ["--fade-out", "Text fade-out in seconds (default 0.5, 0 = none)"],
       ["--style", "Named style id: clean-bold | minimal-line | warm-story (locked palette from skills/shorts-video/styles.json)"],
+      ["--brand", "Brand id: amber-teal | warm-story | minimal-line (palette from skills/shorts-video/brands.json; same registry as assemble)"],
       ["-o, --output", "Output MP4 file (required)"],
     ],
   },
@@ -1470,6 +1472,7 @@ async function main() {
           textColor: opts.text_color ?? null,
           boxColor: opts.box_color ?? null,
           style: opts.style ?? null,
+          brand: opts.brand ?? null,
         });
         break;
       case "intro":
@@ -1484,6 +1487,7 @@ async function main() {
           fadeIn: numOpt(opts, "fade_in") ?? 0.5,
           fadeOut: numOpt(opts, "fade_out") ?? 0.5,
           style: opts.style ?? null,
+          brand: opts.brand ?? null,
         });
         break;
       case "social": {

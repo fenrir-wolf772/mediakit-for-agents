@@ -961,6 +961,15 @@ it wins over the locked value, is reported in `style_overrides`, and
 never rewrites the library. Changing the style after captions are
 burned means re-burning and re-verifying (same rule as the
 style-lock): the old render is not the new style.
+A `--brand <id>` (`amber-teal`, `warm-story` or `minimal-line`,
+same registry as `assemble` in `skills/shorts-video/brands.json`)
+paints `titlecard` and `intro` in the channel look instead — primary
+is the title-card box, on_primary its text; background is the intro
+background, text its text — so the opening cards match the film
+they open. Resolution is explicit > brand > style > default; the
+brand never sets the font size (its `text_size` belongs to assemble
+text layers). Brand-filled fields are reported in `brand_applied`,
+explicit wins over the brand in `brand_overrides`.
 
 ### 42. Green screen out is a measured alpha, Ken Burns is a measured zoom
 `chroma_key` keys one color out (`--color` hex, `--similarity`

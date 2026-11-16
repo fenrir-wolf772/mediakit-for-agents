@@ -33,7 +33,11 @@ three ids in code).
 - `titlecard` and `intro` take the same `--style <id>` — the title card
   uses the style's locked text/box/font directly; the intro maps the
   box colour to its background. No hex values to retype, no drift
-  between the two cards.
+  between the two cards. The same two tools also take `--brand <id>`
+  (same registry as assemble): primary is the title-card box,
+  on_primary its text; background is the intro background, text its
+  text. Resolution is explicit > brand > style > default, and the
+  brand never sets the font size.
 - Do not import another style's look into this video, and do not fall
   back to a different style because a tool failed — fix the tool call,
   or say what is blocked.

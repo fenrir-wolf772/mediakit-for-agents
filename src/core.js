@@ -3545,7 +3545,7 @@ function normalizeColor(c, name) {
   return v;
 }
 
-export async function titlecard({ text, output, width = 1080, height = 1920, fontSize = null, textColor = null, boxColor = null, style = null }) {
+export async function titlecard({ text, output, width = 1080, height = 1920, fontSize = null, textColor = null, boxColor = null, style = null, brand = null }) {
   if (!text || !String(text).trim()) throw new MediaKitError("titlecard needs text", "INVALID_ARG");
   const outPath = await prepareOutput(output, []);
   const w = num(width, "width", { min: 2, integer: true });
@@ -3554,8 +3554,23 @@ export async function titlecard({ text, output, width = 1080, height = 1920, fon
   // Named style (clean-bold / minimal-line / warm-story) supplies the
   // locked palette; an explicit colour/font arg overrides just that
   // one value for this call and is reported in style_overrides.
+  // A brand (same registry as assemble) paints the card in the
+  // channel look: primary is the box, on_primary the text — so the
+  // title card matches the film it opens. Resolution order is
+  // explicit > brand > style > default. The brand never sets the
+  // font size: brand.text_size is tuned for assemble text layers,
+  // and a 64px hook would shrink the title card (default ~119px).
   const locked = await resolveShortsStyle(style);
+  const brandProfile = await resolveAssembleBrand(brand, "brand");
   const overrides = [];
+  const brandApplied = [];
+  const brandOverrides = [];
+  if (brandProfile) {
+    if (textColor !== null && textColor !== undefined) brandOverrides.push("text_color");
+    else brandApplied.push("text_color");
+    if (boxColor !== null && boxColor !== undefined) brandOverrides.push("box_color");
+    else brandApplied.push("box_color");
+  }
   let size;
   let fg;
   let bg;
@@ -3563,14 +3578,12 @@ export async function titlecard({ text, output, width = 1080, height = 1920, fon
     if (textColor !== null && textColor !== undefined) overrides.push("text_color");
     if (boxColor !== null && boxColor !== undefined) overrides.push("box_color");
     if (fontSize !== null && fontSize !== undefined) overrides.push("font_size");
-    fg = normalizeColor(textColor ?? locked.titlecard.text_color, "text_color");
-    bg = normalizeColor(boxColor ?? locked.titlecard.box_color, "box_color");
     size = fontSize === null || fontSize === undefined ? locked.titlecard.font_size : num(fontSize, "font_size", { min: 16, max: 400, integer: true });
   } else {
-    fg = normalizeColor(textColor ?? "FFD60A", "text_color");
-    bg = normalizeColor(boxColor ?? "F97316", "box_color");
     size = fontSize === null || fontSize === undefined ? Math.round(w * 0.11) : num(fontSize, "font_size", { min: 16, max: 400, integer: true });
   }
+  fg = normalizeColor(textColor ?? brandProfile?.palette?.on_primary ?? locked?.titlecard?.text_color ?? "FFD60A", "text_color");
+  bg = normalizeColor(boxColor ?? brandProfile?.palette?.primary ?? locked?.titlecard?.box_color ?? "F97316", "box_color");
   const lines = wrapTitleLines(String(text).trim().toUpperCase());
   // Textfile (not inline text): drawtext reads newlines natively and
   // draws one box around the whole block.
@@ -3593,7 +3606,7 @@ export async function titlecard({ text, output, width = 1080, height = 1920, fon
   }
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
-  return { operation: "titlecard", output: outPath, text: String(text).trim(), lines, font_size: size, text_color: fg, box_color: bg, style: style ?? null, style_overrides: overrides, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null };
+  return { operation: "titlecard", output: outPath, text: String(text).trim(), lines, font_size: size, text_color: fg, box_color: bg, style: style ?? null, brand: brand ?? null, brand_applied: brandApplied, brand_overrides: brandOverrides, style_overrides: overrides, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null };
 }
 
 // ---------------------------------------------------------------- intro
@@ -3602,7 +3615,7 @@ export async function titlecard({ text, output, width = 1080, height = 1920, fon
 // rebuilt on ffmpeg directly). Text goes through a textfile like
 // titlecard, so quoting can never break the filter. Silent video.
 
-export async function intro({ text, output, width = 1280, height = 720, duration = 3, bgColor = null, textColor = null, fontSize = null, fadeIn = 0.5, fadeOut = 0.5, style = null }) {
+export async function intro({ text, output, width = 1280, height = 720, duration = 3, bgColor = null, textColor = null, fontSize = null, fadeIn = 0.5, fadeOut = 0.5, style = null, brand = null }) {
   if (!text || !String(text).trim()) throw new MediaKitError("intro needs text", "INVALID_ARG");
   const outPath = await prepareOutput(output, []);
   const w = num(width, "width", { min: 2, integer: true });
@@ -3616,9 +3629,21 @@ export async function intro({ text, output, width = 1280, height = 720, duration
   // becomes the intro background, the text colour stays the text
   // colour, and the titlecard font size is the intro font size — so
   // the intro card and the title card of one video share one look.
-  // Explicit args override just that value for this call.
+  // A brand (same registry as assemble) paints it in the channel
+  // look instead: background is the intro background, text the text.
+  // Resolution order is explicit > brand > style > default, and the
+  // brand never sets the font size (same reason as titlecard).
   const locked = await resolveShortsStyle(style);
+  const brandProfile = await resolveAssembleBrand(brand, "brand");
   const overrides = [];
+  const brandApplied = [];
+  const brandOverrides = [];
+  if (brandProfile) {
+    if (bgColor !== null && bgColor !== undefined) brandOverrides.push("bg_color");
+    else brandApplied.push("bg_color");
+    if (textColor !== null && textColor !== undefined) brandOverrides.push("text_color");
+    else brandApplied.push("text_color");
+  }
   let size;
   let bg;
   let fg;
@@ -3626,14 +3651,12 @@ export async function intro({ text, output, width = 1280, height = 720, duration
     if (bgColor !== null && bgColor !== undefined) overrides.push("bg_color");
     if (textColor !== null && textColor !== undefined) overrides.push("text_color");
     if (fontSize !== null && fontSize !== undefined) overrides.push("font_size");
-    bg = normalizeColor(bgColor ?? locked.titlecard.box_color, "bg_color");
-    fg = normalizeColor(textColor ?? locked.titlecard.text_color, "text_color");
     size = fontSize === null || fontSize === undefined ? locked.titlecard.font_size : num(fontSize, "font_size", { min: 16, max: 400, integer: true });
   } else {
-    bg = normalizeColor(bgColor ?? "0F172A", "bg_color");
-    fg = normalizeColor(textColor ?? "FFFFFF", "text_color");
     size = fontSize === null || fontSize === undefined ? Math.round(w * 0.08) : num(fontSize, "font_size", { min: 16, max: 400, integer: true });
   }
+  bg = normalizeColor(bgColor ?? brandProfile?.palette?.background ?? locked?.titlecard?.box_color ?? "0F172A", "bg_color");
+  fg = normalizeColor(textColor ?? brandProfile?.palette?.text ?? locked?.titlecard?.text_color ?? "FFFFFF", "text_color");
   const lines = wrapTitleLines(String(text).trim().toUpperCase());
   const tmpFile = path.join(path.dirname(outPath), `.intro-${process.pid}.txt`);
   await writeFile(tmpFile, lines.join("\n"), "utf8");
@@ -3656,7 +3679,7 @@ export async function intro({ text, output, width = 1280, height = 720, duration
   }
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
-  return { operation: "intro", output: outPath, text: String(text).trim(), lines, font_size: size, bg_color: bg, text_color: fg, fade_in: fi, fade_out: fo, style: style ?? null, style_overrides: overrides, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null, duration_seconds: out.duration_seconds };
+  return { operation: "intro", output: outPath, text: String(text).trim(), lines, font_size: size, bg_color: bg, text_color: fg, fade_in: fi, fade_out: fo, style: style ?? null, brand: brand ?? null, brand_applied: brandApplied, brand_overrides: brandOverrides, style_overrides: overrides, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null, duration_seconds: out.duration_seconds };
 }
 
 // ---------------------------------------------------------------- svg_animate
@@ -10341,15 +10364,22 @@ export async function getAssembleBrands() {
   return byId;
 }
 
-export async function resolveAssembleBrand(brand) {
+// Shared brand registry (skills/shorts-video/brands.json): one id
+// paints a whole film in assemble, and the same id paints the
+// titlecard/intro of that film so the opening card matches the film.
+// `label` names the caller in the error so a bad --brand on titlecard
+// does not blame assemble. Ids are locked in code (ASSEMBLE_BRAND_IDS)
+// and the JSON must match them, so a brand can never silently
+// resolve to different colours.
+export async function resolveAssembleBrand(brand, label = "assemble brand") {
   if (brand === null || brand === undefined) return null;
   if (typeof brand !== "string" || !brand.trim()) {
-    throw new MediaKitError(`assemble brand must be one of ${ASSEMBLE_BRAND_IDS.join(", ")}, got: ${JSON.stringify(brand)}`, "INVALID_ARG");
+    throw new MediaKitError(`${label} must be one of ${ASSEMBLE_BRAND_IDS.join(", ")}, got: ${JSON.stringify(brand)}`, "INVALID_ARG");
   }
   const brands = await getAssembleBrands();
   const found = brands[brand];
   if (!found) {
-    throw new MediaKitError(`assemble brand must be one of ${ASSEMBLE_BRAND_IDS.join(", ")}, got: ${brand}`, "INVALID_ARG");
+    throw new MediaKitError(`${label} must be one of ${ASSEMBLE_BRAND_IDS.join(", ")}, got: ${brand}`, "INVALID_ARG");
   }
   return found;
 }

@@ -1159,16 +1159,17 @@ export const TOOL_DEFS = [
 
   {
     name: "titlecard",
-    description: "Render a title card PNG: a big bold hook (3-6 words) on a coloured box, on a transparent canvas so it overlays onto any frame. Text wraps to short lines; the block sits centred in the safe zone (~55% down the frame). Default: yellow text on an orange box, ~120px type at 1080 wide. Pass style: clean-bold | minimal-line | warm-story to use that style's locked palette from skills/shorts-video/styles.json instead; an explicit text_color/box_color/font_size overrides just that one locked value for this call.",
+    description: "Render a title card PNG: a big bold hook (3-6 words) on a coloured box, on a transparent canvas so it overlays onto any frame. Text wraps to short lines; the block sits centred in the safe zone (~55% down the frame). Default: yellow text on an orange box, ~120px type at 1080 wide. Pass style: clean-bold | minimal-line | warm-story to use that style's locked palette from skills/shorts-video/styles.json instead; pass brand: amber-teal | warm-story | minimal-line to paint it in the channel look from skills/shorts-video/brands.json (primary = box, on_primary = text, same registry as assemble); an explicit text_color/box_color/font_size overrides just that one locked value for this call. Resolution: explicit > brand > style > default; the brand never sets the font size.",
     schema: {
     text: z.string().min(1).describe("The hook text, 3-6 words (e.g. 'The Moon Is Leaving Us')"),
     output: pathSchema,
     width: z.number().int().min(2).default(1080).describe("Canvas width in pixels (must be even)"),
     height: z.number().int().min(2).default(1920).describe("Canvas height in pixels (must be even)"),
     font_size: z.number().int().min(16).max(400).optional().describe("Font size in px; default scales with canvas width (~120px at 1080 wide); with style, the style's locked size"),
-    text_color: z.string().optional().describe("Text color: name or hex, default FFD60A (yellow); with style, the style's locked text color"),
-    box_color: z.string().optional().describe("Box color: name or hex, default F97316 (orange); with style, the style's locked box color"),
+    text_color: z.string().optional().describe("Text color: name or hex, default FFD60A (yellow); with style, the style's locked text color; with brand, the brand's on_primary"),
+    box_color: z.string().optional().describe("Box color: name or hex, default F97316 (orange); with style, the style's locked box color; with brand, the brand's primary"),
     style: z.string().optional().describe("Named style id (clean-bold | minimal-line | warm-story): use that style's locked text/box/font palette"),
+    brand: z.string().optional().describe("Brand id (amber-teal | warm-story | minimal-line): paint the card in the channel look — primary is the box, on_primary the text"),
   },
     handler: async (a) => safe(() => core.titlecard({
     text: a.text,
@@ -1179,25 +1180,27 @@ export const TOOL_DEFS = [
     textColor: a.text_color ?? null,
     boxColor: a.box_color ?? null,
     style: a.style ?? null,
+    brand: a.brand ?? null,
   })),
   },
 
 
   {
     name: "intro",
-    description: "Render a short intro clip: a title on a solid-colour background that fades in and out. Silent video (no audio); use it as the opening card, then concat it in front of the main clip. Text wraps to short lines, centred on the frame. Pass style: clean-bold | minimal-line | warm-story to use that style's locked palette (its box colour becomes the background, its text colour the text) from skills/shorts-video/styles.json; an explicit bg_color/text_color/font_size overrides just that one locked value for this call.",
+    description: "Render a short intro clip: a title on a solid-colour background that fades in and out. Silent video (no audio); use it as the opening card, then concat it in front of the main clip. Text wraps to short lines, centred on the frame. Pass style: clean-bold | minimal-line | warm-story to use that style's locked palette (its box colour becomes the background, its text colour the text) from skills/shorts-video/styles.json; pass brand: amber-teal | warm-story | minimal-line to paint it in the channel look from skills/shorts-video/brands.json (background = background, text = text, same registry as assemble); an explicit bg_color/text_color/font_size overrides just that one locked value for this call. Resolution: explicit > brand > style > default; the brand never sets the font size.",
     schema: {
     text: z.string().min(1).describe("The intro title, e.g. 'Welcome Back'"),
     output: pathSchema,
     width: z.number().int().min(2).default(1280).describe("Canvas width in pixels (must be even)"),
     height: z.number().int().min(2).default(720).describe("Canvas height in pixels (must be even)"),
     duration: z.number().min(0.5).max(30).default(3).describe("Clip length in seconds"),
-    bg_color: z.string().optional().describe("Background color: name or hex, default 0F172A (dark navy); with style, the style's locked box color"),
-    text_color: z.string().optional().describe("Text color: name or hex, default FFFFFF (white); with style, the style's locked text color"),
+    bg_color: z.string().optional().describe("Background color: name or hex, default 0F172A (dark navy); with style, the style's locked box color; with brand, the brand's background"),
+    text_color: z.string().optional().describe("Text color: name or hex, default FFFFFF (white); with style, the style's locked text color; with brand, the brand's text"),
     font_size: z.number().int().min(16).max(400).optional().describe("Font size in px; default scales with canvas width (~100px at 1280 wide); with style, the style's locked size"),
     fade_in: z.number().min(0).max(30).default(0.5).describe("Text fade-in length in seconds (0 = no fade-in)"),
     fade_out: z.number().min(0).max(30).default(0.5).describe("Text fade-out length in seconds (0 = no fade-out)"),
     style: z.string().optional().describe("Named style id (clean-bold | minimal-line | warm-story): use that style's locked palette"),
+    brand: z.string().optional().describe("Brand id (amber-teal | warm-story | minimal-line): paint the intro in the channel look — background is the background, text the text"),
   },
     handler: async (a) => safe(() => core.intro({
     text: a.text,
@@ -1211,6 +1214,7 @@ export const TOOL_DEFS = [
     fadeIn: a.fade_in,
     fadeOut: a.fade_out,
     style: a.style ?? null,
+    brand: a.brand ?? null,
   })),
   },
 

@@ -2727,6 +2727,45 @@ checkOk(minBandR !== null && minBandG !== null && Math.abs(minBandR - minBandG) 
   "titlecard minimal-line band is grey, not warm (R=G=B)", `got R/G/B=${minBandR}/${minBandG}/${minBandB}`);
 checkOk(minBandA !== null && minBandA > 50, "titlecard minimal-line band is opaque (the box is there)", `got A=${minBandA}`);
 
+// titlecard --brand: the same registry as assemble paints the card
+// (primary = box, on_primary = text). The brand never sets the font
+// size — 119px is the card's own default, not the brand's 64px text
+// size. Pixel-verify warm-story: the brown box (B45309) carries blue
+// in the band (B ~30), unlike the default orange box (B ~8).
+const titleBrandRes = await client.callTool({
+  name: "titlecard",
+  arguments: { text: "Warm Story Brand", output: path.join(root, "outputs/mcp-titlecard-brand.png"), brand: "warm-story" },
+});
+const titleBrandJson = JSON.parse(titleBrandRes.content[0].text);
+checkOk(titleBrandJson.brand === "warm-story" && titleBrandJson.text_color === "FFF7ED" && titleBrandJson.box_color === "B45309" && titleBrandJson.font_size === 119,
+  "titlecard --brand warm-story resolves to the brand palette, font stays the card default", JSON.stringify({ brand: titleBrandJson.brand, text_color: titleBrandJson.text_color, box_color: titleBrandJson.box_color, font_size: titleBrandJson.font_size }));
+checkOk(JSON.stringify(titleBrandJson.brand_applied) === JSON.stringify(["text_color", "box_color"]) && JSON.stringify(titleBrandJson.brand_overrides) === JSON.stringify([]),
+  "titlecard --brand reports both colours applied, none overridden", JSON.stringify({ applied: titleBrandJson.brand_applied, overrides: titleBrandJson.brand_overrides }));
+const titleBrandB = await planeMean(path.join(root, "outputs/mcp-titlecard-brand.png"), "1080:500:0:800", "b");
+console.log("titlecard warm-story pixels: band B =", titleBrandB);
+checkOk(titleBrandB !== null && titleBrandB > 20, "titlecard warm-story band carries blue (brown box, not orange)", `got B=${titleBrandB}`);
+const titleBrandOvRes = await client.callTool({
+  name: "titlecard",
+  arguments: { text: "Warm Story Brand", output: path.join(root, "outputs/mcp-titlecard-brand-ov.png"), brand: "warm-story", text_color: "FFFFFF" },
+});
+const titleBrandOvJson = JSON.parse(titleBrandOvRes.content[0].text);
+checkOk(titleBrandOvJson.text_color === "FFFFFF" && titleBrandOvJson.box_color === "B45309" && JSON.stringify(titleBrandOvJson.brand_overrides) === JSON.stringify(["text_color"]) && JSON.stringify(titleBrandOvJson.brand_applied) === JSON.stringify(["box_color"]),
+  "titlecard explicit text_color beats the brand, box stays brand", JSON.stringify({ text_color: titleBrandOvJson.text_color, box_color: titleBrandOvJson.box_color, applied: titleBrandOvJson.brand_applied, overrides: titleBrandOvJson.brand_overrides }));
+const titleBrandBothRes = await client.callTool({
+  name: "titlecard",
+  arguments: { text: "Both", output: path.join(root, "outputs/mcp-titlecard-brand-style.png"), brand: "amber-teal", style: "warm-story" },
+});
+const titleBrandBothJson = JSON.parse(titleBrandBothRes.content[0].text);
+checkOk(titleBrandBothJson.text_color === "111827" && titleBrandBothJson.box_color === "F59E0B" && titleBrandBothJson.font_size === 120,
+  "titlecard brand colours beat style colours, style still sets the font size", JSON.stringify({ text_color: titleBrandBothJson.text_color, box_color: titleBrandBothJson.box_color, font_size: titleBrandBothJson.font_size }));
+const titleBadBrandRes = await client.callTool({
+  name: "titlecard",
+  arguments: { text: "Hi", output: path.join(root, "outputs/mcp-titlecard-badbrand.png"), brand: "nope" },
+});
+const titleBadBrandJson = JSON.parse(titleBadBrandRes.content[0].text);
+checkOk(titleBadBrandRes.isError === true && /brand must be one of/.test(titleBadBrandJson.error ?? ""),
+  "titlecard rejects an unknown brand id", JSON.stringify(titleBadBrandJson));
+
 // burn_captions: defaults scale with frame height and sit above the
 // platform UI. On 1280x720: font 22px, margin 187px from the bottom.
 // Pixel-verify at t=3.5s (cue 2): the caption band differs a lot
@@ -3124,6 +3163,41 @@ const introStyleBadRes = await client.callTool({
 const introStyleBadJson = JSON.parse(introStyleBadRes.content[0].text);
 checkOk(introStyleBadRes.isError === true && /style must be one of/.test(introStyleBadJson.error ?? ""),
   "intro rejects an unknown style id", JSON.stringify(introStyleBadJson));
+
+// intro --brand: background = brand background, text = brand text.
+// Pixel-verify amber-teal at full fade: the top-left corner is the
+// brand background 0F172A (15, 23, 42) — nowhere near the default
+// intro, which happens to share the same navy by coincidence here,
+// so the JSON fields (not the pixel) are the real assertion for
+// amber-teal; warm-story below is the pixel discriminator (1C1917).
+const introBrandRes = await client.callTool({
+  name: "intro",
+  arguments: { text: "Welcome Back", output: path.join(root, "outputs/mcp-intro-brand.mp4"), brand: "amber-teal" },
+});
+const introBrandJson = JSON.parse(introBrandRes.content[0].text);
+checkOk(introBrandJson.brand === "amber-teal" && introBrandJson.bg_color === "0F172A" && introBrandJson.text_color === "FFFFFF" && introBrandJson.font_size === 102,
+  "intro --brand amber-teal resolves to the brand palette, font stays the intro default", JSON.stringify({ brand: introBrandJson.brand, bg_color: introBrandJson.bg_color, text_color: introBrandJson.text_color, font_size: introBrandJson.font_size }));
+checkOk(JSON.stringify(introBrandJson.brand_applied) === JSON.stringify(["bg_color", "text_color"]) && JSON.stringify(introBrandJson.brand_overrides) === JSON.stringify([]),
+  "intro --brand reports both colours applied, none overridden", JSON.stringify({ applied: introBrandJson.brand_applied, overrides: introBrandJson.brand_overrides }));
+const introBrandWarmRes = await client.callTool({
+  name: "intro",
+  arguments: { text: "Welcome Back", output: path.join(root, "outputs/mcp-intro-brand-warm.mp4"), brand: "warm-story" },
+});
+const introBrandWarmPng = path.join(root, "outputs/mcp-intro-brand-warm.png");
+await execFileAsync("ffmpeg", ["-v", "error", "-y", "-ss", "1.5", "-i", path.join(root, "outputs/mcp-intro-brand-warm.mp4"), "-frames:v", "1", introBrandWarmPng]);
+const introBrandR = await planeMean(introBrandWarmPng, "100:100:0:0", "r");
+const introBrandG = await planeMean(introBrandWarmPng, "100:100:0:0", "g");
+const introBrandB = await planeMean(introBrandWarmPng, "100:100:0:0", "b");
+console.log("intro warm-story pixels: corner R/G/B =", introBrandR, introBrandG, introBrandB);
+checkOk(introBrandR !== null && near(introBrandR, 28, 5) && near(introBrandG, 25, 5) && near(introBrandB, 23, 5),
+  "intro --brand warm-story background is 1C1917 in the corner (not default navy)", `got R/G/B=${introBrandR}/${introBrandG}/${introBrandB}`);
+const introBrandOvRes = await client.callTool({
+  name: "intro",
+  arguments: { text: "Welcome Back", output: path.join(root, "outputs/mcp-intro-brand-ov.mp4"), brand: "warm-story", bg_color: "000000" },
+});
+const introBrandOvJson = JSON.parse(introBrandOvRes.content[0].text);
+checkOk(introBrandOvJson.bg_color === "000000" && introBrandOvJson.text_color === "FFF7ED" && JSON.stringify(introBrandOvJson.brand_overrides) === JSON.stringify(["bg_color"]),
+  "intro explicit bg_color beats the brand, text stays brand", JSON.stringify({ bg_color: introBrandOvJson.bg_color, text_color: introBrandOvJson.text_color, overrides: introBrandOvJson.brand_overrides }));
 
 // social: one call exports tiktok + shorts + instagram-feed from the
 // 1280x720 10s source. Each output must be the platform size, ~10s,
