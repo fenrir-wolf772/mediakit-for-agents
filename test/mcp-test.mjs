@@ -885,6 +885,86 @@ checkOk(rotManifestJson.steps_run === 1 && rotManifestJson.steps.every((s) => s.
 const rotCliJson = await runCliJson(["rotate", path.join(root, "test/rotate-source.mp4"), "-o", path.join(root, "outputs/mcp-rotate-cli.mp4"), "--angle", "180"]);
 checkOk(rotCliJson.dimensions === "640x360" && rotCliJson.angle === 180 && rotCliJson.output_rotation === null, "CLI rotate --angle 180 keeps 640x360, no rotation left", JSON.stringify(rotCliJson));
 
+// Display-dims geometry (lượt 75): crop/reframe/resize validate
+// against the frame the viewer sees, not the stored pixels.
+// test/rotated.mp4 is stored 1280x720 with rotation 90, so its
+// display frame is 720x1280 — a full-frame crop rect is 720x1280,
+// and 1280x720 is out of bounds even though it matches the stored
+// size. No new fixture: the rotated pair already exists.
+// MCP: crop the whole display frame of the rotated clip.
+const dispCropRes = await client.callTool({
+  name: "crop",
+  arguments: { input: path.join(root, "test/rotated.mp4"), output: path.join(root, "outputs/mcp-crop-display.mp4"), width: 720, height: 1280 },
+});
+const dispCropJson = JSON.parse(dispCropRes.content[0].text);
+checkOk(dispCropJson.dimensions === "720x1280" && dispCropJson.source_dimensions === "720x1280" && dispCropJson.source_rotation === 90, "crop on a rotated clip accepts the full display frame 720x1280 and reports display dims + rotation", JSON.stringify(dispCropJson));
+// MCP: the stored-size rect is refused, with the display size named.
+const dispCropBadRes = await client.callTool({
+  name: "crop",
+  arguments: { input: path.join(root, "test/rotated.mp4"), output: path.join(root, "outputs/mcp-crop-display-bad.mp4"), width: 1280, height: 720 },
+});
+const dispCropBadJson = JSON.parse(dispCropBadRes.content[0].text);
+checkOk(dispCropBadRes.isError === true && /exceeds display 720x1280/.test(dispCropBadJson.error ?? "") && /stored 1280x720, rotation 90/.test(dispCropBadJson.error ?? ""), "crop on a rotated clip refuses the stored-size rect 1280x720, naming display + stored dims", JSON.stringify(dispCropBadJson));
+// MCP: crop with an offset inside the display frame.
+const dispCropOffRes = await client.callTool({
+  name: "crop",
+  arguments: { input: path.join(root, "test/rotated.mp4"), output: path.join(root, "outputs/mcp-crop-display-off.mp4"), width: 360, height: 640, x: 180, y: 320 },
+});
+const dispCropOffJson = JSON.parse(dispCropOffRes.content[0].text);
+checkOk(dispCropOffJson.dimensions === "360x640", "crop with a display-space offset 360x640+180+320 on a rotated clip succeeds", JSON.stringify(dispCropOffJson));
+// CLI: crop --dry-run reports display source dims without writing.
+const dispCropDryJson = await runCliJson(["crop", path.join(root, "test/rotated.mp4"), "--width", "720", "--height", "1280", "-o", path.join(root, "outputs/mcp-crop-display-dry.mp4"), "--dry-run"]);
+checkOk(dispCropDryJson.dry_run === true && dispCropDryJson.source_dimensions === "720x1280" && dispCropDryJson.source_rotation === 90 && !existsSync(path.join(root, "outputs/mcp-crop-display-dry.mp4")), "crop --dry-run on a rotated clip reports display source dims and writes nothing", JSON.stringify(dispCropDryJson));
+// MCP: reframe a portrait display clip to portrait keeps ~all of it.
+const dispReframeRes = await client.callTool({
+  name: "reframe",
+  arguments: { input: path.join(root, "test/rotated.mp4"), output: path.join(root, "outputs/mcp-reframe-display.mp4"), width: 1080, height: 1920, mode: "crop" },
+});
+const dispReframeJson = JSON.parse(dispReframeRes.content[0].text);
+checkOk(dispReframeJson.dimensions === "1080x1920" && dispReframeJson.source === "720x1280" && dispReframeJson.source_rotation === 90 && dispReframeJson.crop_kept_percent === 100 && dispReframeJson.crop?.width === 720 && dispReframeJson.crop?.height === 1280 && !dispReframeJson.warning, "reframe crop 1080x1920 on a rotated clip keeps the whole 720x1280 display frame (100%, no softness warning)", JSON.stringify(dispReframeJson));
+// MCP: reframe --x past the display-space window is refused (maxX 0:
+// the 720-wide display frame is exactly the crop width).
+const dispReframeBadRes = await client.callTool({
+  name: "reframe",
+  arguments: { input: path.join(root, "test/rotated.mp4"), output: path.join(root, "outputs/mcp-reframe-display-bad.mp4"), width: 1080, height: 1920, mode: "crop", x: 10 },
+});
+const dispReframeBadJson = JSON.parse(dispReframeBadRes.content[0].text);
+checkOk(dispReframeBadRes.isError === true && /x must be <= 0/.test(dispReframeBadJson.error ?? ""), "reframe --x 10 on a rotated clip is refused: the display-space crop window has no slack", JSON.stringify(dispReframeBadJson));
+// MCP: reframe pad mode reports display source dims too.
+const dispReframePadRes = await client.callTool({
+  name: "reframe",
+  arguments: { input: path.join(root, "test/rotated.mp4"), output: path.join(root, "outputs/mcp-reframe-display-pad.mp4"), width: 1080, height: 1920, mode: "pad" },
+});
+const dispReframePadJson = JSON.parse(dispReframePadRes.content[0].text);
+checkOk(dispReframePadJson.dimensions === "1080x1920" && dispReframePadJson.source === "720x1280" && dispReframePadJson.source_rotation === 90, "reframe pad on a rotated clip reports display source 720x1280", JSON.stringify(dispReframePadJson));
+// MCP: resize --preset fits the DISPLAY frame in the box: 720x1280
+// into 1280x720 scales to 406x720 (even-rounded), scaled_down true.
+// Fitting coded 1280x720 instead would "fit" at 1280x720 and stretch
+// the portrait frame to landscape.
+const dispResizeRes = await client.callTool({
+  name: "resize",
+  arguments: { input: path.join(root, "test/rotated.mp4"), output: path.join(root, "outputs/mcp-resize-display.mp4"), preset: "720p" },
+});
+const dispResizeJson = JSON.parse(dispResizeRes.content[0].text);
+checkOk(dispResizeJson.dimensions === "406x720" && dispResizeJson.scaled_down === true && dispResizeJson.source_dimensions === "720x1280" && dispResizeJson.source_rotation === 90, "resize preset 720p on a rotated clip fits the display frame: 406x720, scaled_down", JSON.stringify(dispResizeJson));
+// CLI: resize --preset --dry-run reports the same display fit.
+const dispResizeDryJson = await runCliJson(["resize", path.join(root, "test/rotated.mp4"), "--preset", "720p", "-o", path.join(root, "outputs/mcp-resize-display-dry.mp4"), "--dry-run"]);
+checkOk(dispResizeDryJson.dry_run === true && dispResizeDryJson.dimensions === "406x720" && dispResizeDryJson.source_dimensions === "720x1280" && !existsSync(path.join(root, "outputs/mcp-resize-display-dry.mp4")), "resize preset --dry-run on a rotated clip reports the 406x720 display fit and writes nothing", JSON.stringify(dispResizeDryJson));
+// The taller rotated fixture: stored 1920x1080, display 1080x1920.
+const dispResizeTallRes = await client.callTool({
+  name: "resize",
+  arguments: { input: path.join(root, "test/rotated-vertical.mp4"), output: path.join(root, "outputs/mcp-resize-display-tall.mp4"), preset: "720p" },
+});
+const dispResizeTallJson = JSON.parse(dispResizeTallRes.content[0].text);
+checkOk(dispResizeTallJson.dimensions === "406x720" && dispResizeTallJson.source_dimensions === "1080x1920" && dispResizeTallJson.source_rotation === 90, "resize preset 720p on the 1080x1920 display fixture fits to 406x720", JSON.stringify(dispResizeTallJson));
+// Regression: an unrotated clip still reports coded == display dims.
+const dispReframePlainRes = await client.callTool({
+  name: "reframe",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-reframe-plain.mp4"), width: 1080, height: 1920, mode: "crop" },
+});
+const dispReframePlainJson = JSON.parse(dispReframePlainRes.content[0].text);
+checkOk(dispReframePlainJson.source === "1280x720" && dispReframePlainJson.source_rotation === null, "reframe on an unrotated clip still reports source 1280x720, rotation null", JSON.stringify(dispReframePlainJson));
+
 // chroma_key: green screen out. Fixture test/greenscreen.mp4 is pure
 // green 640x360 with a red 200x140 rect in the middle. Transparent
 // mode must keep an alpha channel (.mov ProRes 4444); composite mode

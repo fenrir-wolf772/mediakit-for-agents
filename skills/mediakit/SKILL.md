@@ -662,6 +662,20 @@ line. 180° is `hflip,vflip`, not two transposes. Works in `batch`
 and `manifest` like any other op; audio-only input is refused
 (nothing to rotate).
 
+### 33d3. Crop, reframe, and resize preset measure the display frame
+The same autorotation rule governs geometry: `crop`, `reframe`, and
+`resize --preset` validate and compute against the display size
+(`probe`'s `display_width`/`display_height`), never the coded size.
+A phone clip stored 1280×720 with rotation 90 is a 720×1280 frame
+to every filter — so `crop --width 720 --height 1280` is a legal
+full-frame crop while `1280x720` is refused ("exceeds display
+720x1280"), `reframe --mode crop` to 1080×1920 keeps 100% of it
+instead of 31.6% with a false softness warning, and `resize --preset
+720p` fits it to 406×720 instead of stretching it to 1280×720.
+Results report `source_dimensions` (display) + `source_rotation`
+(`reframe` reports `source` + `source_rotation`); on an unrotated
+clip these equal the coded size and rotation is null.
+
 ### 33e. Verify a render against its receipt — and dry-run a cut before you render it
 Every full `assemble` render writes `assemble-receipt.json` next to
 `final.mp4`: per-input digests (manifest, voice, music, captions,

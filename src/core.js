@@ -288,6 +288,26 @@ function evalFps(rate) {
   return +(a / b).toFixed(3);
 }
 
+// Display dims are what the viewer sees — and what ffmpeg's filters
+// see, because decode autorotates by default: a phone clip stored
+// 1280x720 with a 90-degree matrix is a 720x1280 frame to every
+// filter. Geometry validation (crop rect, reframe window, resize
+// preset fit) must use these, never the coded width/height:
+// validating against coded dims rejects rects that are valid on
+// screen and accepts rects ffmpeg then refuses ("Invalid too big ...
+// for width '1280'"). Returns null when there is no video stream.
+function displayDims(meta) {
+  const v = meta?.video;
+  if (!v) return null;
+  return {
+    width: v.display_width ?? v.width,
+    height: v.display_height ?? v.height,
+    rotation: v.rotation ?? null,
+    stored_width: v.width,
+    stored_height: v.height,
+  };
+}
+
 // Rotation a viewer sees, in clockwise degrees (0/90/180/270), or
 // null when the file carries no rotation metadata. Two sources, in
 // order: the Display Matrix side data ffprobe reports for phone files
@@ -999,14 +1019,21 @@ export async function crop({ input, output, width, height, x = 0, y = 0, dryRun 
   const cx = num(x, "x", { min: 0, integer: true });
   const cy = num(y, "y", { min: 0, integer: true });
   const meta = await probe(inPath);
-  if (meta.video && (cx + w > meta.video.width || cy + h > meta.video.height)) {
-    throw new MediaKitError(`crop ${w}x${h}+${cx}+${cy} exceeds source ${meta.video.width}x${meta.video.height}`, "INVALID_ARG");
+  // Validate against display dims: the crop filter sees the
+  // autorotated frame, so a rect valid in stored pixels but wider
+  // than the display frame is refused by ffmpeg itself.
+  const disp = displayDims(meta);
+  if (disp && (cx + w > disp.width || cy + h > disp.height)) {
+    const stored = disp.rotation ? ` (stored ${disp.stored_width}x${disp.stored_height}, rotation ${disp.rotation})` : "";
+    throw new MediaKitError(`crop ${w}x${h}+${cx}+${cy} exceeds display ${disp.width}x${disp.height}${stored}`, "INVALID_ARG");
   }
   const args = ["-y", "-i", inPath, "-vf", `crop=${w}:${h}:${cx}:${cy}`, "-c:a", "copy", outPath];
   if (dryRun) {
     return {
       operation: "crop", dry_run: true, input: inPath, output: outPath,
       width: w, height: h, x: cx, y: cy,
+      source_dimensions: disp ? `${disp.width}x${disp.height}` : null,
+      source_rotation: disp?.rotation ?? null,
       dimensions: `${w}x${h}`,
       commands: [formatCommand(args)],
       note: "Dry run: no file written.",
@@ -1015,7 +1042,7 @@ export async function crop({ input, output, width, height, x = 0, y = 0, dryRun 
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
-  return { operation: "crop", input: inPath, output: outPath, width: w, height: h, x: cx, y: cy, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null };
+  return { operation: "crop", input: inPath, output: outPath, width: w, height: h, x: cx, y: cy, source_dimensions: disp ? `${disp.width}x${disp.height}` : null, source_rotation: disp?.rotation ?? null, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null };
 }
 
 // ---------------------------------------------------------------- resize
@@ -1048,7 +1075,12 @@ export async function resize({ input, output, width = null, height = null, keepA
     const meta = await probe(inPath);
     if (!meta.video) throw new MediaKitError("resize needs a video stream", "INVALID_ARG");
     const [boxW, boxH] = box;
-    const srcW = meta.video.width, srcH = meta.video.height;
+    // Fit the DISPLAY frame in the box: on a rotated clip the decoded
+    // frame is portrait while the stored pixels are landscape, so
+    // fitting coded dims would scale a 720x1280 frame to 1280x720 —
+    // a stretched picture, not a fit.
+    const disp = displayDims(meta);
+    const srcW = disp.width, srcH = disp.height;
     // Fit inside the box, never upscale; round to even (x264 yuv420p).
     const factor = Math.min(boxW / srcW, boxH / srcH, 1);
     const even = (n) => Math.max(2, Math.round(n / 2) * 2);
@@ -1059,6 +1091,7 @@ export async function resize({ input, output, width = null, height = null, keepA
         operation: "resize", dry_run: true, input: inPath, output: outPath, preset,
         preset_box: `${boxW}x${boxH}`, scaled_down: factor < 1,
         source_dimensions: `${srcW}x${srcH}`,
+        source_rotation: disp.rotation,
         dimensions: `${tw}x${th}`,
         commands: [formatCommand(presetArgs)],
         note: "Dry run: no file written.",
@@ -1070,7 +1103,8 @@ export async function resize({ input, output, width = null, height = null, keepA
     return {
       operation: "resize", input: inPath, output: outPath, preset,
       preset_box: `${boxW}x${boxH}`, scaled_down: factor < 1,
-      source_dimensions: `${srcW}x${srcH}`, ...info,
+      source_dimensions: `${srcW}x${srcH}`,
+      source_rotation: disp.rotation, ...info,
       dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
     };
   }
@@ -3751,8 +3785,14 @@ export async function reframe({ input, output, width = 1080, height = 1920, mode
   if (!["crop", "pad", "blur"].includes(mode)) throw new MediaKitError(`reframe mode must be crop, pad or blur, got: ${mode}`, "INVALID_ARG");
   const meta = await probe(inPath);
   if (!meta.video) throw new MediaKitError("reframe needs a video input", "INVALID_ARG");
-  const sw = meta.video.width;
-  const sh = meta.video.height;
+  // Geometry in display space: the crop window and the anchor bounds
+  // are measured on the frame the viewer sees (autorotated on
+  // decode). A 720x1280 phone clip reframed to 1080x1920 keeps ~100%
+  // of its pixels; measured on coded 1280x720 dims it would keep
+  // only ~32% and warn about softness that isn't there.
+  const disp = displayDims(meta);
+  const sw = disp.width;
+  const sh = disp.height;
   const targetAspect = tw / th;
   const srcAspect = sw / sh;
   let vf;
@@ -3807,6 +3847,7 @@ export async function reframe({ input, output, width = 1080, height = 1920, mode
   return {
     operation: "reframe", input: inPath, output: outPath, mode,
     target: `${tw}x${th}`, source: `${sw}x${sh}`,
+    source_rotation: disp.rotation,
     ...(cropRect ? { crop: cropRect } : {}),
     ...(cropStats ? { crop_kept_percent: cropStats.kept_percent, upscale: cropStats.upscale, ...(cropStats.warning ? { warning: cropStats.warning } : {}) } : {}),
     ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
