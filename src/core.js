@@ -1189,13 +1189,14 @@ export async function extractFrame({ input, output, timestamp = 0 }) {
 
 // ---------------------------------------------------------------- thumbnail
 
-export async function thumbnail({ input, output, frames = 6, columns = 3, width = 320, timestamps = true, startDelayPercent = 0, endDelayPercent = 0 }) {
+export async function thumbnail({ input, output, frames = 6, columns = 3, width = 320, timestamps = true, startDelayPercent = 0, endDelayPercent = 0, header = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const n = num(frames, "frames", { min: 1, max: 64, integer: true });
   const cols = num(columns, "columns", { min: 1, max: 8, integer: true });
   const w = num(width, "width", { min: 80, max: 1280, integer: true });
   const showTs = timestamps !== false;
+  const showHeader = header === true;
   const startDelay = num(startDelayPercent, "start_delay_percent", { min: 0, max: 90 });
   const endDelay = num(endDelayPercent, "end_delay_percent", { min: 0, max: 90 });
   if (startDelay + endDelay >= 100) {
@@ -1221,6 +1222,7 @@ export async function thumbnail({ input, output, frames = 6, columns = 3, width 
   // grid (it only emits on a complete grid or at EOF — padding keeps
   // both paths identical).
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-thumbnail-"));
+  let headerLines = null;
   try {
     const cells = cols * rows;
     for (let i = 0; i < n; i++) {
@@ -1240,7 +1242,38 @@ export async function thumbnail({ input, output, frames = 6, columns = 3, width 
         await run(FFMPEG, ["-y", "-f", "lavfi", "-i", `color=c=black:s=${size.video.width}x${size.video.height}:d=0.1`, "-frames:v", "1", black]);
       }
     }
-    await run(FFMPEG, ["-y", "-framerate", "1", "-i", path.join(tmpDir, "tile-%03d.png"), "-vf", `tile=${cols}x${rows}`, "-frames:v", "1", "-q:v", "2", outPath]);
+    // Tile into a temp sheet first: with a header the sheet is stacked
+    // under a metadata band, so the final file is written afterwards.
+    const sheetPath = path.join(tmpDir, "sheet.png");
+    await run(FFMPEG, ["-y", "-framerate", "1", "-i", path.join(tmpDir, "tile-%03d.png"), "-vf", `tile=${cols}x${rows}`, "-frames:v", "1", "-q:v", "2", sheetPath]);
+    if (showHeader) {
+      // Header band (vcsi-style): filename + measured duration +
+      // resolution/fps + codecs + size + grid, painted as text on a
+      // dark strip above the tiles so a forwarded sheet still says
+      // which file it came from. Text goes through a textfile (never
+      // inline) so `|` and spaces need no escaping.
+      const sheetMeta = await probe(sheetPath);
+      const base = path.basename(inPath);
+      const shown = base.length > 40 ? `${base.slice(0, 37)}...` : base;
+      const fpsBit = meta.video.fps !== null ? ` | ${meta.video.fps} fps` : "";
+      const audioBit = meta.audio ? ` | audio ${meta.audio.codec} ${meta.audio.channels ?? "?"}ch` : " | no audio";
+      const sizeBit = meta.size_bytes !== null ? ` | ${(meta.size_bytes / (1024 * 1024)).toFixed(1)} MB` : "";
+      headerLines = [
+        `${shown} | ${duration}s | ${meta.video.width}x${meta.video.height}${fpsBit}`,
+        `video ${meta.video.codec}${audioBit}${sizeBit} | ${n} frames ${cols}x${rows}`,
+      ];
+      const headerPath = path.join(tmpDir, "header.png");
+      const headerFile = path.join(tmpDir, "header.txt");
+      await writeFile(headerFile, headerLines.join("\n"), "utf8");
+      const headerH = 68;
+      const esc = headerFile.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
+      await run(FFMPEG, ["-y", "-f", "lavfi", "-i", `color=c=0x111111:s=${sheetMeta.video.width}x${headerH}:d=0.1`,
+        "-vf", `drawtext=fontfile=${TITLECARD_FONT}:textfile=${esc}:fontsize=20:fontcolor=white:line_spacing=8:x=12:y=10`,
+        "-frames:v", "1", headerPath]);
+      await run(FFMPEG, ["-y", "-i", headerPath, "-i", sheetPath, "-filter_complex", "[0:v][1:v]vstack", "-frames:v", "1", "-q:v", "2", outPath]);
+    } else {
+      await copyFile(sheetPath, outPath);
+    }
   } finally {
     await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
@@ -1250,6 +1283,7 @@ export async function thumbnail({ input, output, frames = 6, columns = 3, width 
     operation: "thumbnail", input: inPath, output: outPath, frames: n, columns: cols, rows,
     timestamps: showTs,
     ...(showTs ? { timestamps_seconds: tileTimes } : {}),
+    ...(showHeader ? { header: true, header_lines: headerLines } : {}),
     window_seconds: { start: +winStart.toFixed(3), end: +winEnd.toFixed(3) },
     ...(startDelay || endDelay ? { start_delay_percent: startDelay, end_delay_percent: endDelay } : {}),
     ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
@@ -3745,10 +3779,15 @@ export async function measureLoudness(input) {
   return full === null ? null : +full.i.toFixed(1);
 }
 
-export async function check({ input, platform = "tiktok", content = false, contentStart = null, contentEnd = null, peakThresholdDb = -1 }) {
+export async function check({ input, platform = "tiktok", content = false, contentStart = null, contentEnd = null, peakThresholdDb = -1, expectedDuration = null }) {
   const inPath = await requireInput(input);
   const spec = PLATFORMS[platform];
   if (!spec) throw new MediaKitError(`unknown platform: ${platform} (supported: ${Object.keys(PLATFORMS).join(", ")})`, "INVALID_ARG");
+  // Same ±0.5s tolerance as qa_report's expected_duration: a render
+  // that lands within half a second of the brief is on-spec; beyond
+  // that the cut is wrong (trimmed short, looped long) and the check
+  // must fail instead of passing a file of the wrong length.
+  const expDur = expectedDuration === null || expectedDuration === undefined ? null : parseTime(expectedDuration, "expected_duration");
   const meta = await probe(inPath);
   const checks = [];
   // severity "error" (default) fails the check; "warn" is reported in
@@ -3796,6 +3835,11 @@ export async function check({ input, platform = "tiktok", content = false, conte
     add("duration", `<= ${spec.maxDuration}s`, `${meta.duration_seconds}s`,
       meta.duration_seconds <= spec.maxDuration,
       "trim to fit the platform limit");
+  }
+  if (expDur !== null && meta.duration_seconds !== null) {
+    add("expected_duration", `${expDur}s ± 0.5s`, `${meta.duration_seconds}s`,
+      Math.abs(meta.duration_seconds - expDur) <= 0.5,
+      "trim or fit to the expected length first");
   }
   if (spec.maxFileSizeMB && meta.size_bytes !== null) {
     const mb = meta.size_bytes / (1024 * 1024);
@@ -6674,6 +6718,7 @@ const DOCTOR_FILTERS = [
   "tblend", "signalstats",
   "blend", "split",
   "fade", "asplit",
+  "vstack",
   "loop",
 ];
 const DOCTOR_ENCODERS = [
@@ -6693,7 +6738,7 @@ const TOOL_REQUIREMENTS = {
   resize: { filters: ["scale"] },
   extract_audio: { encoders: ["libmp3lame", "aac", "pcm_s16le", "libvorbis", "libopus", "flac"] },
   extract_frame: {},
-  thumbnail: { filters: ["scale", "tile", "drawtext"] },
+  thumbnail: { filters: ["scale", "tile", "drawtext", "vstack"] },
   loudness: { filters: ["loudnorm", "acompressor"] },
   qa_report: { filters: ["loudnorm", "blackdetect", "freezedetect", "silencedetect", "astats", "ametadata", "select"] },
   concat: { filters: ["concat", "xfade", "acrossfade", "fps", "scale", "pad"] },

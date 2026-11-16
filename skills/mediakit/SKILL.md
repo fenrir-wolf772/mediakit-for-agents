@@ -814,7 +814,12 @@ thumbnail sheet labels each tile with its own timestamp in `MM:SS.d`
 (each tile is captured at that exact timestamp), so read the times
 off the sheet when you decide where to cut. `--start-delay-percent`
 / `--end-delay-percent` skip the intro/credits before spacing the
-tiles.
+tiles. `--header` adds a metadata band on top (filename, measured
+duration, resolution, fps, codecs, size, grid) — use it when the
+sheet will be forwarded or filed, so it still says which file it
+came from. `check` also takes `--expected-duration` now, so a
+platform check can fail a file of the wrong length without needing
+the full `qa_report` gate.
 
 ### 40. One manifest, one finished clip — don't retype a pipeline
 When the same chain of steps belongs on a clip (trim → reframe →

@@ -91,14 +91,15 @@ const COMMANDS = {
     ],
   },
   thumbnail: {
-    usage: "mediakit thumbnail <input> -o <output.png|jpg> [--frames <n>] [--columns <n>] [--width <px>] [--no-timestamps] [--start-delay-percent <n>] [--end-delay-percent <n>]",
-    desc: "Build a contact sheet of N evenly spaced frames. Each tile is captured at its exact timestamp and labelled with it by default — look at it before cutting or publishing. --start-delay-percent / --end-delay-percent skip the first/last slice of the file (intros, credits) before spacing the tiles.",
+    usage: "mediakit thumbnail <input> -o <output.png|jpg> [--frames <n>] [--columns <n>] [--width <px>] [--no-timestamps] [--header] [--start-delay-percent <n>] [--end-delay-percent <n>]",
+    desc: "Build a contact sheet of N evenly spaced frames. Each tile is captured at its exact timestamp and labelled with it by default — look at it before cutting or publishing. --start-delay-percent / --end-delay-percent skip the first/last slice of the file (intros, credits) before spacing the tiles. --header adds a metadata band on top (filename, duration, resolution, fps, codecs, size, grid).",
     args: [{ name: "input", required: true }],
     options: [
       ["--frames", "Number of frames (default 6)"],
       ["--columns", "Grid columns (default 3)"],
       ["--width", "Width of each tile in pixels (default 320)"],
       ["--no-timestamps", "Do not label tiles with timestamps"],
+      ["--header", "Add a metadata band on top: filename, duration, resolution, fps, codecs, size, grid"],
       ["--start-delay-percent", "Skip this percent at the start before spacing tiles (default 0)"],
       ["--end-delay-percent", "Skip this percent at the end before spacing tiles (default 0)"],
       ["-o, --output", "Output file (required)"],
@@ -227,11 +228,12 @@ const COMMANDS = {
     ],
   },
   check: {
-    usage: "mediakit check <input> [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin] [--content] [--start <s|MM:SS>] [--end <s|MM:SS>] [--peak-threshold <dB>]",
-    desc: "Verify a file against a platform delivery spec (dimensions, codecs, duration, loudness). --content also scans for black/frozen frames, silence and audio peaks; --start/--end scan only that time range.",
+    usage: "mediakit check <input> [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin] [--expected-duration <s|MM:SS>] [--content] [--start <s|MM:SS>] [--end <s|MM:SS>] [--peak-threshold <dB>]",
+    desc: "Verify a file against a platform delivery spec (dimensions, codecs, duration, loudness). --expected-duration fails when the measured duration is more than 0.5s off the brief. --content also scans for black/frozen frames, silence and audio peaks; --start/--end scan only that time range.",
     args: [{ name: "input", required: true }],
     options: [
       ["--platform", "Delivery platform (default tiktok)"],
+      ["--expected-duration", "Expected duration, seconds or MM:SS (fail when measured duration is more than 0.5s off)"],
       ["--content", "Also scan content: black/frozen frames, silence and audio peaks (one decode pass)"],
       ["--start", "Scan only from this time, seconds or MM:SS (needs --content)"],
       ["--end", "Scan only up to this time, seconds or MM:SS (needs --content)"],
@@ -997,6 +999,7 @@ async function main() {
           columns: numOpt(opts, "columns") ?? 3,
           width: numOpt(opts, "width") ?? 320,
           timestamps: opts.timestamps ?? true,
+          header: opts.header === true,
           startDelayPercent: numOpt(opts, "start_delay_percent") ?? 0,
           endDelayPercent: numOpt(opts, "end_delay_percent") ?? 0,
         });
@@ -1072,6 +1075,7 @@ async function main() {
         if (hasRange && !wantContent) fail("--start/--end/--peak-threshold need --content (they only affect the content scan)");
         result = await core.check({
           input: needInput(), platform: opts.platform ?? "tiktok",
+          expectedDuration: opts.expected_duration ?? null,
           content: wantContent,
           contentStart: opts.start ?? null,
           contentEnd: opts.end ?? null,

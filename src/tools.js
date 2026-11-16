@@ -151,7 +151,7 @@ export const TOOL_DEFS = [
 
   {
     name: "thumbnail",
-    description: "Build a contact sheet: N evenly spaced frames tiled into a grid image. Each tile is captured at its own exact timestamp and labelled with it (timestamps=true by default), so the sheet shows WHEN each frame is, not just what it shows — look at it before cutting or publishing. start_delay_percent / end_delay_percent skip the first/last slice of the file (intros, credits) before spacing the tiles.",
+    description: "Build a contact sheet: N evenly spaced frames tiled into a grid image. Each tile is captured at its own exact timestamp and labelled with it (timestamps=true by default), so the sheet shows WHEN each frame is, not just what it shows — look at it before cutting or publishing. start_delay_percent / end_delay_percent skip the first/last slice of the file (intros, credits) before spacing the tiles. header=true adds a metadata band on top (filename, measured duration, resolution, fps, codecs, size, grid) so a forwarded sheet still says which file it came from.",
     schema: {
     input: pathSchema,
     output: pathSchema,
@@ -159,6 +159,7 @@ export const TOOL_DEFS = [
     columns: z.number().int().min(1).max(8).default(3),
     width: z.number().int().min(80).max(1280).default(320).describe("Width of each tile in pixels"),
     timestamps: z.boolean().default(true).describe("Label each tile with its timestamp (MM:SS.d); set false for a clean sheet"),
+    header: z.boolean().default(false).describe("Add a metadata band on top: filename, duration, resolution, fps, codecs, size, grid"),
     start_delay_percent: z.number().min(0).max(90).default(0).describe("Skip this percent of the file at the start before spacing tiles (intros)"),
     end_delay_percent: z.number().min(0).max(90).default(0).describe("Skip this percent of the file at the end before spacing tiles (credits)"),
   },
@@ -169,6 +170,7 @@ export const TOOL_DEFS = [
       columns: a.columns,
       width: a.width,
       timestamps: a.timestamps,
+      header: a.header,
       startDelayPercent: a.start_delay_percent,
       endDelayPercent: a.end_delay_percent,
     })),
@@ -292,10 +294,11 @@ export const TOOL_DEFS = [
 
   {
     name: "check",
-    description: "Verify a finished file against a platform delivery spec (tiktok, reels, shorts, youtube): dimensions, codecs, fps, duration limit, audio channels and measured loudness, plus a file-size limit where the platform has one. Video bitrate is checked as a warning only (platforms publish recommendations, not gates) and the result also reports the platform's text-safe zone. With content=true, one extra decode pass scans for black frames, frozen frames, silence and audio peaks (0.1s windows above peak_threshold_db, default -1 dBFS; >= 0 dBFS is clipping) and folds them into the same pass/fail list with position-aware rules (a short black stretch at the very start/end is a warning — likely a fade — the same stretch mid-file fails). content_start/content_end (seconds) scan only that time range, reported on the file's own timeline. Returns pass/fail per rule with fix hints. Run this before publishing.",
+    description: "Verify a finished file against a platform delivery spec (tiktok, reels, shorts, youtube): dimensions, codecs, fps, duration limit, audio channels and measured loudness, plus a file-size limit where the platform has one. Video bitrate is checked as a warning only (platforms publish recommendations, not gates) and the result also reports the platform's text-safe zone. expected_duration fails the check when the measured duration is more than 0.5s off the brief (same tolerance as qa_report). With content=true, one extra decode pass scans for black frames, frozen frames, silence and audio peaks (0.1s windows above peak_threshold_db, default -1 dBFS; >= 0 dBFS is clipping) and folds them into the same pass/fail list with position-aware rules (a short black stretch at the very start/end is a warning — likely a fade — the same stretch mid-file fails). content_start/content_end (seconds) scan only that time range, reported on the file's own timeline. Returns pass/fail per rule with fix hints. Run this before publishing.",
     schema: {
     input: pathSchema,
     platform: z.enum(["tiktok", "reels", "shorts", "youtube", "instagram-feed", "instagram-story", "linkedin"]).default("tiktok"),
+    expected_duration: z.number().min(0).optional().describe("Expected duration in seconds (fail when the measured duration is more than 0.5s off)"),
     content: z.boolean().default(false).describe("Also scan content: black/frozen frames, silence and audio peaks; adds content_black/content_freeze/content_silence/content_peaks rules"),
     content_start: z.number().min(0).optional().describe("Scan only from this time (seconds); needs content=true"),
     content_end: z.number().min(0).optional().describe("Scan only up to this time (seconds); needs content=true"),
@@ -304,6 +307,7 @@ export const TOOL_DEFS = [
     handler: async (a) => safe(() => core.check({
     input: a.input,
     platform: a.platform,
+    expectedDuration: a.expected_duration ?? null,
     content: a.content,
     contentStart: a.content_start ?? null,
     contentEnd: a.content_end ?? null,

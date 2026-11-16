@@ -283,6 +283,41 @@ console.log("check good file:", "pass", checkGoodJson.pass, "| warnings", JSON.s
 checkOk(checkGoodJson.pass === true, "check passes overall when bitrate is the only issue", `got pass=${checkGoodJson.pass} issues=${JSON.stringify(checkGoodJson.issues)}`);
 checkOk(Array.isArray(checkGoodJson.warnings) && checkGoodJson.warnings.some((w) => w.startsWith("video_bitrate")), "check still warns about the low bitrate", JSON.stringify(checkGoodJson.warnings));
 
+// check --expected-duration (lượt 71; qa_report had it since lượt 31,
+// check did not): same ±0.5s tolerance — a file of the wrong length
+// must fail the gate instead of passing a wrong-length deliverable.
+// Boundary values are computed from the duration the tool itself
+// reports, so a 10.00 vs 10.02 probe difference cannot flip them.
+const checkExpRes = await client.callTool({
+  name: "check",
+  arguments: { input: path.join(root, "outputs/mcp-reframe-loud.mp4"), platform: "tiktok", expected_duration: 10 },
+});
+const checkExpJson = JSON.parse(checkExpRes.content[0].text);
+const expRule = checkExpJson.checks.find((c) => c.name === "expected_duration");
+const expDur = parseFloat(expRule?.actual ?? "NaN");
+checkOk(expRule?.pass === true && checkExpJson.pass === true, "check expected_duration 10s passes on the 10s file (overall pass stays true)", JSON.stringify(expRule));
+const checkExpOffRes = await client.callTool({
+  name: "check",
+  arguments: { input: path.join(root, "outputs/mcp-reframe-loud.mp4"), platform: "tiktok", expected_duration: 5 },
+});
+const checkExpOffJson = JSON.parse(checkExpOffRes.content[0].text);
+checkOk(checkExpOffJson.checks.find((c) => c.name === "expected_duration")?.pass === false && checkExpOffJson.pass === false, "check expected_duration 5s fails the 10s file", JSON.stringify(checkExpOffJson.checks.find((c) => c.name === "expected_duration")));
+checkOk(checkExpOffJson.issues?.some((i) => i.startsWith("expected_duration")), "expected_duration failure appears in top-level issues", JSON.stringify(checkExpOffJson.issues));
+const checkExpEdgeRes = await client.callTool({
+  name: "check",
+  arguments: { input: path.join(root, "outputs/mcp-reframe-loud.mp4"), platform: "tiktok", expected_duration: +(expDur + 0.5).toFixed(3) },
+});
+const checkExpEdgeJson = JSON.parse(checkExpEdgeRes.content[0].text);
+checkOk(checkExpEdgeJson.checks.find((c) => c.name === "expected_duration")?.pass === true, "check expected_duration exactly 0.5s off still passes (tolerance is inclusive)", JSON.stringify(checkExpEdgeJson.checks.find((c) => c.name === "expected_duration")));
+const checkExpOverRes = await client.callTool({
+  name: "check",
+  arguments: { input: path.join(root, "outputs/mcp-reframe-loud.mp4"), platform: "tiktok", expected_duration: +(expDur + 0.51).toFixed(3) },
+});
+const checkExpOverJson = JSON.parse(checkExpOverRes.content[0].text);
+checkOk(checkExpOverJson.checks.find((c) => c.name === "expected_duration")?.pass === false, "check expected_duration 0.51s off fails", JSON.stringify(checkExpOverJson.checks.find((c) => c.name === "expected_duration")));
+const checkExpCliJson = await runCliJson(["check", path.join(root, "outputs/mcp-reframe-loud.mp4"), "--platform", "tiktok", "--expected-duration", "0:10"], {});
+checkOk(checkExpCliJson.checks.find((c) => c.name === "expected_duration")?.pass === true, "CLI check --expected-duration accepts MM:SS (0:10 passes on the 10s file)", JSON.stringify(checkExpCliJson.checks.find((c) => c.name === "expected_duration")));
+
 // check --content: black/frozen/silence fixtures, one decode pass.
 async function checkContent(file, platform = "tiktok", extra = {}) {
   const r = await client.callTool({ name: "check", arguments: { input: path.join(root, file), platform, content: true, ...extra } });
@@ -3919,10 +3954,34 @@ async function cropPsnr(a, b, crop) {
     return null;
   }
 }
+// Same as cropPsnr but each input gets its own crop — for comparing a
+// region that moved (e.g. tiles shifted down by a header band).
+async function cropPsnrAsym(a, cropA, b, cropB) {
+  try {
+    const { stderr } = await execFileAsync("ffmpeg", ["-i", a, "-i", b, "-filter_complex", `[0:v]crop=${cropA}[a];[1:v]crop=${cropB}[b];[a][b]psnr`, "-f", "null", "-"]);
+    const m = stderr.match(/average:\s*(inf|[0-9.]+)/);
+    if (!m) return null;
+    return m[1] === "inf" ? Infinity : parseFloat(m[1]);
+  } catch {
+    return null;
+  }
+}
 async function regionYmax(file, crop) {
   try {
     const { stderr } = await execFileAsync("ffmpeg", ["-i", file, "-vf", `crop=${crop},signalstats,metadata=print:key=lavfi.signalstats.YMAX`, "-frames:v", "1", "-f", "null", "-"]);
     const m = stderr.match(/lavfi\.signalstats\.YMAX=([0-9.]+)/);
+    return m ? parseFloat(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
+// Mean luma of a crop (same signalstats path as regionYmax, YAVG
+// instead of YMAX): proves a band is dark overall, not just that it
+// contains one bright pixel.
+async function regionYavg(file, crop) {
+  try {
+    const { stderr } = await execFileAsync("ffmpeg", ["-i", file, "-vf", `crop=${crop},signalstats,metadata=print:key=lavfi.signalstats.YAVG`, "-frames:v", "1", "-f", "null", "-"]);
+    const m = stderr.match(/lavfi\.signalstats\.YAVG=([0-9.]+)/);
     return m ? parseFloat(m[1]) : null;
   } catch {
     return null;
@@ -4009,6 +4068,28 @@ const thumbPartRes = await client.callTool({
 });
 const thumbPartJson = JSON.parse(thumbPartRes.content[0].text);
 checkOk(thumbPartJson.dimensions === "960x360" && thumbPartJson.rows === 2, "thumbnail 5 frames pads to a full 3x2 sheet (960x360)", JSON.stringify(thumbPartJson.dimensions));
+
+// thumbnail --header (lượt 71; vcsi idea from lượt 70): a metadata
+// band on top — filename, measured duration, resolution, fps, codecs,
+// size, grid — so a forwarded sheet still says which file it came
+// from. The sheet grows by exactly the 68px band; the tiles below
+// must be byte-identical to the headerless sheet.
+const thumbHdrRes = await client.callTool({
+  name: "thumbnail",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-thumb-hdr.png"), header: true },
+});
+const thumbHdrJson = JSON.parse(thumbHdrRes.content[0].text);
+console.log("thumbnail header:", thumbHdrJson.dimensions, "|", JSON.stringify(thumbHdrJson.header_lines));
+checkOk(thumbHdrJson.dimensions === "960x428" && thumbHdrJson.header === true, "thumbnail header=true: sheet grows 960x360 -> 960x428 (68px band)", JSON.stringify(thumbHdrJson.dimensions));
+checkOk(thumbHdrJson.header_lines?.[0] === "source.mp4 | 10s | 1280x720 | 30 fps" && thumbHdrJson.header_lines?.[1] === "video h264 | audio aac 1ch | 0.2 MB | 6 frames 3x2", "thumbnail header lines report filename, duration, resolution, fps, codecs, size, grid", JSON.stringify(thumbHdrJson.header_lines));
+const hdrYmax = await regionYmax(path.join(root, "outputs/mcp-thumb-hdr.png"), "960:68:0:0");
+const hdrYavg = await regionYavg(path.join(root, "outputs/mcp-thumb-hdr.png"), "960:68:0:0");
+checkOk(hdrYmax !== null && hdrYmax >= 230, "thumbnail header band holds white text (YMAX >= 230)", `YMAX ${hdrYmax}`);
+checkOk(hdrYavg !== null && hdrYavg < 60, "thumbnail header band is dark overall (YAVG < 60 on the #111111 strip)", `YAVG ${hdrYavg}`);
+const hdrTilesPsnr = await cropPsnrAsym(path.join(root, "outputs/mcp-thumb-hdr.png"), "960:360:0:68", path.join(root, "outputs/mcp-thumb-ts.png"), "960:360:0:0");
+checkOk(hdrTilesPsnr === Infinity, "thumbnail header leaves the tiles byte-identical (vstack only adds the band)", `PSNR tiles vs headerless: ${hdrTilesPsnr}`);
+const thumbHdrCliJson = await runCliJson(["thumbnail", path.join(root, "test/source.mp4"), "-o", path.join(root, "outputs/mcp-thumb-hdr-cli.png"), "--header"], {});
+checkOk(thumbHdrCliJson.dimensions === "960x428" && thumbHdrCliJson.header === true, "CLI thumbnail --header works", JSON.stringify(thumbHdrCliJson.dimensions));
 
 // qa_report on the raw 10s fixture, target any: loudness -21.8 LUFS
 // fails the -16..-12 band, pacing warns (1 shot of 10s), content is
