@@ -646,6 +646,22 @@ seam lands at the normal step, and the frame count (2N−1) is the
 honest proof the pivot frame was dropped, since duration alone
 cannot tell a duplicated frame from an adjacent one.
 
+### 33d2. Rotate what the viewer sees, not the stored pixels — and strip the matrix
+`rotate in.mp4 -o out.mp4 --angle 90` turns the clip 90° clockwise
+(180/270 too), `--flip horizontal|vertical` mirrors it instead —
+exactly one of `--angle`/`--flip`. The angle applies to the frame
+the viewer sees: ffmpeg autorotates on decode, so a phone clip coded
+1280×720 with rotation 90 rotates from its 720×1280 display size
+(90° gives 1280×720, 180° keeps 720×1280). The trap is the second
+rotation: transpose the stored pixels of a rotated file and the
+display matrix survives, so the player rotates the already-rotated
+picture again. The re-encode drops the matrix and any `rotate` tag,
+so the output reports `rotation: null` — check `input_rotation` vs
+`output_rotation` in the result instead of trusting the command
+line. 180° is `hflip,vflip`, not two transposes. Works in `batch`
+and `manifest` like any other op; audio-only input is refused
+(nothing to rotate).
+
 ### 33e. Verify a render against its receipt — and dry-run a cut before you render it
 Every full `assemble` render writes `assemble-receipt.json` next to
 `final.mp4`: per-input digests (manifest, voice, music, captions,
@@ -1134,7 +1150,7 @@ cap, no timeout, no verify) — MediaKit's `download` exists so the
 agent never has to.
 
 ### 52. Test a tool over HTTP before wiring up an MCP client — same tools, curl instead of stdio
-`mediakit mcp --http [--port 3000]` serves the same 63 tools over
+`mediakit mcp --http [--port 3000]` serves the same 64 tools over
 HTTP on `127.0.0.1`: `GET /mcp` (metadata), `GET /mcp/tools`
 (every tool + JSON input schema), `POST /mcp/tools/{name}/invoke`
 (`{"arguments": {...}}`), and `POST /` for JSON-RPC 2.0

@@ -181,10 +181,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 63 tools present");
-checkOk(missing.length === 0, "tools/list has all 63 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 64 tools present");
+checkOk(missing.length === 0, "tools/list has all 64 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -770,6 +770,120 @@ const boomManifestRes = await client.callTool({
 });
 const boomManifestJson = JSON.parse(boomManifestRes.content[0].text);
 checkOk(boomManifestJson.steps_run === 1 && boomManifestJson.steps.every((s) => s.status === "ok") && near(boomManifestJson.final.duration_seconds, 20.045, 0.05), "manifest boomerang step runs and final is 20.045s", JSON.stringify(boomManifestJson.final?.duration_seconds));
+
+// rotate: turn or mirror a clip. Fixture test/rotate-source.mp4 is
+// 640x360, 5s, left half red / right half blue (spatial halves, so a
+// rotation shows up in the pixels, not just the dimensions).
+// transpose=1 is 90 CW: the old left half becomes the TOP half.
+// transpose=2 is 270 CW: the old left half becomes the BOTTOM half.
+// 180 and flip-horizontal both swap left/right; flip-vertical swaps
+// top/bottom (invisible on this vertically-uniform fixture, so only
+// dims + rotation are asserted there). A rotated phone clip
+// (test/rotated.mp4, display 720x1280, rotation 90) proves the angle
+// applies to the DISPLAYED frame and the matrix is stripped: rotate
+// 90 gives display 1280x720, rotate 180 keeps 720x1280, both with
+// output_rotation null.
+const rot90Res = await client.callTool({
+  name: "rotate",
+  arguments: { input: path.join(root, "test/rotate-source.mp4"), output: path.join(root, "outputs/mcp-rotate-90.mp4"), angle: 90 },
+});
+const rot90Json = JSON.parse(rot90Res.content[0].text);
+console.log("rotate 90 call:", JSON.stringify(rot90Json));
+checkOk(rot90Json.dimensions === "360x640" && rot90Json.output_rotation === null && rot90Json.input_rotation === null && rot90Json.input_dimensions === "640x360" && rot90Json.filter === "transpose=1" && near(rot90Json.duration_seconds, 5, 0.1), "rotate 90 swaps display axes to 360x640, no rotation metadata in or out", JSON.stringify(rot90Json));
+const rot90TopR = await planeMean(path.join(root, "outputs/mcp-rotate-90.mp4"), "360:320:0:0", "r", 1);
+const rot90TopB = await planeMean(path.join(root, "outputs/mcp-rotate-90.mp4"), "360:320:0:0", "b", 1);
+const rot90BotR = await planeMean(path.join(root, "outputs/mcp-rotate-90.mp4"), "360:320:0:320", "r", 1);
+const rot90BotB = await planeMean(path.join(root, "outputs/mcp-rotate-90.mp4"), "360:320:0:320", "b", 1);
+console.log("rotate 90 pixels: top R/B =", rot90TopR, rot90TopB, "| bottom R/B =", rot90BotR, rot90BotB);
+checkOk(rot90TopR > 200 && rot90TopB < 10, "rotate 90 CW puts the old left (red) half on top", `top R=${rot90TopR} B=${rot90TopB}`);
+checkOk(rot90BotB > 200 && rot90BotR < 10, "rotate 90 CW puts the old right (blue) half at the bottom", `bottom R=${rot90BotR} B=${rot90BotB}`);
+const rot270Res = await client.callTool({
+  name: "rotate",
+  arguments: { input: path.join(root, "test/rotate-source.mp4"), output: path.join(root, "outputs/mcp-rotate-270.mp4"), angle: 270 },
+});
+const rot270Json = JSON.parse(rot270Res.content[0].text);
+checkOk(rot270Json.dimensions === "360x640" && rot270Json.output_rotation === null && rot270Json.filter === "transpose=2", "rotate 270 swaps axes to 360x640, no rotation left", JSON.stringify(rot270Json));
+const rot270TopR = await planeMean(path.join(root, "outputs/mcp-rotate-270.mp4"), "360:320:0:0", "r", 1);
+const rot270TopB = await planeMean(path.join(root, "outputs/mcp-rotate-270.mp4"), "360:320:0:0", "b", 1);
+const rot270BotR = await planeMean(path.join(root, "outputs/mcp-rotate-270.mp4"), "360:320:0:320", "r", 1);
+const rot270BotB = await planeMean(path.join(root, "outputs/mcp-rotate-270.mp4"), "360:320:0:320", "b", 1);
+console.log("rotate 270 pixels: top R/B =", rot270TopR, rot270TopB, "| bottom R/B =", rot270BotR, rot270BotB);
+checkOk(rot270TopB > 200 && rot270TopR < 10, "rotate 270 CW puts the old right (blue) half on top", `top R=${rot270TopR} B=${rot270TopB}`);
+checkOk(rot270BotR > 200 && rot270BotB < 10, "rotate 270 CW puts the old left (red) half at the bottom", `bottom R=${rot270BotR} B=${rot270BotB}`);
+const rot180Res = await client.callTool({
+  name: "rotate",
+  arguments: { input: path.join(root, "test/rotate-source.mp4"), output: path.join(root, "outputs/mcp-rotate-180.mp4"), angle: 180 },
+});
+const rot180Json = JSON.parse(rot180Res.content[0].text);
+checkOk(rot180Json.dimensions === "640x360" && rot180Json.output_rotation === null && rot180Json.filter === "hflip,vflip", "rotate 180 keeps 640x360 via hflip+vflip, no rotation left", JSON.stringify(rot180Json));
+const rot180LeftR = await planeMean(path.join(root, "outputs/mcp-rotate-180.mp4"), "320:360:0:0", "r", 1);
+const rot180LeftB = await planeMean(path.join(root, "outputs/mcp-rotate-180.mp4"), "320:360:0:0", "b", 1);
+const rot180RightR = await planeMean(path.join(root, "outputs/mcp-rotate-180.mp4"), "320:360:320:0", "r", 1);
+const rot180RightB = await planeMean(path.join(root, "outputs/mcp-rotate-180.mp4"), "320:360:320:0", "b", 1);
+console.log("rotate 180 pixels: left R/B =", rot180LeftR, rot180LeftB, "| right R/B =", rot180RightR, rot180RightB);
+checkOk(rot180LeftB > 200 && rot180LeftR < 10 && rot180RightR > 200 && rot180RightB < 10, "rotate 180 swaps left/right (blue left, red right)", `left B=${rot180LeftB} right R=${rot180RightR}`);
+const rotFlipHRes = await client.callTool({
+  name: "rotate",
+  arguments: { input: path.join(root, "test/rotate-source.mp4"), output: path.join(root, "outputs/mcp-rotate-fliph.mp4"), flip: "horizontal" },
+});
+const rotFlipHJson = JSON.parse(rotFlipHRes.content[0].text);
+checkOk(rotFlipHJson.dimensions === "640x360" && rotFlipHJson.flip === "horizontal" && rotFlipHJson.angle === null && rotFlipHJson.filter === "hflip" && rotFlipHJson.output_rotation === null, "flip horizontal keeps 640x360 and reports flip (not angle)", JSON.stringify(rotFlipHJson));
+const rotFlipHLeftB = await planeMean(path.join(root, "outputs/mcp-rotate-fliph.mp4"), "320:360:0:0", "b", 1);
+const rotFlipHRightR = await planeMean(path.join(root, "outputs/mcp-rotate-fliph.mp4"), "320:360:320:0", "r", 1);
+checkOk(rotFlipHLeftB > 200 && rotFlipHRightR > 200, "flip horizontal mirrors left/right (blue left, red right)", `left B=${rotFlipHLeftB} right R=${rotFlipHRightR}`);
+const rotFlipVRes = await client.callTool({
+  name: "rotate",
+  arguments: { input: path.join(root, "test/rotate-source.mp4"), output: path.join(root, "outputs/mcp-rotate-flipv.mp4"), flip: "vertical" },
+});
+const rotFlipVJson = JSON.parse(rotFlipVRes.content[0].text);
+checkOk(rotFlipVJson.dimensions === "640x360" && rotFlipVJson.flip === "vertical" && rotFlipVJson.filter === "vflip" && near(rotFlipVJson.duration_seconds, 5, 0.1), "flip vertical keeps 640x360 and duration", JSON.stringify(rotFlipVJson));
+// The rotated phone clip: the angle applies to the DISPLAYED frame
+// (720x1280), and the matrix must not survive the re-encode.
+const rotPhone90Res = await client.callTool({
+  name: "rotate",
+  arguments: { input: path.join(root, "test/rotated.mp4"), output: path.join(root, "outputs/mcp-rotate-phone90.mp4"), angle: 90 },
+});
+const rotPhone90Json = JSON.parse(rotPhone90Res.content[0].text);
+console.log("rotate phone 90 call:", JSON.stringify(rotPhone90Json));
+checkOk(rotPhone90Json.input_rotation === 90 && rotPhone90Json.input_dimensions === "720x1280" && rotPhone90Json.dimensions === "1280x720" && rotPhone90Json.output_rotation === null, "rotate 90 on a rotation-90 phone clip gives display 1280x720 with the matrix stripped", JSON.stringify(rotPhone90Json));
+const rotPhone180Res = await client.callTool({
+  name: "rotate",
+  arguments: { input: path.join(root, "test/rotated.mp4"), output: path.join(root, "outputs/mcp-rotate-phone180.mp4"), angle: 180 },
+});
+const rotPhone180Json = JSON.parse(rotPhone180Res.content[0].text);
+checkOk(rotPhone180Json.input_rotation === 90 && rotPhone180Json.dimensions === "720x1280" && rotPhone180Json.output_rotation === null && near(rotPhone180Json.duration_seconds, 10, 0.1), "rotate 180 on a rotation-90 phone clip keeps display 720x1280 with the matrix stripped", JSON.stringify(rotPhone180Json));
+const rotBadAngle = await callExpectThrow("rotate", { input: path.join(root, "test/rotate-source.mp4"), output: path.join(root, "outputs/mcp-rotate-bad.mp4"), angle: 45 });
+checkOk(/angle must be 90, 180 or 270/.test(rotBadAngle), "rotate refuses angle 45", rotBadAngle.slice(0, 200));
+const rotBoth = await callExpectThrow("rotate", { input: path.join(root, "test/rotate-source.mp4"), output: path.join(root, "outputs/mcp-rotate-bad2.mp4"), angle: 90, flip: "horizontal" });
+checkOk(/exactly one of angle or flip/.test(rotBoth), "rotate refuses angle + flip together", rotBoth.slice(0, 200));
+const rotNeither = await callExpectThrow("rotate", { input: path.join(root, "test/rotate-source.mp4"), output: path.join(root, "outputs/mcp-rotate-bad3.mp4") });
+checkOk(/exactly one of angle or flip/.test(rotNeither), "rotate refuses neither angle nor flip", rotNeither.slice(0, 200));
+const rotAudioOnly = await callExpectThrow("rotate", { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-rotate-bad4.mp4"), angle: 90 });
+checkOk(/needs a video input/.test(rotAudioOnly), "rotate refuses audio-only input", rotAudioOnly.slice(0, 200));
+// Batch + manifest pass-through: rotate is a per-file batch op and a
+// manifest step like reverse.
+await rm(path.join(root, "outputs/mcp-batch-rot-in"), { recursive: true, force: true });
+await rm(path.join(root, "outputs/mcp-batch-rot-out"), { recursive: true, force: true });
+await mkdir(path.join(root, "outputs/mcp-batch-rot-in"), { recursive: true });
+await copyFile(path.join(root, "test/rotate-source.mp4"), path.join(root, "outputs/mcp-batch-rot-in/rotate-source.mp4"));
+await copyFile(path.join(root, "test/scenes-source.mp4"), path.join(root, "outputs/mcp-batch-rot-in/scenes-source.mp4"));
+const rotBatchRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "rotate", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-rot-in"), output_dir: path.join(root, "outputs/mcp-batch-rot-out"), args: { angle: 90 }, jobs: 2 },
+});
+const rotBatchJson = JSON.parse(rotBatchRes.content[0].text);
+checkOk(rotBatchJson.succeeded === 2 && rotBatchJson.failed === 0 && rotBatchJson.results.every((r) => r.status === "ok" && r.result?.dimensions === "360x640"), "batch rotate 90 succeeds on both files, both 360x640", JSON.stringify(rotBatchJson.results.map((r) => r.result?.dimensions)));
+await rm(path.join(root, "outputs/mcp-manifest-rotate.mp4"), { force: true });
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const rotManifestRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-rotate.json") },
+});
+const rotManifestJson = JSON.parse(rotManifestRes.content[0].text);
+checkOk(rotManifestJson.steps_run === 1 && rotManifestJson.steps.every((s) => s.status === "ok") && rotManifestJson.final.dimensions === "360x640", "manifest rotate step runs and final is 360x640", JSON.stringify(rotManifestJson.final?.dimensions));
+// CLI: rotate --angle 180 keeps 640x360.
+const rotCliJson = await runCliJson(["rotate", path.join(root, "test/rotate-source.mp4"), "-o", path.join(root, "outputs/mcp-rotate-cli.mp4"), "--angle", "180"]);
+checkOk(rotCliJson.dimensions === "640x360" && rotCliJson.angle === 180 && rotCliJson.output_rotation === null, "CLI rotate --angle 180 keeps 640x360, no rotation left", JSON.stringify(rotCliJson));
 
 // chroma_key: green screen out. Fixture test/greenscreen.mp4 is pure
 // green 640x360 with a red 200x140 rect in the middle. Transparent
@@ -2671,7 +2785,7 @@ const findSourceRes = await client.callTool({
   arguments: { directory: path.join(root, "test"), name: "source" },
 });
 const findSourceJson = JSON.parse(findSourceRes.content[0].text);
-checkOk(findSourceJson.total_matches === 9, "find 'source' matches 9 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source, hook-source, sharpness-source)", `got ${findSourceJson.total_matches}`);
+checkOk(findSourceJson.total_matches === 10, "find 'source' matches 10 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source, hook-source, sharpness-source, rotate-source)", `got ${findSourceJson.total_matches}`);
 
 const findMp3Res = await client.callTool({
   name: "find",
@@ -3760,7 +3874,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 63 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 63 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 64 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 64 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -5341,7 +5455,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 63 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 64 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -5401,11 +5515,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 63, "GET /mcp reports name/version/transport and 63 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 64, "GET /mcp reports name/version/transport and 64 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 63 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 63 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 64 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 64 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -5429,7 +5543,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 63, "JSON-RPC tools/list returns the same 63 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 64, "JSON-RPC tools/list returns the same 64 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

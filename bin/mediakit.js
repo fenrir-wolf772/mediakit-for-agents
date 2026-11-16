@@ -300,6 +300,16 @@ const COMMANDS = {
       ["-o, --output", "Output file (required)"],
     ],
   },
+  rotate: {
+    usage: "mediakit rotate <input> -o <output> [--angle 90|180|270 | --flip horizontal|vertical] [--crf 23]",
+    desc: "Rotate a clip 90/180/270 degrees clockwise, or flip it horizontally/vertically. The angle applies to the frame the viewer sees (a phone clip coded 1280x720 with rotation 90 rotates from its 720x1280 display size); the output carries no rotation metadata, so no player double-rotates it. Reports input_rotation vs output_rotation measured on disk.",
+    opts: [
+      ["--angle", "Clockwise degrees: 90, 180 or 270 (exactly one of --angle/--flip)"],
+      ["--flip", "Flip: horizontal or vertical (use instead of --angle)"],
+      ["--crf", "CRF quality 0-51 (default 23)"],
+      ["-o, --output", "Output file path"],
+    ],
+  },
   boomerang: {
     usage: "mediakit boomerang <input> -o <output> [--no-audio] [--crf 23]",
     desc: "Play a clip forward then backwards — the ping-pong loop. The peak frame is not played twice: the reversed half drops its first frame (moviepy TimeMirror fix) and the reversed audio drops one video-frame of audio, so the output is 2D - 1/fps (audio-only input plays forward + reversed whole, 2D). Reports seam_diff vs normal_step measured on disk. Works on audio-only input too.",
@@ -688,7 +698,7 @@ const COMMANDS = {
   },
   batch: {
     usage: "mediakit batch <operation> --pattern <glob> --input-dir <dir> -o <output-dir> [--args-json '{\"target_lufs\": -14}'] [--jobs 1] [--suffix -loudness] [--no-cache] [--stop-on-error] [--timeout 1800] [--max-files 200] [--dry-run]",
-    desc: "Apply one operation (loudness|resize|reframe|compress|convert|extract-audio|reverse|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|slideshow|hook) to every file matching a glob under a folder, with the same args for all. Outputs are <stem>-<operation>.<ext> under the output dir, mirroring the input tree; a batch-manifest.json records every file's result. Unchanged files are skipped via a content-hash cache; --dry-run lists the planned outputs and writes nothing. cut-words and remove-retakes find each clip's words file as <words-dir>/<stem>.words.json (default: the input's own folder) — a clip with no words file fails its own row only. slideshow is a set operation: the whole matched set of images (2-32) becomes ONE slideshow video (--args-json '{\"output_name\": \"reel.mp4\"}'), and the per-file cache does not apply. hook is probe-only: it writes no file (output null in each row) — the ranked hook windows come back in the row's result, and the cache stores that result.",
+    desc: "Apply one operation (loudness|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|slideshow|hook) to every file matching a glob under a folder, with the same args for all. Outputs are <stem>-<operation>.<ext> under the output dir, mirroring the input tree; a batch-manifest.json records every file's result. Unchanged files are skipped via a content-hash cache; --dry-run lists the planned outputs and writes nothing. cut-words and remove-retakes find each clip's words file as <words-dir>/<stem>.words.json (default: the input's own folder) — a clip with no words file fails its own row only. slideshow is a set operation: the whole matched set of images (2-32) becomes ONE slideshow video (--args-json '{\"output_name\": \"reel.mp4\"}'), and the per-file cache does not apply. hook is probe-only: it writes no file (output null in each row) — the ranked hook windows come back in the row's result, and the cache stores that result.",
     args: [{ name: "operation", required: true }],
     options: [
       ["--pattern", "Glob under --input-dir: **/*.mp4 (any depth), sub/*.mp4 (one folder), or bare *.mp4 (basename at any depth) (required)"],
@@ -758,7 +768,7 @@ const COMMANDS = {
   },
   manifest: {
     usage: "mediakit manifest <manifest.json> [-o <output.mp4>] [--dry-run] [--no-cache] [--keep-intermediates]",
-    desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (slideshow as step 1 only — it builds from images in args, so input should be the first slide image; then trim|resize|reframe|compress|convert|extract-audio|reverse|boomerang|make-loopable|freeze|grade|fit|silence|denoise|interpolate|burn-captions|overlay|chroma-key|cut-words|remove-retakes; hook is the probe-only step — it analyzes the chain file at that point and passes it through unchanged), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file.",
+    desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (slideshow as step 1 only — it builds from images in args, so input should be the first slide image; then trim|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|grade|fit|silence|denoise|interpolate|burn-captions|overlay|chroma-key|cut-words|remove-retakes; hook is the probe-only step — it analyzes the chain file at that point and passes it through unchanged), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file.",
     args: [{ name: "manifest", required: true }],
     options: [
       ["--dry-run", "Validate the manifest and list the planned steps without running anything"],
@@ -787,7 +797,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 63 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 64 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -1141,6 +1151,14 @@ async function main() {
         result = await core.reverseClip({
           input: needInput(), output: needOutput(opts),
           audio: opts.audio !== false,
+          crf: numOpt(opts, "crf") ?? 23,
+        });
+        break;
+      case "rotate":
+        result = await core.rotateClip({
+          input: needInput(), output: needOutput(opts),
+          angle: numOpt(opts, "angle") ?? null,
+          flip: opts.flip ?? null,
           crf: numOpt(opts, "crf") ?? 23,
         });
         break;
@@ -1541,7 +1559,7 @@ async function main() {
         break;
       }
       case "batch": {
-        if (!positional[0]) fail("missing operation: loudness|resize|reframe|compress|convert|extract-audio|reverse|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|slideshow|hook");
+        if (!positional[0]) fail("missing operation: loudness|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|slideshow|hook");
         if (!opts.pattern) fail("missing required option: --pattern <glob>");
         if (!opts.input_dir) fail("missing required option: --input-dir <dir>");
         const opName = positional[0].replace(/-/g, "_");

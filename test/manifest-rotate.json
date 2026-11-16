@@ -1,0 +1,1 @@
+{"input":"rotate-source.mp4","output":"../outputs/mcp-manifest-rotate.mp4","steps":[{"args":{"angle":90},"tool":"rotate"}],"version":1}

@@ -426,6 +426,26 @@ export const TOOL_DEFS = [
 
 
   {
+    name: "rotate",
+    description: "Rotate or flip a clip: angle 90/180/270 clockwise, or flip horizontal/vertical (exactly one of angle/flip). The angle applies to the frame the viewer sees — ffmpeg autorotates on decode, so a phone clip coded 1280x720 with rotation 90 rotates from its 720x1280 display size (rotate 90 gives 1280x720, rotate 180 keeps 720x1280). The re-encode strips the display-matrix/rotate metadata, so the output reports rotation null and no player double-rotates it (yuan66-hub's rotate has no such guard). Re-encodes video (libx264, crf 23 default), AAC pinned 192k. The result reports input_rotation vs output_rotation plus the display dimensions before and after, measured on disk.",
+    schema: {
+    input: pathSchema,
+    output: pathSchema,
+    angle: z.number().int().optional().describe("Clockwise degrees: 90, 180 or 270 (exactly one of angle/flip)"),
+    flip: z.enum(["horizontal", "vertical"]).optional().describe("Flip direction (exactly one of angle/flip)"),
+    crf: z.number().int().min(0).max(51).default(23),
+  },
+    handler: async (a) => safe(() => core.rotateClip({
+    input: a.input,
+    output: a.output,
+    angle: a.angle ?? null,
+    flip: a.flip ?? null,
+    crf: a.crf,
+  })),
+  },
+
+
+  {
     name: "boomerang",
     description: "Play a clip forward then backwards — the ping-pong loop (moviepy TimeSymmetrize/TimeMirror idea): the clip followed by its own reverse, so a bounce, swing or wave returns to where it started with no cut. The peak frame is NOT played twice: the reversed half drops its first frame (moviepy v2.2.1's TimeMirror clipping fix) and the reversed audio drops one video-frame of audio at the same point, so the output is 2D - 1/fps (audio-only input has no video frame to pivot on, so it plays forward + reversed whole, 2D). Re-encodes video (libx264, crf 23 default), AAC pinned 192k. The result measures the seam on disk: seam_diff (output frame just before the seam vs just after it) against normal_step (two neighbouring mid-forward frames) — a good seam lands at the normal step; the frame count (2N-1) is the honest proof the pivot frame was dropped.",
     schema: {
@@ -1222,9 +1242,9 @@ export const TOOL_DEFS = [
 
   {
     name: "batch",
-    description: "Apply ONE operation to many files matching a glob under a folder, in one call: loudness, resize, reframe, compress, convert, extract_audio, reverse, boomerang, make_loopable, freeze, grade, fit, trim, silence, chroma_key, cut_words, remove_retakes or hook — the same args for every file. Outputs are named <stem>-<operation>.<ext> under the output directory, mirroring the input tree. Returns one row per file (input order) with status ok/error/cached/skipped plus counts, so a failure in one file never hides the rest. Unchanged files are skipped via a content-hash cache (.mediakit-batch-cache.json in the output dir, verified against the output's size + sha256); jobs runs up to 8 files at once under one shared timeout_seconds budget; dry_run lists the planned outputs and writes nothing. cut_words and remove_retakes find each clip's words file by convention (<words_dir>/<stem>.words.json, default the input's own folder) — a clip with no words file fails its own row only. slideshow is the exception: a SET operation — the whole matched set of images (2-32) becomes ONE slideshow video (output_name, default slideshow.mp4) instead of one output per file, and the per-file cache does not apply. hook is the probe-only exception: it writes no file (output is null, output_suffix is null) — the ranked hook windows come back in each row's result, and the cache stores that result instead of a file.",
+    description: "Apply ONE operation to many files matching a glob under a folder, in one call: loudness, resize, reframe, compress, convert, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, trim, silence, chroma_key, cut_words, remove_retakes or hook — the same args for every file. Outputs are named <stem>-<operation>.<ext> under the output directory, mirroring the input tree. Returns one row per file (input order) with status ok/error/cached/skipped plus counts, so a failure in one file never hides the rest. Unchanged files are skipped via a content-hash cache (.mediakit-batch-cache.json in the output dir, verified against the output's size + sha256); jobs runs up to 8 files at once under one shared timeout_seconds budget; dry_run lists the planned outputs and writes nothing. cut_words and remove_retakes find each clip's words file by convention (<words_dir>/<stem>.words.json, default the input's own folder) — a clip with no words file fails its own row only. slideshow is the exception: a SET operation — the whole matched set of images (2-32) becomes ONE slideshow video (output_name, default slideshow.mp4) instead of one output per file, and the per-file cache does not apply. hook is the probe-only exception: it writes no file (output is null, output_suffix is null) — the ranked hook windows come back in each row's result, and the cache stores that result instead of a file.",
     schema: {
-    operation: z.enum(["loudness", "resize", "reframe", "compress", "convert", "extract_audio", "reverse", "boomerang", "make_loopable", "freeze", "grade", "fit", "trim", "silence", "chroma_key", "cut_words", "remove_retakes", "slideshow", "hook"]).describe("The operation to apply to every matched file"),
+    operation: z.enum(["loudness", "resize", "reframe", "compress", "convert", "extract_audio", "reverse", "rotate", "boomerang", "make_loopable", "freeze", "grade", "fit", "trim", "silence", "chroma_key", "cut_words", "remove_retakes", "slideshow", "hook"]).describe("The operation to apply to every matched file"),
     pattern: z.string().min(1).describe("Glob matched against paths under input_dir: **/*.mp4 for every mp4 at any depth, sub/*.mp4 for one folder, or a bare *.mp4 (matches the basename at any depth)"),
     input_dir: pathSchema.describe("Folder to search under (recursive; hidden dirs, .git, node_modules and .next are skipped)"),
     output_dir: pathSchema.describe("Directory to write outputs + batch-manifest.json into (created if needed; files under it are never treated as inputs)"),
@@ -1256,7 +1276,7 @@ export const TOOL_DEFS = [
 
   {
     name: "manifest",
-    description: "Run a whole edit pipeline from ONE declarative JSON manifest file: {version: 1, input, output, steps: [{tool, args}], qa?} — paths in the manifest are relative to the manifest file. Steps run in order, each feeding the next (slideshow as step 1 only — it builds a video from images in args, so the manifest input should be the first slide image; download as step 1 only — it fetches from a URL in args, and when it is step 1 the manifest input may be omitted entirely; then trim, resize, reframe, compress, convert, extract_audio, reverse, boomerang, make_loopable, freeze, grade, fit, silence, denoise, interpolate, burn_captions, overlay, chroma_key, cut_words, remove_retakes; hook is the probe-only step — it analyzes the chain file at that point and passes it through unchanged, so its result records WHY the next trim cuts where it does); the whole plan is validated before anything renders, so a typo fails in seconds. Each step is cached by content hash (input bytes + tool + args + sidecar-file bytes, verified against the cached output's size + sha256; a hook step stores only its result, there is no file to verify) — re-running an unchanged manifest re-encodes nothing, and editing step 3 only re-runs from step 3. Set qa to a platform (or 'any') to run qa_report on the final file. dry_run prints the plan and writes nothing — the approve-before-render gate. A step failure aborts the run and keeps the intermediates for inspection.",
+    description: "Run a whole edit pipeline from ONE declarative JSON manifest file: {version: 1, input, output, steps: [{tool, args}], qa?} — paths in the manifest are relative to the manifest file. Steps run in order, each feeding the next (slideshow as step 1 only — it builds a video from images in args, so the manifest input should be the first slide image; download as step 1 only — it fetches from a URL in args, and when it is step 1 the manifest input may be omitted entirely; then trim, resize, reframe, compress, convert, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, silence, denoise, interpolate, burn_captions, overlay, chroma_key, cut_words, remove_retakes; hook is the probe-only step — it analyzes the chain file at that point and passes it through unchanged, so its result records WHY the next trim cuts where it does); the whole plan is validated before anything renders, so a typo fails in seconds. Each step is cached by content hash (input bytes + tool + args + sidecar-file bytes, verified against the cached output's size + sha256; a hook step stores only its result, there is no file to verify) — re-running an unchanged manifest re-encodes nothing, and editing step 3 only re-runs from step 3. Set qa to a platform (or 'any') to run qa_report on the final file. dry_run prints the plan and writes nothing — the approve-before-render gate. A step failure aborts the run and keeps the intermediates for inspection.",
     schema: {
     manifest_path: pathSchema.describe("Path to the manifest JSON file"),
     output: pathSchema.optional().describe("Output file path (overrides the manifest's output; the extension is adjusted to the step chain's final format when needed)"),

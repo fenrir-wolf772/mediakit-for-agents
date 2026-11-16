@@ -4568,6 +4568,80 @@ export async function reverseClip({ input, output, audio = true, crf = 23 }) {
   };
 }
 
+// ---------------------------------------------------------------- rotate
+// Rotate or flip a clip (yuan66-hub/ffmpeg-mcp has a `rotate` tool;
+// misbahsy/video-audio-mcp, studied this round, has none — and
+// neither of them strips the rotation metadata after transposing,
+// so a player applies the matrix twice. MediaKit does).
+//
+// Semantics, and the one decision that matters: the angle is
+// applied to the frame THE VIEWER SEES, not the stored pixels.
+// ffmpeg's CLI autorotates on decode by default (verified by hand
+// 2026-11-16: plain re-encode of test/rotated.mp4 — stored
+// 1280x720, display matrix -90 — comes out 720x1280 with no side
+// data), so `transpose` runs on the already-upright frame and the
+// result matches probe's display_width/display_height. That is why
+// rotate 90 on the rotated fixture gives 1280x720 (the display
+// axes swap), while rotate 180 keeps 720x1280. Do NOT add
+// -noautorotate: transposing stored pixels would leave the output
+// displaying 1280x720 for a clip the viewer saw as 720x1280
+// rotated 180 — wrong by 90 degrees.
+//
+// The re-encode also drops the Display Matrix side data and any
+// `rotate` stream tag (verified on the matrix fixture and on an
+// mkv carrying a rotate tag), so the output reports rotation null
+// and no player double-rotates it. The result proves that on disk:
+// input_rotation vs output_rotation.
+//
+// 180 is hflip+vflip, not transpose twice — one filter chain,
+// same pixels. Audio is re-encoded by output extension with the
+// AAC 192k pin (reverseClip's rule: hardcoding aac wrote AAC into
+// an .mp3 container once).
+export async function rotateClip({ input, output, angle = null, flip = null, crf = 23 }) {
+  const inPath = await requireInput(input);
+  const outPath = await prepareOutput(output, [inPath]);
+  const c = num(crf, "crf", { min: 0, max: 51, integer: true });
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("rotate needs a video input", "INVALID_ARG");
+  const hasAngle = angle !== null && angle !== undefined;
+  const hasFlip = flip !== null && flip !== undefined && String(flip).trim() !== "";
+  if (hasAngle === hasFlip) {
+    throw new MediaKitError("rotate needs exactly one of angle or flip (angle: 90/180/270 clockwise, flip: horizontal/vertical)", "INVALID_ARG");
+  }
+  let filter;
+  let angleOut = null;
+  let flipOut = null;
+  if (hasAngle) {
+    const a = num(angle, "angle", { integer: true });
+    if (![90, 180, 270].includes(a)) throw new MediaKitError(`angle must be 90, 180 or 270 (clockwise degrees), got: ${angle}`, "INVALID_ARG");
+    angleOut = a;
+    filter = a === 90 ? "transpose=1" : a === 270 ? "transpose=2" : "hflip,vflip";
+  } else {
+    const f = String(flip).trim().toLowerCase();
+    if (f !== "horizontal" && f !== "vertical") throw new MediaKitError(`flip must be "horizontal" or "vertical", got: ${flip}`, "INVALID_ARG");
+    flipOut = f;
+    filter = f === "horizontal" ? "hflip" : "vflip";
+  }
+  const ext = path.extname(outPath).slice(1).toLowerCase();
+  const audioCodec = AUDIO_FORMATS[ext] ?? VIDEO_CONTAINER_AUDIO[ext] ?? "aac";
+  const args = ["-y", "-i", inPath, "-vf", filter, "-c:v", "libx264", "-crf", String(c), "-preset", "medium"];
+  if (meta.audio) args.push("-c:a", audioCodec, ...audioBitrateArgs(audioCodec));
+  args.push(outPath);
+  await run(FFMPEG, args);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  return {
+    operation: "rotate", input: inPath, output: outPath,
+    angle: angleOut, flip: flipOut, filter,
+    input_rotation: meta.video.rotation ?? null,
+    input_dimensions: `${meta.video.display_width}x${meta.video.display_height}`,
+    output_rotation: out.video?.rotation ?? null,
+    dimensions: out.video ? `${out.video.display_width}x${out.video.display_height}` : null,
+    duration_seconds: out.duration_seconds,
+    size_bytes: info.size_bytes,
+  };
+}
+
 // ---------------------------------------------------------------- make_loopable
 // Make a clip loop seamlessly (Zulko/moviepy's MakeLoopable idea,
 // built with the tail-to-head crossfade from a 2026-11-11 dev.to
@@ -6881,6 +6955,7 @@ const DOCTOR_FILTERS = [
   "palettegen", "paletteuse", "adelay", "apad", "pan",
   "astats", "ametadata", "eq", "hue", "colorbalance", "lutrgb",
   "reverse", "areverse",
+  "transpose", "hflip", "vflip",
   "minterpolate", "hqdn3d", "nlmeans",
   "chromakey", "zoompan",
   "afade",
@@ -6919,6 +6994,7 @@ const TOOL_REQUIREMENTS = {
   check: { filters: ["loudnorm", "blackdetect", "freezedetect", "silencedetect", "astats", "ametadata"] },
   grade: { filters: ["eq", "hue", "colorbalance", "lutrgb"], encoders: ["libx264"] },
   reverse: { filters: ["reverse", "areverse"], encoders: ["libx264", "aac"] },
+  rotate: { filters: ["transpose", "hflip", "vflip"], encoders: ["libx264", "aac"] },
   boomerang: { filters: ["split", "reverse", "trim", "setpts", "concat", "asplit", "areverse", "atrim", "asetpts", "blend", "signalstats"], encoders: ["libx264", "aac"] },
   make_loopable: { filters: ["split", "asplit", "trim", "atrim", "setpts", "asetpts", "format", "fade", "overlay", "concat", "acrossfade", "blend", "signalstats"], encoders: ["libx264", "aac"] },
   freeze: { filters: ["split", "asplit", "trim", "atrim", "setpts", "asetpts", "loop", "concat", "fps", "format", "volume", "apad", "blend", "signalstats"], encoders: ["libx264", "aac"] },
@@ -8462,6 +8538,10 @@ export const BATCH_OPERATIONS = {
   reverse: {
     args: ["audio", "crf"],
     run: (input, output, a) => reverseClip({ input, output, audio: a.audio ?? true, crf: a.crf ?? 23 }),
+  },
+  rotate: {
+    args: ["angle", "flip", "crf"],
+    run: (input, output, a) => rotateClip({ input, output, angle: a.angle ?? null, flip: a.flip ?? null, crf: a.crf ?? 23 }),
   },
   boomerang: {
     args: ["audio", "crf"],
