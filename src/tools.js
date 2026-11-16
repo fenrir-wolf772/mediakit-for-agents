@@ -151,7 +151,7 @@ export const TOOL_DEFS = [
 
   {
     name: "thumbnail",
-    description: "Build a contact sheet: N evenly spaced frames tiled into a grid image. Each tile is captured at its own exact timestamp and labelled with it (timestamps=true by default), so the sheet shows WHEN each frame is, not just what it shows — look at it before cutting or publishing. start_delay_percent / end_delay_percent skip the first/last slice of the file (intros, credits) before spacing the tiles. header=true adds a metadata band on top (filename, measured duration, resolution, fps, codecs, size, grid) so a forwarded sheet still says which file it came from.",
+    description: "Build a contact sheet: N evenly spaced frames tiled into a grid image. Each tile is captured at its own exact timestamp and labelled with it (timestamps=true by default), so the sheet shows WHEN each frame is, not just what it shows — look at it before cutting or publishing. start_delay_percent / end_delay_percent skip the first/last slice of the file (intros, credits) before spacing the tiles. header=true adds a metadata band on top (filename, measured duration, resolution, fps, codecs, size, grid) so a forwarded sheet still says which file it came from. timestamps_list names every tile time explicitly (seconds or MM:SS each; sets the tile count, cannot combine with the delay percents). sharpest=true picks the sharpest frame in each tile's window instead of the window start (Laplacian mean measured on disk; each tile reports its sharpness) — use it when the sheet must show the cleanest frame, not just the first one.",
     schema: {
     input: pathSchema,
     output: pathSchema,
@@ -162,6 +162,9 @@ export const TOOL_DEFS = [
     header: z.boolean().default(false).describe("Add a metadata band on top: filename, duration, resolution, fps, codecs, size, grid"),
     start_delay_percent: z.number().min(0).max(90).default(0).describe("Skip this percent of the file at the start before spacing tiles (intros)"),
     end_delay_percent: z.number().min(0).max(90).default(0).describe("Skip this percent of the file at the end before spacing tiles (credits)"),
+    timestamps_list: z.array(z.union([z.number(), z.string()])).min(1).max(64).optional().describe("Explicit tile times in seconds or MM:SS (e.g. [1, 6, \"0:30\"]); sets the tile count, cannot combine with the delay percents"),
+    sharpest: z.boolean().default(false).describe("Pick the sharpest frame in each tile's window (Laplacian mean, measured on disk) instead of the window start"),
+    sharpest_samples: z.number().int().min(2).max(16).default(5).describe("Candidate frames sampled per window when sharpest=true (default 5)"),
   },
     handler: async (a) => safe(() => core.thumbnail({
       input: a.input,
@@ -173,6 +176,9 @@ export const TOOL_DEFS = [
       header: a.header,
       startDelayPercent: a.start_delay_percent,
       endDelayPercent: a.end_delay_percent,
+      timestampsList: a.timestamps_list ?? null,
+      sharpest: a.sharpest,
+      sharpestSamples: a.sharpest_samples,
     })),
   },
 
@@ -232,13 +238,15 @@ export const TOOL_DEFS = [
 
   {
     name: "frames",
-    description: "Extract N evenly spaced frames as separate image files (frame-001.png, ...) into a directory, each with its timestamp — so you can actually look at what is in a video before cutting it. One frame per interval; timestamps are i * duration / count, and each frame is captured at its exact timestamp (two-stage seek), so the reported time is the frame's real time.",
+    description: "Extract N evenly spaced frames as separate image files (frame-001.png, ...) into a directory, each with its timestamp — so you can actually look at what is in a video before cutting it. One frame per interval; timestamps are i * duration / count, and each frame is captured at its exact timestamp (two-stage seek), so the reported time is the frame's real time. sharpest=true picks the sharpest frame in each interval instead of the interval start (Laplacian mean, measured on disk; each entry reports sharpness and its window) — use it when a frame must be the cleanest one in its stretch, e.g. picking a cover frame out of a shaky pan.",
     schema: {
     input: pathSchema,
     output_dir: pathSchema.describe("Directory to write the frame files into (created if needed)"),
     count: z.number().int().min(1).max(120).default(6).describe("Number of frames to extract"),
     format: z.enum(["png", "jpg", "webp"]).default("png"),
     width: z.number().int().min(80).max(3840).optional().describe("Scale frames to this width (keeps aspect)"),
+    sharpest: z.boolean().default(false).describe("Pick the sharpest frame in each interval (Laplacian mean, measured on disk) instead of the interval start"),
+    sharpest_samples: z.number().int().min(2).max(16).default(5).describe("Candidate frames sampled per interval when sharpest=true (default 5)"),
   },
     handler: async (a) => safe(() => core.extractFrames({
     input: a.input,
@@ -246,6 +254,8 @@ export const TOOL_DEFS = [
     count: a.count,
     format: a.format,
     width: a.width ?? null,
+    sharpest: a.sharpest,
+    sharpestSamples: a.sharpest_samples,
   })),
   },
 

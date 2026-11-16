@@ -2604,7 +2604,7 @@ const findSourceRes = await client.callTool({
   arguments: { directory: path.join(root, "test"), name: "source" },
 });
 const findSourceJson = JSON.parse(findSourceRes.content[0].text);
-checkOk(findSourceJson.total_matches === 8, "find 'source' matches 8 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source, hook-source)", `got ${findSourceJson.total_matches}`);
+checkOk(findSourceJson.total_matches === 9, "find 'source' matches 9 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source, hook-source, sharpness-source)", `got ${findSourceJson.total_matches}`);
 
 const findMp3Res = await client.callTool({
   name: "find",
@@ -4090,6 +4090,61 @@ const hdrTilesPsnr = await cropPsnrAsym(path.join(root, "outputs/mcp-thumb-hdr.p
 checkOk(hdrTilesPsnr === Infinity, "thumbnail header leaves the tiles byte-identical (vstack only adds the band)", `PSNR tiles vs headerless: ${hdrTilesPsnr}`);
 const thumbHdrCliJson = await runCliJson(["thumbnail", path.join(root, "test/source.mp4"), "-o", path.join(root, "outputs/mcp-thumb-hdr-cli.png"), "--header"], {});
 checkOk(thumbHdrCliJson.dimensions === "960x428" && thumbHdrCliJson.header === true, "CLI thumbnail --header works", JSON.stringify(thumbHdrCliJson.dimensions));
+
+// Manual timestamps + sharpest frames (lượt 72; vcsi `-m` +
+// select_sharpest_images ideas from lượt 70). Fixture
+// test/sharpness-source.mp4 is testsrc2, 10s: the first 5s sharp,
+// the last 5s boxblur=10 — so the sharpest frame in window [0,5)
+// must score several times the sharpest in [5,10).
+const sharpFramesRes = await client.callTool({
+  name: "frames",
+  arguments: { input: path.join(root, "test/sharpness-source.mp4"), output_dir: path.join(root, "outputs/mcp-frames-sharp"), count: 2, sharpest: true },
+});
+const sharpFramesJson = JSON.parse(sharpFramesRes.content[0].text);
+console.log("frames --sharpest:", JSON.stringify(sharpFramesJson.frames.map((f) => `${f.timestamp_seconds}s sharp=${f.sharpness}`)));
+checkOk(sharpFramesJson.sharpest === true && sharpFramesJson.sharpest_samples === 5 && sharpFramesJson.frames.length === 2, "frames sharpest=true reports the flag and 2 frames", JSON.stringify(sharpFramesJson.sharpest));
+checkOk(sharpFramesJson.frames[0].timestamp_seconds >= 0 && sharpFramesJson.frames[0].timestamp_seconds < 5 && sharpFramesJson.frames[1].timestamp_seconds >= 5 && sharpFramesJson.frames[1].timestamp_seconds < 10, "frames --sharpest picks one frame per window ([0,5) and [5,10))", JSON.stringify(sharpFramesJson.frames.map((f) => f.timestamp_seconds)));
+checkOk(sharpFramesJson.frames[0].sharpness > 2 && sharpFramesJson.frames[1].sharpness < 1 && sharpFramesJson.frames[0].sharpness > 3 * sharpFramesJson.frames[1].sharpness, "frames --sharpest: sharp half scores >3x the blurred half (Laplacian mean, measured on disk)", JSON.stringify(sharpFramesJson.frames.map((f) => f.sharpness)));
+checkOk(JSON.stringify(sharpFramesJson.frames[0].window_seconds) === JSON.stringify({ start: 0, end: 5 }) && JSON.stringify(sharpFramesJson.frames[1].window_seconds) === JSON.stringify({ start: 5, end: 10 }), "frames --sharpest reports each frame's window", JSON.stringify(sharpFramesJson.frames.map((f) => f.window_seconds)));
+// Regression: without --sharpest the contract is unchanged —
+const plainFramesRes = await client.callTool({
+  name: "frames",
+  arguments: { input: path.join(root, "test/sharpness-source.mp4"), output_dir: path.join(root, "outputs/mcp-frames-plain"), count: 2 },
+});
+const plainFramesJson = JSON.parse(plainFramesRes.content[0].text);
+checkOk(plainFramesJson.sharpest === undefined && plainFramesJson.frames[0].timestamp_seconds === 0 && plainFramesJson.frames[1].timestamp_seconds === 5 && plainFramesJson.frames[0].sharpness === undefined, "frames without --sharpest keeps the old contract (window starts, no sharpness key)", JSON.stringify(plainFramesJson.frames.map((f) => f.timestamp_seconds)));
+// thumbnail --timestamps-list: two exact times on scenes-source
+// (red 5s + blue 5s) — tile 1 red, tile 2 blue, sheet 960x180.
+const thumbManualRes = await client.callTool({
+  name: "thumbnail",
+  arguments: { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-thumb-manual.png"), timestamps_list: [1, 6] },
+});
+const thumbManualJson = JSON.parse(thumbManualRes.content[0].text);
+const manR = await imagePlaneMean(path.join(root, "outputs/mcp-thumb-manual.png"), "r");
+const manB = await imagePlaneMean(path.join(root, "outputs/mcp-thumb-manual.png"), "b");
+console.log("thumbnail manual:", JSON.stringify(thumbManualJson.timestamps_seconds), "| sheet R/B", manR, manB);
+checkOk(JSON.stringify(thumbManualJson.timestamps_seconds) === JSON.stringify([1, 6]) && thumbManualJson.manual_timestamps === true && thumbManualJson.dimensions === "960x180" && !("window_seconds" in thumbManualJson), "thumbnail timestamps_list [1,6]: exact tile times, 2 tiles, no sampling window", JSON.stringify(thumbManualJson.timestamps_seconds));
+checkOk(manR !== null && manR > 60 && manB !== null && manB > 60 && Math.abs(manR - manB) < 30, "thumbnail manual sheet is half red (t=1) half blue (t=6) — a third of the sheet is the black-padded empty cell, so each channel means ~83", `R ${manR} / B ${manB}`);
+const thumbManualBad = await callExpectThrow("thumbnail", { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-thumb-manual-bad.png"), timestamps_list: [1, 99] });
+checkOk(/at\/past the end/.test(thumbManualBad ?? ""), "thumbnail timestamps_list refuses a time past the end", thumbManualBad ?? "");
+const thumbManualClash = await callExpectThrow("thumbnail", { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-thumb-manual-clash.png"), timestamps_list: [1, 6], start_delay_percent: 10 });
+checkOk(/cannot be combined/.test(thumbManualClash ?? ""), "thumbnail timestamps_list refuses the delay percents", thumbManualClash ?? "");
+// thumbnail --sharpest: same fixture, 2 tiles — sharp tile first.
+const thumbSharpRes = await client.callTool({
+  name: "thumbnail",
+  arguments: { input: path.join(root, "test/sharpness-source.mp4"), output: path.join(root, "outputs/mcp-thumb-sharp.png"), frames: 2, sharpest: true },
+});
+const thumbSharpJson = JSON.parse(thumbSharpRes.content[0].text);
+console.log("thumbnail sharpest:", JSON.stringify(thumbSharpJson.timestamps_seconds), JSON.stringify(thumbSharpJson.sharpness));
+checkOk(thumbSharpJson.sharpest === true && thumbSharpJson.timestamps_seconds[0] >= 0 && thumbSharpJson.timestamps_seconds[0] < 5 && thumbSharpJson.timestamps_seconds[1] >= 5 && thumbSharpJson.timestamps_seconds[1] < 10, "thumbnail --sharpest picks one tile per window", JSON.stringify(thumbSharpJson.timestamps_seconds));
+checkOk(thumbSharpJson.sharpness[0] > 2 && thumbSharpJson.sharpness[1] < 1 && thumbSharpJson.sharpness[0] > 3 * thumbSharpJson.sharpness[1], "thumbnail --sharpest: sharp tile scores >3x the blurred tile", JSON.stringify(thumbSharpJson.sharpness));
+const sharpSamplesBad = await callExpectThrow("frames", { input: path.join(root, "test/sharpness-source.mp4"), output_dir: path.join(root, "outputs/mcp-frames-sharp-bad"), count: 2, sharpest: true, sharpest_samples: 1 });
+checkOk(/greater than or equal to 2/.test(sharpSamplesBad ?? ""), "frames rejects sharpest_samples below 2 (MCP validation)", sharpSamplesBad?.slice(0, 160) ?? "");
+// CLI: frames --sharpest + thumbnail --timestamps-list with MM:SS.
+const sharpCliJson = await runCliJson(["frames", path.join(root, "test/sharpness-source.mp4"), "-o", path.join(root, "outputs/mcp-frames-sharp-cli"), "--count", "2", "--sharpest"], {});
+checkOk(sharpCliJson.sharpest === true && sharpCliJson.frames[0].sharpness > 3 * sharpCliJson.frames[1].sharpness, "CLI frames --sharpest works", JSON.stringify(sharpCliJson.frames.map((f) => f.sharpness)));
+const manualCliJson = await runCliJson(["thumbnail", path.join(root, "test/scenes-source.mp4"), "-o", path.join(root, "outputs/mcp-thumb-manual-cli.png"), "--timestamps-list", "0:01,0:06"], {});
+checkOk(JSON.stringify(manualCliJson.timestamps_seconds) === JSON.stringify([1, 6]) && manualCliJson.manual_timestamps === true, "CLI thumbnail --timestamps-list accepts MM:SS", JSON.stringify(manualCliJson.timestamps_seconds));
 
 // qa_report on the raw 10s fixture, target any: loudness -21.8 LUFS
 // fails the -16..-12 band, pacing warns (1 shot of 10s), content is

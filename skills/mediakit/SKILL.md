@@ -204,11 +204,20 @@ If the voice file is a video, its video stream is copied through, so
 spaced frames as separate images with timestamps — read 3–6 of them to
 see what's actually in the clip (scene changes, framing, captions
 rendering) before choosing trim points or a reframe anchor. `thumbnail`
-is the cheaper one-image overview when you only need the gist. Format
-tip: for screen recordings or any text-heavy footage use png (the
-default) or webp, not jpg — JPEG chroma subsampling smears 1px text and
-thin borders, so a jpg frame can look broken when the video itself is
-fine.
+is the cheaper one-image overview when you only need the gist. Two
+refinements: `--sharpest` (both tools) picks the sharpest frame in
+each interval/window instead of the interval start — Laplacian mean
+measured on disk, each frame reports its score — use it when the
+sheet must show the cleanest frame, e.g. a cover frame out of a shaky
+pan (flat-colour footage scores ~0 everywhere and keeps the first
+candidate, which is correct when nothing is sharper). `thumbnail
+--timestamps-list 1,6,0:30` names every tile time explicitly instead
+of even spacing (sets the tile count; cannot combine with the delay
+percents) — use it when you already know the moments that matter, e.g.
+one frame per scene cut. Format tip: for screen recordings or any
+text-heavy footage use png (the default) or webp, not jpg — JPEG
+chroma subsampling smears 1px text and thin borders, so a jpg frame
+can look broken when the video itself is fine.
 
 ### 13. Logos go on with `overlay`, not by hand-built filter graphs
 `overlay` takes a PNG (transparency recommended), a named position

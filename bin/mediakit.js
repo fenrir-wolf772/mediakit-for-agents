@@ -91,8 +91,8 @@ const COMMANDS = {
     ],
   },
   thumbnail: {
-    usage: "mediakit thumbnail <input> -o <output.png|jpg> [--frames <n>] [--columns <n>] [--width <px>] [--no-timestamps] [--header] [--start-delay-percent <n>] [--end-delay-percent <n>]",
-    desc: "Build a contact sheet of N evenly spaced frames. Each tile is captured at its exact timestamp and labelled with it by default — look at it before cutting or publishing. --start-delay-percent / --end-delay-percent skip the first/last slice of the file (intros, credits) before spacing the tiles. --header adds a metadata band on top (filename, duration, resolution, fps, codecs, size, grid).",
+    usage: "mediakit thumbnail <input> -o <output.png|jpg> [--frames <n>] [--columns <n>] [--width <px>] [--no-timestamps] [--header] [--start-delay-percent <n>] [--end-delay-percent <n>] [--timestamps-list <s,s,...>] [--sharpest] [--sharpest-samples <n>]",
+    desc: "Build a contact sheet of N evenly spaced frames. Each tile is captured at its exact timestamp and labelled with it by default — look at it before cutting or publishing. --start-delay-percent / --end-delay-percent skip the first/last slice of the file (intros, credits) before spacing the tiles. --header adds a metadata band on top (filename, duration, resolution, fps, codecs, size, grid). --timestamps-list names every tile time explicitly (seconds or MM:SS, comma-separated; sets the tile count, cannot combine with the delay percents). --sharpest picks the sharpest frame in each tile's window instead of the window start (Laplacian mean, measured on disk).",
     args: [{ name: "input", required: true }],
     options: [
       ["--frames", "Number of frames (default 6)"],
@@ -102,6 +102,9 @@ const COMMANDS = {
       ["--header", "Add a metadata band on top: filename, duration, resolution, fps, codecs, size, grid"],
       ["--start-delay-percent", "Skip this percent at the start before spacing tiles (default 0)"],
       ["--end-delay-percent", "Skip this percent at the end before spacing tiles (default 0)"],
+      ["--timestamps-list", "Explicit tile times, comma-separated seconds or MM:SS (e.g. 1,6,0:30); sets the tile count"],
+      ["--sharpest", "Pick the sharpest frame in each tile's window instead of the window start"],
+      ["--sharpest-samples", "Candidate frames sampled per window when --sharpest (default 5, 2-16)"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -133,13 +136,15 @@ const COMMANDS = {
     ],
   },
   frames: {
-    usage: "mediakit frames <input> -o <directory> [--count <n>] [--format png|jpg|webp] [--width <px>]",
-    desc: "Extract N evenly spaced frames as separate images (frame-001.png, ...) so you can look at a video before cutting it.",
+    usage: "mediakit frames <input> -o <directory> [--count <n>] [--format png|jpg|webp] [--width <px>] [--sharpest] [--sharpest-samples <n>]",
+    desc: "Extract N evenly spaced frames as separate images (frame-001.png, ...) so you can look at a video before cutting it. --sharpest picks the sharpest frame in each interval instead of the interval start (Laplacian mean, measured on disk; each entry reports its sharpness and window).",
     args: [{ name: "input", required: true }],
     options: [
       ["--count", "Number of frames (default 6)"],
       ["--format", "Image format png (default) | jpg | webp"],
       ["--width", "Scale frames to this width (keeps aspect)"],
+      ["--sharpest", "Pick the sharpest frame in each interval instead of the interval start"],
+      ["--sharpest-samples", "Candidate frames sampled per interval when --sharpest (default 5, 2-16)"],
       ["-o, --output", "Output directory (required, created if needed)"],
     ],
   },
@@ -1002,6 +1007,9 @@ async function main() {
           header: opts.header === true,
           startDelayPercent: numOpt(opts, "start_delay_percent") ?? 0,
           endDelayPercent: numOpt(opts, "end_delay_percent") ?? 0,
+          timestampsList: opts.timestamps_list === undefined ? null : String(opts.timestamps_list).split(",").map((s) => s.trim()).filter(Boolean),
+          sharpest: opts.sharpest === true,
+          sharpestSamples: numOpt(opts, "sharpest_samples") ?? 5,
         });
         break;
       case "loudness":
@@ -1029,6 +1037,8 @@ async function main() {
           count: numOpt(opts, "count") ?? 6,
           format: opts.format ?? "png",
           width: numOpt(opts, "width") ?? null,
+          sharpest: opts.sharpest === true,
+          sharpestSamples: numOpt(opts, "sharpest_samples") ?? 5,
         });
         break;
       case "export-gif":

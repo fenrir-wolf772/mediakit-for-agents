@@ -1166,6 +1166,52 @@ async function captureFrameAt(inPath, t, outPath, { width = null, labelFile = nu
   await run(FFMPEG, args);
 }
 
+// ---------------------------------------------------------------- sharpness
+// Sharpness of one still image: the mean of the Laplacian — the
+// classic variance-of-Laplacian focus measure, as a mean because
+// ffmpeg has no `laplacian` filter (the 3x3 kernel
+// 0 -1 0 / -1 4 -1 / 0 -1 0 IS the Laplacian, applied with
+// `convolution`). `edgedetect` is a poor substitute: it barely moves
+// under mild blur (1.263 -> 1.177 at boxblur=1 on testsrc2), while
+// the Laplacian mean drops 1.85 -> 0.31 -> 0.17 -> 0.11 at boxblur
+// 1/2/5 — monotonic in blur, ~6x for a light blur, ~15x for a heavy
+// one. The score is only comparable between frames of the SAME video
+// measured at the SAME probe width, never across videos. Flat-colour
+// frames score ~0 (no edges at all) — a tie keeps the earliest
+// candidate, which is the right behaviour when nothing is sharper
+// than anything else.
+const LAPLACIAN_KERNEL = "0 -1 0 -1 4 -1 0 -1 0:0 -1 0 -1 4 -1 0 -1 0";
+
+async function measureSharpness(imagePath) {
+  const { stderr } = await run(FFMPEG, [
+    "-hide_banner", "-nostats", "-i", imagePath,
+    "-vf", `format=gray,convolution=${LAPLACIAN_KERNEL},signalstats,metadata=print:key=lavfi.signalstats.YAVG`,
+    "-frames:v", "1", "-f", "null", "-",
+  ]);
+  const m = stderr.match(/lavfi\.signalstats\.YAVG=([0-9.]+)/);
+  if (!m) throw new MediaKitError(`could not measure sharpness of ${imagePath}`, "MEASURE_FAILED");
+  return +(+m[1]).toFixed(4);
+}
+
+// Pick the sharpest frame inside [winStart, winEnd): sample
+// `samples` candidate timestamps at sub-window midpoints, capture
+// each at probe width (320px — the score is relative, so the probe
+// width only has to be constant), measure, keep the max. Ties keep
+// the earliest candidate. Returns the winning timestamp + score;
+// the caller re-captures the winner at full width for the output.
+async function pickSharpestFrame(inPath, winStart, winEnd, samples, tmpDir) {
+  const span = winEnd - winStart;
+  let best = null;
+  for (let j = 0; j < samples; j++) {
+    const t = +(winStart + ((j + 0.5) * span) / samples).toFixed(3);
+    const candPath = path.join(tmpDir, `sharp-${String(j).padStart(2, "0")}.png`);
+    await captureFrameAt(inPath, t, candPath, { width: 320 });
+    const sharpness = await measureSharpness(candPath);
+    if (best === null || sharpness > best.sharpness) best = { timestamp: t, sharpness };
+  }
+  return best;
+}
+
 // ---------------------------------------------------------------- extract_frame
 
 export async function extractFrame({ input, output, timestamp = 0 }) {
@@ -1189,31 +1235,51 @@ export async function extractFrame({ input, output, timestamp = 0 }) {
 
 // ---------------------------------------------------------------- thumbnail
 
-export async function thumbnail({ input, output, frames = 6, columns = 3, width = 320, timestamps = true, startDelayPercent = 0, endDelayPercent = 0, header = false }) {
+export async function thumbnail({ input, output, frames = 6, columns = 3, width = 320, timestamps = true, startDelayPercent = 0, endDelayPercent = 0, header = false, timestampsList = null, sharpest = false, sharpestSamples = 5 }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
-  const n = num(frames, "frames", { min: 1, max: 64, integer: true });
   const cols = num(columns, "columns", { min: 1, max: 8, integer: true });
   const w = num(width, "width", { min: 80, max: 1280, integer: true });
   const showTs = timestamps !== false;
   const showHeader = header === true;
+  const wantSharpest = sharpest === true;
+  const samples = wantSharpest ? num(sharpestSamples, "sharpest_samples", { min: 2, max: 16, integer: true }) : 5;
   const startDelay = num(startDelayPercent, "start_delay_percent", { min: 0, max: 90 });
   const endDelay = num(endDelayPercent, "end_delay_percent", { min: 0, max: 90 });
-  if (startDelay + endDelay >= 100) {
+  const manual = timestampsList !== null && timestampsList !== undefined;
+  if (manual && (startDelay || endDelay)) {
+    throw new MediaKitError("timestamps_list cannot be combined with start_delay_percent / end_delay_percent — the list already fixes every tile time", "INVALID_ARG");
+  }
+  if (!manual && startDelay + endDelay >= 100) {
     throw new MediaKitError(`start_delay_percent (${startDelay}) + end_delay_percent (${endDelay}) must leave a window to sample`, "INVALID_ARG");
   }
   const meta = await probe(inPath);
   if (!meta.video) throw new MediaKitError("thumbnail needs a video input", "INVALID_ARG");
   const duration = meta.duration_seconds;
   if (duration === null || duration <= 0) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
+  // Manual timestamps (vcsi `-m` idea): the caller names every tile
+  // time — seconds or MM:SS each — instead of even spacing. The list
+  // sets the tile count; `frames` is ignored. Times are used in the
+  // order given (the sheet order is the caller's order), each must
+  // sit inside the file.
+  let list = null;
+  if (manual) {
+    const raw = Array.isArray(timestampsList) ? timestampsList : [timestampsList];
+    if (raw.length < 1 || raw.length > 64) {
+      throw new MediaKitError(`timestamps_list needs 1-64 timestamps, got ${raw.length}`, "INVALID_ARG");
+    }
+    list = raw.map((v, i) => parseTime(v, `timestamps_list[${i}]`));
+    for (const t of list) {
+      if (t >= duration) {
+        throw new MediaKitError(`timestamp ${t}s is at/past the end of the file (${duration}s)`, "INVALID_ARG");
+      }
+    }
+  }
+  const n = list ? list.length : num(frames, "frames", { min: 1, max: 64, integer: true });
   const rows = Math.ceil(n / cols);
-  // Sampling window, vcsi-style: skip the first start_delay% and the
-  // last end_delay% (intros, credits) and space the tiles evenly
-  // across what is left. Delays default to 0, so the window is the
-  // whole file and the timestamps match the old i*D/n contract.
   const winStart = duration * startDelay / 100;
   const winEnd = duration * (1 - endDelay / 100);
-  const tileTimes = Array.from({ length: n }, (_, i) => +((winStart + (i * (winEnd - winStart)) / n).toFixed(3)));
+  const baseTimes = list ?? Array.from({ length: n }, (_, i) => +((winStart + (i * (winEnd - winStart)) / n).toFixed(3)));
   // Each tile is captured at its own exact timestamp (captureFrameAt),
   // labelled with that timestamp in MM:SS.d — never with %{pts}, whose
   // value follows the filter's frame-picking, not the reported time.
@@ -1223,7 +1289,25 @@ export async function thumbnail({ input, output, frames = 6, columns = 3, width 
   // both paths identical).
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-thumbnail-"));
   let headerLines = null;
+  let tileTimes = baseTimes;
+  let sharpness = null;
   try {
+    // With --sharpest each tile is the sharpest frame in its window:
+    // the window starts at the tile's nominal time and runs to the
+    // next tile's time (the last window runs to the end of the file
+    // for a manual list, or to the end of the sampling window). The
+    // tile label shows the picked time, and the result reports the
+    // sharpness of every tile.
+    if (wantSharpest) {
+      sharpness = [];
+      tileTimes = [];
+      for (let i = 0; i < n; i++) {
+        const wEnd = i + 1 < n ? baseTimes[i + 1] : (list ? duration : winEnd);
+        const pick = await pickSharpestFrame(inPath, baseTimes[i], wEnd, samples, tmpDir);
+        tileTimes.push(pick.timestamp);
+        sharpness.push(pick.sharpness);
+      }
+    }
     const cells = cols * rows;
     for (let i = 0; i < n; i++) {
       const tilePath = path.join(tmpDir, `tile-${String(i + 1).padStart(3, "0")}.png`);
@@ -1284,8 +1368,13 @@ export async function thumbnail({ input, output, frames = 6, columns = 3, width 
     timestamps: showTs,
     ...(showTs ? { timestamps_seconds: tileTimes } : {}),
     ...(showHeader ? { header: true, header_lines: headerLines } : {}),
-    window_seconds: { start: +winStart.toFixed(3), end: +winEnd.toFixed(3) },
-    ...(startDelay || endDelay ? { start_delay_percent: startDelay, end_delay_percent: endDelay } : {}),
+    ...(list
+      ? { manual_timestamps: true }
+      : {
+          window_seconds: { start: +winStart.toFixed(3), end: +winEnd.toFixed(3) },
+          ...(startDelay || endDelay ? { start_delay_percent: startDelay, end_delay_percent: endDelay } : {}),
+        }),
+    ...(wantSharpest ? { sharpest: true, sharpest_samples: samples, sharpness } : {}),
     ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
   };
 }
@@ -1302,9 +1391,11 @@ export async function thumbnail({ input, output, frames = 6, columns = 3, width 
 // text and thin borders, so a jpg frame can look broken when the
 // video itself is fine.
 
-export async function extractFrames({ input, outputDir, count = 6, format = "png", width = null }) {
+export async function extractFrames({ input, outputDir, count = 6, format = "png", width = null, sharpest = false, sharpestSamples = 5 }) {
   const inPath = await requireInput(input);
   const n = num(count, "count", { min: 1, max: 120, integer: true });
+  const wantSharpest = sharpest === true;
+  const samples = wantSharpest ? num(sharpestSamples, "sharpest_samples", { min: 2, max: 16, integer: true }) : 5;
   const fmt = (format || "png").toLowerCase();
   if (!["png", "jpg", "jpeg", "webp"].includes(fmt)) {
     throw new MediaKitError(`frames format must be png/jpg/webp, got: ${format}`, "INVALID_ARG");
@@ -1329,19 +1420,40 @@ export async function extractFrames({ input, outputDir, count = 6, format = "png
   // timestamp it is reported under (lượt 69 probe on a 25.878s film:
   // frame-002 reported 12.939s, pixels from shot 3 at ~24s). Captures
   // are sequential — each is a short seek + decode, and parallel
-  // ffmpeg runs on this 1.5-CPU box starve each other.
+  // ffmpeg runs on this 1.5-CPU box starve each other. With --sharpest
+  // each frame is the sharpest in its window [i*D/n, (i+1)*D/n)
+  // instead of the window start, and the entry reports the score.
   const frames = [];
-  for (let i = 0; i < n; i++) {
-    const t = +((i * duration) / n).toFixed(3);
-    const fp = path.join(dir, `frame-${String(i + 1).padStart(3, "0")}.${ext}`);
-    await captureFrameAt(inPath, t, fp, { width: w });
-    const info = await fileInfo(fp);
-    frames.push({ file: path.basename(fp), path: fp, timestamp_seconds: t, ...info });
+  let sharpTmp = null;
+  try {
+    if (wantSharpest) sharpTmp = await mkdtemp(path.join(os.tmpdir(), "mediakit-frames-sharp-"));
+    for (let i = 0; i < n; i++) {
+      const winStart = +((i * duration) / n).toFixed(3);
+      const winEnd = +(((i + 1) * duration) / n).toFixed(3);
+      let t = winStart;
+      let sharp = null;
+      if (wantSharpest) {
+        const pick = await pickSharpestFrame(inPath, winStart, winEnd, samples, sharpTmp);
+        t = pick.timestamp;
+        sharp = pick.sharpness;
+      }
+      const fp = path.join(dir, `frame-${String(i + 1).padStart(3, "0")}.${ext}`);
+      await captureFrameAt(inPath, t, fp, { width: w });
+      const info = await fileInfo(fp);
+      frames.push({
+        file: path.basename(fp), path: fp, timestamp_seconds: t,
+        ...(wantSharpest ? { sharpness: sharp, window_seconds: { start: winStart, end: winEnd } } : {}),
+        ...info,
+      });
+    }
+  } finally {
+    if (sharpTmp) await rm(sharpTmp, { recursive: true, force: true }).catch(() => {});
   }
   return {
     operation: "frames", input: inPath, output_dir: dir,
     requested: n, extracted: frames.length, format: ext,
     ...(w !== null ? { width: w } : {}),
+    ...(wantSharpest ? { sharpest: true, sharpest_samples: samples } : {}),
     duration_seconds: duration,
     frames,
   };
@@ -6716,6 +6828,7 @@ const DOCTOR_FILTERS = [
   "chromakey", "zoompan",
   "afade",
   "tblend", "signalstats",
+  "convolution",
   "blend", "split",
   "fade", "asplit",
   "vstack",
@@ -6738,11 +6851,11 @@ const TOOL_REQUIREMENTS = {
   resize: { filters: ["scale"] },
   extract_audio: { encoders: ["libmp3lame", "aac", "pcm_s16le", "libvorbis", "libopus", "flac"] },
   extract_frame: {},
-  thumbnail: { filters: ["scale", "tile", "drawtext", "vstack"] },
+  thumbnail: { filters: ["scale", "tile", "drawtext", "vstack", "convolution", "signalstats"] },
   loudness: { filters: ["loudnorm", "acompressor"] },
   qa_report: { filters: ["loudnorm", "blackdetect", "freezedetect", "silencedetect", "astats", "ametadata", "select"] },
   concat: { filters: ["concat", "xfade", "acrossfade", "fps", "scale", "pad"] },
-  frames: { filters: ["scale"] },
+  frames: { filters: ["scale", "convolution", "signalstats"] },
   export_gif: { filters: ["palettegen", "paletteuse", "fps", "scale"] },
   burn_captions: { filters: ["subtitles", "ass"] },
   reframe: { filters: ["crop", "scale", "pad", "gblur", "overlay"], encoders: ["libx264"] },
