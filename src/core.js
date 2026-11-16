@@ -2239,8 +2239,16 @@ export async function burnCaptions({ input, output, captions, fontSize = null, f
     throw new MediaKitError(`captions must be .srt/.ass/.vtt, got ${ext}`, "INVALID_ARG");
   }
   const meta = await probe(inPath);
-  const vw = meta.video?.width ?? 1280;
-  const vh = meta.video?.height ?? 720;
+  // Filters see the autorotated frame, so defaults must scale with the
+  // DISPLAY size, not the coded size: a phone clip stored 1920x1080
+  // with a 90-degree matrix is a 1080x1920 frame to libass. Using the
+  // coded height here made the default font ~33px (should be ~60px)
+  // and the margin ~281px (should be ~499px) on such a clip, landing
+  // the captions inside the platform UI zone instead of above it.
+  // PlayRes pins libass to the same frame the filter draws on.
+  const disp = displayDims(meta);
+  const vw = disp?.width ?? meta.video?.width ?? 1280;
+  const vh = disp?.height ?? meta.video?.height ?? 720;
   // Defaults scale with frame height so captions stay readable and clear
   // of platform overlays at any size: ~60px type on 1080x1920, sitting
   // ~500px above the bottom edge (TikTok/Shorts cover the bottom ~480px

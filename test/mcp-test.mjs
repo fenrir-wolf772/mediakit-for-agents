@@ -2736,6 +2736,30 @@ checkOk(capsBand !== null && capsBand < 30, "burn_captions text lands in the saf
 const capsStrip = await bandPsnr(path.join(root, "test/source.mp4"), path.join(root, "outputs/mcp-captions.mp4"), 3.5, 680, 40);
 checkOk(capsStrip !== null && capsStrip > 40, "burn_captions text stays out of the bottom strip (high PSNR there)", `got PSNR ${capsStrip}`);
 
+// burn_captions on a rotated clip: defaults scale with the DISPLAY
+// frame (1080x1920), not the coded 1920x1080 — font 60px, margin
+// 499px. Before the fix this reported 33px/281px and the text landed
+// inside the platform UI zone at the bottom.
+const capsRotRes = await client.callTool({
+  name: "burn_captions",
+  arguments: {
+    input: path.join(root, "test/rotated-vertical.mp4"),
+    captions: path.join(root, "test/captions.srt"),
+    output: path.join(root, "outputs/mcp-captions-rotated.mp4"),
+  },
+});
+const capsRotJson = JSON.parse(capsRotRes.content[0].text);
+console.log("burn_captions rotated call:", "font_size", capsRotJson.font_size, "| margin_v", capsRotJson.margin_v);
+checkOk(capsRotJson.font_size === 60, "burn_captions default font is 60px on a 1080x1920 display frame", `got ${capsRotJson.font_size}`);
+checkOk(capsRotJson.margin_v === 499, "burn_captions default margin is 499px on a 1080x1920 display frame", `got ${capsRotJson.margin_v}`);
+// Pixel-verify at t=3.5s (cue 2): the text baseline sits at
+// 1920-499, so the band 1330-1400 differs a lot, while the bottom
+// strip 1880-1920 (inside the platform UI zone) stays clean.
+const capsRotBand = await bandPsnr(path.join(root, "test/rotated-vertical.mp4"), path.join(root, "outputs/mcp-captions-rotated.mp4"), 3.5, 1330, 70);
+checkOk(capsRotBand !== null && capsRotBand < 30, "burn_captions text lands in the safe band on a rotated clip", `got PSNR ${capsRotBand}`);
+const capsRotStrip = await bandPsnr(path.join(root, "test/rotated-vertical.mp4"), path.join(root, "outputs/mcp-captions-rotated.mp4"), 3.5, 1880, 40);
+checkOk(capsRotStrip !== null && capsRotStrip > 40, "burn_captions text stays out of the bottom strip on a rotated clip", `got PSNR ${capsRotStrip}`);
+
 // burn_captions --style: all four styles render text in the safe band,
 // echo their name, and render differently from each other. The
 // background box is the regression trap: libass draws the BorderStyle 3
