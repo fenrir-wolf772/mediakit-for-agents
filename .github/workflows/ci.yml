@@ -63,6 +63,10 @@ jobs:
       - run: npm ci
       - name: Syntax check
         run: npm run check
+      - name: Mutation smoke test
+        # Proves the suite can fail: 4 hand-written mutants, each tied
+        # to one named suite assertion; a survivor fails the job.
+        run: npm run mutation-smoke
       - name: CLI smoke test
         run: |
           node bin/mediakit.js probe test/source.mp4
@@ -146,7 +150,10 @@ jobs:
           node bin/mediakit.js manifest outputs/ci-manifest.json | grep '"cache_hits": 0'
           node bin/mediakit.js manifest outputs/ci-manifest.json | grep '"cache_hits": 3'
           node bin/mediakit.js titlecard "Style Check" -o outputs/ci-titlecard-style.png --style minimal-line | grep '"box_color": "111111"'
+          node bin/mediakit.js titlecard "Warm Story Brand" -o outputs/ci-titlecard-brand.png --brand warm-story | grep '"box_color": "B45309"'
+          node bin/mediakit.js titlecard "Warm Story Brand" -o outputs/ci-titlecard-brand-ov.png --brand warm-story --text-color FFFFFF | tr -d ' \n' | grep -F '"brand_overrides":["text_color"]'
           node bin/mediakit.js intro "Welcome Back" -o outputs/ci-intro-style.mp4 --style clean-bold | grep '"bg_color": "F97316"'
+          node bin/mediakit.js intro "Welcome Back" -o outputs/ci-intro-brand.mp4 --brand warm-story | grep '"bg_color": "1C1917"'
           node bin/mediakit.js chroma-key test/greenscreen.mp4 -o outputs/ci-chroma.mov | grep '"has_alpha": true'
           node bin/mediakit.js chroma-key test/greenscreen.mp4 -o outputs/ci-chroma-bg.mp4 --background 1E40AF | grep '"mode": "composite"'
           node bin/mediakit.js zoom-pan test/kenburns.png -o outputs/ci-zoompan.mp4 --duration 3 --zoom-from 1 --zoom-to 2 --width 640 --height 360 | grep '"frames": 90'
