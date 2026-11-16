@@ -683,6 +683,29 @@ Results report `source_dimensions` (display) + `source_rotation`
 (`reframe` reports `source` + `source_rotation`); on an unrotated
 clip these equal the coded size and rotation is null.
 
+### 33d4. Concat, PiP, and overlay measure the display frame too
+The same rule, three more tools. `concat` compares clip sizes on
+display dimensions: a stored-1280×720 clip with rotation 90 displays
+720×1280, so joining it with an upright 1280×720 clip is a size
+mismatch — auto re-encodes through the filter graph (normalized to
+the first clip's display size, second half upright) and `--fast`
+refuses it naming the display size. Two clips with the same display
+size but different stored orientation also refuse `--fast` (stream
+copy cannot re-orient a clip) — and they go through the filter graph
+too, because the demuxer re-encode applies the first clip's rotation
+to every clip: an upright second clip came out rotated 90° and
+stretched (PSNR 3.1 dB vs the correct picture), even though both
+clips decode to the same frame size. The
+transition and trim paths normalize to the first clip's display
+size — a rotated first clip no longer pillarboxes into landscape.
+`overlay` and `pip` position and fit on the display frame: on that
+rotated clip, top-right 120px lands at 576,24 (not 1136,24 — the old
+stored-size math put the logo outside the 720-wide frame and ffmpeg
+silently drew nothing, output byte-identical to a plain re-encode),
+and a rotated PiP clip keeps its portrait aspect (320×568, not
+320×180 squashed). All three report `source_dimensions` +
+`source_rotation`; `concat` also reports `normalize_dimensions`.
+
 ### 33e. Verify a render against its receipt — and dry-run a cut before you render it
 Every full `assemble` render writes `assemble-receipt.json` next to
 `final.mp4`: per-input digests (manifest, voice, music, captions,

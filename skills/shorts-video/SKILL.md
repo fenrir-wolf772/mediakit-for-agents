@@ -48,9 +48,11 @@ is a 1080×1920 vertical video, not a landscape one, and `check` judges
 it as displayed. If you are building from stills/script only: generate
 or collect the visuals first (images or a screen recording), then
 assemble with `concat`. When joining clips, `concat` stream-copies
-only when the clips are identical down to the video `time_base` — a
-time_base mismatch re-encodes through the filter graph instead (the
-concat demuxer copies timestamps verbatim and stretches the join).
+only when the clips are identical down to the video `time_base` and
+the display size — a time_base mismatch re-encodes through the
+filter graph instead (the concat demuxer copies timestamps verbatim
+and stretches the join), and a rotated clip counts at its display
+size (720×1280, not the stored 1280×720).
 
 ### Step 2 — Go vertical
 Center-crop to 9:16, then resize to 1080×1920:

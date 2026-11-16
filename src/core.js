@@ -1900,10 +1900,19 @@ export async function concat({ inputs, output, videoCodec = "libx264", audioCode
   // The demuxer copies timestamps verbatim, so even its re-encode
   // path stretches a clip whose time_base differs (measured
   // 2026-11-16: 10s + 10s re-encoded through the demuxer came out
-  // 116.9s). Route those joins through the filter graph, which resets
-  // timestamps per clip with setpts — verified to give exactly 20s on
-  // the same pair. Mode stays "reencode"; the reason is reported.
-  if (!useFast && compat.timeBaseMismatch) {
+  // 116.9s). The same holds for display size: the demuxer re-encode
+  // of a rotated (display 720x1280) + upright (1280x720) pair plays
+  // the upright half transposed 90 degrees (PSNR 51.8 dB vs the
+  // transposed source frame, measured 2026-11-16). And any rotation
+  // difference at all corrupts the demuxer path — even two clips
+  // with the same display size: it applies the first clip's
+  // display-matrix rotation to every clip, so an upright second
+  // clip came out rotated 90 degrees and stretched (PSNR 3.1 dB vs
+  // the correct picture). Route all three kinds of join through the
+  // filter graph, which resets timestamps per clip with setpts and
+  // normalizes every clip to the first clip's display size. Mode
+  // stays "reencode"; the reason is reported.
+  if (!useFast && (compat.timeBaseMismatch || compat.displayMismatch || compat.rotationMismatch)) {
     return concatTrimmed({ inPaths, outPath, videoCodec, audioCodec, clips, metas, mode: "reencode", fastSkipped: compat.reasons });
   }
   // Concat demuxer: stream-copy when clips match, re-encode otherwise.
@@ -1929,6 +1938,7 @@ export async function concat({ inputs, output, videoCodec = "libx264", audioCode
   }
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
+  const outDisp = out.video ? displayDims(out) : null;
   return {
     operation: "concat", inputs: inPaths, output: outPath, parts: concatParts(clips),
     mode: useFast ? "fast" : "reencode",
@@ -1936,15 +1946,20 @@ export async function concat({ inputs, output, videoCodec = "libx264", audioCode
       ? { fast_reason: "all clips identical (codec, size, fps, pixel format, time_base, audio) — stream-copied without re-encoding" }
       : { fast_skipped: compat.reasons.length ? compat.reasons : ["fast mode disabled"] }),
     ...info, duration_seconds: out.duration_seconds,
+    dimensions: outDisp ? `${outDisp.width}x${outDisp.height}` : null,
   };
 }
 
 /**
  * Concat with per-clip trims: trim/atrim each clip in one filter
- * graph, normalize to the first clip's size/fps (like the transition
- * path), then join with the concat filter. Always re-encodes — the
- * demuxer's inpoint/outpoint cannot cut accurately (see the --fast
- * error above), so there is no fast path here.
+ * graph, normalize to the first clip's display size/fps (like the
+ * transition path), then join with the concat filter. Always
+ * re-encodes — the demuxer's inpoint/outpoint cannot cut accurately
+ * (see the --fast error above), so there is no fast path here.
+ * Display size, not stored size: decode autorotates, so a phone clip
+ * stored 1280x720 with rotation 90 arrives as 720x1280 frames —
+ * normalizing to the stored 1280x720 would pillarbox it into a
+ * landscape output (measured 2026-11-16).
  */
 async function concatTrimmed({ inPaths, outPath, videoCodec, audioCodec, clips, metas, mode = "trim", fastSkipped = null }) {
   const hasVideo = metas.some((m) => m.video);
@@ -1952,8 +1967,9 @@ async function concatTrimmed({ inPaths, outPath, videoCodec, audioCodec, clips, 
     throw new MediaKitError("concat with per-clip trims needs video in every input (or audio in every input) — mixed video/audio-only clips are not supported", "INVALID_ARG");
   }
   const firstVideo = metas.find((m) => m.video);
-  const tw = firstVideo ? firstVideo.video.width : null;
-  const th = firstVideo ? firstVideo.video.height : null;
+  const firstDisp = firstVideo ? displayDims(firstVideo) : null;
+  const tw = firstDisp ? firstDisp.width : null;
+  const th = firstDisp ? firstDisp.height : null;
   const fps = firstVideo ? firstVideo.video.fps || 30 : null;
   const graph = [];
   metas.forEach((m, i) => {
@@ -1994,6 +2010,7 @@ async function concatTrimmed({ inPaths, outPath, videoCodec, audioCodec, clips, 
     operation: "concat", inputs: inPaths, output: outPath, parts: concatParts(clips),
     mode, expected_duration_seconds: expected,
     ...(fastSkipped ? { fast_skipped: fastSkipped } : {}),
+    ...(firstDisp ? { normalize_dimensions: `${tw}x${th}`, source_dimensions: `${firstDisp.width}x${firstDisp.height}`, source_rotation: firstDisp.rotation } : {}),
     ...info, duration_seconds: out.duration_seconds,
     dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
   };
@@ -2004,11 +2021,28 @@ async function concatTrimmed({ inPaths, outPath, videoCodec, audioCodec, clips, 
  * codec/size/fps/pixel format and same audio presence/codec/rate/
  * channels, in the same container family. Compare each clip against
  * the first and collect every mismatch (not just the first) so the
- * caller can see what to normalize.
+ * caller can see what to normalize. Size is compared on DISPLAY
+ * dimensions — what the viewer sees after autorotate — because the
+ * decoded frames are what the join actually stitches: two clips
+ * stored 1280x720 where one carries rotation 90 display as 720x1280
+ * and 1280x720, and stream-copying them plays one half sideways
+ * (measured 2026-11-16). The fast path additionally needs identical
+ * stored dims + rotation, because stream copy cannot re-orient a
+ * clip. The demuxer re-encode path is NOT a safe fallback for any
+ * rotation difference: it applies the first clip's display-matrix
+ * rotation to every clip (measured 2026-11-16: an upright 720x1280
+ * second clip came out rotated 90 degrees and stretched to fill
+ * the frame, PSNR 3.1 dB vs the correct picture — while the filter
+ * graph renders the same join at 52.1 dB). So any stored-orientation
+ * difference sets rotationMismatch and the caller routes the join
+ * through the filter graph, which autorotates each input
+ * independently and normalizes to the first clip's display size.
  */
 function checkConcatCompat(metas) {
   const reasons = [];
   let timeBaseMismatch = false;
+  let displayMismatch = false;
+  let rotationMismatch = false;
   const base = metas[0];
   const fmt = (m) => (m.format ?? "").split(",")[0];
   const vid = (m) => m.video;
@@ -2022,8 +2056,18 @@ function checkConcatCompat(metas) {
       if (!!vid(base) !== !!vid(m)) reasons.push(`${label}: video presence differs`);
     } else {
       if (vid(m).codec !== vid(base).codec) reasons.push(`${label}: video codec ${vid(m).codec} != ${vid(base).codec}`);
-      if (vid(m).width !== vid(base).width || vid(m).height !== vid(base).height) {
-        reasons.push(`${label}: size ${vid(m).width}x${vid(m).height} != ${vid(base).width}x${vid(base).height}`);
+      const dBase = displayDims(base);
+      const dM = displayDims(m);
+      if (dM.width !== dBase.width || dM.height !== dBase.height) {
+        reasons.push(`${label}: display size ${dM.width}x${dM.height} != ${dBase.width}x${dBase.height} (stored ${vid(m).width}x${vid(m).height}, rotation ${vid(m).rotation ?? "none"})`);
+        displayMismatch = true;
+      } else if (vid(m).width !== vid(base).width || vid(m).height !== vid(base).height || (vid(m).rotation ?? null) !== (vid(base).rotation ?? null)) {
+        // Same picture on screen, different coded orientation: the
+        // demuxer re-encode would still corrupt the join (it applies
+        // the first clip's rotation to every clip — measured
+        // 2026-11-16), so this also routes through the filter graph.
+        reasons.push(`${label}: same display size ${dM.width}x${dM.height} but stored orientation differs (${vid(m).width}x${vid(m).height}, rotation ${vid(m).rotation ?? "none"} vs ${vid(base).width}x${vid(base).height}, rotation ${vid(base).rotation ?? "none"}) — re-encode to normalize`);
+        rotationMismatch = true;
       }
       if (!sameFps(vid(m).fps, vid(base).fps)) reasons.push(`${label}: fps ${vid(m).fps} != ${vid(base).fps}`);
       if (vid(m).pixel_format !== vid(base).pixel_format) reasons.push(`${label}: pixel format ${vid(m).pixel_format} != ${vid(base).pixel_format}`);
@@ -2045,7 +2089,7 @@ function checkConcatCompat(metas) {
       if (aud(m).channels !== aud(base).channels) reasons.push(`${label}: audio channels ${aud(m).channels} != ${aud(base).channels}`);
     }
   }
-  return { ok: reasons.length === 0, reasons, timeBaseMismatch };
+  return { ok: reasons.length === 0, reasons, timeBaseMismatch, displayMismatch, rotationMismatch };
 }
 
 /** concat with an xfade transition between every pair of clips.
@@ -2090,11 +2134,14 @@ async function concatTransition({ inPaths, outPath, videoCodec, audioCodec, tran
       throw new MediaKitError(`transition ${k} duration (${t}s) must be shorter than the clips it joins (${durations[k - 1]}s and ${durations[k]}s)`, "INVALID_ARG");
     }
   }
-  // Normalize to the first clip's size/fps (xfade needs identical
-  // dimensions and frame rates on both inputs). A trimmed clip is cut
-  // first (trim/atrim + PTS reset), then scaled like an untrimmed one.
-  const tw = metas[0].video.width;
-  const th = metas[0].video.height;
+  // Normalize to the first clip's display size/fps (xfade needs
+  // identical dimensions and frame rates on both inputs). A trimmed
+  // clip is cut first (trim/atrim + PTS reset), then scaled like an
+  // untrimmed one. Display size: decode autorotates, so a rotated
+  // phone clip stored 1280x720 arrives as 720x1280 frames.
+  const firstDisp = displayDims(metas[0]);
+  const tw = firstDisp.width;
+  const th = firstDisp.height;
   const fps = metas[0].video.fps || 30;
   const graph = [];
   metas.forEach((m, i) => {
@@ -2148,6 +2195,9 @@ async function concatTransition({ inPaths, outPath, videoCodec, audioCodec, tran
     transitions: ts,
     transition_durations: tNums,
     expected_duration_seconds: running,
+    normalize_dimensions: `${tw}x${th}`,
+    source_dimensions: `${firstDisp.width}x${firstDisp.height}`,
+    source_rotation: firstDisp.rotation,
     ...info, duration_seconds: out.duration_seconds,
     dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
   };
@@ -7824,14 +7874,23 @@ export async function overlayImage({
   if (!meta.video) throw new MediaKitError("overlay needs a video input", "INVALID_ARG");
   const ovMeta = await probe(ovPath);
   if (!ovMeta.video) throw new MediaKitError("overlay file must be an image or video", "INVALID_ARG");
-  const sw = meta.video.width;
-  const sh = meta.video.height;
-  const owNative = ovMeta.video.width;
-  const ohNative = ovMeta.video.height;
+  // Geometry is measured on the display frame: decode autorotates,
+  // so a phone clip stored 1280x720 with rotation 90 is a 720x1280
+  // frame to the overlay filter — positioning from the stored size
+  // puts x=1136 on a 720-wide frame and ffmpeg silently draws
+  // nothing (measured 2026-11-16: output byte-identical to the
+  // plain re-encode). The overlay image/video uses its own display
+  // size too, so a rotated overlay video keeps its aspect.
+  const disp = displayDims(meta);
+  const sw = disp.width;
+  const sh = disp.height;
+  const ovDisp = displayDims(ovMeta);
+  const owNative = ovDisp.width;
+  const ohNative = ovDisp.height;
   const ow = width === null || width === undefined ? owNative : num(width, "width", { min: 2, integer: true });
   const oh = Math.max(2, Math.round((ohNative * ow) / owNative));
   if (ow + 2 * m > sw || oh + 2 * m > sh) {
-    throw new MediaKitError(`overlay ${ow}x${oh} with margin ${m}px does not fit source ${sw}x${sh} — use a smaller --width or --margin`, "INVALID_ARG");
+    throw new MediaKitError(`overlay ${ow}x${oh} with margin ${m}px does not fit display ${sw}x${sh} (stored ${meta.video.width}x${meta.video.height}, rotation ${meta.video.rotation ?? "none"}) — use a smaller --width or --margin`, "INVALID_ARG");
   }
   let s = null;
   let e = null;
@@ -7871,6 +7930,8 @@ export async function overlayImage({
     position, x, y, margin: m,
     overlay_size: `${ow}x${oh}`,
     opacity: op,
+    source_dimensions: `${sw}x${sh}`,
+    source_rotation: disp.rotation,
     ...(s !== null ? { visible_from_seconds: s } : {}),
     ...(e !== null ? { visible_until_seconds: e } : {}),
     ...info,
@@ -7915,8 +7976,16 @@ export async function pictureInPicture({
   if (!meta.video) throw new MediaKitError("pip needs a video input", "INVALID_ARG");
   const pipMeta = await probe(pipPath);
   if (!pipMeta.video) throw new MediaKitError("pip file must be a video", "INVALID_ARG");
-  const sw = meta.video.width;
-  const sh = meta.video.height;
+  // Geometry is measured on the display frame (see overlay above):
+  // a rotated main clip is 720 wide to the filter, not 1280, and a
+  // rotated PiP clip is portrait to the scale filter, not landscape
+  // — sizing it from the stored aspect squashes it (measured
+  // 2026-11-16: PiP silently vanished, output byte-identical to the
+  // plain re-encode).
+  const disp = displayDims(meta);
+  const sw = disp.width;
+  const sh = disp.height;
+  const pipDisp = displayDims(pipMeta);
   const pwRaw = width === null || width === undefined
     ? Math.round(sw * num(scale, "scale", { min: 0.05, max: 0.9 }))
     : num(width, "width", { min: 2, integer: true });
@@ -7924,10 +7993,10 @@ export async function pictureInPicture({
   // misbehave on odd widths/heights. Scale to explicit pw x ph so the
   // reported size is exactly what ffmpeg renders.
   const pw = Math.max(2, pwRaw - (pwRaw % 2));
-  const phRaw = (pipMeta.video.height * pw) / pipMeta.video.width;
+  const phRaw = (pipDisp.height * pw) / pipDisp.width;
   const ph = Math.max(2, 2 * Math.round(phRaw / 2));
   if (pw + 2 * m > sw || ph + 2 * m > sh) {
-    throw new MediaKitError(`pip ${pw}x${ph} with margin ${m}px does not fit source ${sw}x${sh} — use a smaller --width/--scale or --margin`, "INVALID_ARG");
+    throw new MediaKitError(`pip ${pw}x${ph} with margin ${m}px does not fit display ${sw}x${sh} (stored ${meta.video.width}x${meta.video.height}, rotation ${meta.video.rotation ?? "none"}) — use a smaller --width/--scale or --margin`, "INVALID_ARG");
   }
   let s = null;
   let e = null;
@@ -7993,6 +8062,9 @@ export async function pictureInPicture({
     pip_size: `${pw}x${ph}`,
     opacity: op,
     audio,
+    source_dimensions: `${sw}x${sh}`,
+    source_rotation: disp.rotation,
+    pip_source_dimensions: `${pipDisp.width}x${pipDisp.height}`,
     ...(s !== null ? { visible_from_seconds: s } : {}),
     ...(e !== null ? { visible_until_seconds: e } : {}),
     ...info,

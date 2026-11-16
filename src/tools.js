@@ -207,7 +207,7 @@ export const TOOL_DEFS = [
 
   {
     name: "concat",
-    description: "Join 2+ media files into one. By default it probes the clips first: identical clips (codec, size, fps, pixel format, time_base, audio) are stream-copied with no re-encoding (fast, lossless); differing clips are re-encoded so the join still works — except a time_base mismatch, which goes through the filter graph instead of the demuxer, because the demuxer copies timestamps verbatim and stretches the join (measured 10s+10s → 116.9s). Set fast=true to require the stream-copy path (errors with the exact mismatch if clips differ), or fast=false to always re-encode. Set transition (e.g. fade, wipeleft, dissolve, circlecrop) to crossfade between clips instead of a hard cut — clips are normalized to the first clip's size/fps first, and the output is sum(durations) minus (n-1) x transition_duration. Per-clip trim: give an input as {file, start, end} (seconds or MM:SS) — trims always re-encode with exact cuts, and fast=true refuses them (stream-copy cuts snap to keyframes).",
+    description: "Join 2+ media files into one. By default it probes the clips first: identical clips (codec, size, fps, pixel format, time_base, audio) are stream-copied with no re-encoding (fast, lossless); differing clips are re-encoded so the join still works — except a time_base mismatch, a display-size mismatch, or any rotation difference, which go through the filter graph instead of the demuxer, because the demuxer copies timestamps verbatim and stretches the join (measured 10s+10s → 116.9s) and applies the first clip's display-matrix rotation to every clip (an upright second clip came out rotated 90 degrees and stretched). Size is compared on display dimensions (what the viewer sees after autorotate): a clip stored 1280x720 with rotation 90 displays 720x1280, and fast=true additionally needs identical stored dims + rotation. Set fast=true to require the stream-copy path (errors with the exact mismatch if clips differ), or fast=false to always re-encode. Set transition (e.g. fade, wipeleft, dissolve, circlecrop) to crossfade between clips instead of a hard cut — clips are normalized to the first clip's display size/fps first, and the output is sum(durations) minus (n-1) x transition_duration. Per-clip trim: give an input as {file, start, end} (seconds or MM:SS) — trims always re-encode with exact cuts, and fast=true refuses them (stream-copy cuts snap to keyframes).",
     schema: {
     inputs: z.array(z.union([
       z.string().min(1),
@@ -1009,7 +1009,7 @@ export const TOOL_DEFS = [
 
   {
     name: "overlay",
-    description: "Overlay a logo/watermark image on a video. Named position (top-right, top-left, bottom-left, bottom-right, center) plus a margin from the edge; the overlay is scaled to width keeping its aspect ratio, opacity 0-1, and start/end (seconds) show it only during that window. Audio is copied through.",
+    description: "Overlay a logo/watermark image on a video. Named position (top-right, top-left, bottom-left, bottom-right, center) plus a margin from the edge; the overlay is scaled to width keeping its aspect ratio, opacity 0-1, and start/end (seconds) show it only during that window. Position and fit are measured on the display frame — a phone clip stored 1280x720 with rotation 90 is 720x1280 to the filter, so top-right lands at 576,24 there, not 1136,24. Audio is copied through.",
     schema: {
     input: pathSchema,
     overlay: pathSchema.describe("Overlay image file (PNG with transparency recommended)"),
@@ -1037,7 +1037,7 @@ export const TOOL_DEFS = [
 
   {
     name: "pip",
-    description: "Picture-in-picture: place a second video over the main one. 9 named positions (corners, edges, center), size by width in pixels or by scale fraction of the main width (default 0.25), opacity 0-1, and start/end (seconds) show it only during that window — the PiP clip loops so it never runs out. Audio: main (default, PiP audio dropped), pip (PiP audio only), or mix (both mixed, levels kept).",
+    description: "Picture-in-picture: place a second video over the main one. 9 named positions (corners, edges, center), size by width in pixels or by scale fraction of the main width (default 0.25), opacity 0-1, and start/end (seconds) show it only during that window — the PiP clip loops so it never runs out. Geometry is measured on display frames: a rotated main clip is 720 wide (not 1280 stored), and a rotated PiP clip keeps its portrait aspect instead of being squashed to the stored one. Audio: main (default, PiP audio dropped), pip (PiP audio only), or mix (both mixed, levels kept).",
     schema: {
     input: pathSchema,
     pip: pathSchema.describe("Video to place on top"),

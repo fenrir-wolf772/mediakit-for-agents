@@ -2314,6 +2314,157 @@ const concatTbFastRes = await client.callTool({
 const concatTbFastJson = JSON.parse(concatTbFastRes.content[0].text);
 checkOk(concatTbFastRes.isError === true && /time_base 1\/90000/.test(concatTbFastJson.error ?? ""), "concat fast=true errors on a time_base mismatch", JSON.stringify(concatTbFastJson));
 
+// concat/pip/overlay on rotated phone clips (lượt 77): geometry is
+// measured on the DISPLAY frame, not the coded pixels. rotated.mp4
+// is stored 1280x720 with rotation 90 (displays 720x1280);
+// upright-720x1280.mp4 is the same picture coded upright (stored
+// 720x1280, rotation null) — same display size, different stored
+// orientation. Before the fix, concat auto stream-copied the pair
+// (one half sideways), the transition path pillarboxed the portrait
+// clip into 1280x720, and overlay/pip silently drew nothing (output
+// byte-identical to the plain re-encode).
+const concatDispRes = await client.callTool({
+  name: "concat",
+  arguments: {
+    inputs: [path.join(root, "test/rotated.mp4"), path.join(root, "test/source.mp4")],
+    output: path.join(root, "outputs/mcp-concat-display.mp4"),
+  },
+});
+const concatDispJson = JSON.parse(concatDispRes.content[0].text);
+console.log("concat display-mismatch auto:", concatDispJson.mode, "| duration", concatDispJson.duration_seconds, "|", concatDispJson.dimensions, "| normalize", concatDispJson.normalize_dimensions, "| skipped:", JSON.stringify(concatDispJson.fast_skipped));
+checkOk(concatDispJson.mode === "reencode", "concat auto on a display-size mismatch re-encodes through the filter graph (not the demuxer)", `got mode=${concatDispJson.mode}`);
+checkOk(near(concatDispJson.duration_seconds, 20, 0.1), "concat display-mismatch duration is 20s (10+10)", `got ${concatDispJson.duration_seconds}`);
+checkOk(concatDispJson.dimensions === "720x1280", "concat display-mismatch output is 720x1280 (first clip's display size)", `got ${concatDispJson.dimensions}`);
+checkOk(concatDispJson.normalize_dimensions === "720x1280", "concat display-mismatch normalizes to 720x1280", `got ${concatDispJson.normalize_dimensions}`);
+checkOk(Array.isArray(concatDispJson.fast_skipped) && concatDispJson.fast_skipped.some((r) => r.includes("display size 1280x720")), "concat auto names the display-size mismatch", JSON.stringify(concatDispJson.fast_skipped));
+// Second half must be the upright clip, upright: PSNR vs the source
+// frame padded to 720x1280 is ~27.6 dB (calibrated: the same
+// scale+pad+crf23 pipeline re-encoded on its own scores 27.63), while
+// the sideways (transposed) variant scores ~3.2.
+await extractPng(path.join(root, "outputs/mcp-concat-display.mp4"), 15, path.join(root, "outputs/mcp-concat-disp-t15.png"));
+await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-ss", "5", "-i", path.join(root, "test/source.mp4"), "-frames:v", "1", "-vf", "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:-1:-1:black", "-y", path.join(root, "outputs/mcp-concat-disp-exp.png")]);
+await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-ss", "5", "-i", path.join(root, "test/source.mp4"), "-frames:v", "1", "-vf", "transpose=1", "-y", path.join(root, "outputs/mcp-concat-disp-sideways.png")]);
+const concatDispPsnr = await framePsnr(path.join(root, "outputs/mcp-concat-disp-exp.png"), path.join(root, "outputs/mcp-concat-disp-t15.png"));
+const concatDispSidePsnr = await framePsnr(path.join(root, "outputs/mcp-concat-disp-sideways.png"), path.join(root, "outputs/mcp-concat-disp-t15.png"));
+console.log("concat display second-half PSNR: upright", concatDispPsnr, "| sideways", concatDispSidePsnr);
+checkOk(concatDispPsnr !== null && concatDispPsnr > 25, "concat display-mismatch second half is upright (PSNR > 25 vs padded source frame)", `got ${concatDispPsnr}`);
+checkOk(concatDispSidePsnr !== null && concatDispSidePsnr < 10, "concat display-mismatch second half is not sideways (PSNR < 10 vs transposed frame)", `got ${concatDispSidePsnr}`);
+const concatDispFastRes = await client.callTool({
+  name: "concat",
+  arguments: {
+    inputs: [path.join(root, "test/rotated.mp4"), path.join(root, "test/source.mp4")],
+    output: path.join(root, "outputs/mcp-concat-display-fast.mp4"),
+    fast: true,
+  },
+});
+const concatDispFastJson = JSON.parse(concatDispFastRes.content[0].text);
+checkOk(concatDispFastRes.isError === true && /display size 1280x720/.test(concatDispFastJson.error ?? ""), "concat fast=true errors on a display-size mismatch", JSON.stringify(concatDispFastJson));
+// Transition path with a rotated first clip normalizes to its
+// display size too (before: 1280x720 landscape with pillarbox).
+const concatDispTransRes = await client.callTool({
+  name: "concat",
+  arguments: {
+    inputs: [path.join(root, "test/rotated.mp4"), path.join(root, "test/source.mp4")],
+    output: path.join(root, "outputs/mcp-concat-display-fade.mp4"),
+    transition: "fade",
+    transition_duration: 1,
+  },
+});
+const concatDispTransJson = JSON.parse(concatDispTransRes.content[0].text);
+console.log("concat display+fade:", concatDispTransJson.dimensions, "| duration", concatDispTransJson.duration_seconds, "| normalize", concatDispTransJson.normalize_dimensions);
+checkOk(concatDispTransJson.dimensions === "720x1280", "concat transition on a rotated first clip outputs 720x1280", `got ${concatDispTransJson.dimensions}`);
+checkOk(near(concatDispTransJson.duration_seconds, 19, 0.1), "concat transition on a rotated first clip is 19s (10+10-1)", `got ${concatDispTransJson.duration_seconds}`);
+checkOk(concatDispTransJson.normalize_dimensions === "720x1280", "concat transition normalizes to the first clip's display size", `got ${concatDispTransJson.normalize_dimensions}`);
+// Same display size, different stored orientation: fast must still
+// refuse (stream copy cannot re-orient), but the demuxer re-encode
+// is safe because both clips decode to 720x1280 frames.
+const concatSameDispRes = await client.callTool({
+  name: "concat",
+  arguments: {
+    inputs: [path.join(root, "test/rotated.mp4"), path.join(root, "test/upright-720x1280.mp4")],
+    output: path.join(root, "outputs/mcp-concat-samedisplay.mp4"),
+  },
+});
+const concatSameDispJson = JSON.parse(concatSameDispRes.content[0].text);
+console.log("concat same-display auto:", concatSameDispJson.mode, "| duration", concatSameDispJson.duration_seconds, "|", concatSameDispJson.dimensions, "| skipped:", JSON.stringify(concatSameDispJson.fast_skipped));
+checkOk(concatSameDispJson.mode === "reencode", "concat auto on same-display/different-stored clips re-encodes", `got mode=${concatSameDispJson.mode}`);
+checkOk(near(concatSameDispJson.duration_seconds, 20, 0.1), "concat same-display duration is 20s (10+10)", `got ${concatSameDispJson.duration_seconds}`);
+checkOk(concatSameDispJson.dimensions === "720x1280", "concat same-display output is 720x1280", `got ${concatSameDispJson.dimensions}`);
+await extractPng(path.join(root, "outputs/mcp-concat-samedisplay.mp4"), 15, path.join(root, "outputs/mcp-concat-samedisp-t15.png"));
+await extractPng(path.join(root, "test/upright-720x1280.mp4"), 5, path.join(root, "outputs/mcp-concat-samedisp-exp.png"));
+const concatSameDispPsnr = await framePsnr(path.join(root, "outputs/mcp-concat-samedisp-exp.png"), path.join(root, "outputs/mcp-concat-samedisp-t15.png"));
+console.log("concat same-display second-half PSNR:", concatSameDispPsnr);
+checkOk(concatSameDispPsnr !== null && concatSameDispPsnr > 25, "concat same-display second half matches the upright clip (PSNR > 25)", `got ${concatSameDispPsnr}`);
+const concatSameDispFastRes = await client.callTool({
+  name: "concat",
+  arguments: {
+    inputs: [path.join(root, "test/rotated.mp4"), path.join(root, "test/upright-720x1280.mp4")],
+    output: path.join(root, "outputs/mcp-concat-samedisplay-fast.mp4"),
+    fast: true,
+  },
+});
+const concatSameDispFastJson = JSON.parse(concatSameDispFastRes.content[0].text);
+checkOk(concatSameDispFastRes.isError === true && /stored orientation differs/.test(concatSameDispFastJson.error ?? ""), "concat fast=true errors on same-display/different-stored clips", JSON.stringify(concatSameDispFastJson));
+// overlay on a rotated clip: top-right 120px lands at 576,24 on
+// the 720-wide display frame (before: 1136,24 — outside the frame,
+// logo silently absent). Pixel-verify the red logo is really there.
+const overlayDispRes = await client.callTool({
+  name: "overlay",
+  arguments: {
+    input: path.join(root, "test/rotated.mp4"),
+    overlay: path.join(root, "test/logo.png"),
+    output: path.join(root, "outputs/mcp-overlay-display.mp4"),
+    position: "top-right",
+    width: 120,
+    opacity: 1,
+  },
+});
+const overlayDispJson = JSON.parse(overlayDispRes.content[0].text);
+console.log("overlay display:", overlayDispJson.position, overlayDispJson.x + "," + overlayDispJson.y, "|", overlayDispJson.overlay_size, "| src", overlayDispJson.source_dimensions, "rot", overlayDispJson.source_rotation);
+checkOk(overlayDispJson.x === 576 && overlayDispJson.y === 24 && overlayDispJson.source_dimensions === "720x1280" && overlayDispJson.source_rotation === 90, "overlay on a rotated clip lands at 576,24 on the 720x1280 display frame", `got ${overlayDispJson.x},${overlayDispJson.y} ${overlayDispJson.source_dimensions} rot ${overlayDispJson.source_rotation}`);
+const overlayDispR = await planeMean(path.join(root, "outputs/mcp-overlay-display.mp4"), "120:120:576:24", "r", 5);
+const overlayDispB = await planeMean(path.join(root, "outputs/mcp-overlay-display.mp4"), "120:120:576:24", "b", 5);
+console.log("overlay display pixels: logo R/B =", overlayDispR, overlayDispB);
+checkOk(overlayDispR !== null && overlayDispR > 200, "overlay logo is really red on the rotated clip (R > 200)", `got R=${overlayDispR}`);
+checkOk(overlayDispB !== null && overlayDispB < 20, "overlay logo has no blue on the rotated clip (B < 20)", `got B=${overlayDispB}`);
+// pip on a rotated clip: rotate-source.mp4 is left-red/right-blue
+// 640x360, so the 180x102 PiP at bottom-right (516,1154) must show
+// red on its left half and blue on its right half.
+const pipDispRes = await client.callTool({
+  name: "pip",
+  arguments: {
+    input: path.join(root, "test/rotated.mp4"),
+    pip: path.join(root, "test/rotate-source.mp4"),
+    output: path.join(root, "outputs/mcp-pip-display.mp4"),
+  },
+});
+const pipDispJson = JSON.parse(pipDispRes.content[0].text);
+console.log("pip display:", pipDispJson.position, pipDispJson.x + "," + pipDispJson.y, "|", pipDispJson.pip_size, "| src", pipDispJson.source_dimensions);
+checkOk(pipDispJson.x === 516 && pipDispJson.y === 1154 && pipDispJson.pip_size === "180x102" && pipDispJson.source_dimensions === "720x1280", "pip on a rotated clip lands at 516,1154 as 180x102 on the 720x1280 display frame", `got ${pipDispJson.x},${pipDispJson.y} ${pipDispJson.pip_size} ${pipDispJson.source_dimensions}`);
+const pipDispLeftR = await planeMean(path.join(root, "outputs/mcp-pip-display.mp4"), "90:102:516:1154", "r", 5);
+const pipDispLeftB = await planeMean(path.join(root, "outputs/mcp-pip-display.mp4"), "90:102:516:1154", "b", 5);
+const pipDispRightB = await planeMean(path.join(root, "outputs/mcp-pip-display.mp4"), "90:102:606:1154", "b", 5);
+const pipDispRightR = await planeMean(path.join(root, "outputs/mcp-pip-display.mp4"), "90:102:606:1154", "r", 5);
+console.log("pip display pixels: left R/B =", pipDispLeftR, pipDispLeftB, "| right B/R =", pipDispRightB, pipDispRightR);
+checkOk(pipDispLeftR !== null && pipDispLeftR > 200, "pip left half is red on the rotated clip (R > 200)", `got R=${pipDispLeftR}`);
+checkOk(pipDispLeftB !== null && pipDispLeftB < 20, "pip left half has no blue (B < 20)", `got B=${pipDispLeftB}`);
+checkOk(pipDispRightB !== null && pipDispRightB > 200, "pip right half is blue on the rotated clip (B > 200)", `got B=${pipDispRightB}`);
+checkOk(pipDispRightR !== null && pipDispRightR < 20, "pip right half has no red (R < 20)", `got R=${pipDispRightR}`);
+// A rotated PiP clip keeps its portrait aspect: 320 wide on a
+// 1280-wide main is 320x568 from the display ratio (before: 320x180
+// from the stored 1280x720 ratio — squashed flat).
+const pipRotClipRes = await client.callTool({
+  name: "pip",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    pip: path.join(root, "test/rotated.mp4"),
+    output: path.join(root, "outputs/mcp-pip-rotclip.mp4"),
+  },
+});
+const pipRotClipJson = JSON.parse(pipRotClipRes.content[0].text);
+console.log("pip rotated clip:", pipRotClipJson.pip_size, "|", pipRotClipJson.x + "," + pipRotClipJson.y, "| pip src", pipRotClipJson.pip_source_dimensions);
+checkOk(pipRotClipJson.pip_size === "320x568" && pipRotClipJson.x === 936 && pipRotClipJson.y === 128 && pipRotClipJson.pip_source_dimensions === "720x1280", "pip with a rotated clip is 320x568 at 936,128 (display aspect, not stored)", `got ${pipRotClipJson.pip_size} ${pipRotClipJson.x},${pipRotClipJson.y} ${pipRotClipJson.pip_source_dimensions}`);
+
 // concat per-clip trim: {file, start, end} objects (MCP) and
 // path@start-end (CLI). Trims re-encode through the filter graph —
 // the concat demuxer's inpoint/outpoint was measured to NOT cut
