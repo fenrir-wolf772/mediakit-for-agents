@@ -77,6 +77,8 @@ jobs:
           node bin/mediakit.js compress test/source.mp4 --quality low -o outputs/ci-compress.mp4
           node bin/mediakit.js compress test/source.mp4 --target-size 1 -o outputs/ci-compress-target.mp4
           ffprobe -v error -show_entries stream=width,height -of csv=p=0 outputs/ci-compress-target.mp4 | grep '^854,480$'
+          node bin/mediakit.js compress test/source.mp4 --target-size 1 -o outputs/ci-compress-proof.mp4 | grep '"verdict": "indistinguishable"'
+          node bin/mediakit.js compress test/source.mp4 --target-size 1 --no-quality-proof -o outputs/ci-compress-noproof.mp4 | grep '"quality_proof": null'
           node bin/mediakit.js compress test/source.mp4 --target-size 1 --no-resolution-ladder -o outputs/ci-compress-noladder.mp4
           ffprobe -v error -show_entries stream=width,height -of csv=p=0 outputs/ci-compress-noladder.mp4 | grep '^1280,720$'
           node bin/mediakit.js compress test/source.mp4 --quality email-25mb -o outputs/ci-compress-email.mp4

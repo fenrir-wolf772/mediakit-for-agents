@@ -893,6 +893,17 @@ const burnFitManifestRes = await client.callTool({
 const burnFitManifestJson = JSON.parse(burnFitManifestRes.content[0].text);
 const burnFitStep = burnFitManifestJson.steps?.[0]?.result;
 checkOk(burnFitManifestJson.steps_run === 1 && burnFitStep?.font_size === 45 && burnFitStep?.margin_v === 520 && burnFitStep?.fit?.width_px === 952, "manifest burn_captions passes max_lines + platform through (font 45, margin 520, budget 952)", JSON.stringify(burnFitStep?.fit));
+// Manifest: a compress target-size step carries the quality proof
+// through in its step result.
+await rm(path.join(root, "outputs/mcp-manifest-compress-proof.mp4"), { force: true });
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const proofManifestRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-compress-proof.json") },
+});
+const proofManifestJson = JSON.parse(proofManifestRes.content[0].text);
+const proofManifestStep = proofManifestJson.steps?.[0]?.result;
+checkOk(proofManifestJson.steps_run === 1 && proofManifestStep?.quality_proof?.available === true && proofManifestStep.quality_proof.verdict === "indistinguishable" && proofManifestStep.quality_proof.ssim_mean > 0.99, "manifest compress target-size step returns the quality proof (indistinguishable, SSIM >0.99)", JSON.stringify(proofManifestStep?.quality_proof));
 // CLI: rotate --angle 180 keeps 640x360.
 const rotCliJson = await runCliJson(["rotate", path.join(root, "test/rotate-source.mp4"), "-o", path.join(root, "outputs/mcp-rotate-cli.mp4"), "--angle", "180"]);
 checkOk(rotCliJson.dimensions === "640x360" && rotCliJson.angle === 180 && rotCliJson.output_rotation === null, "CLI rotate --angle 180 keeps 640x360, no rotation left", JSON.stringify(rotCliJson));
@@ -1361,6 +1372,7 @@ checkOk(doctorJson.tools.reverse?.available === true, "doctor: reverse is availa
 checkOk(doctorJson.tools.interpolate?.available === true, "doctor: interpolate is available (minterpolate filter present)");
 checkOk(doctorJson.tools.denoise?.available === true, "doctor: denoise is available (hqdn3d/nlmeans filters present)");
 checkOk(doctorJson.tools.segment?.available === true, "doctor: segment is available (HLS muxer is built-in)");
+checkOk(doctorJson.filters?.ssim === true && doctorJson.filters?.psnr === true && doctorJson.filters?.libvmaf === false, "doctor: ssim/psnr filters present, libvmaf absent (so the compress quality proof is SSIM-only)", JSON.stringify({ ssim: doctorJson.filters?.ssim, psnr: doctorJson.filters?.psnr, libvmaf: doctorJson.filters?.libvmaf }));
 checkOk(typeof doctorJson.gpu?.available === "boolean" && Array.isArray(doctorJson.gpu?.encoders) && "working_encoder" in (doctorJson.gpu ?? {}), "doctor: gpu section reports available + listed encoders + working encoder", JSON.stringify(doctorJson.gpu));
 checkOk(doctorJson.gpu.available === (doctorJson.gpu.working_encoder !== null), "doctor: gpu available is true exactly when a probe encode worked", JSON.stringify(doctorJson.gpu));
 console.log("doctor gpu:", JSON.stringify(doctorJson.gpu));
@@ -3411,7 +3423,7 @@ const findSourceRes = await client.callTool({
   arguments: { directory: path.join(root, "test"), name: "source" },
 });
 const findSourceJson = JSON.parse(findSourceRes.content[0].text);
-checkOk(findSourceJson.total_matches === 10, "find 'source' matches 10 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source, hook-source, sharpness-source, rotate-source)", `got ${findSourceJson.total_matches}`);
+checkOk(findSourceJson.total_matches === 11, "find 'source' matches 11 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source, hook-source, sharpness-source, rotate-source, noisy-source)", `got ${findSourceJson.total_matches}`);
 
 const findMp3Res = await client.callTool({
   name: "find",
@@ -3657,6 +3669,43 @@ const compressT5Res = await client.callTool({
 });
 const compressT5Json = JSON.parse(compressT5Res.content[0].text);
 checkOk(compressT5Json.dimensions === "1280x720" && compressT5Json.resolution_ladder_applied === false && near(compressT5Json.bpp_before, 0.1256, 0.001) && compressT5Json.target_met === true, "compress target-size 5MB does not trigger the ladder (bpp 0.1256)", JSON.stringify(compressT5Json));
+// Quality proof (lượt 82): target-size mode measures the output
+// against the source — SSIM at 3 sample points + PSNR mid-clip +
+// a verdict in words. Smooth testsrc2 saturates near 1.0, so the
+// shape + top band are asserted here; the noisy fixture below proves
+// the verdict actually moves with the target.
+const proofT1 = compressTJson.quality_proof;
+checkOk(proofT1?.available === true && Array.isArray(proofT1.sample_points) && proofT1.sample_points.length === 3 && proofT1.sample_points.every((p) => typeof p.ssim_all === "number"), "compress target-size 1MB returns a quality proof with 3 SSIM sample points", JSON.stringify(proofT1?.sample_points));
+checkOk(proofT1.ssim_mean > 0.99 && proofT1.ssim_min > 0.99 && proofT1.verdict === "indistinguishable" && typeof proofT1.psnr_y_db === "number" && proofT1.psnr_y_db > 50, "compress target-size 1MB proof: SSIM mean >0.99, verdict indistinguishable, PSNR-Y >50 dB on smooth content", JSON.stringify({ mean: proofT1.ssim_mean, psnr: proofT1.psnr_y_db, verdict: proofT1.verdict }));
+checkOk(proofT1.vmaf === null && /libvmaf/.test(proofT1.vmaf_note ?? ""), "compress quality proof says VMAF is unavailable (no libvmaf in this ffmpeg build)", proofT1.vmaf_note ?? "");
+// The proof discriminates on hard content: test/noisy-source.mp4
+// (640x360, static noise — detail that actually costs bits).
+// Measured 2026-11-17: 1 MB -> SSIM 0.970 (looks_the_same),
+// 0.5 MB -> SSIM 0.884 (clearly_degraded).
+const proofNz1Res = await client.callTool({
+  name: "compress",
+  arguments: { input: path.join(root, "test/noisy-source.mp4"), output: path.join(root, "outputs/mcp-compress-proof-nz1.mp4"), target_size_mb: 1 },
+});
+const proofNz1 = JSON.parse(proofNz1Res.content[0].text).quality_proof;
+checkOk(proofNz1?.available === true && near(proofNz1.ssim_mean, 0.970, 0.01) && proofNz1.verdict === "looks_the_same", "compress proof on noisy 1MB: SSIM ~0.970, verdict looks_the_same", JSON.stringify({ mean: proofNz1?.ssim_mean, verdict: proofNz1?.verdict }));
+const proofNz05Res = await client.callTool({
+  name: "compress",
+  arguments: { input: path.join(root, "test/noisy-source.mp4"), output: path.join(root, "outputs/mcp-compress-proof-nz05.mp4"), target_size_mb: 0.5 },
+});
+const proofNz05 = JSON.parse(proofNz05Res.content[0].text).quality_proof;
+checkOk(proofNz05?.available === true && proofNz05.ssim_mean < 0.90 && proofNz05.verdict === "clearly_degraded" && near(proofNz05.psnr_y_db, 33.6, 1.5), "compress proof on noisy 0.5MB: SSIM <0.90, verdict clearly_degraded, PSNR-Y ~33.6 dB", JSON.stringify({ mean: proofNz05?.ssim_mean, psnr: proofNz05?.psnr_y_db, verdict: proofNz05?.verdict }));
+// quality_proof=false skips the measurement; audio-only has no
+// frames to compare, so the proof is null with a note.
+const proofOffRes = await client.callTool({
+  name: "compress",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-compress-proof-off.mp4"), target_size_mb: 1, quality_proof: false },
+});
+const proofOffJson = JSON.parse(proofOffRes.content[0].text);
+checkOk(proofOffJson.quality_proof === null && proofOffJson.target_met === true, "compress quality_proof=false skips the measurement (null proof, target still met)", JSON.stringify(proofOffJson.quality_proof));
+checkOk(compressTAJson.quality_proof === null && /audio-only/.test(compressTAJson.quality_proof_note ?? ""), "compress target-size on audio-only input: proof null with an audio-only note", compressTAJson.quality_proof_note ?? "");
+// CLI: --no-quality-proof skips the measurement.
+const proofCliJson = await runCliJson(["compress", path.join(root, "test/source.mp4"), "-o", path.join(root, "outputs/mcp-compress-proof-cli.mp4"), "--target-size", "1", "--no-quality-proof"]);
+checkOk(proofCliJson.quality_proof === null && proofCliJson.target_met === true, "CLI compress --no-quality-proof skips the measurement", JSON.stringify(proofCliJson.quality_proof));
 // Ladder + max-width: --max-width already shrinks the frame to
 // 640x360, where 592k buys 0.0856 bpp — above the threshold, so the
 // ladder leaves it alone.

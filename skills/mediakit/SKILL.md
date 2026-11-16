@@ -415,7 +415,22 @@ two-pass ABR overshoots on hard content: downscaled testsrc ran
 0.2% (measured 2026-11-13) — a 2% margin let the 1 MB case land
 over target. `--quality email-25mb` is shorthand for a target of
 18 MB (25 MB Gmail limit ÷ ~1.37 base64 inflation), for files that
-will be emailed as attachments.
+will be emailed as attachments. Target-size mode also returns a
+`quality_proof`: SSIM measured against the source at 3 sample points
+(10% / 50% / 90% of duration) plus PSNR-Y mid-clip, and a verdict in
+words — `indistinguishable` (SSIM ≥0.99), `looks_the_same` (≥0.97),
+`slight_softening` (≥0.95), `visible_loss` (≥0.90),
+`clearly_degraded` (below). VMAF is not in this ffmpeg build (no
+libvmaf — `doctor` reports it), so SSIM is the measured proxy and the
+proof says so. The proof rates encode fidelity at the delivered
+resolution: the source is scaled to the output size before comparing,
+so it does NOT penalize the resolution ladder — a smaller frame is
+easier to encode, and on hard content a 426x240 encode can score
+higher than the same bitrate at 720p (measured 2026-11-17). Compare
+`dimensions` + `bpp_after` across targets for the resolution
+tradeoff, not SSIM alone. `--no-quality-proof` skips the measurement
+(audio-only input has no frames to compare, so its proof is null
+with a note).
 `extract_audio --whisper` is the Whisper ASR preset: 16 kHz mono WAV
 (the output is renamed to .wav when needed, and the real path is
 reported) — the direct input for a transcribe step.

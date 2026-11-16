@@ -6452,7 +6452,98 @@ const EMAIL_25MB_TARGET_MB = 18;
 const LADDER_MIN_BPP = 0.045;
 const LADDER_HEIGHTS = [1080, 720, 480, 360, 240];
 
-export async function compress({ input, output, quality = "medium", maxWidth = null, crf = null, preset = null, targetSizeMb = null, resolutionLadder = true }) {
+// Quality proof for compress --target-size (halfsize's idea: SSIM at
+// 3 sample points + VMAF mid-clip + a verdict in words, so the caller
+// sees what the size actually cost instead of trusting the bitrate).
+// VMAF is NOT in this ffmpeg build (no libvmaf filter — doctor
+// reports it), so the verdict is SSIM-only and says so. SSIM is
+// measured against the source scaled to the OUTPUT size, so it rates
+// encode fidelity at the delivered resolution — it does NOT penalize
+// the resolution ladder: a smaller frame is easier to encode, so on
+// hard content a 426x240 encode scores HIGHER than the same bitrate
+// at 720p (measured 2026-11-17: static-noise source, 5 MB at 720p
+// SSIM 0.957 vs 0.5 MB at 240p SSIM 0.966 — the downscaled reference
+// has less detail to lose). Compare `dimensions` + `bpp_after`
+// across targets for the resolution tradeoff, not SSIM alone.
+// Bands are SSIM-mean working figures (cross-checked against
+// halfsize's VMAF bands ≥95/90/80/70): calibrated on a static-noise
+// stress clip (5 MB → 0.957, 1 MB → 0.918, 0.5 MB → 0.966) and on
+// smooth testsrc2 (all targets ≥0.9997, CRF 32 → 0.9966) — a verdict
+// is a fidelity reading at the delivered size, not a beauty score.
+const QUALITY_PROOF_VERDICTS = [
+  { min: 0.99, verdict: "indistinguishable", detail: "no visible difference from the source at this size" },
+  { min: 0.97, verdict: "looks_the_same", detail: "indistinguishable in normal viewing; pixel-peeping finds it" },
+  { min: 0.95, verdict: "slight_softening", detail: "fine detail softens slightly; fine for sharing" },
+  { min: 0.90, verdict: "visible_loss", detail: "softening and smearing are visible on close inspection" },
+  { min: -Infinity, verdict: "clearly_degraded", detail: "clearly worse than the source — raise the target or accept the loss" },
+];
+
+// Measure a compressed file against its source: SSIM at 3 sample
+// points (10% / 50% / 90% of duration, 1s windows) plus PSNR-Y at
+// the middle point, in one ffmpeg run per point (the mid run chains
+// ssim -> psnr on the same frames). Input seeking (-ss before -i)
+// on both inputs lands the first compared frame at the same
+// timestamp — verified by identity: source vs itself reads SSIM
+// All 1.000000 at all three points. Returns { available: false,
+// reason } when there is nothing to measure (no video, clip too
+// short, ssim filter missing); never throws, so a proof failure
+// cannot fail the compress that already succeeded.
+async function measureQualityProof({ source, compressed, duration }) {
+  if (!duration || duration < 0.5) {
+    return { available: false, reason: `clip too short to sample (duration ${duration ?? "?"}s < 0.5s)` };
+  }
+  const filtersOut = await listCapabilities("filters");
+  if (!new RegExp("\\bssim\\b").test(filtersOut)) {
+    return { available: false, reason: "ssim filter not in this ffmpeg build (doctor reports it)" };
+  }
+  const outMeta = await probe(compressed);
+  if (!outMeta.video) {
+    return { available: false, reason: "no video stream in the compressed output" };
+  }
+  const { width: w, height: h } = outMeta.video;
+  const win = Math.min(1, duration / 5);
+  const points = [];
+  for (let i = 0; i < 3; i++) {
+    const t = Math.min([0.1, 0.5, 0.9][i] * duration, duration - win);
+    const tStr = String(+t.toFixed(3));
+    const mid = i === 1;
+    // The mid run chains ssim -> psnr on the same frames; a filter
+    // label can only feed ONE consumer, so the scaled reference is
+    // split in two (feeding [ref] to both filters fails: the second
+    // silently falls back to the raw input and psnr dies on the size
+    // mismatch — caught by CLI smoke, 2026-11-17).
+    const filter = mid
+      ? `[0:v]scale=${w}:${h},split=2[ref1][ref2];[1:v][ref1]ssim[s];[s][ref2]psnr`
+      : `[0:v]scale=${w}:${h}[ref];[1:v][ref]ssim`;
+    const { stderr } = await run(FFMPEG, ["-v", "info", "-ss", tStr, "-t", String(win), "-i", source, "-ss", tStr, "-t", String(win), "-i", compressed, "-filter_complex", filter, "-an", "-f", "null", "-"]);
+    const ssim = stderr.match(/SSIM Y:([0-9.]+) \([^)]*\) U:([0-9.]+) \([^)]*\) V:([0-9.]+) \([^)]*\) All:([0-9.]+)/);
+    if (!ssim) throw new MediaKitError(`quality proof: no SSIM reading at t=${tStr}s (ffmpeg output changed?)`, "FFMPEG_FAILED");
+    const point = { t_seconds: +tStr, ssim_y: +ssim[1], ssim_u: +ssim[2], ssim_v: +ssim[3], ssim_all: +ssim[4] };
+    if (mid) {
+      const psnr = stderr.match(/PSNR y:([0-9.]+) u:([0-9.]+) v:([0-9.]+) average:([0-9.]+)/);
+      if (psnr) point.psnr_y_db = +psnr[1];
+    }
+    points.push(point);
+  }
+  const mean = points.reduce((a, p) => a + p.ssim_all, 0) / points.length;
+  const min = Math.min(...points.map((p) => p.ssim_all));
+  const band = QUALITY_PROOF_VERDICTS.find((b) => mean >= b.min);
+  return {
+    available: true,
+    method: "ssim",
+    sample_points: points,
+    ssim_mean: +mean.toFixed(6),
+    ssim_min: +min.toFixed(6),
+    ...(points[1].psnr_y_db !== undefined ? { psnr_y_db: points[1].psnr_y_db } : {}),
+    vmaf: null,
+    vmaf_note: "VMAF (libvmaf) is not in this ffmpeg build — SSIM is the measured proxy",
+    verdict: band.verdict,
+    verdict_detail: band.detail,
+    resolution_note: "SSIM is measured against the source scaled to the output size, so it rates encode fidelity at the delivered resolution — it does not penalize the resolution ladder; compare dimensions and bpp_after for that tradeoff",
+  };
+}
+
+export async function compress({ input, output, quality = "medium", maxWidth = null, crf = null, preset = null, targetSizeMb = null, resolutionLadder = true, qualityProof = true }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const emailPreset = quality === "email-25mb";
@@ -6598,6 +6689,22 @@ export async function compress({ input, output, quality = "medium", maxWidth = n
     const after = await fileInfo(outPath);
     const out = await probe(outPath);
     const reduction = +(((before.size_bytes - after.size_bytes) / before.size_bytes) * 100).toFixed(1);
+    // Quality proof: measure what the size actually cost, on disk.
+    // A proof failure must not fail the compress that already
+    // succeeded — it degrades to { available: false, reason }.
+    let proof = null;
+    let proofNote = null;
+    if (qualityProof !== false) {
+      if (!out.video) {
+        proofNote = "audio-only input: no video frames to compare";
+      } else {
+        try {
+          proof = await measureQualityProof({ source: inPath, compressed: outPath, duration: out.duration_seconds });
+        } catch (err) {
+          proof = { available: false, reason: `measurement failed: ${err.message}` };
+        }
+      }
+    }
     return {
       operation: "compress", input: inPath, output: outPath, mode: "target_size",
       target_size_mb: effectiveTargetMb, target_size_bytes: targetBytes,
@@ -6614,6 +6721,8 @@ export async function compress({ input, output, quality = "medium", maxWidth = n
       reduction_percent: reduction,
       duration_seconds: out.duration_seconds,
       dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+      quality_proof: proof,
+      ...(proofNote ? { quality_proof_note: proofNote } : {}),
     };
   }
 
@@ -7232,6 +7341,7 @@ const DOCTOR_FILTERS = [
   "afade",
   "tblend", "signalstats",
   "convolution",
+  "ssim", "psnr", "libvmaf",
   "blend", "split",
   "fade", "asplit",
   "vstack",
@@ -9047,8 +9157,8 @@ export const BATCH_OPERATIONS = {
     run: (input, output, a) => reframe({ input, output, width: a.width ?? 1080, height: a.height ?? 1920, mode: a.mode ?? "crop", x: a.x ?? null, y: a.y ?? null, blur: a.blur ?? 20, anchor: a.anchor ?? null }),
   },
   compress: {
-    args: ["quality", "max_width", "crf", "preset", "target_size_mb", "resolution_ladder"],
-    run: (input, output, a) => compress({ input, output, quality: a.quality ?? "medium", maxWidth: a.max_width ?? null, crf: a.crf ?? null, preset: a.preset ?? null, targetSizeMb: a.target_size_mb ?? null, resolutionLadder: a.resolution_ladder ?? true }),
+    args: ["quality", "max_width", "crf", "preset", "target_size_mb", "resolution_ladder", "quality_proof"],
+    run: (input, output, a) => compress({ input, output, quality: a.quality ?? "medium", maxWidth: a.max_width ?? null, crf: a.crf ?? null, preset: a.preset ?? null, targetSizeMb: a.target_size_mb ?? null, resolutionLadder: a.resolution_ladder ?? true, qualityProof: a.quality_proof ?? true }),
   },
   convert: {
     args: ["video_codec", "audio_codec", "crf", "preset", "gop", "gop_seconds"],

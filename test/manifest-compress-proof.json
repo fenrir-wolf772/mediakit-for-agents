@@ -1,0 +1,1 @@
+{"input":"source.mp4","output":"../outputs/mcp-manifest-compress-proof.mp4","steps":[{"args":{"target_size_mb":1},"tool":"compress"}],"version":1}
