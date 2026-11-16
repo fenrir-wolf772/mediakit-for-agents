@@ -881,6 +881,18 @@ const rotManifestRes = await client.callTool({
 });
 const rotManifestJson = JSON.parse(rotManifestRes.content[0].text);
 checkOk(rotManifestJson.steps_run === 1 && rotManifestJson.steps.every((s) => s.status === "ok") && rotManifestJson.final.dimensions === "360x640", "manifest rotate step runs and final is 360x640", JSON.stringify(rotManifestJson.final?.dimensions));
+// Manifest: a burn_captions step carries max_lines + platform through
+// (the narrower tiktok safe-rect budget 952px shrinks one px further
+// than the plain 972px budget: 45px, not 46px; margin is tiktok's 520).
+await rm(path.join(root, "outputs/mcp-manifest-burn-fit.mp4"), { force: true });
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const burnFitManifestRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-burn-fit.json") },
+});
+const burnFitManifestJson = JSON.parse(burnFitManifestRes.content[0].text);
+const burnFitStep = burnFitManifestJson.steps?.[0]?.result;
+checkOk(burnFitManifestJson.steps_run === 1 && burnFitStep?.font_size === 45 && burnFitStep?.margin_v === 520 && burnFitStep?.fit?.width_px === 952, "manifest burn_captions passes max_lines + platform through (font 45, margin 520, budget 952)", JSON.stringify(burnFitStep?.fit));
 // CLI: rotate --angle 180 keeps 640x360.
 const rotCliJson = await runCliJson(["rotate", path.join(root, "test/rotate-source.mp4"), "-o", path.join(root, "outputs/mcp-rotate-cli.mp4"), "--angle", "180"]);
 checkOk(rotCliJson.dimensions === "640x360" && rotCliJson.angle === 180 && rotCliJson.output_rotation === null, "CLI rotate --angle 180 keeps 640x360, no rotation left", JSON.stringify(rotCliJson));
@@ -2759,6 +2771,151 @@ const capsRotBand = await bandPsnr(path.join(root, "test/rotated-vertical.mp4"),
 checkOk(capsRotBand !== null && capsRotBand < 30, "burn_captions text lands in the safe band on a rotated clip", `got PSNR ${capsRotBand}`);
 const capsRotStrip = await bandPsnr(path.join(root, "test/rotated-vertical.mp4"), path.join(root, "outputs/mcp-captions-rotated.mp4"), 3.5, 1880, 40);
 checkOk(capsRotStrip !== null && capsRotStrip > 40, "burn_captions text stays out of the bottom strip on a rotated clip", `got PSNR ${capsRotStrip}`);
+
+// burn_captions --max-lines: fit-to-width. On a 1080x1920 display
+// frame the longest cue of captions-fit.srt (92 chars) needs 3 lines
+// at the 60px default, so max_lines=2 shrinks the whole track to
+// 46px (measured with Liberation Sans, the font libass actually
+// draws). Pixel-verify at t=4s (cue 3): the band where the 3rd line
+// sat (y 1230-1280) is clean in the fitted render (PSNR > 30) but
+// carries box+text without fit (PSNR < 30), while the shared line
+// zone (y 1360-1400) has text in both (PSNR < 30).
+const capsFitNoRes = await client.callTool({
+  name: "burn_captions",
+  arguments: {
+    input: path.join(root, "test/rotated-vertical.mp4"),
+    captions: path.join(root, "test/captions-fit.srt"),
+    output: path.join(root, "outputs/mcp-captions-fit-nofit.mp4"),
+  },
+});
+const capsFitNoJson = JSON.parse(capsFitNoRes.content[0].text);
+checkOk(capsFitNoJson.font_size === 60, "burn_captions without max_lines keeps the 60px default", `got ${capsFitNoJson.font_size}`);
+checkOk(capsFitNoJson.fit === null, "burn_captions without max_lines reports fit=null", JSON.stringify(capsFitNoJson.fit));
+const capsFitRes = await client.callTool({
+  name: "burn_captions",
+  arguments: {
+    input: path.join(root, "test/rotated-vertical.mp4"),
+    captions: path.join(root, "test/captions-fit.srt"),
+    output: path.join(root, "outputs/mcp-captions-fit.mp4"),
+    max_lines: 2,
+  },
+});
+const capsFitJson = JSON.parse(capsFitRes.content[0].text);
+console.log("burn_captions fit call:", "font_size", capsFitJson.font_size, "| fit", JSON.stringify(capsFitJson.fit));
+checkOk(capsFitJson.font_size === 46, "burn_captions max_lines=2 shrinks 60px to 46px for the 92-char cue", `got ${capsFitJson.font_size}`);
+checkOk(capsFitJson.fit?.fits === true && capsFitJson.fit?.shrunk === 14 && capsFitJson.fit?.lines_at_size === 2, "burn_captions fit reports fits=true, shrunk=14, 2 lines", JSON.stringify(capsFitJson.fit));
+checkOk(capsFitJson.fit?.width_px === 972, "burn_captions fit width budget is 90% of 1080", `got ${capsFitJson.fit?.width_px}`);
+const fitThirdLine = await bandPsnr(path.join(root, "test/rotated-vertical.mp4"), path.join(root, "outputs/mcp-captions-fit.mp4"), 4, 1230, 50);
+checkOk(fitThirdLine !== null && fitThirdLine > 30, "burn_captions fitted render has no 3rd line in y1230-1280 (high PSNR)", `got PSNR ${fitThirdLine}`);
+const nofitThirdLine = await bandPsnr(path.join(root, "test/rotated-vertical.mp4"), path.join(root, "outputs/mcp-captions-fit-nofit.mp4"), 4, 1230, 50);
+checkOk(nofitThirdLine !== null && nofitThirdLine < 30, "burn_captions unfitted render has the 3rd line in y1230-1280 (low PSNR)", `got PSNR ${nofitThirdLine}`);
+const fitSharedLine = await bandPsnr(path.join(root, "test/rotated-vertical.mp4"), path.join(root, "outputs/mcp-captions-fit.mp4"), 4, 1360, 40);
+checkOk(fitSharedLine !== null && fitSharedLine < 30, "burn_captions fitted render still has text in the shared line zone", `got PSNR ${fitSharedLine}`);
+
+// burn_captions --max-lines floor: one line is impossible for the
+// 92-char cue even at the 31px floor, so it burns at the floor and
+// reports fits=false instead of shrinking to unreadable type.
+const capsFloorRes = await client.callTool({
+  name: "burn_captions",
+  arguments: {
+    input: path.join(root, "test/rotated-vertical.mp4"),
+    captions: path.join(root, "test/captions-fit-floor.srt"),
+    output: path.join(root, "outputs/mcp-captions-fit-floor.mp4"),
+    max_lines: 1,
+  },
+});
+const capsFloorJson = JSON.parse(capsFloorRes.content[0].text);
+checkOk(capsFloorJson.font_size === 31, "burn_captions floor is 31px at 1920 high", `got ${capsFloorJson.font_size}`);
+checkOk(capsFloorJson.fit?.fits === false && capsFloorJson.fit?.lines_at_size === 2, "burn_captions floor case reports fits=false with 2 lines at the floor", JSON.stringify(capsFloorJson.fit));
+
+// burn_captions --max-lines with a short cue: nothing to shrink.
+const capsShortRes = await client.callTool({
+  name: "burn_captions",
+  arguments: {
+    input: path.join(root, "test/rotated-vertical.mp4"),
+    captions: path.join(root, "test/captions-fit-short.srt"),
+    output: path.join(root, "outputs/mcp-captions-fit-short.mp4"),
+    max_lines: 2,
+  },
+});
+const capsShortJson = JSON.parse(capsShortRes.content[0].text);
+checkOk(capsShortJson.font_size === 60 && capsShortJson.fit?.shrunk === 0 && capsShortJson.fit?.fits === true, "burn_captions short cue keeps 60px with max_lines=2", JSON.stringify(capsShortJson.fit));
+
+// burn_captions --platform: the default margin becomes the
+// platform's own bottom UI depth — tiktok 520px at 1920 high,
+// youtube 100px of 1080 scaled to 67px at 720 high. An explicit
+// margin_v wins over the platform.
+const capsTtRes = await client.callTool({
+  name: "burn_captions",
+  arguments: {
+    input: path.join(root, "test/rotated-vertical.mp4"),
+    captions: path.join(root, "test/captions.srt"),
+    output: path.join(root, "outputs/mcp-captions-tiktok.mp4"),
+    platform: "tiktok",
+  },
+});
+const capsTtJson = JSON.parse(capsTtRes.content[0].text);
+checkOk(capsTtJson.margin_v === 520, "burn_captions platform=tiktok margin is 520px at 1920 high", `got ${capsTtJson.margin_v}`);
+checkOk(capsTtJson.platform === "tiktok", "burn_captions echoes its platform", `got ${capsTtJson.platform}`);
+const capsYtRes = await client.callTool({
+  name: "burn_captions",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    captions: path.join(root, "test/captions.srt"),
+    output: path.join(root, "outputs/mcp-captions-youtube.mp4"),
+    platform: "youtube",
+  },
+});
+const capsYtJson = JSON.parse(capsYtRes.content[0].text);
+checkOk(capsYtJson.margin_v === 67, "burn_captions platform=youtube margin is 67px at 720 high", `got ${capsYtJson.margin_v}`);
+const capsTtMRes = await client.callTool({
+  name: "burn_captions",
+  arguments: {
+    input: path.join(root, "test/rotated-vertical.mp4"),
+    captions: path.join(root, "test/captions.srt"),
+    output: path.join(root, "outputs/mcp-captions-tiktok-m100.mp4"),
+    platform: "tiktok",
+    margin_v: 100,
+  },
+});
+const capsTtMJson = JSON.parse(capsTtMRes.content[0].text);
+checkOk(capsTtMJson.margin_v === 100, "burn_captions explicit margin_v wins over platform", `got ${capsTtMJson.margin_v}`);
+// An unknown platform is rejected by the MCP schema itself (enum
+// validation) before the tool runs — the client throws the -32602
+// error instead of returning a tool result. (The core-level
+// "unknown platform" error is covered by the CLI probe: exit 2,
+// INVALID_ARG.)
+let capsBadPlatText = "";
+try {
+  const capsBadPlatRes = await client.callTool({
+    name: "burn_captions",
+    arguments: {
+      input: path.join(root, "test/rotated-vertical.mp4"),
+      captions: path.join(root, "test/captions.srt"),
+      output: path.join(root, "outputs/mcp-captions-badplat.mp4"),
+      platform: "nope",
+    },
+  });
+  capsBadPlatText = capsBadPlatRes.content?.[0]?.text ?? "";
+} catch (e) { capsBadPlatText = e.message; }
+checkOk(/Invalid enum value/.test(capsBadPlatText) && /nope/.test(capsBadPlatText), "burn_captions unknown platform is refused (MCP enum validation)", capsBadPlatText.slice(0, 160));
+
+// burn_captions on .ass: max_lines and the platform margin are
+// ignored (the file carries its own styles) and reported, not
+// silently dropped.
+const capsAssRes = await client.callTool({
+  name: "burn_captions",
+  arguments: {
+    input: path.join(root, "test/rotated-vertical.mp4"),
+    captions: path.join(root, "test/captions-min.ass"),
+    output: path.join(root, "outputs/mcp-captions-ass.mp4"),
+    max_lines: 2,
+    platform: "tiktok",
+  },
+});
+const capsAssJson = JSON.parse(capsAssRes.content[0].text);
+checkOk(capsAssJson.fit === null && /ignored for \.ass/.test(capsAssJson.fit_note ?? ""), "burn_captions .ass reports fit ignored", JSON.stringify(capsAssJson));
+checkOk(capsAssJson.style_applied === false, "burn_captions .ass reports style_applied=false", `got ${capsAssJson.style_applied}`);
 
 // burn_captions --style: all four styles render text in the safe band,
 // echo their name, and render differently from each other. The

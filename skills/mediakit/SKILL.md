@@ -150,7 +150,18 @@ Keep lines short (≤ 42 chars), max 2 lines per cue, and never let a cue
 span a sentence break awkwardly. Font size and position default to the
 safe zone and scale with frame height (~60px type on 1080x1920, sitting
 ~500px above the bottom edge so TikTok/Shorts UI never covers the
-text) — pass `--font-size` / `--margin-v` only to override. Style with
+text) — pass `--font-size` / `--margin-v` only to override. If a cue
+runs long, pass `--max-lines 2` instead of hand-shrinking the font:
+the tool measures the real text width (Liberation Sans, the font
+libass draws) and shrinks the whole track until every cue fits in 2
+lines, never below the readability floor (~31px at 1920 high); a cue
+that still overflows burns at the floor and reports `fit.fits=false`,
+so split that cue instead of shrinking further. Pass `--platform
+tiktok` (or reels/shorts/youtube/...) and the default margin becomes
+that platform's own bottom UI depth (tiktok 520px at 1920 high) with
+the fit width narrowed to its text-safe rect — explicit `--margin-v`
+still wins. `.ass` files carry their own styles, so `--max-lines` and
+`--platform` are ignored there (reported in `fit_note`). Style with
 `--style`: `background` (default — white text on a semi-transparent
 black box, the YouTube look), `outline` (black outline, no box),
 `shadow` (thin outline + drop shadow), `glow` (thick halo in the text's

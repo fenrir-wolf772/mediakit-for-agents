@@ -162,15 +162,17 @@ const COMMANDS = {
     ],
   },
   "burn-captions": {
-    usage: "mediakit burn-captions <input> --captions <file.srt|ass|vtt> -o <output> [--font-size <n>] [--margin-v <n>] [--style background|outline|shadow|glow] [--outline-color <name|hex>]",
+    usage: "mediakit burn-captions <input> --captions <file.srt|ass|vtt> -o <output> [--font-size <n>] [--margin-v <n>] [--style background|outline|shadow|glow] [--outline-color <name|hex>] [--max-lines <n>] [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin]",
     desc: "Burn subtitles into the video (hardcoded, always visible).",
     args: [{ name: "input", required: true }],
     options: [
       ["--captions", "Subtitle file .srt/.ass/.vtt (required)"],
       ["--font-size", "Font size in px (default: scales with frame height, ~60px at 1920 high)"],
-      ["--margin-v", "Distance from bottom edge in px (default: 26% of frame height, above platform UI)"],
+      ["--margin-v", "Distance from bottom edge in px (default: 26% of frame height, above platform UI; or the platform's bottom UI depth with --platform)"],
       ["--style", "Caption style: background (default, white text on a semi-transparent black box) | outline | shadow | glow (halo in the text colour). Ignored for .ass files, which carry their own styles"],
       ["--outline-color", "Outline colour for outline/shadow styles: name or RRGGBB hex (default black)"],
+      ["--max-lines", "Fit-to-width: shrink the font until every cue wraps to at most N lines (1-4), never below the readability floor (~31px at 1920 high). Ignored for .ass files"],
+      ["--platform", "Destination platform: default margin becomes that platform's bottom UI depth, and the fit width narrows to its text-safe rect. Explicit --margin-v wins"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -1074,6 +1076,8 @@ async function main() {
           captions: opts.captions, fontSize: numOpt(opts, "font_size") ?? null,
           marginV: numOpt(opts, "margin_v") ?? null,
           style: opts.style ?? null, outlineColor: opts.outline_color ?? "black",
+          maxLines: numOpt(opts, "max_lines") ?? null,
+          platform: opts.platform ?? null,
         });
         break;
       }

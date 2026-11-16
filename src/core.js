@@ -2204,6 +2204,115 @@ async function concatTransition({ inPaths, outPath, videoCodec, audioCodec, tran
 }
 
 // ---------------------------------------------------------------- burn_captions
+// Fit-to-width (ý từ kajisho5/ffmpeg-skill caption.py `fit_size` — đọc
+// code thật lượt 79, chỉ học ý tưởng, tự implement bằng Node):
+//   * ffmpeg-skill walks the size down linearly from the requested size
+//     to a floor, because the wrap predicate is not guaranteed monotone
+//     under phrase-wrap rules — a bisection could skip a fitting size.
+//     MediaKit does the same linear walk, at most ~30 steps.
+//   * Their width comes from a per-script average-advance table
+//     (`text_width_em`); MediaKit measures real glyphs with node-canvas
+//     instead — libass renders SRT through the default ASS font "Arial",
+//     which fontconfig on this box resolves to Liberation Sans
+//     (verified: `fc-match Arial` -> LiberationSans-Regular.ttf), so the
+//     measurer uses that family. Words are measured once at 100px and
+//     scaled linearly to any size (hinting aside, advance scales with
+//     size); the rendered band is pixel-checked on disk by the tests.
+//   * Their floor is 4.5% of the frame height — calibrated to their
+//     ~160px house caption size. MediaKit's default is ~3.1% of height
+//     (~60px at 1920), so a 4.5% floor would sit ABOVE the default and
+//     leave no room to shrink. MediaKit's floor is 1.6% of the frame
+//     height (~31px at 1920), never below 16px: still readable on a
+//     phone, small enough that a long cue can actually shrink into it.
+//   * Their wrap budget is 90% of the frame width (SAFE_WIDTH_FRACTION).
+//     MediaKit keeps 0.9 as the default budget, and narrows it to the
+//     platform's text-safe rect when --platform is given.
+// Platform margin (cùng nguồn, `--platform`): the default margin_v
+// becomes the platform's own bottom UI depth — the distance from the
+// frame bottom to the safe zone's bottom edge, scaled to the frame
+// height. An explicit --margin-v is the more specific statement and
+// always wins (same rule as ffmpeg-skill). The safe zones are the ones
+// `check` already reports (creator guidance, not platform-published
+// specs), so burn and check agree on where the UI sits.
+
+// Greedy word wrap: how many lines `text` needs at `sizePx` inside
+// `budgetPx`. Hard \n breaks (and SRT \N) split first; a single word
+// wider than the budget still counts as one line (libass breaks it
+// mid-word on screen). `measure(word, sizePx)` returns the word's
+// width in px at that size.
+function wrapLineCount(text, sizePx, budgetPx, measure) {
+  const clean = String(text).replace(/<[^>]*>/g, "").replace(/\\N/g, "\n");
+  let total = 0;
+  for (const hard of clean.split("\n")) {
+    const words = hard.trim().split(/\s+/).filter(Boolean);
+    if (words.length === 0) { total += 1; continue; }
+    let lines = 1;
+    let curW = 0;
+    const spaceW = measure(" ", sizePx);
+    for (const w of words) {
+      const ww = measure(w, sizePx);
+      const add = curW === 0 ? ww : curW + spaceW + ww;
+      if (add > budgetPx && curW > 0) { lines += 1; curW = ww; }
+      else curW = add;
+    }
+    total += lines;
+  }
+  return total;
+}
+
+// Largest size in [floor, requested] at which every cue wraps to at
+// most maxLines lines (scope = whole file: one size per track, so the
+// type size never jumps cue to cue). Pure function of strings +
+// numbers + a measure callback — no ffmpeg, no I/O.
+export function fitCaptionSize({ texts, requested, floor, maxLines, budgetPx, measure }) {
+  const measurable = (texts ?? []).map((t) => String(t ?? "")).filter((t) => t.trim());
+  const result = {
+    requested_size: requested, size: requested, floor, max_lines: maxLines,
+    shrunk: 0, fits: true, lines_at_size: 0, width_px: budgetPx,
+  };
+  if (!measurable.length) return result;
+  const linesAt = (sz) => Math.max(...measurable.map((t) => wrapLineCount(t, sz, budgetPx, measure)));
+  let size = requested;
+  while (size > floor && linesAt(size) > maxLines) size -= 1;
+  const lines = linesAt(size);
+  result.size = size;
+  result.shrunk = requested - size;
+  result.fits = lines <= maxLines;
+  result.lines_at_size = lines;
+  return result;
+}
+
+// Measure callback backed by node-canvas: words measured once at
+// 100px in the font libass actually draws with, then scaled linearly.
+function canvasWordMeasurer() {
+  const { createCanvas } = loadCanvasPackage("burn_captions fit");
+  const canvas = createCanvas(1, 1);
+  const ctx = canvas.getContext("2d");
+  const cache = new Map();
+  const at100 = (word) => {
+    if (!cache.has(word)) {
+      ctx.font = `100px "Liberation Sans"`;
+      cache.set(word, ctx.measureText(word).width);
+    }
+    return cache.get(word);
+  };
+  return (word, sizePx) => at100(word) * sizePx / 100;
+}
+
+// Default margin_v for a platform: the platform's bottom UI depth
+// (frame bottom minus safe-zone bottom edge), scaled to this frame.
+function platformCaptionMargin(platform, vh) {
+  const spec = PLATFORMS[platform];
+  return Math.round((spec.height - spec.safeZone.y1) * vh / spec.height);
+}
+
+// Fit width budget: the platform's text-safe rect when a platform is
+// given, else 90% of the frame width.
+function captionFitBudgetPx(platform, vw) {
+  if (!platform) return Math.round(vw * 0.9);
+  const spec = PLATFORMS[platform];
+  return Math.round((spec.safeZone.x1 - spec.safeZone.x0) * vw / spec.width);
+}
 // Styles (SRT/VTT only — .ass carries its own styles, style is ignored
 // there): background = white text on a semi-transparent black box
 // (BorderStyle 3, the default — the YouTube-style boxed caption);
@@ -2230,13 +2339,22 @@ function assColor(value, label) {
   return `&H00${hex.slice(4, 6)}${hex.slice(2, 4)}${hex.slice(0, 2)}&`;
 }
 
-export async function burnCaptions({ input, output, captions, fontSize = null, fontColor = "white", box = true, marginV = null, style = null, outlineColor = "black" }) {
+export async function burnCaptions({ input, output, captions, fontSize = null, fontColor = "white", box = true, marginV = null, style = null, outlineColor = "black", maxLines = null, platform = null }) {
   const inPath = await requireInput(input);
   const capPath = await requireInput(captions, "captions file");
   const outPath = await prepareOutput(output, [inPath]);
   const ext = path.extname(capPath).toLowerCase();
   if (![".srt", ".ass", ".vtt"].includes(ext)) {
     throw new MediaKitError(`captions must be .srt/.ass/.vtt, got ${ext}`, "INVALID_ARG");
+  }
+  if (maxLines !== null) {
+    maxLines = num(maxLines, "max_lines", { min: 1, max: 4, integer: true });
+  }
+  if (platform !== null) {
+    platform = String(platform).toLowerCase();
+    if (!PLATFORMS[platform]) {
+      throw new MediaKitError(`unknown platform: ${platform} (supported: ${Object.keys(PLATFORMS).join(", ")})`, "INVALID_ARG");
+    }
   }
   const meta = await probe(inPath);
   // Filters see the autorotated frame, so defaults must scale with the
@@ -2252,10 +2370,41 @@ export async function burnCaptions({ input, output, captions, fontSize = null, f
   // Defaults scale with frame height so captions stay readable and clear
   // of platform overlays at any size: ~60px type on 1080x1920, sitting
   // ~500px above the bottom edge (TikTok/Shorts cover the bottom ~480px
-  // with their own UI). Explicit values always win. Applies to .srt/.vtt;
-  // .ass files carry their own styles.
-  const size = fontSize === null ? Math.round(vh * 0.031) : num(fontSize, "font_size", { min: 8, max: 200, integer: true });
-  const margin = marginV === null ? Math.round(vh * 0.26) : num(marginV, "margin_v", { min: 0, max: vh, integer: true });
+  // with their own UI). Explicit values always win. With --platform the
+  // margin default is that platform's own bottom UI depth instead of
+  // the 26% rule (e.g. tiktok 520px at 1920 high, youtube 100px at
+  // 1080 high). Applies to .srt/.vtt; .ass files carry their own styles.
+  const requestedSize = fontSize === null ? Math.round(vh * 0.031) : num(fontSize, "font_size", { min: 8, max: 200, integer: true });
+  const margin = marginV === null
+    ? (platform !== null ? platformCaptionMargin(platform, vh) : Math.round(vh * 0.26))
+    : num(marginV, "margin_v", { min: 0, max: vh, integer: true });
+  // Fit-to-width: shrink the type until every cue wraps to at most
+  // maxLines lines, never below the readability floor (1.6% of frame
+  // height, min 16px). SRT/VTT only — .ass carries its own styles, so
+  // fit and the platform margin are ignored there (reported, not
+  // silently dropped). A cue that still overflows at the floor burns
+  // at the floor and reports fits:false so the caller can split it.
+  let size = requestedSize;
+  let fit = null;
+  let fitNote = null;
+  if (maxLines !== null) {
+    if (ext === ".ass") {
+      fitNote = "max_lines ignored for .ass (styles are embedded in the file)";
+    } else {
+      const raw = await readFile(capPath, "utf8");
+      const { cues } = parseCaptions(raw, ext === ".vtt" ? "vtt" : "srt");
+      const floor = Math.min(Math.max(16, Math.round(vh * 0.016)), requestedSize);
+      fit = fitCaptionSize({
+        texts: cues.map((c) => c.text), requested: requestedSize, floor,
+        maxLines, budgetPx: captionFitBudgetPx(platform, vw),
+        measure: canvasWordMeasurer(),
+      });
+      size = fit.size;
+    }
+  }
+  if (ext === ".ass" && platform !== null) {
+    fitNote = (fitNote ? `${fitNote}; ` : "") + "platform margin ignored for .ass (styles are embedded in the file)";
+  }
   // style wins over the legacy box flag; without style, box=true keeps
   // the old default (background box) and box=false means outline.
   const styleName = style === null ? (box ? "background" : "outline") : String(style).toLowerCase();
@@ -2302,7 +2451,7 @@ export async function burnCaptions({ input, output, captions, fontSize = null, f
   await run(FFMPEG, ["-y", "-i", inPath, "-vf", vf, "-c:a", "copy", outPath]);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
-  return { operation: "burn_captions", input: inPath, output: outPath, captions: capPath, font_size: size, margin_v: margin, style: styleName, style_applied: ext !== ".ass", ...info, duration_seconds: out.duration_seconds };
+  return { operation: "burn_captions", input: inPath, output: outPath, captions: capPath, font_size: size, margin_v: margin, style: styleName, style_applied: ext !== ".ass", platform: platform ?? null, fit, fit_note: fitNote, ...info, duration_seconds: out.duration_seconds };
 }
 
 // ---------------------------------------------------------------- convert_captions
@@ -9460,8 +9609,8 @@ export const MANIFEST_STEPS = {
     run: (input, output, a) => interpolate({ input, output, fps: a.fps, mode: a.mode ?? "blend", crf: a.crf ?? 23 }),
   },
   burn_captions: {
-    args: ["captions", "font_size", "margin_v", "style", "outline_color"],
-    run: (input, output, a) => burnCaptions({ input, output, captions: a.captions, fontSize: a.font_size ?? null, marginV: a.margin_v ?? null, style: a.style ?? null, outlineColor: a.outline_color ?? "black" }),
+    args: ["captions", "font_size", "margin_v", "style", "outline_color", "max_lines", "platform"],
+    run: (input, output, a) => burnCaptions({ input, output, captions: a.captions, fontSize: a.font_size ?? null, marginV: a.margin_v ?? null, style: a.style ?? null, outlineColor: a.outline_color ?? "black", maxLines: a.max_lines ?? null, platform: a.platform ?? null }),
   },
   overlay: {
     args: ["overlay", "position", "margin", "width", "opacity", "start", "end"],

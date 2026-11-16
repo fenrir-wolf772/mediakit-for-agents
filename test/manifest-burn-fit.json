@@ -1,0 +1,1 @@
+{"input": "rotated-vertical.mp4", "output": "../outputs/mcp-manifest-burn-fit.mp4", "steps": [{"tool": "burn_captions", "args": {"captions": "captions-fit.srt", "max_lines": 2, "platform": "tiktok"}}], "version": 1}

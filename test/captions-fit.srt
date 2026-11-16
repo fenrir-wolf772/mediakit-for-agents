@@ -1,0 +1,11 @@
+1
+00:00:00,000 --> 00:00:01,500
+Short cue here
+
+2
+00:00:01,500 --> 00:00:03,500
+Every caption should fit on two lines at most, even when the sentence runs long
+
+3
+00:00:03,500 --> 00:00:05,000
+This is a very long caption line that keeps going and going without ever stopping for breath

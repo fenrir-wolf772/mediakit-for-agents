@@ -262,15 +262,17 @@ export const TOOL_DEFS = [
 
   {
     name: "burn_captions",
-    description: "Burn subtitles into the video (hardcoded, always visible). Accepts .srt, .ass or .vtt. Style: background (default — white text on a semi-transparent black box), outline (black outline, no box), shadow (thin outline + drop shadow), or glow (thick halo in the text's own colour, reads on bright footage). Defaults scale with frame height: ~60px type on 1080x1920, sitting ~500px above the bottom edge so platform UI (bottom ~480px) never covers the text. Explicit font_size / margin_v override. .ass files carry their own styles, so style is ignored there (style_applied=false).",
+    description: "Burn subtitles into the video (hardcoded, always visible). Accepts .srt, .ass or .vtt. Style: background (default — white text on a semi-transparent black box), outline (black outline, no box), shadow (thin outline + drop shadow), or glow (thick halo in the text's own colour, reads on bright footage). Defaults scale with frame height: ~60px type on 1080x1920, sitting ~500px above the bottom edge so platform UI (bottom ~480px) never covers the text. Explicit font_size / margin_v override. max_lines shrinks the type (measured with the same font libass draws, Liberation Sans) until every cue wraps to at most that many lines, never below a readability floor (1.6% of frame height, min 16px); a cue that still overflows at the floor burns at the floor and reports fit.fits=false. platform sets the default margin from that platform's own bottom UI depth (tiktok 520px at 1920 high, youtube 100px at 1080 high) and narrows the fit width to its text-safe rect; explicit margin_v wins. .ass files carry their own styles, so style, max_lines and the platform margin are ignored there (style_applied=false, fit=null with a note).",
     schema: {
     input: pathSchema,
     output: pathSchema,
     captions: pathSchema.describe("Path to the .srt/.ass/.vtt file"),
     font_size: z.number().int().min(8).max(200).optional().describe("Font size in px; default scales with frame height (~60px at 1920 high)"),
-    margin_v: z.number().int().min(0).optional().describe("Distance from bottom edge in px; default is 26% of frame height (above platform UI)"),
+    margin_v: z.number().int().min(0).optional().describe("Distance from bottom edge in px; default is 26% of frame height (above platform UI), or the platform's bottom UI depth when platform is set"),
     style: z.enum(["background", "outline", "shadow", "glow"]).optional().describe("Caption style; default background (boxed). Ignored for .ass inputs"),
     outline_color: z.string().optional().describe("Outline colour for outline/shadow styles: name (white/black/yellow/cyan/red/green/blue/orange/magenta) or RRGGBB hex; default black"),
+    max_lines: z.number().int().min(1).max(4).optional().describe("Fit-to-width: shrink the font until every cue wraps to at most this many lines (default 2 in spirit, off unless set); never below the readability floor. Ignored for .ass inputs"),
+    platform: z.enum(["tiktok", "reels", "shorts", "youtube", "instagram-feed", "instagram-story", "linkedin"]).optional().describe("Destination platform: default margin_v becomes that platform's bottom UI depth, and the fit width narrows to its text-safe rect. Explicit margin_v wins"),
   },
     handler: async (a) => safe(() => core.burnCaptions({
     input: a.input,
@@ -280,6 +282,8 @@ export const TOOL_DEFS = [
     marginV: a.margin_v ?? null,
     style: a.style ?? null,
     outlineColor: a.outline_color ?? "black",
+    maxLines: a.max_lines ?? null,
+    platform: a.platform ?? null,
   })),
   },
 
