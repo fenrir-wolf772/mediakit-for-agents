@@ -1069,12 +1069,27 @@ export const TOOL_DEFS = [
 
   {
     name: "scenes",
-    description: "Detect scene changes / hard cuts in a video (probe-only, writes no file). Returns the cut timestamps plus the segments between them — trim on these boundaries instead of guessing. Lower threshold = more sensitive.",
+    description: "Detect scene changes / hard cuts in a video (probe-only, writes no file). Returns the cut timestamps plus the segments between them — trim on these boundaries instead of guessing. detector ffmpeg (default) is ffmpeg's scene metric; detector content scores each frame change in hue/sat/luma separately (PySceneDetect ContentDetector idea) and catches hue-only cuts the ffmpeg metric misses, with min_scene_len merging too-short scenes and a flash filter dropping 1-frame blips. fades=true adds fade in/out detection (dark core + measured ramp). Lower threshold = more sensitive; defaults differ per detector (ffmpeg 0.3, content 0.05).",
     schema: {
     input: pathSchema,
-    threshold: z.number().min(0).max(1).default(0.3).describe("Scene sensitivity (0-1, lower = more sensitive)"),
+    threshold: z.number().min(0).max(1).optional().describe("Scene sensitivity (0-1, lower = more sensitive). Default 0.3 for detector ffmpeg, 0.05 for detector content"),
+    detector: z.enum(["ffmpeg", "content"]).default("ffmpeg").describe("ffmpeg = ffmpeg select scene metric; content = hue/sat/luma split scoring (catches hue-only cuts)"),
+    min_scene_len: z.number().int().min(1).default(15).describe("Content detector only: drop a cut when the scene it would open is shorter than this many frames (default 15)"),
+    flash_frames: z.number().int().min(0).default(5).describe("Content detector only: a cut followed within this many frames by a cut back to the same content is a flash blip, not a scene (default 5)"),
+    fades: z.boolean().default(false).describe("Also detect fade in/out (dark core + measured ramp) from mean luma"),
+    fade_threshold: z.number().min(0).max(255).default(20).describe("Mean luma at/below this is the dark core of a fade (limited-range black is 16; default 20)"),
+    min_fade_frames: z.number().int().min(1).default(2).describe("A dark run shorter than this many frames is not a fade (default 2)"),
   },
-    handler: async (a) => safe(() => core.detectScenes(a)),
+    handler: async (a) => safe(() => core.detectScenes({
+      input: a.input,
+      threshold: a.threshold ?? null,
+      detector: a.detector,
+      minSceneLen: a.min_scene_len,
+      flashFrames: a.flash_frames,
+      fades: a.fades,
+      fadeThreshold: a.fade_threshold,
+      minFadeFrames: a.min_fade_frames,
+    })),
   },
 
 

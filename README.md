@@ -158,7 +158,7 @@ what you see is the record, not a guess at it.
 | `titlecard` | Render a title card PNG: big bold hook (3-6 words) on a coloured box, transparent canvas — overlay it onto frame 1 or use it as the opening card. `--style clean-bold\|minimal-line\|warm-story` uses that style's locked palette from `skills/shorts-video/styles.json` (text/box/font); an explicit colour/font overrides just that one locked value and is reported in `style_overrides` | `mediakit titlecard "The Moon Is Leaving Us" -o title.png --style clean-bold` |
 | `intro` | Render a short intro clip: title on a solid-colour background, fading in and out (silent video) — concat it in front of the main clip. `--style` reuses the same locked palette (box colour becomes the background) | `mediakit intro "Welcome Back" -o intro.mp4 --duration 3 --style clean-bold` |
 | `social` | Export one video to several platform specs in one call: reframe + trim to max duration + loudness + check each, writing `<base>-<platform>.mp4` + `manifest.json` | `mediakit social in.mp4 -o out/ --platforms tiktok,reels,shorts` |
-| `scenes` | Detect scene changes / hard cuts; returns cut timestamps + segments (probe-only) | `mediakit scenes in.mp4` |
+| `scenes` | Detect scene changes / hard cuts; returns cut timestamps + segments (probe-only). `--detector content` scores hue/sat/luma separately (catches hue-only cuts); `--fades` adds fade in/out | `mediakit scenes in.mp4 --detector content --fades` |
 | `motion` | Measure real movement (probe-only): per-second curve of the fraction of pixels that changed between adjacent frames, still intervals (runs ≥ `--min-still-seconds`, default 2s), and a verdict `moving` / `mostly-static` / `static`. Scale measured on disk: static title card 0.0000–0.0001, bouncing ball 0.003–0.009, testsrc 0.06, frozen stretch exactly 0.0000 — default still threshold 0.001 (0.1% of pixels). `--adaptive` calibrates the threshold to the clip instead (floor = 25th percentile of the curve × `--adaptive-factor` 2.0, capped at `--adaptive-cap` 0.005): light grain on a static shot (0.0007–0.0013) reads still instead of flickering across the fixed threshold, while a bouncing ball still reads moving. `--lag-seconds N` compares frames N whole seconds apart instead of adjacent frames, catching motion too slow for one frame step — a 10s fade-in reads static adjacent (energy 0.00043) but moving at lag 2 (energy ~1.0); a creeping zoom is amplified 11x. Still intervals in lag mode are corrected to clip time (end + lag, clamped); a still shorter than lag+1s or in the final lag seconds is not reported. The director's motion gate: run it on every shot before calling a film done | `mediakit motion shot.mp4` / `mediakit motion grainy.mp4 --adaptive` / `mediakit motion fade.mp4 --lag-seconds 2` |
 | `hook` | Find the best hook window in a clip (probe-only, writes no file): slide a window of `--duration` seconds (4–20, default 15) across the file and score each candidate on three measured signals — mean audio energy (astats RMS, normalized against the file's own loudest bin), speech coverage (silencedetect complement) and scene cuts (a window opening on a cut scores higher). Score is 0.5×energy + 0.3×speech + 0.2×cut with fixed weights; the top windows are greedy non-overlapping, so they are alternatives, not the same window shifted one step. Returns ranked candidates with the score breakdown, the per-step energy curve, pacing from real cuts (slow/medium/fast-cut) and a `suggested_trim` command that cuts the winning window. Video-only input scores on cuts alone; audio-only on energy+speech; files over 20 minutes are refused. The director's opening-shot picker: run it on raw footage before cutting the first 15 seconds of a Short | `mediakit hook raw.mp4 --duration 10` |
 | `verify` | Verify an assemble render against its receipt (`assemble-receipt.json`, written next to `final.mp4` by every full render): re-hash every input (manifest, voice, music, captions, sfx, shot assets) and the output file, re-measure duration/frames/dimensions/LUFS, and report `matched`/`changed`/`missing` per item with a `pass`/`fail` verdict and the first difference. `--rerender` re-runs assemble from the recorded manifest (`force`) and compares the new receipt against the old one — on the same machine renders are byte-identical (measured: two renders of the same film, same sha256), so it is a real reproducibility proof; across machines only the measured properties are comparable. The rerender reuses the content-addressed shot cache (segments verified by size + sha256 on read), so it proves join/audio/mux determinism + cache integrity — delete `.mediakit-assemble-cache` next to the manifest to force fresh shot builds | `mediakit verify out/assemble-receipt.json` / `mediakit verify out/assemble-receipt.json --rerender` |
@@ -306,7 +306,24 @@ also work with `--transition`: the fade is computed on the trimmed
 timeline (output is sum of trimmed durations minus (n−1) × transition). `scenes` is probe-only: it lists hard cuts and the
 segments between them so you trim on real boundaries; the default
 threshold 0.3 catches real cuts, and a hard cut between flat colours
-scores ~0.4, so keep the threshold at or below 0.4. `keyframes` is
+scores ~0.4, so keep the threshold at or below 0.4. `--detector content`
+scores each frame change in hue, saturation and luma separately (the
+PySceneDetect ContentDetector idea, measured with ffmpeg's signalstats —
+no OpenCV): it catches a hue-only cut the ffmpeg metric misses entirely
+(red → dark green, same luma: content 0.183, ffmpeg no cut at all).
+Default content threshold is 0.05, calibrated on fixtures: weakest
+measured flat cut 0.171, continuous testsrc2 never above 0.005. The
+content detector also drops cuts that would open a scene shorter than
+`--min-scene-len` frames (default 15) and drops 1-frame flashes: a cut
+followed within `--flash-frames` (default 5) by a cut back to the same
+content is a blip, not a scene (a 1-frame white flash reports 0 cuts,
+`filtered.flash: 2`). `--fades` adds fade detection from mean luma: a
+dark core (luma ≤ `--fade-threshold`, default 20 — limited-range black
+is 16) with the ramp measured outward, so a 1s fade-in reports 0–1.03s
+(±1 frame), not just its 3-frame dark core; type is `in`/`out`/`black`.
+Content detection and fades refuse files over 20 minutes (the per-frame
+stats JSON would approach the 16 MB capture buffer — trim a section
+first). `keyframes` is
 probe-only: it lists every I-frame timestamp plus the GOP interval, so
 you know where a lossless cut can land — `trim --stream-copy --snap`
 snaps the requested start down and end up to the nearest keyframes and

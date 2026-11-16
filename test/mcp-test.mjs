@@ -1706,6 +1706,62 @@ const scenesJson = JSON.parse(scenesRes.content[0].text);
 console.log("scenes call: count", scenesJson.count, "| changes", scenesJson.scene_changes.join(","), "| segments", scenesJson.segments.map((s) => `${s.start}-${s.end}`).join(" "));
 checkOk(scenesJson.count === 1 && near(scenesJson.scene_changes[0], 5.033, 0.05), "scenes finds the 5.033s cut", JSON.stringify(scenesJson.scene_changes));
 
+// scenes --detector content: hue/sat/luma split scoring. Fixture
+// test/scenes-hue.mp4 is red 5s -> dark green 5s (same luma): the
+// ffmpeg metric sees nothing, the content detector scores 0.183.
+// scenes-flash.mp4 is red with 1 white frame at 5s: both cuts of the
+// blip must be dropped by the flash filter. scenes-rapid.mp4 cuts
+// every 8 frames: min_scene_len 15 keeps every other cut (9), min 1
+// keeps all 19. scenes-fade.mp4 fades in 0-1s and out 6-7s.
+const scenesContentRes = await client.callTool({
+  name: "scenes",
+  arguments: { input: path.join(root, "test/scenes-hue.mp4"), detector: "content" },
+});
+const scenesContentJson = JSON.parse(scenesContentRes.content[0].text);
+console.log("scenes content hue call: count", scenesContentJson.count, "| changes", scenesContentJson.scene_changes.join(","), "| candidates", scenesContentJson.candidates);
+checkOk(scenesContentJson.detector === "content" && scenesContentJson.threshold === 0.05 && scenesContentJson.count === 1 && near(scenesContentJson.scene_changes[0], 5, 0.05) && scenesContentJson.candidates === 1, "scenes content finds the hue-only cut at 5s (default threshold 0.05)", JSON.stringify(scenesContentJson.scene_changes));
+const scenesHueFfmpegRes = await client.callTool({
+  name: "scenes",
+  arguments: { input: path.join(root, "test/scenes-hue.mp4") },
+});
+const scenesHueFfmpegJson = JSON.parse(scenesHueFfmpegRes.content[0].text);
+checkOk(scenesHueFfmpegJson.detector === "ffmpeg" && scenesHueFfmpegJson.threshold === 0.3 && scenesHueFfmpegJson.count === 0, "scenes ffmpeg misses the hue-only cut (luma-driven metric)", JSON.stringify(scenesHueFfmpegJson.scene_changes));
+const scenesFlashRes = await client.callTool({
+  name: "scenes",
+  arguments: { input: path.join(root, "test/scenes-flash.mp4"), detector: "content" },
+});
+const scenesFlashJson = JSON.parse(scenesFlashRes.content[0].text);
+console.log("scenes content flash call: count", scenesFlashJson.count, "| filtered", JSON.stringify(scenesFlashJson.filtered));
+checkOk(scenesFlashJson.count === 0 && scenesFlashJson.candidates === 2 && scenesFlashJson.filtered.flash === 2, "scenes content flash filter drops both cuts of a 1-frame white blip", JSON.stringify(scenesFlashJson));
+const scenesRapidRes = await client.callTool({
+  name: "scenes",
+  arguments: { input: path.join(root, "test/scenes-rapid.mp4"), detector: "content" },
+});
+const scenesRapidJson = JSON.parse(scenesRapidRes.content[0].text);
+console.log("scenes content rapid call: count", scenesRapidJson.count, "| filtered", JSON.stringify(scenesRapidJson.filtered));
+checkOk(scenesRapidJson.count === 9 && scenesRapidJson.candidates === 19 && scenesRapidJson.filtered.min_scene_len === 10 && near(scenesRapidJson.scene_changes[0], 0.533, 0.05) && near(scenesRapidJson.scene_changes[8], 4.8, 0.05), "scenes content min_scene_len 15 keeps every other 8-frame cut (9 of 19)", JSON.stringify(scenesRapidJson.scene_changes));
+const scenesRapid1Res = await client.callTool({
+  name: "scenes",
+  arguments: { input: path.join(root, "test/scenes-rapid.mp4"), detector: "content", min_scene_len: 1 },
+});
+const scenesRapid1Json = JSON.parse(scenesRapid1Res.content[0].text);
+checkOk(scenesRapid1Json.count === 19 && scenesRapid1Json.filtered.min_scene_len === 0, "scenes content min_scene_len 1 keeps all 19 rapid cuts", `got ${scenesRapid1Json.count}`);
+const scenesFadeRes = await client.callTool({
+  name: "scenes",
+  arguments: { input: path.join(root, "test/scenes-fade.mp4"), detector: "content", fades: true },
+});
+const scenesFadeJson = JSON.parse(scenesFadeRes.content[0].text);
+console.log("scenes fades call:", JSON.stringify(scenesFadeJson.fades));
+checkOk(scenesFadeJson.count === 0 && scenesFadeJson.fades.length === 2 && scenesFadeJson.fades[0].type === "in" && near(scenesFadeJson.fades[0].start, 0, 0.01) && near(scenesFadeJson.fades[0].end, 1.033, 0.05) && near(scenesFadeJson.fades[0].dark_end, 0.1, 0.05) && scenesFadeJson.fades[1].type === "out" && near(scenesFadeJson.fades[1].start, 6, 0.05) && near(scenesFadeJson.fades[1].end, 7, 0.01) && near(scenesFadeJson.fades[1].dark_start, 6.933, 0.05), "scenes fades finds fade-in 0-1.03s (dark core 0-0.1) and fade-out 6-7s (dark core 6.93-7)", JSON.stringify(scenesFadeJson.fades));
+const scenesFadeFfmpegRes = await client.callTool({
+  name: "scenes",
+  arguments: { input: path.join(root, "test/scenes-fade.mp4"), fades: true },
+});
+const scenesFadeFfmpegJson = JSON.parse(scenesFadeFfmpegRes.content[0].text);
+checkOk(scenesFadeFfmpegJson.detector === "ffmpeg" && scenesFadeFfmpegJson.fades.length === 2, "scenes fades also works with the ffmpeg detector", JSON.stringify(scenesFadeFfmpegJson.fades));
+const scenesBadDetectorText = await callExpectThrow("scenes", { input: path.join(root, "test/scenes-source.mp4"), detector: "bogus" });
+checkOk(scenesBadDetectorText.includes("Invalid enum value") && scenesBadDetectorText.includes("content"), "scenes rejects an unknown detector at schema validation (core also rejects it: CLI prints 'detector must be')", scenesBadDetectorText.slice(0, 160));
+
 // motion: per-second changed-pixel fraction. testsrc moves steadily
 // (~0.06), the frozen stretch of content-freeze is exactly 0.0000,
 // a static clip is 0 everywhere — the verdict must tell them apart.

@@ -239,7 +239,14 @@ scores ~0.4, so a threshold above ~0.4 will miss genuine cuts — if
 `scenes` returns nothing on a clip you know has cuts, lower the
 threshold to 0.2 before concluding there are none. A continuous shot
 (testsrc, a static camera) correctly returns zero cuts; zero is a
-real answer, not a failure.
+real answer, not a failure. When the cut changes colour but not
+brightness (a hue-only cut), the ffmpeg metric sees nothing at all —
+use `--detector content` instead: it scores hue, saturation and luma
+separately and catches it (red → dark green, same luma: 0.183 vs the
+0.05 default). A 1-frame flash is not a scene: the content detector's
+flash filter drops both cuts of the blip. Add `--fades` when the film
+opens or closes on black — it reports the fade type, the full ramp
+(measured, ±1 frame) and the dark core separately.
 
 ### 15. Stream-copy cuts must land on keyframes
 A lossless `--stream-copy` trim can only start/end on keyframes — ask

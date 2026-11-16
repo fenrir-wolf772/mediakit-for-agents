@@ -626,11 +626,17 @@ const COMMANDS = {
     ],
   },
   scenes: {
-    usage: "mediakit scenes <input> [--threshold 0.3]",
-    desc: "Detect scene changes / hard cuts; returns cut timestamps + the segments between them. Probe-only, writes no file.",
+    usage: "mediakit scenes <input> [--threshold 0.3] [--detector ffmpeg|content] [--min-scene-len 15] [--flash-frames 5] [--fades] [--fade-threshold 20] [--min-fade-frames 2]",
+    desc: "Detect scene changes / hard cuts; returns cut timestamps + the segments between them. Probe-only, writes no file. --detector content scores hue/sat/luma separately and catches hue-only cuts the ffmpeg metric misses (default threshold 0.05 for content, 0.3 for ffmpeg); --min-scene-len merges too-short scenes and --flash-frames drops 1-frame blips (content only). --fades also reports fade in/out (dark core + measured ramp).",
     args: [{ name: "input", required: true }],
     options: [
-      ["--threshold", "Scene sensitivity 0-1, lower = more sensitive (default 0.3)"],
+      ["--threshold", "Scene sensitivity 0-1, lower = more sensitive (default 0.3 ffmpeg / 0.05 content)"],
+      ["--detector", "ffmpeg (default) or content (hue/sat/luma split scoring)"],
+      ["--min-scene-len", "Content only: drop a cut when the scene it would open is shorter than this many frames (default 15)"],
+      ["--flash-frames", "Content only: a cut followed within this many frames by a cut back to the same content is a flash blip (default 5)"],
+      ["--fades", "Also detect fade in/out (dark core + measured ramp)"],
+      ["--fade-threshold", "Mean luma at/below this is the dark core of a fade (default 20)"],
+      ["--min-fade-frames", "A dark run shorter than this many frames is not a fade (default 2)"],
     ],
   },
   keyframes: {
@@ -1492,7 +1498,13 @@ async function main() {
       case "scenes":
         result = await core.detectScenes({
           input: needInput(),
-          threshold: numOpt(opts, "threshold") ?? 0.3,
+          threshold: numOpt(opts, "threshold") ?? null,
+          detector: opts.detector ?? "ffmpeg",
+          minSceneLen: numOpt(opts, "min_scene_len") ?? 15,
+          flashFrames: numOpt(opts, "flash_frames") ?? 5,
+          fades: opts.fades === true,
+          fadeThreshold: numOpt(opts, "fade_threshold") ?? 20,
+          minFadeFrames: numOpt(opts, "min_fade_frames") ?? 2,
         });
         break;
       case "keyframes":

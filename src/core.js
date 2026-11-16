@@ -7070,7 +7070,7 @@ const TOOL_REQUIREMENTS = {
   },
   mix: { filters: ["sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay"], encoders: ["aac", "libmp3lame"] },
   overlay: { filters: ["overlay", "format", "scale", "colorchannelmixer"], encoders: ["libx264"] },
-  scenes: { filters: ["select"] },
+  scenes: { filters: ["select", "signalstats"] },
   hook: { filters: ["astats", "ametadata", "silencedetect", "select"] },
   // chapters only needs silencedetect, and only in input mode — the
   // words-file mode is pure JSON and needs no ffmpeg capability.
@@ -8009,17 +8009,59 @@ export async function pictureInPicture({
 // is written. The lavfi path is escaped for the filter parser
 // (backslash -> /, : -> \:, ' -> \'); the command itself still goes
 // through execFile with no shell.
+//
+// detector "content" (PySceneDetect's ContentDetector idea, measured
+// with ffmpeg only — no OpenCV): per-frame mean Y/U/V from signalstats,
+// scored as the mean of three independent 0-1 terms — hue distance
+// (weighted by the smaller saturation, because hue is meaningless on
+// grey), saturation distance, luma distance. A flat red->dark-green cut
+// (same luma, hue+sat only) scores 0.183 while continuous testsrc2
+// never exceeds 0.005, so the default threshold 0.05 sits 3.4x below
+// the weakest measured flat cut and 10x above the noisiest continuous
+// frame. The ffmpeg detector misses that cut entirely (its scene
+// metric is luma-driven: it scores red->blue 0.4 but red->green 0).
+// Two PySceneDetect filters ride on the candidate list: min_scene_len
+// (frames; a cut is dropped when the scene it would open is shorter
+// than this) and the flash filter (a cut followed within flash_frames
+// by another cut whose content matches the frame before the first cut
+// is a 1-frame blip, not a scene — both cuts are dropped). Fades
+// (PySceneDetect's ThresholdDetector idea) come from the same stats
+// pass: runs of frames with mean luma at/below fade_threshold are the
+// dark core of a fade; the ramp is measured outward from the core
+// while the luma keeps moving (>=1 unit/frame, 2-frame grace), so a
+// 1s fade-in on the fixture reports 0-1.0s, not just its 3-frame dark
+// core. Files over 20 minutes are refused: the per-frame JSON would
+// approach run()'s 16 MB capture buffer (same cap as hook).
 
-export async function detectScenes({ input, threshold = 0.3 }) {
-  const inPath = await requireInput(input);
-  const t = num(threshold, "threshold", { min: 0, max: 1 });
-  const meta = await probe(inPath);
-  if (!meta.video) throw new MediaKitError("scenes needs a video input", "INVALID_ARG");
-  const duration = meta.duration_seconds;
-  const escaped = inPath.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
+const SCENES_MAX_DURATION_SECONDS = 1200;
+const CONTENT_DETECTOR_DEFAULT_THRESHOLD = 0.05;
+const CONTENT_DETECTOR_DEFAULT_MIN_SCENE_LEN = 15;
+const CONTENT_DETECTOR_DEFAULT_FLASH_FRAMES = 5;
+const FADES_DEFAULT_THRESHOLD = 20;
+const FADES_DEFAULT_MIN_FRAMES = 2;
+
+function hueSatOf(u, v) {
+  const du = u - 128, dv = v - 128;
+  return { sat: Math.sqrt(du * du + dv * dv), hue: Math.atan2(dv, du) };
+}
+
+// Content change between two frames, 0-1 (mean of hue/sat/luma terms).
+function contentScore(a, b) {
+  const ha = hueSatOf(a.u, a.v), hb = hueSatOf(b.u, b.v);
+  const dluma = Math.abs(b.y - a.y) / 255;
+  const dsat = Math.abs(hb.sat - ha.sat) / 181;
+  let dhue = Math.abs(hb.hue - ha.hue);
+  if (dhue > Math.PI) dhue = 2 * Math.PI - dhue;
+  const hueTerm = (dhue / Math.PI) * (Math.min(ha.sat, hb.sat) / 181);
+  return (hueTerm + dsat + dluma) / 3;
+}
+
+async function frameColorStats(input) {
+  const escaped = input.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
   const { stdout } = await run(FFPROBE, [
-    "-v", "quiet", "-print_format", "json", "-show_frames",
-    "-f", "lavfi", `movie=${escaped},select=gt(scene\\,${t})`,
+    "-v", "quiet", "-print_format", "json",
+    "-show_entries", "frame=best_effort_timestamp_time:frame_tags=lavfi.signalstats.YAVG,lavfi.signalstats.UAVG,lavfi.signalstats.VAVG",
+    "-f", "lavfi", `movie=${escaped},signalstats`,
   ]);
   let data;
   try {
@@ -8027,12 +8069,193 @@ export async function detectScenes({ input, threshold = 0.3 }) {
   } catch {
     throw new MediaKitError("ffprobe returned unparseable output", "PROBE_FAILED");
   }
-  const raw = (data.frames ?? [])
-    .map((f) => parseFloat(f.best_effort_timestamp_time ?? NaN))
-    .filter((v) => Number.isFinite(v))
-    .map((v) => +v.toFixed(3));
-  // The first frame has no predecessor, so a hit at ~0 is not a cut.
-  const changes = [...new Set(raw)].filter((v) => v > 0.05).sort((a, b) => a - b);
+  const frames = [];
+  for (const f of data.frames ?? []) {
+    const t = f.tags ?? {};
+    const y = parseFloat(t["lavfi.signalstats.YAVG"]);
+    const u = parseFloat(t["lavfi.signalstats.UAVG"]);
+    const v = parseFloat(t["lavfi.signalstats.VAVG"]);
+    const pts = parseFloat(f.best_effort_timestamp_time ?? NaN);
+    if (!Number.isFinite(y) || !Number.isFinite(u) || !Number.isFinite(v) || !Number.isFinite(pts)) continue;
+    frames.push({ pts, y, u, v });
+  }
+  return frames;
+}
+
+// Dark runs (mean luma <= fadeThreshold, at least minFadeFrames long)
+// with the fade ramp measured outward from each core. type: "in" when
+// the core touches frame 0, "out" when it touches the last frame,
+// "black" in the middle (a fade-out + fade-in pair with no gap).
+function detectFades(frames, { fadeThreshold, minFadeFrames, duration }) {
+  const dark = frames.map((f) => f.y <= fadeThreshold);
+  const runs = [];
+  for (let i = 0; i < frames.length;) {
+    if (!dark[i]) { i++; continue; }
+    let j = i;
+    while (j + 1 < frames.length && dark[j + 1]) j++;
+    if (j - i + 1 >= minFadeFrames) runs.push([i, j]);
+    i = j + 1;
+  }
+  const fades = [];
+  for (const [a, b] of runs) {
+    const frameDur = frames.length > 1 ? (frames[frames.length - 1].pts - frames[0].pts) / (frames.length - 1) : 0;
+    const darkStart = +frames[a].pts.toFixed(3);
+    const darkEnd = +(Math.min(frames[b].pts + frameDur, duration ?? frames[b].pts + frameDur)).toFixed(3);
+    let start = darkStart, end = darkEnd;
+    const type = a === 0 ? "in" : b === frames.length - 1 ? "out" : "black";
+    // Ramp out: walk while luma keeps moving >=1 unit/frame, allowing
+    // 2 consecutive stalled frames (encoder noise) before stopping.
+    const extendForward = (fromIdx) => {
+      let last = fromIdx, stalls = 0;
+      for (let i = fromIdx + 1; i < frames.length; i++) {
+        if (frames[i].y - frames[i - 1].y >= 1) { last = i; stalls = 0; }
+        else if (++stalls >= 2) break;
+      }
+      return last;
+    };
+    const extendBackward = (fromIdx) => {
+      let first = fromIdx, stalls = 0;
+      for (let i = fromIdx - 1; i >= 0; i--) {
+        if (frames[i].y - frames[i + 1].y >= 1) { first = i; stalls = 0; }
+        else if (++stalls >= 2) break;
+      }
+      return first;
+    };
+    if (type === "in" || type === "black") {
+      const last = extendForward(b);
+      end = +(Math.min(frames[last].pts + frameDur, duration ?? frames[last].pts + frameDur)).toFixed(3);
+    }
+    if (type === "out" || type === "black") {
+      const first = extendBackward(a);
+      start = +frames[first].pts.toFixed(3);
+    }
+    fades.push({
+      type,
+      start,
+      end,
+      duration_seconds: +(end - start).toFixed(3),
+      dark_start: darkStart,
+      dark_end: darkEnd,
+    });
+  }
+  return fades;
+}
+
+export async function detectScenes({
+  input,
+  threshold = null,
+  detector = "ffmpeg",
+  minSceneLen = CONTENT_DETECTOR_DEFAULT_MIN_SCENE_LEN,
+  flashFrames = CONTENT_DETECTOR_DEFAULT_FLASH_FRAMES,
+  fades = false,
+  fadeThreshold = FADES_DEFAULT_THRESHOLD,
+  minFadeFrames = FADES_DEFAULT_MIN_FRAMES,
+}) {
+  const inPath = await requireInput(input);
+  const det = String(detector ?? "ffmpeg");
+  if (det !== "ffmpeg" && det !== "content") {
+    throw new MediaKitError(`detector must be "ffmpeg" or "content", got "${det}"`, "INVALID_ARG");
+  }
+  const t = num(threshold ?? (det === "content" ? CONTENT_DETECTOR_DEFAULT_THRESHOLD : 0.3), "threshold", { min: 0, max: 1 });
+  const minLen = num(minSceneLen, "min_scene_len", { min: 1, integer: true });
+  const flashLen = num(flashFrames, "flash_frames", { min: 0, integer: true });
+  const fadeT = num(fadeThreshold, "fade_threshold", { min: 0, max: 255 });
+  const minFade = num(minFadeFrames, "min_fade_frames", { min: 1, integer: true });
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("scenes needs a video input", "INVALID_ARG");
+  const duration = meta.duration_seconds;
+  if (duration !== null && duration > SCENES_MAX_DURATION_SECONDS && (det === "content" || fades)) {
+    throw new MediaKitError(`scenes with detector=content or fades refuses files over ${SCENES_MAX_DURATION_SECONDS}s (per-frame stats would exceed the capture buffer) — trim a section first`, "INVALID_ARG");
+  }
+
+  let changes, extra = {};
+  let colorFrames = null;
+  if (det === "ffmpeg") {
+    const escaped = inPath.replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
+    const { stdout } = await run(FFPROBE, [
+      "-v", "quiet", "-print_format", "json", "-show_frames",
+      "-f", "lavfi", `movie=${escaped},select=gt(scene\\,${t})`,
+    ]);
+    let data;
+    try {
+      data = JSON.parse(stdout);
+    } catch {
+      throw new MediaKitError("ffprobe returned unparseable output", "PROBE_FAILED");
+    }
+    const raw = (data.frames ?? [])
+      .map((f) => parseFloat(f.best_effort_timestamp_time ?? NaN))
+      .filter((v) => Number.isFinite(v))
+      .map((v) => +v.toFixed(3));
+    // The first frame has no predecessor, so a hit at ~0 is not a cut.
+    changes = [...new Set(raw)].filter((v) => v > 0.05).sort((a, b) => a - b);
+  } else {
+    const frames = await frameColorStats(inPath);
+    colorFrames = frames;
+    if (frames.length < 2) {
+      changes = [];
+    } else {
+      // Candidate cuts: content score between consecutive frames.
+      const candidates = [];
+      for (let i = 1; i < frames.length; i++) {
+        if (contentScore(frames[i - 1], frames[i]) > t) candidates.push(i);
+      }
+      const candidateCount = candidates.length;
+      // Flash filter: a cut followed within flash_frames by another
+      // cut whose content matches the frame before the first cut is a
+      // blip, not a scene — drop both.
+      let droppedFlash = 0;
+      const afterFlash = [];
+      const used = new Set();
+      for (let k = 0; k < candidates.length; k++) {
+        if (used.has(k)) continue;
+        const i = candidates[k];
+        let paired = -1;
+        for (let m = k + 1; m < candidates.length; m++) {
+          const j = candidates[m];
+          if (j - i > flashLen) break;
+          if (contentScore(frames[i - 1], frames[j]) <= t) { paired = m; break; }
+        }
+        if (paired >= 0) {
+          used.add(k); used.add(paired); droppedFlash += 2;
+        } else {
+          afterFlash.push(i);
+        }
+      }
+      // min_scene_len: drop a cut when the scene it would open is
+      // shorter than this many frames.
+      let droppedShort = 0;
+      const kept = [];
+      let lastKept = 0;
+      for (const i of afterFlash) {
+        if (i - lastKept < minLen) { droppedShort++; continue; }
+        kept.push(i);
+        lastKept = i;
+      }
+      changes = kept.map((i) => +frames[i].pts.toFixed(3));
+      extra = {
+        candidates: candidateCount,
+        filtered: { flash: droppedFlash, min_scene_len: droppedShort },
+        min_scene_len_frames: minLen,
+        flash_frames: flashLen,
+      };
+    }
+  }
+
+  const result = {
+    operation: "scenes",
+    input: inPath,
+    detector: det,
+    threshold: t,
+    duration_seconds: duration,
+    scene_changes: changes,
+    count: changes.length,
+    ...extra,
+  };
+  if (fades) {
+    // Reuse the content detector's stats pass when available.
+    const frames = colorFrames ?? await frameColorStats(inPath);
+    result.fades = detectFades(frames, { fadeThreshold: fadeT, minFadeFrames: minFade, duration });
+  }
   const bounds = [0, ...changes, ...(duration !== null ? [duration] : [])];
   const segments = [];
   for (let i = 0; i < bounds.length - 1; i++) {
@@ -8042,15 +8265,8 @@ export async function detectScenes({ input, threshold = 0.3 }) {
       duration_seconds: +(bounds[i + 1] - bounds[i]).toFixed(3),
     });
   }
-  return {
-    operation: "scenes",
-    input: inPath,
-    threshold: t,
-    duration_seconds: duration,
-    scene_changes: changes,
-    count: changes.length,
-    segments,
-  };
+  result.segments = segments;
+  return result;
 }
 
 // ---------------------------------------------------------------- hook
