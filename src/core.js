@@ -5967,6 +5967,119 @@ async function acquireDownloadToken(rps) {
   return waitMs;
 }
 
+// License policy gate for `download` (lượt 90, backlog from
+// js713-lab/sonic-match-mcp, lượt 68 — provenance already recorded
+// the license as "unknown", but nothing stopped a download whose
+// license the caller KNEW was unusable). The gate is a policy FILE,
+// never a guess: the caller declares the license with --license, the
+// policy file lists what is allowed / denied, and a download whose
+// declared license fails the policy is refused BEFORE any network
+// fetch — zero bytes, zero server hits, no file written. Without a
+// policy file the gate is off and the license is only recorded (the
+// old behaviour): a policy that silently blocked every existing
+// workflow would be a breaking change, so enforcement is opt-in by
+// design. The policy file is MEDIAKIT_LICENSE_POLICY (env) or
+// --license-policy-file (per call, wins over env):
+//   { "allow": ["CC0", "CC-BY"], "deny": ["All Rights Reserved"], "require_license": true }
+// allow null/absent = any label passes (unless denied);
+// require_license = a download with no declared license is refused.
+const LICENSE_POLICY_ENV = "MEDIAKIT_LICENSE_POLICY";
+const LICENSE_ALIASES = {
+  "cc0": "CC0",
+  "cc-by": "CC-BY",
+  "cc-by-sa": "CC-BY-SA",
+  "cc-by-nc": "CC-BY-NC",
+  "cc-by-nd": "CC-BY-ND",
+  "cc-by-nc-sa": "CC-BY-NC-SA",
+  "cc-by-nc-nd": "CC-BY-NC-ND",
+  "public-domain": "Public Domain",
+  "public domain": "Public Domain",
+  "pd": "Public Domain",
+  "unknown": "unknown",
+  "all-rights-reserved": "All Rights Reserved",
+  "all rights reserved": "All Rights Reserved",
+  "arr": "All Rights Reserved",
+  "proprietary": "All Rights Reserved",
+  "copyrighted": "All Rights Reserved",
+  "mit": "MIT",
+  "apache-2.0": "Apache-2.0",
+  "apache 2.0": "Apache-2.0",
+  "gpl-3.0": "GPL-3.0",
+  "ofl-1.1": "OFL-1.1",
+};
+
+// Canonicalize a declared license: aliases collapse to one spelling
+// ("cc0" / "CC0" / "Cc0" are the same label), anything unlisted is
+// kept verbatim — a label is never guessed or rewritten into a
+// different license. No declaration means "unknown".
+function canonicalLicense(label) {
+  if (label === null || label === undefined) return "unknown";
+  const trimmed = String(label).trim();
+  if (!trimmed) return "unknown";
+  const key = trimmed.toLowerCase().replace(/\s+/g, " ");
+  return LICENSE_ALIASES[key] ?? trimmed;
+}
+
+function licenseList(value, field, policyPath) {
+  if (!Array.isArray(value)) {
+    throw new MediaKitError(`license policy ${policyPath}: "${field}" must be an array of license labels`, "LICENSE_POLICY_ERROR");
+  }
+  const out = [];
+  for (const v of value) {
+    if (typeof v !== "string" || !v.trim()) {
+      throw new MediaKitError(`license policy ${policyPath}: "${field}" entries must be non-empty strings`, "LICENSE_POLICY_ERROR");
+    }
+    const c = canonicalLicense(v);
+    if (!out.includes(c)) out.push(c);
+  }
+  return out;
+}
+
+// Resolve the effective policy: explicit file > MEDIAKIT_LICENSE_POLICY
+// env > the permissive default (gate off, record only). A set but
+// unreadable / malformed policy file is a config error, not a silent
+// fallback to permissive — a gate that fails open on a typo would be
+// worse than no gate.
+export async function loadLicensePolicy(policyFile = null) {
+  const raw = typeof policyFile === "string" && policyFile.trim()
+    ? policyFile.trim()
+    : (typeof process.env[LICENSE_POLICY_ENV] === "string" ? process.env[LICENSE_POLICY_ENV].trim() : "");
+  if (!raw) return { allow: null, deny: [], require_license: false, source: "default" };
+  let doc;
+  try {
+    doc = JSON.parse(await readFile(raw, "utf8"));
+  } catch (e) {
+    throw new MediaKitError(`license policy file ${raw} cannot be read: ${e.message}`, "LICENSE_POLICY_ERROR");
+  }
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
+    throw new MediaKitError(`license policy ${raw} must be a JSON object {allow?, deny?, require_license?}`, "LICENSE_POLICY_ERROR");
+  }
+  const allow = doc.allow === undefined || doc.allow === null ? null : licenseList(doc.allow, "allow", raw);
+  const deny = doc.deny === undefined || doc.deny === null ? [] : licenseList(doc.deny, "deny", raw);
+  const requireLicense = doc.require_license === undefined ? false : doc.require_license;
+  if (typeof requireLicense !== "boolean") {
+    throw new MediaKitError(`license policy ${raw}: "require_license" must be true or false`, "LICENSE_POLICY_ERROR");
+  }
+  return { allow, deny, require_license: requireLicense, source: `file:${raw}` };
+}
+
+// The gate itself: deny wins over allow, allow is an exact match on
+// the canonical label ("CC-BY 4.0" is NOT "CC-BY" — declare the exact
+// label the policy lists). Returns the verdict for the result /
+// provenance record; throws LICENSE_DENIED before any fetch.
+function checkLicenseGate(label, policy) {
+  if (policy.deny.includes(label)) {
+    throw new MediaKitError(`download refused by license policy (${policy.source}): license "${label}" is in the deny list`, "LICENSE_DENIED");
+  }
+  if (policy.allow !== null && !policy.allow.includes(label)) {
+    throw new MediaKitError(`download refused by license policy (${policy.source}): license "${label}" is not in the allow list [${policy.allow.join(", ")}]`, "LICENSE_DENIED");
+  }
+  if (policy.require_license && label === "unknown") {
+    throw new MediaKitError(`download refused by license policy (${policy.source}): no license was declared and the policy requires one — pass --license <label>`, "LICENSE_DENIED");
+  }
+  return { label, policy_source: policy.source, decision: "allowed" };
+}
+
 function parseRetryAfterMs(res) {
   const raw = res.headers?.get?.("retry-after");
   if (!raw) return null;
@@ -5993,7 +6106,7 @@ function retryableDownloadError(message, retryAfterMs = null) {
 // the result tail shared by the direct, playlist and cache-hit
 // paths. A file that fails the probe is deleted and reported, never
 // left on disk as a success.
-async function probeAndRecordDownload({ outPath, url, finalUrl, redirects, contentType, playlist, maxBytes, cacheInfo = null }) {
+async function probeAndRecordDownload({ outPath, url, finalUrl, redirects, contentType, playlist, maxBytes, cacheInfo = null, license = null, policy = null }) {
   const info = await fileInfo(outPath);
   let media;
   try {
@@ -6009,6 +6122,7 @@ async function probeAndRecordDownload({ outPath, url, finalUrl, redirects, conte
   const provenance = await writeDownloadProvenance({
     outPath, url, finalUrl, redirects,
     contentType: contentType || null, playlist, media, sizeBytes: info.size_bytes, cache: cacheInfo,
+    license, policy,
   });
   return {
     operation: "download",
@@ -6017,6 +6131,7 @@ async function probeAndRecordDownload({ outPath, url, finalUrl, redirects, conte
     redirects,
     output: outPath,
     provenance,
+    ...(license ? { license: { label: license, policy_source: policy?.source ?? "default", decision: "allowed" } } : {}),
     size_bytes: info.size_bytes,
     size_human: info.size_human,
     content_type: contentType || null,
@@ -6030,7 +6145,7 @@ async function probeAndRecordDownload({ outPath, url, finalUrl, redirects, conte
   };
 }
 
-export async function downloadMedia({ url, output, maxSizeMb = DOWNLOAD_DEFAULT_MAX_MB, timeoutSeconds = DOWNLOAD_DEFAULT_TIMEOUT_S, cache = false, maxRetries = DOWNLOAD_DEFAULT_MAX_RETRIES, rateLimitRps = null, cacheDir = null }) {
+export async function downloadMedia({ url, output, maxSizeMb = DOWNLOAD_DEFAULT_MAX_MB, timeoutSeconds = DOWNLOAD_DEFAULT_TIMEOUT_S, cache = false, maxRetries = DOWNLOAD_DEFAULT_MAX_RETRIES, rateLimitRps = null, cacheDir = null, license = null, licensePolicyFile = null }) {
   if (typeof url !== "string" || !url.trim()) {
     throw new MediaKitError("download needs a URL", "INVALID_ARG");
   }
@@ -6044,6 +6159,14 @@ export async function downloadMedia({ url, output, maxSizeMb = DOWNLOAD_DEFAULT_
   if (u.username || u.password) {
     throw new MediaKitError("download refuses URLs with embedded credentials — use a signed URL (query parameters) instead", "INVALID_ARG");
   }
+  // License gate FIRST: before the cache lookup, before any fetch —
+  // a refused license costs zero bytes and zero server hits. The
+  // policy file is loaded here (not at import) so a per-call
+  // --license-policy-file and the MEDIAKIT_LICENSE_POLICY env both
+  // apply, and a broken policy file fails the call, never the import.
+  const licenseLabel = canonicalLicense(license);
+  const licensePolicy = await loadLicensePolicy(licensePolicyFile);
+  checkLicenseGate(licenseLabel, licensePolicy);
   const urlExt = path.extname(u.pathname).slice(1).toLowerCase();
   const maxMb = num(maxSizeMb, "max_size_mb", { min: 0.01, max: 2000 });
   const maxBytes = Math.floor(maxMb * 1024 * 1024);
@@ -6070,7 +6193,7 @@ export async function downloadMedia({ url, output, maxSizeMb = DOWNLOAD_DEFAULT_
       throw new MediaKitError("download --cache does not cache playlists yet (a playlist's segments change under the same URL) — re-run without --cache", "INVALID_ARG");
     }
     const rateWaitMs = await acquireDownloadToken(rps);
-    const pl = await downloadPlaylistMedia({ url: url.trim(), urlExt, output, maxBytes, maxMb, timeoutS, requestedExt, maxRetries: retriesMax });
+    const pl = await downloadPlaylistMedia({ url: url.trim(), urlExt, output, maxBytes, maxMb, timeoutS, requestedExt, maxRetries: retriesMax, license: licenseLabel, policy: licensePolicy });
     return { ...pl, cached: false, cache_age_seconds: null, cache_stored: null, rate_limited_wait_ms: rateWaitMs };
   }
   // Cache lookup first: a hit serves no network at all (and takes no
@@ -6100,6 +6223,7 @@ export async function downloadMedia({ url, output, maxSizeMb = DOWNLOAD_DEFAULT_
       outPath, url: url.trim(), finalUrl: cachedEntry.meta.final_url, redirects: cachedEntry.meta.redirects ?? null,
       contentType: contentType || null, playlist: null, maxBytes,
       cacheInfo: { hit: true, stored_at: cachedEntry.meta.stored_at },
+      license: licenseLabel, policy: licensePolicy,
     });
     return {
       ...base,
@@ -6144,6 +6268,7 @@ export async function downloadMedia({ url, output, maxSizeMb = DOWNLOAD_DEFAULT_
     outPath: fetched.outPath, url: url.trim(), finalUrl: fetched.finalUrl, redirects: fetched.redirects,
     contentType: fetched.contentType, playlist: null, maxBytes,
     cacheInfo: cache ? { hit: false, stored: cacheStored } : null,
+    license: licenseLabel, policy: licensePolicy,
   });
   return {
     ...base,
@@ -6272,7 +6397,7 @@ async function fetchDirectOnce({ u, output, requestedExt, maxBytes, maxMb, timeo
 // an over-cap file is deleted and reported, never left as a success.
 const DOWNLOAD_PLAYLIST_CONTAINER_EXTS = ["mp4", "mov", "mkv", "webm", "m4v", "avi", "mp3", "m4a", "wav", "flac", "ogg", "opus"];
 
-async function downloadPlaylistMedia({ url, urlExt, output, maxBytes, maxMb, timeoutS, requestedExt, maxRetries = DOWNLOAD_DEFAULT_MAX_RETRIES }) {
+async function downloadPlaylistMedia({ url, urlExt, output, maxBytes, maxMb, timeoutS, requestedExt, maxRetries = DOWNLOAD_DEFAULT_MAX_RETRIES, license = null, policy = null }) {
   const ext = requestedExt || "mp4";
   if (!DOWNLOAD_PLAYLIST_CONTAINER_EXTS.includes(ext)) {
     throw new MediaKitError(`download refuses: an HLS/DASH playlist (.${urlExt}) can only be written to a video/audio container (${DOWNLOAD_PLAYLIST_CONTAINER_EXTS.join(", ")}) — got .${ext}`, "INVALID_ARG");
@@ -6330,6 +6455,7 @@ async function downloadPlaylistMedia({ url, urlExt, output, maxBytes, maxMb, tim
   const base = await probeAndRecordDownload({
     outPath, url, finalUrl: url, redirects: null,
     contentType: null, playlist: urlExt, maxBytes,
+    license, policy,
   });
   return { ...base, playlist: urlExt, attempts, retries, retry_wait_ms: retryWaitMs };
 }
@@ -6338,11 +6464,16 @@ async function downloadPlaylistMedia({ url, urlExt, output, maxBytes, maxMb, tim
 // successful download writes a provenance record next to the file, so
 // a clip never exists without its record. The record holds what the
 // server actually stated — URL, final URL, redirects, content-type,
-// SHA-256, sizes, versions — and the license is "unknown" unless the
-// server said otherwise: a license is never guessed from a filename
-// or a domain. Check the source before publishing.
-async function writeDownloadProvenance({ outPath, url, finalUrl, redirects, contentType, playlist, media, sizeBytes, cache = null }) {
+// SHA-256, sizes, versions — and the license is the CALLER's
+// declaration (or "unknown" when none was given): a license is never
+// guessed from a filename or a domain. commercial_use stays "unknown"
+// even for a permissive label — the declaration is unverified, and
+// only the source can confirm it. The policy verdict is recorded
+// alongside, so a later reader can tell whether a gate was even on.
+// Check the source before publishing.
+async function writeDownloadProvenance({ outPath, url, finalUrl, redirects, contentType, playlist, media, sizeBytes, cache = null, license = null, policy = null }) {
   const sha256 = createHash("sha256").update(await readFile(outPath)).digest("hex");
+  const label = license ?? "unknown";
   const record = {
     schema: "mediakit-for-agents/provenance/1",
     file: path.basename(outPath),
@@ -6350,7 +6481,20 @@ async function writeDownloadProvenance({ outPath, url, finalUrl, redirects, cont
     size_bytes: sizeBytes,
     source: { url, final_url: finalUrl, redirects, content_type: contentType, playlist: playlist ?? null },
     ...(cache ? { cache } : {}),
-    license: { label: "unknown", commercial_use: "unknown", note: "No license was published with this download — check the source before publishing." },
+    license: {
+      label,
+      commercial_use: "unknown",
+      note: label === "unknown"
+        ? "No license was published with this download — check the source before publishing."
+        : `License declared by the caller as "${label}" — verify it against the source before publishing.`,
+    },
+    license_policy: {
+      source: policy?.source ?? "default",
+      allow: policy?.allow ?? null,
+      deny: policy?.deny ?? [],
+      require_license: policy?.require_license ?? false,
+      decision: "allowed",
+    },
     retrieved_at: new Date().toISOString(),
     mediakit_version: MEDIAKIT_VERSION,
     ffmpeg_version: await ffmpegVersionString(),
@@ -8007,6 +8151,23 @@ export async function doctor() {
     brandsFile = { set: true, path: process.env[BRANDS_FILE_ENV] ?? null, error: err.message };
     allOk = false;
   }
+  // License policy: MEDIAKIT_LICENSE_POLICY (or a per-call
+  // --license-policy-file) gates downloads. A set but broken file is
+  // a config error, so ok goes false — same treatment as a broken
+  // workdir or brands file: a gate that fails open on a typo would
+  // be worse than no gate.
+  let licensePolicy = { set: false, path: null, allow: null, deny: [], require_license: false };
+  try {
+    const p = await loadLicensePolicy(null);
+    licensePolicy = {
+      set: p.source !== "default",
+      path: p.source === "default" ? null : p.source.slice("file:".length),
+      allow: p.allow, deny: p.deny, require_license: p.require_license,
+    };
+  } catch (err) {
+    licensePolicy = { set: true, path: process.env[LICENSE_POLICY_ENV] ?? null, error: err.message };
+    allOk = false;
+  }
   // transcribe is optional (ffmpeg-skill's ASR rule: a speech engine is
   // never required): report the engine state, but a missing engine
   // must not fail ok — everything else still works without it.
@@ -8026,6 +8187,7 @@ export async function doctor() {
     platform: `${process.platform}-${process.arch}`,
     sandbox,
     brands_file: brandsFile,
+    license_policy: licensePolicy,
     audit,
     gpu,
     filters,
@@ -10871,8 +11033,12 @@ export const MANIFEST_STEPS = {
   // it is the pipeline's source, like slideshow: step 1 only, and
   // the manifest's `input` may be omitted (see manifest()).
   download: {
-    args: ["url", "max_size_mb", "timeout_seconds"],
-    run: (input, output, a) => downloadMedia({ url: a.url, output, maxSizeMb: a.max_size_mb ?? 500, timeoutSeconds: a.timeout_seconds ?? 300, cache: a.cache ?? false, maxRetries: a.max_retries ?? 3, rateLimitRps: a.rate_limit_rps ?? 0, cacheDir: a.cache_dir ?? null }),
+    // args must list every key run() reads: cache/cache_dir/
+    // max_retries/rate_limit_rps were read but not listed, so a
+    // manifest download step with cache:true was rejected at lint
+    // time even though determinism's docs promised it works (lượt 90).
+    args: ["url", "max_size_mb", "timeout_seconds", "cache", "cache_dir", "max_retries", "rate_limit_rps", "license"],
+    run: (input, output, a) => downloadMedia({ url: a.url, output, maxSizeMb: a.max_size_mb ?? 500, timeoutSeconds: a.timeout_seconds ?? 300, cache: a.cache ?? false, maxRetries: a.max_retries ?? 3, rateLimitRps: a.rate_limit_rps ?? 0, cacheDir: a.cache_dir ?? null, license: a.license ?? null }),
   },
 };
 

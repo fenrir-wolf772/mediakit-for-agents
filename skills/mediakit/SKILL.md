@@ -802,9 +802,9 @@ about first: a silence that measures 0.998s does not split at
 missing. And a download's provenance is the same idea for footage:
 every `download` writes `<output>.provenance.json` next to the file
 (source URL, final URL, redirects, content-type, SHA-256, versions) —
-the license is recorded as `unknown` unless the server stated one,
-never guessed from a filename or a domain; check the source before
-publishing.
+the license is the caller's `--license` declaration, or `unknown`
+when none was given, never guessed from a filename or a domain;
+check the source before publishing.
 
 ### 34. Resources are the map, tools are the hands — and the map never leaves the workspace
 Before guessing a path, read `videos://list` (every media file under
@@ -1275,7 +1275,26 @@ cached and `--cache` on one is refused, not silently ignored.
 `--rate-limit-rps` paces downloads in this process with a token
 bucket (0 = unlimited; `MEDIAKIT_DOWNLOAD_RPS` when the flag is
 absent) — a manifest fetching several URLs in one process stays
-polite to the CDN. Never `ffmpeg -i <url>` directly: that is
+polite to the CDN. License: `--license <label>` declares the
+source's license (e.g. `CC0`, `CC-BY`, `Public Domain` — aliases
+collapse to one spelling, anything else is kept verbatim) and is
+recorded in `<output>.provenance.json` next to the file, together
+with the policy verdict; without a declaration the license stays
+`unknown`, never guessed. A policy file
+(`MEDIAKIT_LICENSE_POLICY` env, or `--license-policy-file` per call:
+`{allow?, deny?, require_license?}`) gates the download BEFORE
+any fetch — a declared license outside the allow list, inside the
+deny list, or missing when required is refused with
+`LICENSE_DENIED` and costs zero bytes (the gate runs before the
+cache too, so a cached URL under a denying policy is refused, not
+served). Without a policy file the gate is off and the license is
+only recorded — enforcement is opt-in so existing workflows don't
+break. `doctor` reports the policy state (`license_policy.set`); a
+set but malformed policy file fails `doctor`'s `ok`, like a broken
+workdir. A manifest `download` step takes `license` (and
+`cache`/`max_retries`/`rate_limit_rps`/`cache_dir` — those were
+already read by the step runner but rejected at lint until lượt
+90). Never `ffmpeg -i <url>` directly: that is
 exactly the unguarded pattern brookcs3/m3u8-mcp-server's
 `m3u8_download` uses (no validation, no cap, no timeout, no
 verify) — MediaKit's `download` exists so the agent never has to.

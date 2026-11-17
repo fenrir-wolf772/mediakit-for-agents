@@ -359,8 +359,8 @@ const COMMANDS = {
     ],
   },
   download: {
-    usage: "mediakit download <url> -o <output.mp4> [--max-size-mb 500] [--timeout-seconds 300] [--cache] [--cache-dir <dir>] [--max-retries 3] [--rate-limit-rps 0]",
-    desc: "Download a media file from an http(s) URL into the workspace. Typed and guarded: http/https only (no credentials in the URL), size cap enforced while streaming (default 500 MB), 5 redirects max, 300s timeout per attempt, written atomically via <output>.partial and renamed only on success, then probed — a file that is not media is deleted and reported. The output extension is either given (must be a media extension) or derived from the Content-Type / URL path. Transient failures (HTTP 429/5xx, network errors) are retried with exponential backoff honouring Retry-After (default 3 retries; timeouts and deterministic refusals are never retried). --cache reuses a verified per-URL disk cache (size + sha256 checked; playlists are never cached). --rate-limit-rps paces downloads in this process with a token bucket (0 = unlimited).",
+    usage: "mediakit download <url> -o <output.mp4> [--max-size-mb 500] [--timeout-seconds 300] [--cache] [--cache-dir <dir>] [--max-retries 3] [--rate-limit-rps 0] [--license <label>] [--license-policy-file <path>]",
+    desc: "Download a media file from an http(s) URL into the workspace. Typed and guarded: http/https only (no credentials in the URL), size cap enforced while streaming (default 500 MB), 5 redirects max, 300s timeout per attempt, written atomically via <output>.partial and renamed only on success, then probed — a file that is not media is deleted and reported. The output extension is either given (must be a media extension) or derived from the Content-Type / URL path. Transient failures (HTTP 429/5xx, network errors) are retried with exponential backoff honouring Retry-After (default 3 retries; timeouts and deterministic refusals are never retried). --cache reuses a verified per-URL disk cache (size + sha256 checked; playlists are never cached). --rate-limit-rps paces downloads in this process with a token bucket (0 = unlimited). License: --license declares the source's license (recorded in <output>.provenance.json, never guessed); a policy file (MEDIAKIT_LICENSE_POLICY env, or --license-policy-file: {allow?, deny?, require_license?}) gates the download BEFORE any fetch — a failing license is refused with LICENSE_DENIED and costs zero bytes. Without a policy file the gate is off and the license is only recorded.",
     args: [{ name: "url", required: true }],
     options: [
       ["--max-size-mb", "Maximum download size in MB (default 500)"],
@@ -369,6 +369,8 @@ const COMMANDS = {
       ["--cache-dir", "Cache directory override"],
       ["--max-retries", "Retries for transient failures, 0-5 (default 3)"],
       ["--rate-limit-rps", "Token-bucket rate limit in requests/second for this process (default 0 = unlimited; MEDIAKIT_DOWNLOAD_RPS env when the flag is absent)"],
+      ["--license", "License of the source as declared by the caller (e.g. CC0, CC-BY, Public Domain) — recorded in the provenance file; checked against the policy file when one is configured"],
+      ["--license-policy-file", "Path to a license policy JSON file {allow?, deny?, require_license?} — overrides MEDIAKIT_LICENSE_POLICY for this call"],
       ["-o, --output", "Output file (required) — with a media extension, or without one (derived from Content-Type / URL path)"],
     ],
   },
@@ -1263,6 +1265,8 @@ async function main() {
           cacheDir: opts.cache_dir ?? null,
           maxRetries: numOpt(opts, "max_retries") ?? 3,
           rateLimitRps: numOpt(opts, "rate_limit_rps") ?? null,
+          license: opts.license ?? null,
+          licensePolicyFile: opts.license_policy_file ?? null,
         });
         break;
       case "image-to-video":

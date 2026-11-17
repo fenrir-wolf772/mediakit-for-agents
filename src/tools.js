@@ -1406,7 +1406,7 @@ export const TOOL_DEFS = [
 // until the last segment arrives.
   {
     name: "download",
-    description: "Download a media file from an http(s) URL into the workspace — stock footage, a reference clip, a music bed. Typed and guarded: http/https only (no credentials in the URL), size cap enforced while streaming for direct files (default 500 MB, refused upfront when Content-Length already exceeds it), 5 redirects max, 300s timeout per attempt, written atomically via <output>.partial and renamed only on success, then probed — a file that is not media is deleted and reported, never left as a success. HLS (.m3u8) / DASH (.mpd) playlists are fetched with ffmpeg -c copy (re-mux, never re-encode) under a protocol whitelist, and the size cap is enforced after the fetch. The output extension is either given (must be a media extension) or derived from the Content-Type / URL path. Transient failures (HTTP 429/5xx, network errors) are retried with exponential backoff 1s/2s/4s honouring Retry-After (default 3 retries; timeouts and deterministic refusals are never retried). cache:true reuses a verified per-URL disk cache (size + sha256 checked, corrupt entries re-fetched; playlists are never cached). rate_limit_rps paces downloads in this process with a token bucket (0 = unlimited). Returns the output path, size, content-type, redirect count, attempts/retries, cache hit status and the probe summary (duration, dimensions, codecs).",
+    description: "Download a media file from an http(s) URL into the workspace — stock footage, a reference clip, a music bed. Typed and guarded: http/https only (no credentials in the URL), size cap enforced while streaming for direct files (default 500 MB, refused upfront when Content-Length already exceeds it), 5 redirects max, 300s timeout per attempt, written atomically via <output>.partial and renamed only on success, then probed — a file that is not media is deleted and reported, never left as a success. HLS (.m3u8) / DASH (.mpd) playlists are fetched with ffmpeg -c copy (re-mux, never re-encode) under a protocol whitelist, and the size cap is enforced after the fetch. The output extension is either given (must be a media extension) or derived from the Content-Type / URL path. Transient failures (HTTP 429/5xx, network errors) are retried with exponential backoff 1s/2s/4s honouring Retry-After (default 3 retries; timeouts and deterministic refusals are never retried). cache:true reuses a verified per-URL disk cache (size + sha256 checked, corrupt entries re-fetched; playlists are never cached). rate_limit_rps paces downloads in this process with a token bucket (0 = unlimited). License: pass license to declare the source's license (e.g. CC0, CC-BY, Public Domain — recorded in <output>.provenance.json, never guessed); a license policy file (MEDIAKIT_LICENSE_POLICY env, or license_policy_file per call: {allow?, deny?, require_license?}) gates the download BEFORE any fetch — a declared license outside the allow list, inside the deny list, or missing when required is refused with LICENSE_DENIED and costs zero bytes. Without a policy file the gate is off and the license is only recorded. Returns the output path, size, content-type, redirect count, attempts/retries, cache hit status, the declared license + policy verdict, and the probe summary (duration, dimensions, codecs).",
     schema: {
     url: z.string().url().describe("http(s) URL of a direct media file (video/audio/image) or an HLS (.m3u8) / DASH (.mpd) playlist"),
     output: pathSchema.describe("Output file path — with a media extension, or without one (the extension is then derived from the Content-Type / URL path)"),
@@ -1416,6 +1416,8 @@ export const TOOL_DEFS = [
     cache_dir: z.string().optional().describe("Cache directory override (default: MEDIAKIT_DOWNLOAD_CACHE_DIR env, else ~/.cache/mediakit/downloads)"),
     max_retries: z.number().int().min(0).max(5).default(3).describe("Retries for transient failures — HTTP 429/5xx and network errors (default 3; 0 = no retry; timeouts and deterministic refusals are never retried)"),
     rate_limit_rps: z.number().min(0).max(1000).default(0).describe("Token-bucket rate limit in requests/second for this process (default 0 = unlimited; the bucket starts full, so a single download is never delayed)"),
+    license: z.string().optional().describe("License of the source as declared by the caller (e.g. CC0, CC-BY, Public Domain; aliases collapse to one spelling, anything else is kept verbatim) — recorded in the provenance file; with a license policy configured it is checked before any fetch, and a failing license is refused with LICENSE_DENIED"),
+    license_policy_file: z.string().optional().describe("Path to a license policy JSON file {allow?, deny?, require_license?} — overrides MEDIAKIT_LICENSE_POLICY for this call; without a policy file the gate is off and the license is only recorded"),
   },
     handler: async (a) => safe(() => core.downloadMedia({
     url: a.url,
@@ -1426,6 +1428,8 @@ export const TOOL_DEFS = [
     cacheDir: a.cache_dir ?? null,
     maxRetries: a.max_retries,
     rateLimitRps: a.rate_limit_rps,
+    license: a.license ?? null,
+    licensePolicyFile: a.license_policy_file ?? null,
   })),
   },
 

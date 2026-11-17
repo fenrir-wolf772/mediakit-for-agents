@@ -6488,7 +6488,7 @@ checkOk(/unknown job/.test(jobUnknownText ?? ""), "job status refuses an unknown
 // 127.0.0.1, so the sandbox proxy is bypassed for these calls.
 const downloadFixture = await readFile(path.join(root, "test/source.mp4"));
 // Hit counters for the retry/cache endpoints below (lượt 85).
-const dlHits = { flaky: 0, always503: 0, cacheable: 0 };
+const dlHits = { flaky: 0, always503: 0, cacheable: 0, counted: 0 };
 // HLS/DASH fixtures, generated on the fly from the same source clip
 // (stream copy, so the segments carry the source's own streams —
 // no re-encode, and the suite stays network-free).
@@ -6542,6 +6542,12 @@ const downloadServer = createServer(async (req, res) => {
     res.writeHead(503); res.end();
   } else if (req.url === "/cacheable.mp4") {
     dlHits.cacheable++;
+    res.writeHead(200, { "content-type": "video/mp4", "content-length": downloadFixture.length }); res.end(downloadFixture);
+  } else if (req.url === "/counted.mp4") {
+    // Counted endpoint for the license gate (lượt 90): a denied
+    // download must not hit the server at all, so the counter proves
+    // the fail-fast instead of trusting the code path.
+    dlHits.counted++;
     res.writeHead(200, { "content-type": "video/mp4", "content-length": downloadFixture.length }); res.end(downloadFixture);
   } else if (req.url === "/slow") {
     // Never responds: the tool's timeout must fire, not the test's.
@@ -6717,6 +6723,61 @@ const dlCliCache1 = await runCliJson(["download", `${dlBase}/cacheable.mp4`, "-o
 checkOk(dlCliCache1.cached === false && dlCliCache1.cache_stored === true, "CLI download --cache stores on first fetch", JSON.stringify({ cached: dlCliCache1.cached, cache_stored: dlCliCache1.cache_stored }));
 const dlCliCache2 = await runCliJson(["download", `${dlBase}/cacheable.mp4`, "-o", path.join(root, "outputs/mcp-download-cli-cache2.mp4"), "--cache", "--cache-dir", path.join(root, "outputs/dl-cache-cli")]);
 checkOk(dlCliCache2.cached === true && dlCliCache2.attempts === 0, "CLI download --cache serves the second fetch from disk", JSON.stringify({ cached: dlCliCache2.cached, attempts: dlCliCache2.attempts }));
+// License policy gate (lượt 90, backlog lượt 68): --license declares
+// the source's license, a policy file gates the download BEFORE any
+// fetch. The /counted.mp4 endpoint proves the fail-fast: a denied
+// download must not hit the server at all.
+const dlPolicyAllowCc0 = path.join(root, "outputs/dl-policy-allow-cc0.json");
+await writeFile(dlPolicyAllowCc0, JSON.stringify({ allow: ["CC0"] }));
+const dlPolicyRequire = path.join(root, "outputs/dl-policy-require.json");
+await writeFile(dlPolicyRequire, JSON.stringify({ require_license: true }));
+const dlPolicyDenyArr = path.join(root, "outputs/dl-policy-deny-arr.json");
+await writeFile(dlPolicyDenyArr, JSON.stringify({ deny: ["All Rights Reserved"] }));
+const dlPolicyBad = path.join(root, "outputs/dl-policy-bad.json");
+await writeFile(dlPolicyBad, "{not json");
+const dlLicDenyText = await callExpectThrow("download", { url: `${dlBase}/counted.mp4`, output: path.join(root, "outputs/mcp-download-lic-deny.mp4"), license: "CC-BY", license_policy_file: dlPolicyAllowCc0 });
+checkOk(/LICENSE_DENIED/.test(dlLicDenyText ?? "") && /not in the allow list/.test(dlLicDenyText ?? "") && dlHits.counted === 0 && !existsSync(path.join(root, "outputs/mcp-download-lic-deny.mp4")), "license gate: CC-BY vs allow [CC0] is refused with LICENSE_DENIED before any fetch (server hit count still 0, no file)", dlLicDenyText ?? "");
+const dlLicOkRes = await client.callTool({ name: "download", arguments: { url: `${dlBase}/counted.mp4`, output: path.join(root, "outputs/mcp-download-lic-ok.mp4"), license: "cc0", license_policy_file: dlPolicyAllowCc0 } });
+const dlLicOk = JSON.parse(dlLicOkRes.content[0].text);
+checkOk(dlLicOk.license?.label === "CC0" && dlLicOk.license?.policy_source === `file:${dlPolicyAllowCc0}` && dlLicOk.license?.decision === "allowed" && dlHits.counted === 1, "license gate: lowercase alias 'cc0' canonicalizes to CC0 and passes the allow list (1 server hit)", JSON.stringify(dlLicOk.license));
+const dlLicOkProv = JSON.parse(await readFile(path.join(root, "outputs/mcp-download-lic-ok.mp4.provenance.json"), "utf8"));
+checkOk(dlLicOkProv.license?.label === "CC0" && dlLicOkProv.license?.commercial_use === "unknown" && dlLicOkProv.license_policy?.source === `file:${dlPolicyAllowCc0}` && JSON.stringify(dlLicOkProv.license_policy?.allow) === JSON.stringify(["CC0"]) && dlLicOkProv.license_policy?.decision === "allowed", "provenance records the declared CC0 license + the policy verdict (commercial_use stays unknown — the declaration is unverified)", JSON.stringify(dlLicOkProv.license_policy));
+const dlLicReqText = await callExpectThrow("download", { url: `${dlBase}/counted.mp4`, output: path.join(root, "outputs/mcp-download-lic-req.mp4"), license_policy_file: dlPolicyRequire });
+checkOk(/LICENSE_DENIED/.test(dlLicReqText ?? "") && /requires one/.test(dlLicReqText ?? "") && dlHits.counted === 1 && !existsSync(path.join(root, "outputs/mcp-download-lic-req.mp4")), "license gate: require_license refuses a download with no declared license, still 1 server hit", dlLicReqText ?? "");
+const dlLicArrText = await callExpectThrow("download", { url: `${dlBase}/counted.mp4`, output: path.join(root, "outputs/mcp-download-lic-arr.mp4"), license: "all rights reserved", license_policy_file: dlPolicyDenyArr });
+checkOk(/LICENSE_DENIED/.test(dlLicArrText ?? "") && /deny list/.test(dlLicArrText ?? "") && dlHits.counted === 1, "license gate: 'all rights reserved' canonicalizes into the deny list", dlLicArrText ?? "");
+const dlLicFreeRes = await client.callTool({ name: "download", arguments: { url: `${dlBase}/counted.mp4`, output: path.join(root, "outputs/mcp-download-lic-free.mp4"), license: "CC-BY" } });
+const dlLicFree = JSON.parse(dlLicFreeRes.content[0].text);
+checkOk(dlLicFree.license?.label === "CC-BY" && dlLicFree.license?.policy_source === "default" && dlHits.counted === 2, "without a policy file the gate is off: CC-BY downloads and is only recorded", JSON.stringify(dlLicFree.license));
+const dlLicFreeProv = JSON.parse(await readFile(path.join(root, "outputs/mcp-download-lic-free.mp4.provenance.json"), "utf8"));
+checkOk(dlLicFreeProv.license?.label === "CC-BY" && dlLicFreeProv.license_policy?.source === "default", "provenance without a policy records CC-BY + policy source default", JSON.stringify(dlLicFreeProv.license_policy));
+// The gate runs before the cache: a cached URL under a denying
+// policy is refused, not served from disk.
+const dlCacheableBefore = dlHits.cacheable;
+const dlLicCacheText = await callExpectThrow("download", { url: `${dlBase}/cacheable.mp4`, output: path.join(root, "outputs/mcp-download-lic-cache.mp4"), cache: true, cache_dir: dlCacheDir, license: "CC-BY", license_policy_file: dlPolicyAllowCc0 });
+checkOk(/LICENSE_DENIED/.test(dlLicCacheText ?? "") && dlHits.cacheable === dlCacheableBefore && !existsSync(path.join(root, "outputs/mcp-download-lic-cache.mp4")), "license gate precedes the cache: a cached URL under a denying policy is refused (cacheable hit count unchanged)", dlLicCacheText ?? "");
+// A broken policy file fails the call, never fails open.
+const dlLicBadText = await callExpectThrow("download", { url: `${dlBase}/counted.mp4`, output: path.join(root, "outputs/mcp-download-lic-bad.mp4"), license_policy_file: dlPolicyBad });
+checkOk(/LICENSE_POLICY_ERROR/.test(dlLicBadText ?? "") && dlHits.counted === 2, "a malformed policy file fails with LICENSE_POLICY_ERROR before any fetch", dlLicBadText ?? "");
+// doctor reports the policy state (off here — the server child has
+// no MEDIAKIT_LICENSE_POLICY env).
+checkOk(dlDoctor.license_policy?.set === false && dlDoctor.license_policy?.require_license === false, "doctor reports license_policy set=false when no policy file is configured", JSON.stringify(dlDoctor.license_policy));
+// CLI: env policy + --license, and the env path in general.
+const dlCliLicDeny = await runCliExpectError(["download", `${dlBase}/counted.mp4`, "-o", path.join(root, "outputs/mcp-download-cli-lic-deny.mp4"), "--license", "CC-BY"], { MEDIAKIT_LICENSE_POLICY: dlPolicyAllowCc0 });
+checkOk(/LICENSE_DENIED/.test(dlCliLicDeny ?? "") && dlHits.counted === 2 && !existsSync(path.join(root, "outputs/mcp-download-cli-lic-deny.mp4")), "CLI: MEDIAKIT_LICENSE_POLICY env + --license CC-BY is refused before any fetch", dlCliLicDeny ?? "");
+const dlCliLicOk = await runCliJson(["download", `${dlBase}/counted.mp4`, "-o", path.join(root, "outputs/mcp-download-cli-lic-ok.mp4"), "--license", "CC0"], { MEDIAKIT_LICENSE_POLICY: dlPolicyAllowCc0 });
+checkOk(dlCliLicOk.license?.label === "CC0" && dlHits.counted === 3, "CLI: --license CC0 passes the env policy", JSON.stringify(dlCliLicOk.license));
+// Manifest: the download step takes license, and the previously
+// rejected cache:true now passes lint (lượt 90 fix — run() already
+// read it, the args list just didn't allow it).
+const dlManLicPath = path.join(root, "outputs/mcp-manifest-download-license.json");
+await writeFile(dlManLicPath, JSON.stringify({
+  version: 1, output: "mcp-manifest-download-license.mp4",
+  steps: [{ tool: "download", args: { url: `${dlBase}/counted.mp4`, license: "CC0", cache: true } }],
+}, null, 2));
+const dlManLicRes = await client.callTool({ name: "manifest", arguments: { manifest_path: dlManLicPath } });
+const dlManLic = JSON.parse(dlManLicRes.content[0].text);
+checkOk(dlManLic.steps_run === 1 && dlManLic.final?.duration_seconds === 10 && dlHits.counted === 4, "manifest download step accepts license + cache:true (previously rejected at lint) and fetches once", JSON.stringify({ steps_run: dlManLic.steps_run, hits: dlHits.counted }));
 downloadServer.closeAllConnections();
 downloadServer.close();
 
