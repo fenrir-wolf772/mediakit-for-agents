@@ -697,6 +697,15 @@ const COMMANDS = {
       ["--method", "grid (default, one steady tempo) or dp (DP tracker, follows real onsets when the tempo drifts)"],
     ],
   },
+  tempo_drift: {
+    usage: "mediakit tempo_drift <input> [--min-bpm 40] [--max-bpm 240]",
+    desc: "Measure the local tempo of a clip over time: sliding-window tempo estimation — the aubio pipeline (spectral-flux + autocorrelation/comb + 120 BPM prior + onset-recall tie-break) run on overlapping windows of the onset envelope, aggregated to a 1-second tempo_curve (the local-tempo idea of librosa's plp). Returns bpm (global), confidence, a reliable flag, tempo_curve, start_bpm / end_bpm, delta_bpm, max_deviation_bpm, direction (speeding_up / slowing_down / steady) and verdict (steady / drifting / variable / unreliable). Use it before snapping cuts to a beat grid: a drifting take needs beat_grid --method dp, not the rigid grid. A tone or speech reports verdict unreliable. Probe-only, writes no file. Files over 10 minutes or under 8s are refused.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--min-bpm", "Lowest tempo to consider in BPM (default 40)"],
+      ["--max-bpm", "Highest tempo to consider in BPM (default 240)"],
+    ],
+  },
   mux: {
     usage: "mediakit mux <video> <audio> -o <output> [--audio-offset <s>] [--shortest] [--dry-run]",
     desc: "Replace a video's audio track with an external audio file, stream-copying both (no re-encode). --audio-offset shifts the new audio (positive = audio later, negative = video later). --dry-run prints the ffmpeg command and writes no file.",
@@ -842,7 +851,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 67 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 68 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -1594,6 +1603,13 @@ async function main() {
           minBpm: numOpt(opts, "min_bpm") ?? 40,
           maxBpm: numOpt(opts, "max_bpm") ?? 240,
           method: opts.method ?? "grid",
+        });
+        break;
+      case "tempo_drift":
+        result = await core.detectTempoDrift({
+          input: needInput(),
+          minBpm: numOpt(opts, "min_bpm") ?? 40,
+          maxBpm: numOpt(opts, "max_bpm") ?? 240,
         });
         break;
       case "mux": {

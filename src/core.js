@@ -7870,6 +7870,9 @@ const TOOL_REQUIREMENTS = {
   // beat_grid is the same measurement as bpm with the full grid
   // expanded — same (lack of) ffmpeg capability.
   beat_grid: {},
+  // tempo_drift is the same family (decode + pure-Node tempogram) —
+  // no ffmpeg capability needed either.
+  tempo_drift: {},
   // chapters only needs silencedetect, and only in input mode — the
   // words-file mode is pure JSON and needs no ffmpeg capability.
   chapters: { filters: ["silencedetect"] },
@@ -9550,6 +9553,22 @@ export function trackBeatsDP(flux, fps, periodFrames, { tightness = 2 } = {}) {
   return { beats, beat_count: beats.length, intervals_seconds: intervals, tempo_drift_cv: cv };
 }
 
+// Decode a file to mono f32 PCM at 22050 Hz — the shared input for
+// the bpm family (bpm, beat_grid, tempo_drift). Extracted from
+// detectBpm (lượt 89) so the three tools decode identically.
+async function decodeMono22050(inPath) {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-bpm-"));
+  const rawPath = path.join(tmpDir, "audio.f32");
+  try {
+    await run(FFMPEG, ["-y", "-v", "error", "-i", inPath, "-vn", "-ac", "1", "-ar", String(BPM_SAMPLE_RATE), "-f", "f32le", rawPath]);
+    const buf = await readFile(rawPath);
+    const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+    return new Float32Array(ab);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 export async function detectBpm({ input, minBpm = 40, maxBpm = 240, fullGrid = false, method = "grid" }) {
   const inPath = await requireInput(input);
   const lo = num(minBpm, "min_bpm", { min: 20, max: 300 });
@@ -9568,17 +9587,7 @@ export async function detectBpm({ input, minBpm = 40, maxBpm = 240, fullGrid = f
   }
   const warnings = [];
   if (total < 8) warnings.push(`file is ${total}s — fewer than ~10 beats at slow tempos, treat the number as rough`);
-  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-bpm-"));
-  const rawPath = path.join(tmpDir, "audio.f32");
-  let samples;
-  try {
-    await run(FFMPEG, ["-y", "-v", "error", "-i", inPath, "-vn", "-ac", "1", "-ar", String(BPM_SAMPLE_RATE), "-f", "f32le", rawPath]);
-    const buf = await readFile(rawPath);
-    const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-    samples = new Float32Array(ab);
-  } finally {
-    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
-  }
+  const samples = await decodeMono22050(inPath);
   if (!samples.length) throw new MediaKitError("bpm: decoded audio is empty", "PROBE_FAILED");
   const { flux, rawFlux, fps } = spectralFluxOnset(samples, BPM_SAMPLE_RATE);
   // fullGrid (the beat_grid tool) expands the grid over the whole
@@ -9654,6 +9663,167 @@ export async function detectBpm({ input, minBpm = 40, maxBpm = 240, fullGrid = f
 // (trim --snap-beat) refuses to snap to it.
 export async function detectBeatGrid({ input, minBpm = 40, maxBpm = 240, method = "grid" }) {
   return detectBpm({ input, minBpm, maxBpm, fullGrid: true, method });
+}
+
+// ------------------------------------------------------------- tempo drift
+// Local tempo over time — the local-tempo idea of librosa's `plp`
+// (Grosche & Muller 2011): analyse the onset envelope in sliding
+// windows instead of once for the whole file, so a take that speeds
+// up shows up as a rising curve rather than one mean number. The
+// per-window estimator is the SAME aubio pipeline `bpm` uses
+// (spectral-flux + autocorrelation/comb + 120 BPM prior +
+// onset-recall tie-break, `estimateTempo` on each window slice) —
+// deliberately not a second estimator. The first attempt (lượt 89
+// run 1) read the per-frame tempo off the Fourier tempogram peak
+// (librosa plp steps 1-4) and FAILED on the kick+hat drum fixture:
+// it read 239.1 on every bin. The reason is structural, not a
+// threshold: the flux of a kick+off-beat-hat pattern is genuinely
+// periodic at 0.25s (240 BPM) — the kick and hat 2 Hz components
+// cancel (measured in one window: mag 120 BPM = 92.5 vs mag 240 BPM
+// = 4352.3), and even comb scoring (120: 2302 vs 240: 4346) cannot
+// recover the musical beat, because the tempogram looks at one
+// frequency at a time while the 120 information lives in the
+// alternating strong/weak onset pattern — which the autocorrelation
+// DOES see (a 0.5s lag aligns strong-with-strong) and the prior +
+// recall tie-break then resolves to 120. So the tempogram peak was
+// dropped and the windowed estimateTempo kept: it reads 120 flat on
+// the drum, 120 flat on a steady click, 90.0 on a steady 90 click,
+// and tracks drift 120->132 as 122.7 -> 129.2 (probe
+// /tmp/probe-windowed-tempo.mjs, synthetic trains).
+//
+// Calibration, measured on disk 2026-11-17: steady 120 reads 120.0
+// flat, steady 90 reads 90.0 flat, drift 120->132 reads 122.7 at
+// t=2 rising to 129.2 at t=9 (truth 122.5 / 129.5 at the bin
+// centres), drift 132->120 falls 129.5 -> 123.0. Per-window
+// confidence is a ratio, so a steady tone's float-noise flux can
+// score "reliable" on a window with bpm 171.9 — reliability is
+// therefore gated on ONSET ENERGY as well: a window counts only
+// when its mean raw flux is at least 2% of the file's max raw flux
+// (a steady tone's flux is numerical noise, ~1e-6 of a click
+// track's). A bin is reliable with >= 3 usable+reliable windows;
+// the window cannot centre on the first/last ~W/2 frames, so a 12s
+// take reports bins t=2..9 and the edge bins are unreliable by
+// construction. Hop is 4 flux frames, capped so a 10-minute file
+// runs ~2000 windows instead of ~6000.
+export function localTempoCurve(flux, rawFlux, fps, { minBpm = 40, maxBpm = 240 } = {}) {
+  const n = flux.length;
+  const W = Math.min(384, Math.max(172, Math.round(n * 0.4)));
+  const HOP = Math.max(4, Math.ceil((n - W) / 2000));
+  if (n < W + 8) return { window_frames: W, frames: [], bins: [], reason: "too few flux frames for a tempogram window" };
+  const maxRawFlux = Math.max(...rawFlux);
+  const frames = [];
+  const half = Math.floor(W / 2);
+  for (let c = half; c + half < n; c += HOP) {
+    const start = c - half;
+    let rawMean = 0;
+    for (let i = 0; i < W; i++) rawMean += rawFlux[start + i];
+    rawMean /= W;
+    const est = estimateTempo(flux.slice(start, start + W), fps, rawFlux.slice(start, start + W), minBpm, maxBpm, 1);
+    frames.push({
+      t_seconds: +(c / fps).toFixed(3),
+      bpm: est.bpm,
+      confidence: est.confidence,
+      reliable: est.reliable,
+      usable: maxRawFlux > 0 && rawMean >= 0.02 * maxRawFlux,
+    });
+  }
+  const bins = [];
+  for (let s = 0; s < Math.floor(n / fps); s++) {
+    const inBin = frames.filter((f) => f.t_seconds >= s && f.t_seconds < s + 1 && f.usable && f.reliable);
+    if (inBin.length >= 3) {
+      const sorted = inBin.map((f) => f.bpm).sort((a, b) => a - b);
+      bins.push({
+        t_seconds: s,
+        bpm: +sorted[Math.floor(sorted.length / 2)].toFixed(1),
+        confidence: +(inBin.reduce((a, f) => a + f.confidence, 0) / inBin.length).toFixed(3),
+        reliable: true,
+        frames: inBin.length,
+      });
+    } else {
+      bins.push({ t_seconds: s, bpm: null, confidence: 0, reliable: false, frames: inBin.length });
+    }
+  }
+  return { window_frames: W, frames, bins };
+}
+
+const TEMPO_DRIFT_MIN_DURATION_SECONDS = 8;
+const TEMPO_DRIFT_THRESHOLD_BPM = 3;
+
+// The tempo_drift tool: local tempo curve + drift verdict for a clip
+// (probe-only, writes no file). Same decode + limits as bpm, except
+// the minimum is 8s — below that the tempogram window (~4-9s) leaves
+// almost no curve to report. Returns the 1s tempo_curve, start/end
+// bpm (median of the first/last 20% of reliable bins), delta,
+// max_deviation_bpm (worst bin vs the curve median), direction and
+// verdict: steady (|delta| < 3 and max deviation < 3), drifting
+// (|delta| >= 3), variable (a wobble that is neither), unreliable
+// (global bpm unreliable or < half the bins reliable — speech, tone,
+// drone). An unreliable curve is still returned with its bins, never
+// a confident wrong verdict.
+export async function detectTempoDrift({ input, minBpm = 40, maxBpm = 240 }) {
+  const inPath = await requireInput(input);
+  const lo = num(minBpm, "min_bpm", { min: 20, max: 300 });
+  const hi = num(maxBpm, "max_bpm", { min: 20, max: 300 });
+  if (lo >= hi) throw new MediaKitError(`tempo_drift: min_bpm (${lo}) must be below max_bpm (${hi})`, "INVALID_ARG");
+  const meta = await probe(inPath);
+  if (!meta.audio) throw new MediaKitError("tempo_drift needs an audio stream — this file has none", "INVALID_ARG");
+  const total = meta.duration_seconds;
+  if (total === null) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
+  if (total > BPM_MAX_DURATION_SECONDS) {
+    throw new MediaKitError(`tempo_drift refuses files over ${BPM_MAX_DURATION_SECONDS}s (the raw PCM decode would exceed memory) — trim a section first`, "INVALID_ARG");
+  }
+  if (total < TEMPO_DRIFT_MIN_DURATION_SECONDS) {
+    throw new MediaKitError(`tempo_drift needs at least ${TEMPO_DRIFT_MIN_DURATION_SECONDS}s of audio (the tempogram window alone is ~4-9s) — use bpm for a single number instead`, "INVALID_ARG");
+  }
+  const warnings = [];
+  const samples = await decodeMono22050(inPath);
+  if (!samples.length) throw new MediaKitError("tempo_drift: decoded audio is empty", "PROBE_FAILED");
+  const { flux, rawFlux, fps } = spectralFluxOnset(samples, BPM_SAMPLE_RATE);
+  const est = estimateTempo(flux, fps, rawFlux, lo, hi, 16);
+  if (est.bpm === null) warnings.push(est.reason ?? "no periodic onset found — the curve below is a guess");
+  if (!est.reliable) warnings.push(`low confidence (${est.confidence}) — the audio may have no steady beat (speech, ambience, a drone); do not trust this curve`);
+  const curve = localTempoCurve(flux, rawFlux, fps, { minBpm: lo, maxBpm: hi });
+  const reliableBins = curve.bins.filter((b) => b.reliable);
+  const median = (arr) => {
+    const s = [...arr].sort((a, b) => a - b);
+    return s[Math.floor(s.length / 2)];
+  };
+  let startBpm = null, endBpm = null, deltaBpm = null, maxDeviationBpm = null, direction = "steady", verdict = "unreliable";
+  if (reliableBins.length) {
+    const take = Math.max(1, Math.floor(reliableBins.length * 0.2));
+    startBpm = +median(reliableBins.slice(0, take).map((b) => b.bpm)).toFixed(1);
+    endBpm = +median(reliableBins.slice(-take).map((b) => b.bpm)).toFixed(1);
+    deltaBpm = +(endBpm - startBpm).toFixed(1);
+    const med = median(reliableBins.map((b) => b.bpm));
+    maxDeviationBpm = +Math.max(...reliableBins.map((b) => Math.abs(b.bpm - med))).toFixed(1);
+    direction = deltaBpm >= TEMPO_DRIFT_THRESHOLD_BPM ? "speeding_up" : deltaBpm <= -TEMPO_DRIFT_THRESHOLD_BPM ? "slowing_down" : "steady";
+    const enoughBins = reliableBins.length >= Math.ceil(curve.bins.length / 2);
+    verdict = !est.reliable || !enoughBins ? "unreliable"
+      : Math.abs(deltaBpm) >= TEMPO_DRIFT_THRESHOLD_BPM ? "drifting"
+      : maxDeviationBpm < TEMPO_DRIFT_THRESHOLD_BPM ? "steady" : "variable";
+    if (verdict === "unreliable") warnings.push(`only ${reliableBins.length}/${curve.bins.length} curve bins are reliable — the tempo verdict is unreliable`);
+  } else {
+    warnings.push("no reliable curve bins — the audio has no measurable local tempo");
+  }
+  return {
+    operation: "tempo_drift",
+    input: inPath,
+    duration_seconds: total,
+    sample_rate_hz: BPM_SAMPLE_RATE,
+    bpm: est.bpm,
+    confidence: est.confidence,
+    reliable: verdict !== "unreliable",
+    tempo_curve: curve.bins,
+    window_frames: curve.window_frames,
+    start_bpm: startBpm,
+    end_bpm: endBpm,
+    delta_bpm: deltaBpm,
+    max_deviation_bpm: maxDeviationBpm,
+    direction,
+    verdict,
+    method: "Sliding-window tempo estimation — the aubio pipeline (spectral-flux + autocorrelation/comb + 120 BPM prior + onset-recall tie-break) run on overlapping windows of the onset envelope, aggregated to 1s median bins (the local-tempo idea of librosa's plp)",
+    warnings,
+  };
 }
 
 // ---------------------------------------------------------------- motion
@@ -10137,6 +10307,14 @@ export const BATCH_OPERATIONS = {
     probeOnly: true,
     args: ["min_bpm", "max_bpm", "method"],
     run: (input, output, a) => detectBeatGrid({ input, minBpm: a.min_bpm ?? 40, maxBpm: a.max_bpm ?? 240, method: a.method ?? "grid" }),
+  },
+  // tempo_drift in batch/manifest is probe-only like bpm/beat_grid:
+  // the local tempo curve comes back in the row's `result` (batch)
+  // or the step's result (manifest) and the cache stores that result.
+  tempo_drift: {
+    probeOnly: true,
+    args: ["min_bpm", "max_bpm"],
+    run: (input, output, a) => detectTempoDrift({ input, minBpm: a.min_bpm ?? 40, maxBpm: a.max_bpm ?? 240 }),
   },
   // slideshow in batch is a SET operation, not a per-file one: the
   // whole matched set becomes ONE slideshow (batch() branches on it

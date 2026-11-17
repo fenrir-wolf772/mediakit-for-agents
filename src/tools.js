@@ -1271,9 +1271,9 @@ export const TOOL_DEFS = [
 
   {
     name: "batch",
-    description: "Apply ONE operation to many files matching a glob under a folder, in one call: loudness, resize, reframe, compress, convert, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, trim, silence, chroma_key, cut_words, remove_retakes, slideshow, hook, bpm or beat_grid — the same args for every file. Outputs are named <stem>-<operation>.<ext> under the output directory, mirroring the input tree. Returns one row per file (input order) with status ok/error/cached/skipped plus counts, so a failure in one file never hides the rest. Unchanged files are skipped via a content-hash cache (.mediakit-batch-cache.json in the output dir, verified against the output's size + sha256); jobs runs up to 8 files at once under one shared timeout_seconds budget; dry_run lists the planned outputs and writes nothing. cut_words and remove_retakes find each clip's words file by convention (<words_dir>/<stem>.words.json, default the input's own folder) — a clip with no words file fails its own row only. slideshow is the exception: a SET operation — the whole matched set of images (2-32) becomes ONE slideshow video (output_name, default slideshow.mp4) instead of one output per file, and the per-file cache does not apply. hook, bpm and beat_grid are the probe-only exceptions: they write no file (output is null, output_suffix is null) — the measurement comes back in each row's result, and the cache stores that result instead of a file.",
+    description: "Apply ONE operation to many files matching a glob under a folder, in one call: loudness, resize, reframe, compress, convert, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, trim, silence, chroma_key, cut_words, remove_retakes, slideshow, hook, bpm, beat_grid or tempo_drift — the same args for every file. Outputs are named <stem>-<operation>.<ext> under the output directory, mirroring the input tree. Returns one row per file (input order) with status ok/error/cached/skipped plus counts, so a failure in one file never hides the rest. Unchanged files are skipped via a content-hash cache (.mediakit-batch-cache.json in the output dir, verified against the output's size + sha256); jobs runs up to 8 files at once under one shared timeout_seconds budget; dry_run lists the planned outputs and writes nothing. cut_words and remove_retakes find each clip's words file by convention (<words_dir>/<stem>.words.json, default the input's own folder) — a clip with no words file fails its own row only. slideshow is the exception: a SET operation — the whole matched set of images (2-32) becomes ONE slideshow video (output_name, default slideshow.mp4) instead of one output per file, and the per-file cache does not apply. hook, bpm, beat_grid and tempo_drift are the probe-only exceptions: they write no file (output is null, output_suffix is null) — the measurement comes back in each row's result, and the cache stores that result instead of a file.",
     schema: {
-    operation: z.enum(["loudness", "resize", "reframe", "compress", "convert", "extract_audio", "reverse", "rotate", "boomerang", "make_loopable", "freeze", "grade", "fit", "trim", "silence", "chroma_key", "cut_words", "remove_retakes", "slideshow", "hook", "bpm", "beat_grid"]).describe("The operation to apply to every matched file"),
+    operation: z.enum(["loudness", "resize", "reframe", "compress", "convert", "extract_audio", "reverse", "rotate", "boomerang", "make_loopable", "freeze", "grade", "fit", "trim", "silence", "chroma_key", "cut_words", "remove_retakes", "slideshow", "hook", "bpm", "beat_grid", "tempo_drift"]).describe("The operation to apply to every matched file"),
     pattern: z.string().min(1).describe("Glob matched against paths under input_dir: **/*.mp4 for every mp4 at any depth, sub/*.mp4 for one folder, or a bare *.mp4 (matches the basename at any depth)"),
     input_dir: pathSchema.describe("Folder to search under (recursive; hidden dirs, .git, node_modules and .next are skipped)"),
     output_dir: pathSchema.describe("Directory to write outputs + batch-manifest.json into (created if needed; files under it are never treated as inputs)"),
@@ -1305,7 +1305,7 @@ export const TOOL_DEFS = [
 
   {
     name: "manifest",
-    description: "Run a whole edit pipeline from ONE declarative JSON manifest file: {version: 1, input, output, steps: [{tool, args}], qa?} — paths in the manifest are relative to the manifest file. Steps run in order, each feeding the next (slideshow as step 1 only — it builds a video from images in args, so the manifest input should be the first slide image; download as step 1 only — it fetches from a URL in args, and when it is step 1 the manifest input may be omitted entirely; then trim, resize, reframe, compress, convert, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, silence, denoise, interpolate, burn_captions, overlay, chroma_key, cut_words, remove_retakes; hook, bpm and beat_grid are the probe-only steps — they analyze the chain file at that point and pass it through unchanged, so their results record WHY the next trim cuts where it does); the whole plan is validated before anything renders, so a typo fails in seconds. Each step is cached by content hash (input bytes + tool + args + sidecar-file bytes, verified against the cached output's size + sha256; a probe-only step stores only its result, there is no file to verify) — re-running an unchanged manifest re-encodes nothing, and editing step 3 only re-runs from step 3. Set qa to a platform (or 'any') to run qa_report on the final file. dry_run prints the plan and writes nothing — the approve-before-render gate. A step failure aborts the run and keeps the intermediates for inspection.",
+    description: "Run a whole edit pipeline from ONE declarative JSON manifest file: {version: 1, input, output, steps: [{tool, args}], qa?} — paths in the manifest are relative to the manifest file. Steps run in order, each feeding the next (slideshow as step 1 only — it builds a video from images in args, so the manifest input should be the first slide image; download as step 1 only — it fetches from a URL in args, and when it is step 1 the manifest input may be omitted entirely; then trim, resize, reframe, compress, convert, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, silence, denoise, interpolate, burn_captions, overlay, chroma_key, cut_words, remove_retakes; hook, bpm, beat_grid and tempo_drift are the probe-only steps — they analyze the chain file at that point and pass it through unchanged, so their results record WHY the next trim cuts where it does); the whole plan is validated before anything renders, so a typo fails in seconds. Each step is cached by content hash (input bytes + tool + args + sidecar-file bytes, verified against the cached output's size + sha256; a probe-only step stores only its result, there is no file to verify) — re-running an unchanged manifest re-encodes nothing, and editing step 3 only re-runs from step 3. Set qa to a platform (or 'any') to run qa_report on the final file. dry_run prints the plan and writes nothing — the approve-before-render gate. A step failure aborts the run and keeps the intermediates for inspection.",
     schema: {
     manifest_path: pathSchema.describe("Path to the manifest JSON file"),
     output: pathSchema.optional().describe("Output file path (overrides the manifest's output; the extension is adjusted to the step chain's final format when needed)"),
@@ -1565,6 +1565,36 @@ export const TOOL_DEFS = [
     minBpm: a.min_bpm,
     maxBpm: a.max_bpm,
     method: a.method ?? "grid",
+  })),
+  },
+
+
+  // Local tempo over time (probe-only, writes no file): sliding
+  // windows of the spectral-flux onset envelope, each measured by the
+  // same aubio pipeline `bpm` uses (the local-tempo idea of librosa's
+  // `plp`; a tempogram peak was tried first and read 239.1 on the
+  // kick+hat drum — see localTempoCurve), aggregated to a 1-second
+  // tempo_curve. Answers the director's question "does this take
+  // speed up or slow down, and where" — bpm gives one number for the
+  // whole file, this gives the curve. Returns start_bpm / end_bpm
+  // (median of the first/last 20% of reliable bins), delta_bpm,
+  // max_deviation_bpm, direction (speeding_up / slowing_down /
+  // steady) and verdict (steady / drifting / variable / unreliable).
+  // A steady tone or speech reports verdict unreliable instead of a
+  // confident wrong curve. Files over 10 minutes or under 8s are
+  // refused (the analysis window alone is ~4-9s).
+  {
+    name: "tempo_drift",
+    description: "Measure the local tempo of a clip over time (probe-only, writes no file): sliding-window tempo estimation — the aubio pipeline (spectral-flux + autocorrelation/comb + 120 BPM prior + onset-recall tie-break) run on overlapping windows of the onset envelope, aggregated to a 1-second tempo_curve (the local-tempo idea of librosa's plp). Returns bpm (global), confidence, a reliable flag, tempo_curve (1s bins with bpm + confidence + reliable), start_bpm / end_bpm (median of the first/last 20% of reliable bins), delta_bpm, max_deviation_bpm, direction (speeding_up / slowing_down / steady) and verdict (steady / drifting / variable / unreliable). Use it before snapping cuts to a beat grid: a drifting take (120->132 over 12s reads delta +6.5) needs beat_grid --method dp, not the rigid grid. A steady tone or speech reports verdict unreliable. Files over 10 minutes or under 8s are refused.",
+    schema: {
+    input: pathSchema,
+    min_bpm: z.number().min(20).max(300).default(40).describe("Lowest tempo to consider in BPM (default 40)"),
+    max_bpm: z.number().min(20).max(300).default(240).describe("Highest tempo to consider in BPM (default 240)"),
+  },
+    handler: async (a) => safe(() => core.detectTempoDrift({
+    input: a.input,
+    minBpm: a.min_bpm,
+    maxBpm: a.max_bpm,
   })),
   },
 

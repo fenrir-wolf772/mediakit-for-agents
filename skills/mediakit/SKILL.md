@@ -1429,6 +1429,32 @@ too. `bpm` and `beat_grid` are probe-only steps in `batch` and
 it through unchanged, so a manifest can record the grid before the
 `trim --snap-beat` step that cuts on it.
 
+### 58. Check whether the tempo moves before trusting the grid — `tempo_drift`
+`bpm` gives one number for the whole file and `beat_grid` assumes
+it holds; a live take that speeds up breaks both. `tempo_drift
+<clip>` measures the LOCAL tempo over time (probe-only, writes no
+file): sliding-window tempo estimation — the aubio pipeline
+(spectral-flux + autocorrelation/comb + 120 BPM prior +
+onset-recall tie-break) run on overlapping windows of the onset
+envelope, aggregated to a 1-second `tempo_curve` (the local-tempo
+idea of librosa's `plp`).
+It returns `start_bpm` / `end_bpm` (median of the first/last 20%
+of reliable bins), `delta_bpm`, `max_deviation_bpm`, `direction`
+(`speeding_up` / `slowing_down` / `steady`) and `verdict`
+(`steady` / `drifting` / `variable` / `unreliable`). A 120→132
+take over 12s reads 122.7 → 129.2, delta +6.5, verdict `drifting`
+(the window cannot centre on the first/last ~2.4s, so the curve
+covers t=2..9 and start/end are the outer bins, not 120/132
+themselves); a steady 120 reads 120 → 120, verdict `steady`. When
+the verdict is `drifting`, snap cuts to the DP grid (`beat_grid
+--method dp` + `trim --snap-beat-method dp`), not the rigid one.
+A steady tone or speech reports `verdict: unreliable` — the curve
+is returned with its bins, but do not trust it. Files over 10
+minutes or under 8s are refused (the analysis window alone is
+~4–9s); use `bpm` for a single number on a short clip. Like the
+other tempo tools it is a probe-only step in `batch` and
+`manifest`.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

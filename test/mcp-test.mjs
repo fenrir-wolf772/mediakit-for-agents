@@ -13,7 +13,7 @@ import { createServer } from "node:http";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { compareDeterminismRuns, estimateTempo, fixForMissing, groupWords, parseFfmpegProgress, runFfmpegWithProgress, spectralFluxOnset, trackBeatsDP, SHORTS_STYLE_IDS } from "../src/core.js";
+import { compareDeterminismRuns, estimateTempo, fixForMissing, groupWords, localTempoCurve, parseFfmpegProgress, runFfmpegWithProgress, spectralFluxOnset, trackBeatsDP, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 
 const execFileAsync = promisify(execFile);
@@ -181,10 +181,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook", "bpm", "beat_grid"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 67 tools present");
-checkOk(missing.length === 0, "tools/list has all 67 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 68 tools present");
+checkOk(missing.length === 0, "tools/list has all 68 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -2035,6 +2035,81 @@ checkOk(hookManifestDryJson.dry_run === true && hookManifestDryJson.steps[0].out
   const drumMinInterval = Math.min(...drumDp.intervals_seconds);
   checkOk(drumDp.beat_count === 24 && drumMinInterval >= 0.45 && drumDp.tempo_drift_cv <= 0.05, "dp unit: kick+hat drum pattern does not subdivide (24 beats, min interval >=0.45s, cv <=0.05)", JSON.stringify({ count: drumDp.beat_count, minInterval: drumMinInterval, cv: drumDp.tempo_drift_cv }));
 }
+// tempo_drift unit (lượt 89): the same aubio pipeline `bpm` uses,
+  // run on sliding windows of the flux and aggregated to 1s bins.
+  // (A Fourier tempogram peak was tried first and read 239.1 on the
+  // drum — the kick+hat 2 Hz components cancel, so the peak lands on
+  // the 240 subdivision; the windowed autocorrelation sees the
+  // alternating strong/weak pattern and reads the musical 120.) Same synthetic trains as the bpm/dp
+// units (12s, 22050 Hz). A steady 120 train must read 120 flat; a
+// 120->132 drift must rise ~123 at t=2 to ~129 at t=9 (the window
+// cannot centre on the first/last ~2.4s, so bins 0, 1, 10 are
+// unreliable by construction); a kick+hat drum must stay on the
+// musical 120, not the 240 subdivision; a steady 440 Hz tone has no
+// onset energy, so every window is unusable and every bin unreliable
+// — per-window confidence is a ratio, so a tone window can score
+// "reliable" with a garbage bpm (171.9 in the probe), which is why
+// the gate is onset energy, not confidence.
+{
+  const sr = 22050, seconds = 12;
+  const click = (bpmFn) => {
+    const s = new Float32Array(seconds * sr);
+    for (let t = 0; t < seconds;) {
+      const start = Math.floor(t * sr);
+      for (let i = 0; i < Math.floor(0.03 * sr); i++) {
+        const u = i / sr;
+        s[start + i] += Math.sin(2 * Math.PI * 1000 * u) * Math.exp(-u * 180) * 0.9;
+      }
+      t += 60 / bpmFn(t);
+    }
+    return s;
+  };
+  const steady = click(() => 120);
+  const sFlux = spectralFluxOnset(steady, sr);
+  const sCurve = localTempoCurve(sFlux.flux, sFlux.rawFlux, sFlux.fps);
+  const sBins = sCurve.bins.filter((b) => b.reliable);
+  console.log("tempo_drift unit (steady 120):", JSON.stringify({ window: sCurve.window_frames, bins: sBins.map((b) => b.bpm) }));
+  checkOk(sBins.length === 8 && sBins.every((b) => near(b.bpm, 120, 0.5)), "tempo_drift unit: steady 120 reads 120 +/-0.5 on all 8 reliable bins (t=2..9)", JSON.stringify(sBins.map((b) => b.bpm)));
+  const drift = click((t) => 120 + t);
+  const dFlux = spectralFluxOnset(drift, sr);
+  const dCurve = localTempoCurve(dFlux.flux, dFlux.rawFlux, dFlux.fps);
+  const dBins = dCurve.bins.filter((b) => b.reliable);
+  const dBpms = dBins.map((b) => b.bpm);
+  console.log("tempo_drift unit (drift 120->132):", JSON.stringify({ bins: dBpms }));
+  checkOk(dBins.length === 8 && near(dBpms[0], 122.7, 1) && near(dBpms[dBpms.length - 1], 129.2, 1) && dBpms[dBpms.length - 1] - dBpms[0] >= 5 && dBpms.every((v, i) => i === 0 || v >= dBpms[i - 1] - 0.2), "tempo_drift unit: 120->132 take rises 122.7 -> 129.2 across the curve (delta >=5, never falls)", JSON.stringify(dBpms));
+  const drum = (() => {
+    const s = new Float32Array(seconds * sr);
+    let seed = 12345;
+    const rand = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    for (let b = 0; ; b++) {
+      const t0 = (b * 60) / 120;
+      if (t0 >= seconds) break;
+      const start = Math.floor(t0 * sr);
+      for (let i = 0; i < Math.floor(0.15 * sr); i++) {
+        const u = i / sr;
+        s[start + i] += Math.sin(2 * Math.PI * 60 * u) * Math.exp(-u * 25) * 0.9;
+      }
+      const hatAt = t0 + 0.25;
+      if (hatAt < seconds) {
+        const hs = Math.floor(hatAt * sr);
+        for (let i = 0; i < Math.floor(0.04 * sr); i++) {
+          const u = i / sr;
+          s[hs + i] += (rand() * 2 - 1) * Math.exp(-u * 120) * 0.25;
+        }
+      }
+    }
+    return s;
+  })();
+  const drumFlux = spectralFluxOnset(drum, sr);
+  const drumCurve = localTempoCurve(drumFlux.flux, drumFlux.rawFlux, drumFlux.fps);
+  const drumBins = drumCurve.bins.filter((b) => b.reliable);
+  checkOk(drumBins.length >= 6 && drumBins.every((b) => near(b.bpm, 120, 1)), "tempo_drift unit: kick+hat drum stays on the musical 120 (not 240) on every reliable bin", JSON.stringify(drumBins.map((b) => b.bpm)));
+  const tone = new Float32Array(seconds * sr);
+  for (let i = 0; i < tone.length; i++) tone[i] = Math.sin(2 * Math.PI * 440 * i / sr) * 0.5;
+  const toneFlux = spectralFluxOnset(tone, sr);
+  const toneCurve = localTempoCurve(toneFlux.flux, toneFlux.rawFlux, toneFlux.fps);
+  checkOk(toneCurve.bins.every((b) => !b.reliable), "tempo_drift unit: steady tone has no usable frames — every bin unreliable (onset-energy gate, not per-window confidence)", JSON.stringify(toneCurve.bins.map((b) => b.frames)));
+}
 async function callBpm(input, extra = {}) {
   const res = await client.callTool({ name: "bpm", arguments: { input, ...extra } });
   return JSON.parse(res.content[0].text);
@@ -2250,6 +2325,62 @@ const beatDpManifestCacheRes = await client.callTool({
 });
 const beatDpManifestCacheJson = JSON.parse(beatDpManifestCacheRes.content[0].text);
 checkOk(beatDpManifestCacheJson.cache_hits === 2 && beatDpManifestCacheJson.steps.every((s) => s.status === "cached") && beatDpManifestCacheJson.steps[0].result.grid_method === "dp", "manifest beat_grid dp re-run serves both steps from cache", JSON.stringify(beatDpManifestCacheJson.steps.map((s) => s.status)));
+
+// tempo_drift (lượt 89): the local tempo curve — windowed
+// estimateTempo, 1s bins. Numbers are the ones measured on disk
+// (probe + CLI): the 120->132 take reads start 122.7 / end 129.2 /
+// delta +6.5 (the window cannot centre on the first/last ~2.4s, so
+// the curve covers t=2..9 and start/end are the medians of the
+// outer bins, not 120/132 themselves); the 132->120 take mirrors
+// it at 129.5 -> 123.0 / delta -6.5.
+async function callTempoDrift(input, extra = {}) {
+  const res = await client.callTool({ name: "tempo_drift", arguments: { input, ...extra } });
+  return JSON.parse(res.content[0].text);
+}
+const driftUp = await callTempoDrift(path.join(root, "test/bpm-drift-120-132.wav"));
+console.log("tempo_drift 120->132:", JSON.stringify({ verdict: driftUp.verdict, dir: driftUp.direction, start: driftUp.start_bpm, end: driftUp.end_bpm, delta: driftUp.delta_bpm, curve: driftUp.tempo_curve.filter((b) => b.reliable).map((b) => b.bpm) }));
+checkOk(driftUp.operation === "tempo_drift" && driftUp.verdict === "drifting" && driftUp.direction === "speeding_up" && driftUp.reliable === true && near(driftUp.start_bpm, 122.7, 1) && near(driftUp.end_bpm, 129.2, 1) && near(driftUp.delta_bpm, 6.5, 0.5) && driftUp.tempo_curve.filter((b) => b.reliable).length === 8 && near(driftUp.bpm, 125.9, 1), "tempo_drift reads the 120->132 take as drifting / speeding_up (122.7 -> 129.2, delta +6.5, 8 reliable bins)", JSON.stringify({ start: driftUp.start_bpm, end: driftUp.end_bpm, delta: driftUp.delta_bpm }));
+const driftDown = await callTempoDrift(path.join(root, "test/bpm-drift-132-120.wav"));
+checkOk(driftDown.verdict === "drifting" && driftDown.direction === "slowing_down" && near(driftDown.start_bpm, 129.5, 1) && near(driftDown.end_bpm, 123, 1) && near(driftDown.delta_bpm, -6.5, 0.5), "tempo_drift reads the 132->120 take as drifting / slowing_down (129.5 -> 123.0, delta -6.5)", JSON.stringify({ start: driftDown.start_bpm, end: driftDown.end_bpm, delta: driftDown.delta_bpm }));
+const driftSteady = await callTempoDrift(path.join(root, "test/bpm-click-120.wav"));
+checkOk(driftSteady.verdict === "steady" && driftSteady.direction === "steady" && near(driftSteady.start_bpm, 120, 0.5) && near(driftSteady.end_bpm, 120, 0.5) && Math.abs(driftSteady.delta_bpm) < 0.5 && driftSteady.tempo_curve.filter((b) => b.reliable).every((b) => near(b.bpm, 120, 0.5)), "tempo_drift reads the steady 120 track as steady (120 -> 120, delta 0)", JSON.stringify({ start: driftSteady.start_bpm, end: driftSteady.end_bpm, delta: driftSteady.delta_bpm }));
+const drift90 = await callTempoDrift(path.join(root, "test/bpm-click-90.wav"));
+checkOk(drift90.verdict === "steady" && near(drift90.start_bpm, 90, 0.5) && near(drift90.end_bpm, 90, 0.5), "tempo_drift reads the steady 90 track as steady (90 -> 90)", JSON.stringify({ start: drift90.start_bpm, end: drift90.end_bpm }));
+const driftTone = await callTempoDrift(path.join(root, "test/mix-music.mp3"));
+checkOk(driftTone.verdict === "unreliable" && driftTone.reliable === false && driftTone.tempo_curve.every((b) => !b.reliable) && driftTone.warnings.some((w) => /low confidence/.test(w)), "tempo_drift on a steady tone reports verdict unreliable (no reliable bins) instead of a confident curve", JSON.stringify({ verdict: driftTone.verdict, warnings: driftTone.warnings }));
+const driftVideoOnly = await callExpectThrow("tempo_drift", { input: path.join(root, "test/content-video-only.mp4") });
+checkOk(/needs an audio stream/.test(driftVideoOnly), "tempo_drift refuses video-only input", driftVideoOnly.slice(0, 120));
+const driftShort = await callExpectThrow("tempo_drift", { input: path.join(root, "test/mix-music-short.mp3") });
+checkOk(/at least 8s/.test(driftShort), "tempo_drift refuses files under 8s (analysis window needs the length)", driftShort.slice(0, 140));
+const driftBadRange = await callExpectThrow("tempo_drift", { input: path.join(root, "test/bpm-click-120.wav"), min_bpm: 200, max_bpm: 100 });
+checkOk(/must be below/.test(driftBadRange), "tempo_drift refuses min_bpm above max_bpm", driftBadRange.slice(0, 120));
+// tempo_drift in batch + manifest (probe-only like bpm/beat_grid):
+// the curve comes back in the row / step result, no file written.
+const driftBatchRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "tempo_drift", pattern: "bpm-drift-120-132.wav", input_dir: path.join(root, "outputs/mcp-batch-beat-in"), output_dir: path.join(root, "outputs/mcp-batch-beat-out"), args: {}, jobs: 1 },
+});
+const driftBatchJson = JSON.parse(driftBatchRes.content[0].text);
+checkOk(driftBatchJson.succeeded === 1 && driftBatchJson.results[0].output === null && driftBatchJson.results[0].result?.verdict === "drifting" && near(driftBatchJson.results[0].result?.delta_bpm, 6.5, 0.5), "batch tempo_drift returns the drifting verdict + delta in the row result (no file)", JSON.stringify({ verdict: driftBatchJson.results[0].result?.verdict, delta: driftBatchJson.results[0].result?.delta_bpm }));
+await rm(path.join(root, "outputs/mcp-manifest-tempodrift.mp4"), { force: true });
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const driftManifestRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-tempodrift.json") },
+});
+const driftManifestJson = JSON.parse(driftManifestRes.content[0].text);
+console.log("manifest tempo_drift:", JSON.stringify(driftManifestJson.steps.map((s) => ({ tool: s.tool, status: s.status, verdict: s.result?.verdict ?? s.result?.beat_method, delta: s.result?.delta_bpm }))), "| final", driftManifestJson.final?.duration_seconds);
+const tempoManifestGrid = await callBeatGrid(path.join(root, "test/beat-drift-trim.mp4"));
+const driftManifestStart = [...tempoManifestGrid.beats].reverse().find((t) => t <= 1.13) ?? 0;
+const driftManifestEnd = tempoManifestGrid.beats.find((t) => t >= 3.27) ?? 12;
+checkOk(driftManifestJson.steps_run === 2 && driftManifestJson.steps.every((s) => s.status === "ok") && driftManifestJson.steps[0].tool === "tempo_drift" && driftManifestJson.steps[0].result.verdict === "drifting" && driftManifestJson.steps[0].result.direction === "speeding_up" && near(driftManifestJson.final.duration_seconds, driftManifestEnd - driftManifestStart, 0.1), "manifest tempo_drift step records the drifting verdict, then trim snap_to_beat cuts on the rigid grid", JSON.stringify({ verdict: driftManifestJson.steps[0].result?.verdict, final: driftManifestJson.final?.duration_seconds }));
+checkOk(driftManifestJson.steps[0].output === driftManifestJson.input && driftManifestJson.steps[1].output !== driftManifestJson.steps[0].output, "manifest tempo_drift step passes the chain file through (its output is the input it analyzed)", driftManifestJson.steps[0].output);
+const driftManifestCacheRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-tempodrift.json") },
+});
+const driftManifestCacheJson = JSON.parse(driftManifestCacheRes.content[0].text);
+checkOk(driftManifestCacheJson.cache_hits === 2 && driftManifestCacheJson.steps.every((s) => s.status === "cached") && driftManifestCacheJson.steps[0].result.verdict === "drifting", "manifest tempo_drift re-run serves both steps from cache", JSON.stringify(driftManifestCacheJson.steps.map((s) => s.status)));
 
 // motion --adaptive: two-pass calibration to the clip's own quiet
 // quarter (floor = p25 of the curve, threshold = min(max(fixed,
@@ -4881,7 +5012,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 67 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 67 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 68 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 68 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -6621,7 +6752,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 67 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 68 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -6681,11 +6812,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 67, "GET /mcp reports name/version/transport and 67 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 68, "GET /mcp reports name/version/transport and 68 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 67 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 67 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 68 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 68 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -6709,7 +6840,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 67, "JSON-RPC tools/list returns the same 67 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 68, "JSON-RPC tools/list returns the same 68 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

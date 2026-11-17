@@ -1,0 +1,1 @@
+{"input":"beat-drift-trim.mp4","output":"../outputs/mcp-manifest-tempodrift.mp4","steps":[{"args":{},"tool":"tempo_drift"},{"args":{"end":3.27,"snap_to_beat":true,"start":1.13},"tool":"trim"}],"version":1}

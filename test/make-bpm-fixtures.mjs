@@ -97,3 +97,4 @@ writeWav("bpm-click-150.wav", clickTrack(150));
 writeWav("bpm-click-180.wav", clickTrack(180));
 writeWav("bpm-drum-120.wav", drumTrack(120));
 writeWav("bpm-drift-120-132.wav", driftClickTrack(120, 132));
+writeWav("bpm-drift-132-120.wav", driftClickTrack(132, 120));
