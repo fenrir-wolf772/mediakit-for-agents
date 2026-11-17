@@ -1390,6 +1390,17 @@ checkOk(typeof fixEnc === "string" && fixEnc.includes("libx264|aac"), "doctor fi
 const fixMixed = fixForMissing(["filter:crop", "decoder:librsvg"]);
 checkOk(typeof fixMixed === "string" && fixMixed.includes("filter:crop") && fixMixed.includes("decoder:librsvg"), "doctor fix: one hint covers all missing capabilities", fixMixed ?? "");
 checkOk(doctorJson.sandbox?.enabled === false, "doctor: sandbox disabled when MEDIAKIT_WORKDIR is unset", JSON.stringify(doctorJson.sandbox));
+// Turn 93: doctor --smoke runs a real render chain (generate ->
+// trim -> loudness -> verify) and proves it on disk; without --smoke
+// there is no smoke key at all.
+checkOk(!("smoke" in doctorJson), "doctor without --smoke reports no smoke section", Object.keys(doctorJson).join(","));
+const doctorSmokeRes = await client.callTool({ name: "doctor", arguments: { smoke: true } });
+const doctorSmokeJson = JSON.parse(doctorSmokeRes.content[0].text);
+const smokeSteps = doctorSmokeJson.smoke?.steps ?? [];
+checkOk(doctorSmokeJson.ok === true && doctorSmokeJson.smoke?.ran === true && doctorSmokeJson.smoke?.ok === true, "doctor smoke:true runs the real chain and passes", JSON.stringify(doctorSmokeJson.smoke));
+checkOk(smokeSteps.map((s) => s.name).join(",") === "generate,trim,loudness,verify" && smokeSteps.every((s) => s.ok === true && typeof s.seconds === "number" && s.seconds >= 0), "doctor smoke reports all 4 steps ok with timings", JSON.stringify(smokeSteps));
+checkOk(/-14/.test(smokeSteps.find((s) => s.name === "loudness")?.detail ?? ""), "doctor smoke loudness step measured -14 LUFS", JSON.stringify(smokeSteps));
+checkOk(typeof doctorSmokeJson.smoke?.seconds === "number" && doctorSmokeJson.smoke.seconds > 0, "doctor smoke reports total seconds", JSON.stringify(doctorSmokeJson.smoke));
 
 // Audit log / operation envelope (lượt 55): every tool call above
 // was recorded into the hermetic audit file — the log must prove it
@@ -1402,6 +1413,9 @@ async function runCliJson(args, env = {}) {
   });
   return JSON.parse(stdout);
 }
+// Turn 93: the same smoke through the CLI flag.
+const doctorSmokeCli = await runCliJson(["doctor", "--smoke"]);
+checkOk(doctorSmokeCli.ok === true && doctorSmokeCli.smoke?.ran === true && doctorSmokeCli.smoke?.ok === true && doctorSmokeCli.smoke.steps?.length === 4 && doctorSmokeCli.smoke.steps.every((s) => s.ok === true), "CLI doctor --smoke runs the real chain and passes", JSON.stringify(doctorSmokeCli.smoke));
 const auditPath = process.env.MEDIAKIT_AUDIT_PATH;
 checkOk(doctorJson.audit?.enabled === true && doctorJson.audit?.path === auditPath && doctorJson.audit?.entries > 0, "doctor: audit enabled, path is the hermetic test file, entries > 0", JSON.stringify(doctorJson.audit));
 const auditAllRes = await client.callTool({ name: "audit", arguments: { limit: 200 } });
@@ -6553,8 +6567,18 @@ for (let i = 0; i < 150; i++) {
   await new Promise((r) => setTimeout(r, 2000));
 }
 checkOk(assembleAsyncSawRunning && assembleAsyncJob?.status === "done" && assembleAsyncJob?.progress?.percent === 100, "async job moves queued -> running -> done with progress reaching 100%", `status=${assembleAsyncJob?.status} progress=${JSON.stringify(assembleAsyncJob?.progress)}`);
+checkOk(assembleAsyncPercents.every((v, i) => i === 0 || v >= assembleAsyncPercents[i - 1]), "async job polled percents never go backwards", `percents=${JSON.stringify(assembleAsyncPercents)}`);
+// Turn 93: the history is written by the WORKER on every progress
+// emit (250 ms throttle), so it proves the percent moved INSIDE a
+// stage no matter how fast the render ran between two polls — turn
+// 92's CI only ever polled [0, 17, 100] on a 4s film and failed the
+// poll-based version of this check. A 6-stage render can only show
+// 0/17/33/50/67/83/100 at stage boundaries, so any other value in the
+// history proves frame-level progress (ffmpeg -progress) inside a
+// stage, and the history itself is monotonic.
+const assembleAsyncHistory = Array.isArray(assembleAsyncJob?.progress_history) ? assembleAsyncJob.progress_history.map((e) => e.percent) : [];
 const assembleAsyncStageBounds = new Set([0, 17, 33, 50, 67, 83, 100]);
-checkOk(assembleAsyncPercents.every((v, i) => i === 0 || v >= assembleAsyncPercents[i - 1]) && assembleAsyncPercents.some((v) => v > 0 && v < 100 && !assembleAsyncStageBounds.has(v)), "async job percent moves INSIDE a stage, not just at stage boundaries (some polled percent is not 0/17/33/50/67/83/100) and never goes backwards", `percents=${JSON.stringify(assembleAsyncPercents)}`);
+checkOk(assembleAsyncHistory.length >= 2 && assembleAsyncHistory.every((v, i) => i === 0 || v >= assembleAsyncHistory[i - 1]) && assembleAsyncHistory.some((v) => v > 0 && v < 100 && !assembleAsyncStageBounds.has(v)), "async job progress_history records a percent INSIDE a stage, not just at stage boundaries (worker-written, poll-independent)", `history=${JSON.stringify(assembleAsyncHistory)}`);
 checkOk(assembleAsyncJob?.result?.output?.endsWith("final.mp4") && near(assembleAsyncJob?.result?.duration_seconds, 4, 0.15) && assembleAsyncJob?.result?.frames === 120 && near(assembleAsyncJob?.result?.loudness_lufs, -14, 0.5) && assembleAsyncJob?.result?.qa_verdict === "pass" && assembleAsyncJob?.result?.sha256?.length === 64, "async job result carries output + 4s/120 frames/-14 LUFS + qa pass + SHA-256", JSON.stringify(assembleAsyncJob?.result));
 const assembleAsyncFinalFrames = await countFrames(path.join(assembleAsyncOut, "final.mp4"));
 checkOk(assembleAsyncFinalFrames === 120, "async-rendered final.mp4 has exactly 120 frames on disk", `frames=${assembleAsyncFinalFrames}`);

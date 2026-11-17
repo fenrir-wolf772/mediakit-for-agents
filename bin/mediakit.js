@@ -846,10 +846,12 @@ const COMMANDS = {
     ],
   },
   doctor: {
-    usage: "mediakit doctor",
-    desc: "Read-only preflight: ffmpeg/ffprobe versions, available filters/encoders, and which tools that enables.",
+    usage: "mediakit doctor [--smoke]",
+    desc: "Read-only preflight: ffmpeg/ffprobe versions, available filters/encoders, and which tools that enables. --smoke also runs a real end-to-end render (generate → trim → loudness → verify) and reports whether this machine can actually render, not just which filters exist.",
     args: [],
-    options: [],
+    options: [
+      ["--smoke", "Run a real end-to-end render chain (generate → trim → loudness → verify) after the static checks; a failed smoke fails doctor"],
+    ],
   },
   audit: {
     usage: "mediakit audit [--limit <n>] [--tool <name>] [--status ok|error] [--since <YYYY-MM-DD>] [--verify]",
@@ -1854,7 +1856,7 @@ async function main() {
         break;
       }
       case "doctor":
-        result = await core.doctor();
+        result = await core.doctor({ smoke: opts.smoke === true });
         break;
       case "audit": {
         if (opts.status !== undefined && opts.status !== "ok" && opts.status !== "error") fail(`--status must be "ok" or "error", got: ${opts.status}`);

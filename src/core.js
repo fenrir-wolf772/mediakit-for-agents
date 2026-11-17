@@ -8143,7 +8143,83 @@ async function detectGpu(encodersOut) {
   return { available: working !== null, encoders: present, working_encoder: working };
 }
 
-export async function doctor() {
+// ---------------------------------------------------------------- doctor smoke
+// `doctor --smoke` (turn 93, idea from AH64-dll/OpenEdit's installer
+// rule: only report success after a real end-to-end workflow runs):
+// generate a 2s clip from lavfi, then run the real trim -> loudness
+// chain on it and verify the file on disk (duration, dimensions,
+// LUFS). Static capability checks can pass while a render still fails
+// (a broken encoder, a bad filter graph), so the smoke is the only
+// honest "this machine can render" answer. Runs in a temp dir (inside
+// the sandbox workdir when one is set, so the sandbox rules that
+// guard trim/loudness apply here too) and removes it afterwards; each
+// step reports its own seconds so a slow machine shows where time
+// went. Skipped (ran:false) when trim or loudness is statically
+// unavailable — a skip is not a pass, and doctor's ok is already
+// false then because those tools are missing.
+async function runDoctorSmoke(tools) {
+  const started = Date.now();
+  const steps = [];
+  const step = async (name, fn) => {
+    const t0 = Date.now();
+    try {
+      const detail = await fn();
+      steps.push({ name, ok: true, seconds: +((Date.now() - t0) / 1000).toFixed(2), ...(detail ? { detail } : {}) });
+      return true;
+    } catch (err) {
+      steps.push({ name, ok: false, seconds: +((Date.now() - t0) / 1000).toFixed(2), error: err?.message ?? String(err) });
+      return false;
+    }
+  };
+  const missing = ["trim", "loudness"].filter((t) => tools[t] && !tools[t].available);
+  if (missing.length) {
+    return { ran: false, ok: false, seconds: 0, steps, reason: `smoke needs trim + loudness available (missing: ${missing.join(", ")})` };
+  }
+  let workRoot = null;
+  try { workRoot = await workdirRoot(); } catch { workRoot = null; }
+  const tmpDir = await mkdtemp(path.join(workRoot ?? os.tmpdir(), "mediakit-doctor-smoke-"));
+  let ok = true;
+  try {
+    const src = path.join(tmpDir, "smoke-source.mp4");
+    const trimmed = path.join(tmpDir, "smoke-trimmed.mp4");
+    const mastered = path.join(tmpDir, "smoke-mastered.mp4");
+    ok = await step("generate", async () => {
+      await run(FFMPEG, ["-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30:duration=2", "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", src]);
+      const m = await probe(src);
+      if (!m.video || !m.audio || Math.abs(m.duration_seconds - 2) > 0.15) {
+        throw new MediaKitError(`generated source failed verification: ${m.duration_seconds}s video=${!!m.video} audio=${!!m.audio}`, "SMOKE_FAILED");
+      }
+      return "2s 640x360 testsrc2 + 440 Hz tone";
+    });
+    if (ok) ok = await step("trim", async () => {
+      await trim({ input: src, output: trimmed, start: 0.25, duration: 1.5 });
+      const m = await probe(trimmed);
+      if (Math.abs(m.duration_seconds - 1.5) > 0.15) {
+        throw new MediaKitError(`trim output is ${m.duration_seconds}s, expected 1.5s`, "SMOKE_FAILED");
+      }
+      return "0.25s + 1.5s";
+    });
+    if (ok) ok = await step("loudness", async () => {
+      const r = await loudness({ input: trimmed, output: mastered, targetLufs: -14 });
+      if (r.output_lufs === null || Math.abs(r.output_lufs - (-14)) > 1) {
+        throw new MediaKitError(`loudness output is ${r.output_lufs} LUFS, expected -14 +/-1`, "SMOKE_FAILED");
+      }
+      return `output ${r.output_lufs} LUFS (target -14)`;
+    });
+    if (ok) ok = await step("verify", async () => {
+      const m = await probe(mastered);
+      if (!m.video || !m.audio || Math.abs(m.duration_seconds - 1.5) > 0.15 || m.video.width !== 640 || m.video.height !== 360) {
+        throw new MediaKitError(`mastered file failed verification: ${m.duration_seconds}s ${m.video?.width}x${m.video?.height} audio=${!!m.audio}`, "SMOKE_FAILED");
+      }
+      return "1.5s 640x360 + audio, on disk";
+    });
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+  return { ran: true, ok, seconds: +((Date.now() - started) / 1000).toFixed(2), steps };
+}
+
+export async function doctor({ smoke = false } = {}) {
   const { stdout: ffmpegVer } = await run(FFMPEG, ["-version"]);
   const { stdout: ffprobeVer } = await run(FFPROBE, ["-version"]);
   const ffmpegVersion = (ffmpegVer.match(/ffmpeg version (\S+)/) || [])[1] ?? null;
@@ -8221,6 +8297,13 @@ export async function doctor() {
   // Audit log state: enabled/path/entries, so a caller can tell
   // whether tool calls are being recorded before trusting `audit`.
   const audit = await auditStatus();
+  // --smoke runs a real render chain after the static checks; a
+  // failed smoke fails doctor.ok — "available" must mean "renders".
+  let smokeResult = null;
+  if (smoke) {
+    smokeResult = await runDoctorSmoke(tools);
+    if (smokeResult.ran && !smokeResult.ok) allOk = false;
+  }
   return {
     operation: "doctor",
     ffmpeg_version: ffmpegVersion,
@@ -8237,6 +8320,7 @@ export async function doctor() {
     decoders,
     muxers,
     tools,
+    ...(smokeResult ? { smoke: smokeResult } : {}),
     ok: allOk,
   };
 }
@@ -13877,6 +13961,26 @@ async function updateJobRecord(jobId, jobDir, patch) {
     // the canceller's record with done/failed after the kill.
     if (JOB_TERMINAL.has(record.status) && record.status === "cancelled") return record;
     const next = { ...record, ...patch, updated_at: new Date().toISOString() };
+    // Progress history: every distinct (stage, percent) the worker
+    // reports is appended, so a caller can prove the percent moved
+    // INSIDE a stage without depending on poll timing. Turn 92's CI
+    // failed exactly on that: the poll loop only ever saw [0, 17,
+    // 100] because the whole 4s render finished between two 2s
+    // polls — the worker HAD emitted in-stage values, but no poll
+    // landed on one. The history is written by the worker itself, so
+    // it survives any poll cadence. Capped at 1000 entries (a render
+    // emits at most ~4/s through the 250 ms throttle); only a change
+    // is recorded, so a stalled stage does not spam the file.
+    if (patch.progress && typeof patch.progress.percent === "number") {
+      const history = Array.isArray(record.progress_history) ? [...record.progress_history] : [];
+      const last = history[history.length - 1];
+      if (!last || last.stage !== patch.progress.stage || last.percent !== patch.progress.percent) {
+        history.push({ at: next.updated_at, stage: patch.progress.stage ?? null, percent: patch.progress.percent });
+        next.progress_history = history.slice(-1000);
+      } else {
+        next.progress_history = history;
+      }
+    }
     await writeJobRecord(path.dirname(jobDir), next);
     return next;
   });
@@ -13942,7 +14046,7 @@ export async function startAssembleJob({ manifestPath, outputDir, force = false 
     manifest: manifestAbs, output_dir: outDirAbs, mode: "render", force: !!force,
     approval: approvalStatus, title: plan.title,
     total_seconds: plan.total_seconds, total_frames: plan.total_frames,
-    pid: null, progress: { stage: null, percent: 0, detail: null },
+    pid: null, progress: { stage: null, percent: 0, detail: null }, progress_history: [],
     created_at: now, updated_at: now, result: null, error: null,
   };
   await writeJobRecord(root, record);
@@ -13999,7 +14103,11 @@ export async function listJobs({ limit = 50 } = {}) {
   for (const name of names.sort().reverse()) {
     if (!JOB_ID_RE.test(name)) continue;
     try {
-      jobs.push(JSON.parse(await readFile(path.join(root, name, "job.json"), "utf8")));
+      const rec = JSON.parse(await readFile(path.join(root, name, "job.json"), "utf8"));
+      // List is a summary: the per-entry progress_history (up to
+      // 1000 points) stays on the status view, not in every row.
+      const { progress_history: _history, ...summary } = rec;
+      jobs.push(summary);
     } catch { /* skip unreadable entries */ }
     if (jobs.length >= limit) break;
   }

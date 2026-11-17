@@ -1157,9 +1157,11 @@ export const TOOL_DEFS = [
 
   {
     name: "doctor",
-    description: "Read-only environment preflight: ffmpeg/ffprobe versions, which filters and encoders this build has, and which mediakit tools that enables. An unavailable tool also reports a one-sentence fix telling you how to repair the ffmpeg install. Run first on a new machine — a tool that reports available=false will fail at runtime.",
-    schema: {},
-    handler: async () => safe(() => core.doctor()),
+    description: "Read-only environment preflight: ffmpeg/ffprobe versions, which filters and encoders this build has, and which mediakit tools that enables. An unavailable tool also reports a one-sentence fix telling you how to repair the ffmpeg install. Run first on a new machine — a tool that reports available=false will fail at runtime. With smoke:true, also runs a real end-to-end render (generate → trim → loudness → verify) and reports whether this machine can actually render — a failed smoke fails ok.",
+    schema: {
+    smoke: z.boolean().default(false).describe("Also run a real end-to-end render chain (generate → trim → loudness → verify) after the static checks; a failed smoke fails ok"),
+    },
+    handler: async (a) => safe(() => core.doctor({ smoke: a?.smoke === true })),
   },
 
 
@@ -1377,7 +1379,7 @@ export const TOOL_DEFS = [
 // (kills the worker's whole process group, ffmpeg children included).
   {
     name: "job",
-    description: "Inspect a durable async render job (started by assemble async:true): status shows progress (stage + percent) and the terminal result or error; list shows all jobs newest-first; cancel stops a queued or running job. Jobs live under MEDIAKIT_JOBS_DIR or <workdir>/.mediakit-jobs.",
+    description: "Inspect a durable async render job (started by assemble async:true): status shows progress (stage + percent) and the terminal result or error; list shows all jobs newest-first; cancel stops a queued or running job. Status also carries progress_history — every distinct percent the worker reported, so in-stage movement is provable without polling luck (list omits it). Jobs live under MEDIAKIT_JOBS_DIR or <workdir>/.mediakit-jobs.",
     schema: {
     job_id: z.string().optional().describe("Job id (e.g. job-20261114-005800-a1b2c3d4) — required for status/cancel"),
     action: z.enum(["status", "list", "cancel"]).default("status").describe("status: read one job; list: all jobs; cancel: stop a queued/running job"),
