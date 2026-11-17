@@ -274,6 +274,9 @@ it keeps the exact start by re-encoding just the head up to the next
 keyframe at source bitrate ×1.2 and stream-copying the rest — the
 result reports `mode` (`smart-cut` / `keyframe-exact` /
 `full-reencode`), `next_keyframe` and `head_reencoded_seconds`.
+`--snap-beat` is the musical cousin (see §57): it snaps to beats
+instead of keyframes, works with or without `--stream-copy`, and
+refuses `--snap` and `--smart-cut`.
 Verify it by frame count (exactly round(duration×fps)) and by pixel:
 the head frame must match the source at the same content time
 (PSNR > 30 dB), the tail frame must be bit-identical. Supported video
@@ -1278,7 +1281,7 @@ exactly the unguarded pattern brookcs3/m3u8-mcp-server's
 verify) — MediaKit's `download` exists so the agent never has to.
 
 ### 52. Test a tool over HTTP before wiring up an MCP client — same tools, curl instead of stdio
-`mediakit mcp --http [--port 3000]` serves the same 66 tools over
+`mediakit mcp --http [--port 3000]` serves the same 67 tools over
 HTTP on `127.0.0.1`: `GET /mcp` (metadata), `GET /mcp/tools`
 (every tool + JSON input schema), `POST /mcp/tools/{name}/invoke`
 (`{"arguments": {...}}`), and `POST /` for JSON-RPC 2.0
@@ -1382,7 +1385,7 @@ and an onset-recall tie-break (aubio's tempo pipeline,
 re-implemented in pure Node). It returns `bpm` (1 decimal),
 `beat_period_seconds`, `confidence` 0–1, a `reliable` flag,
 `onset_recall`, `onsets_detected`, `first_beat_seconds` and the
-first 16 `beats` — the grid a future beat-snapping cut snaps to.
+first 16 `beats` — the grid a beat-snapping cut snaps to.
 Trust the number only when `reliable` is true: a steady tone has no
 onsets (confidence ~0) and speech has no steady beat (confidence
 ~0.09), and both report `reliable: false` with a warning instead of
@@ -1391,6 +1394,32 @@ The prior is deliberate, not a bug: a kick + off-beat-hat drum
 pattern scores identically at 60/120/240 on comb alone, and the
 prior is what reads it as its musical beat (120), not its
 subdivision (240). Files over 10 minutes or under 4s are refused.
+
+### 57. Cut on the beat — `beat_grid` + `trim --snap-beat`
+`bpm` only shows the first 16 beats; `beat_grid <clip>` returns
+every beat across the file (`beats`, `beat_count`,
+`last_beat_seconds`) — the cut points. Then
+`trim --snap-beat --start 1.13 --end 3.27` moves the start DOWN to
+the nearest beat at/before it and the end UP to the nearest beat
+at/after it (the same widening convention as `--snap`, so a cut
+never loses content at either edge), and reports `beat_start`,
+`beat_end`, `bpm` and `beat_confidence` next to the requested
+range — read both. Unlike `--snap` it works on re-encode cuts too
+(the point is musical alignment, not keyframe alignment) and on
+stream-copy; it refuses `--snap` and `--smart-cut` (pick one grid,
+or one exact-start method). It refuses outright when the grid is
+unreliable — a tone measured 43.2 BPM at confidence 0.004 is not a
+grid, it is a guess, and the error says so; cut with plain `trim`
+instead. Two honest limits: the grid is rigid — one tempo + one
+phase for the whole file, so a clip whose tempo drifts will drift
+off the grid (librosa's DP beat tracker handles drift by picking
+real onset peaks near the grid; a future improvement, not this
+tool); and the grid is only as precise as one flux frame (~23 ms),
+so a snap can sit ~12 ms off the true click — inaudible for a cut
+point. `bpm` and `beat_grid` are probe-only steps in `batch` and
+`manifest` too: they analyze the chain file at that point and pass
+it through unchanged, so a manifest can record the grid before the
+`trim --snap-beat` step that cuts on it.
 
 ## Workflow: vertical captioned clip from a landscape source
 

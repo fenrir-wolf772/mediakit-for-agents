@@ -181,10 +181,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook", "bpm"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook", "bpm", "beat_grid"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 66 tools present");
-checkOk(missing.length === 0, "tools/list has all 66 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 67 tools present");
+checkOk(missing.length === 0, "tools/list has all 67 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -1945,6 +1945,17 @@ checkOk(hookManifestDryJson.dry_run === true && hookManifestDryJson.steps[0].out
   const unitEst = estimateTempo(flux, fps, rawFlux);
   console.log("bpm unit (synthetic 120 click train):", JSON.stringify(unitEst));
   checkOk(near(unitEst.bpm, 120, 1) && unitEst.reliable === true && unitEst.confidence >= 0.7 && near(unitEst.onset_recall, 1, 0.05), "bpm unit: synthetic 120 BPM click train -> 120 +/-1, reliable, recall ~1", JSON.stringify(unitEst));
+  checkOk(unitEst.beats.length === 16, "bpm unit: default beat list is capped at the first 16 beats", JSON.stringify(unitEst.beats.length));
+  // beat_grid (lượt 87): the same estimation with maxBeats raised
+  // expands the grid over the whole 12s train — 23 beats (the flux
+  // span ends at 11.959s, so the 24th click at 11.991 has no flux
+  // frame), first beat ~0.488 (one flux frame before the 0.5s click),
+  // 0.5s apart. The grid is built from the refined lag at full
+  // precision, never from the rounded bpm — stepping 60/120.0 would
+  // drift the same amount here, but on a 150.7 BPM file it would not.
+  const unitGrid = estimateTempo(flux, fps, rawFlux, 40, 240, 5000);
+  console.log("beat_grid unit (synthetic 120 click train, maxBeats 5000):", JSON.stringify({ beats: unitGrid.beats.length, first: unitGrid.beats[0], last: unitGrid.beats[unitGrid.beats.length - 1] }));
+  checkOk(unitGrid.beats.length === 23 && near(unitGrid.beats[0], 0.488, 0.03) && near(unitGrid.beats[1] - unitGrid.beats[0], 0.5, 0.02) && near(unitGrid.beats[unitGrid.beats.length - 1], 11.491, 0.03), "beat_grid unit: full grid is 23 beats, 0.488 first, 0.5s apart, 11.491 last", JSON.stringify(unitGrid.beats.slice(0, 3)));
 }
 async function callBpm(input, extra = {}) {
   const res = await client.callTool({ name: "bpm", arguments: { input, ...extra } });
@@ -1972,6 +1983,113 @@ const bpmBadRange = await callExpectThrow("bpm", { input: path.join(root, "test/
 checkOk(/must be below/.test(bpmBadRange), "bpm refuses min_bpm above max_bpm", bpmBadRange.slice(0, 120));
 const bpmNarrow = await callBpm(path.join(root, "test/bpm-click-120.wav"), { min_bpm: 100, max_bpm: 140 });
 checkOk(near(bpmNarrow.bpm, 120, 1) && bpmNarrow.reliable === true, "bpm with a narrowed 100-140 range still reads 120", JSON.stringify({ bpm: bpmNarrow.bpm }));
+
+// beat_grid (lượt 87): the full beat grid — every beat across the
+// file, not just bpm's first 16. Fixture test/beat-trim-source.mp4
+// is the same 120 BPM click track under a flat 1280x720 color
+// (12s), so the grid and the trim snap below share ground truth.
+async function callBeatGrid(input, extra = {}) {
+  const res = await client.callTool({ name: "beat_grid", arguments: { input, ...extra } });
+  return JSON.parse(res.content[0].text);
+}
+const grid120 = await callBeatGrid(path.join(root, "test/bpm-click-120.wav"));
+console.log("beat_grid 120:", JSON.stringify({ bpm: grid120.bpm, beats: grid120.beats.length, first: grid120.first_beat_seconds, last: grid120.last_beat_seconds }));
+checkOk(grid120.operation === "beat_grid" && near(grid120.bpm, 120, 1) && grid120.reliable === true && grid120.beat_count === 23 && grid120.beats.length === 23 && near(grid120.first_beat_seconds, 0.488, 0.03) && near(grid120.last_beat_seconds, 11.491, 0.03) && near(grid120.beats[1] - grid120.beats[0], 0.5, 0.02), "beat_grid returns all 23 beats of the 120 click track (0.488 first, 0.5s apart, 11.491 last)", JSON.stringify({ count: grid120.beat_count, first: grid120.first_beat_seconds, last: grid120.last_beat_seconds }));
+const gridDrum = await callBeatGrid(path.join(root, "test/bpm-drum-120.wav"));
+checkOk(near(gridDrum.bpm, 120, 1) && gridDrum.reliable === true && gridDrum.beat_count >= 20 && near(gridDrum.beats[1] - gridDrum.beats[0], 0.5, 0.02), "beat_grid on the drum pattern reads the musical 120 grid, not the 240 subdivision", JSON.stringify({ bpm: gridDrum.bpm, count: gridDrum.beat_count }));
+const gridTone = await callBeatGrid(path.join(root, "test/mix-music.mp3"));
+checkOk(gridTone.reliable === false && gridTone.confidence < 0.35 && gridTone.warnings.some((w) => /low confidence/.test(w)), "beat_grid on a steady tone reports reliable: false instead of a grid to snap to", JSON.stringify({ conf: gridTone.confidence, beats: gridTone.beats.length }));
+const gridVideoOnly = await callExpectThrow("beat_grid", { input: path.join(root, "test/content-video-only.mp4") });
+checkOk(/needs an audio stream/.test(gridVideoOnly), "beat_grid refuses video-only input", gridVideoOnly.slice(0, 120));
+
+// trim --snap-beat (lượt 87): snap start down / end up onto the
+// beat grid. Expected edges are computed from the measured grid
+// itself (probe-first), not hardcoded: 1.13 falls between beats
+// 0.988 and 1.488, 3.27 between 2.988 and 3.489.
+const snapBeatGrid = grid120.beats;
+const snapBeatStart = [...snapBeatGrid].reverse().find((t) => t <= 1.13) ?? 0;
+const snapBeatEnd = snapBeatGrid.find((t) => t >= 3.27) ?? 12;
+const snapBeatRes = await client.callTool({
+  name: "trim",
+  arguments: {
+    input: path.join(root, "test/beat-trim-source.mp4"),
+    output: path.join(root, "outputs/mcp-trim-snapbeat.mp4"),
+    start: 1.13, end: 3.27, snap_to_beat: true,
+  },
+});
+const snapBeatJson = JSON.parse(snapBeatRes.content[0].text);
+console.log("trim snap-beat:", JSON.stringify({ requested: `${snapBeatJson.requested_start}-${snapBeatJson.requested_end}`, actual: `${snapBeatJson.start}-${snapBeatJson.start + snapBeatJson.duration_seconds}`, bpm: snapBeatJson.bpm, duration_actual: snapBeatJson.duration_actual }));
+checkOk(snapBeatJson.snapped === true && near(snapBeatJson.start, snapBeatStart, 0.001) && near(snapBeatJson.beat_start, snapBeatStart, 0.001) && near(snapBeatJson.beat_end, snapBeatEnd, 0.001) && snapBeatJson.bpm === 120 && snapBeatJson.beat_confidence >= 0.7 && near(snapBeatJson.duration_seconds, snapBeatEnd - snapBeatStart, 0.001) && near(snapBeatJson.duration_actual, snapBeatEnd - snapBeatStart, 0.1), "trim snap_to_beat moves 1.13-3.27 onto beats (start down, end up) at 120 BPM", JSON.stringify({ start: snapBeatJson.start, end: snapBeatJson.beat_end, bpm: snapBeatJson.bpm }));
+checkOk(snapBeatJson.cut_verified === true, "trim snap-beat still verifies (flat fixture: all frames identical, so the moved cut matches)", JSON.stringify(snapBeatJson.check_frames_match));
+// Stream-copy snap-beat: the grid still decides the window (the
+// container may land a keyframe later, which duration_actual shows).
+const snapBeatCopyRes = await client.callTool({
+  name: "trim",
+  arguments: {
+    input: path.join(root, "test/beat-trim-source.mp4"),
+    output: path.join(root, "outputs/mcp-trim-snapbeat-copy.mp4"),
+    start: 1.13, end: 3.27, stream_copy: true, snap_to_beat: true,
+  },
+});
+const snapBeatCopyJson = JSON.parse(snapBeatCopyRes.content[0].text);
+checkOk(snapBeatCopyJson.snapped === true && near(snapBeatCopyJson.start, snapBeatStart, 0.001) && near(snapBeatCopyJson.beat_end, snapBeatEnd, 0.001), "trim snap_to_beat works with stream_copy too (grid decides the window)", JSON.stringify({ start: snapBeatCopyJson.start, end: snapBeatCopyJson.beat_end }));
+// Refusals: no steady beat, and two grids / an exact-start cut.
+const snapBeatTone = await callExpectThrow("trim", { input: path.join(root, "test/mix-music.mp3"), output: path.join(root, "outputs/mcp-trim-snapbeat-tone.mp3"), start: 1, duration: 2, snap_to_beat: true });
+checkOk(/needs a reliable beat grid/.test(snapBeatTone), "trim snap_to_beat refuses a tone (no steady beat to snap to)", snapBeatTone.slice(0, 140));
+const snapBeatBoth = await callExpectThrow("trim", { input: path.join(root, "test/beat-trim-source.mp4"), output: path.join(root, "outputs/mcp-trim-snapbeat-both.mp4"), start: 1, duration: 2, stream_copy: true, snap_to_keyframe: true, snap_to_beat: true });
+checkOk(/cannot be combined/.test(snapBeatBoth), "trim snap_to_beat + snap_to_keyframe is refused (pick one grid)", snapBeatBoth.slice(0, 120));
+const snapBeatSmart = await callExpectThrow("trim", { input: path.join(root, "test/beat-trim-source.mp4"), output: path.join(root, "outputs/mcp-trim-snapbeat-smart.mp4"), start: 1, duration: 2, stream_copy: true, smart_cut: true, snap_to_beat: true });
+checkOk(/cannot be combined/.test(snapBeatSmart), "trim snap_to_beat + smart_cut is refused", snapBeatSmart.slice(0, 120));
+// Dry-run: the plan reports the snapped beats and writes no file.
+const drySnapBeatPath = path.join(root, "outputs/mcp-dry-trim-snapbeat.mp4");
+const drySnapBeatRes = await client.callTool({ name: "trim", arguments: { input: path.join(root, "test/beat-trim-source.mp4"), output: drySnapBeatPath, start: 1.13, end: 3.27, snap_to_beat: true, dry_run: true } });
+const drySnapBeatJson = JSON.parse(drySnapBeatRes.content[0].text);
+checkOk(drySnapBeatJson.dry_run === true && drySnapBeatJson.snapped === true && near(drySnapBeatJson.beat_start, snapBeatStart, 0.001) && near(drySnapBeatJson.beat_end, snapBeatEnd, 0.001) && drySnapBeatJson.bpm === 120 && drySnapBeatJson.commands?.[0]?.includes(`-ss ${snapBeatStart}`), "trim dry-run with snap_to_beat reports the snapped beats in the plan", JSON.stringify(drySnapBeatJson).slice(0, 220));
+checkOk(!existsSync(drySnapBeatPath), "trim dry-run (snap-beat) writes no file", drySnapBeatPath);
+
+// bpm + beat_grid in batch + manifest (lượt 87): probe-only like
+// hook — no file written, the measurement comes back in the row /
+// step result, and the cache stores that result.
+await rm(path.join(root, "outputs/mcp-batch-beat-in"), { recursive: true, force: true });
+await rm(path.join(root, "outputs/mcp-batch-beat-out"), { recursive: true, force: true });
+await mkdir(path.join(root, "outputs/mcp-batch-beat-in"), { recursive: true });
+await copyFile(path.join(root, "test/bpm-click-120.wav"), path.join(root, "outputs/mcp-batch-beat-in/bpm-click-120.wav"));
+await copyFile(path.join(root, "test/bpm-drum-120.wav"), path.join(root, "outputs/mcp-batch-beat-in/bpm-drum-120.wav"));
+const beatBatchRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "bpm", pattern: "*.wav", input_dir: path.join(root, "outputs/mcp-batch-beat-in"), output_dir: path.join(root, "outputs/mcp-batch-beat-out"), args: {}, jobs: 2 },
+});
+const beatBatchJson = JSON.parse(beatBatchRes.content[0].text);
+console.log("batch bpm:", JSON.stringify(beatBatchJson.results.map((r) => ({ status: r.status, output: r.output, bpm: r.result?.bpm }))), "| suffix", beatBatchJson.output_suffix);
+checkOk(beatBatchJson.succeeded === 2 && beatBatchJson.failed === 0 && beatBatchJson.output_suffix === null && beatBatchJson.results.every((r) => r.status === "ok" && r.output === null && near(r.result?.bpm, 120, 1)), "batch bpm measures 120 on both click tracks with no output file (output null, suffix null)", JSON.stringify(beatBatchJson.results.map((r) => r.result?.bpm)));
+const beatBatchCacheRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "bpm", pattern: "*.wav", input_dir: path.join(root, "outputs/mcp-batch-beat-in"), output_dir: path.join(root, "outputs/mcp-batch-beat-out"), args: {}, jobs: 2 },
+});
+const beatBatchCacheJson = JSON.parse(beatBatchCacheRes.content[0].text);
+checkOk(beatBatchCacheJson.cached === 2 && beatBatchCacheJson.succeeded === 0 && beatBatchCacheJson.results.every((r) => r.status === "cached" && near(r.result?.bpm, 120, 1)), "batch bpm second run serves both rows from the result cache", JSON.stringify(beatBatchCacheJson.results.map((r) => r.status)));
+const gridBatchRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "beat_grid", pattern: "bpm-click-120.wav", input_dir: path.join(root, "outputs/mcp-batch-beat-in"), output_dir: path.join(root, "outputs/mcp-batch-beat-out"), args: {}, jobs: 1 },
+});
+const gridBatchJson = JSON.parse(gridBatchRes.content[0].text);
+checkOk(gridBatchJson.succeeded === 1 && gridBatchJson.results[0].output === null && gridBatchJson.results[0].result?.beat_count === 23 && gridBatchJson.results[0].result?.beats?.length === 23, "batch beat_grid returns the full 23-beat grid in the row result", JSON.stringify({ count: gridBatchJson.results[0].result?.beat_count }));
+await rm(path.join(root, "outputs/mcp-manifest-beatgrid.mp4"), { force: true });
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const beatManifestRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-beatgrid.json") },
+});
+const beatManifestJson = JSON.parse(beatManifestRes.content[0].text);
+console.log("manifest beat_grid:", JSON.stringify(beatManifestJson.steps.map((s) => ({ tool: s.tool, status: s.status, output: s.output, count: s.result?.beat_count ?? s.result?.duration_seconds }))), "| final", beatManifestJson.final?.duration_seconds);
+checkOk(beatManifestJson.steps_run === 2 && beatManifestJson.steps.every((s) => s.status === "ok") && beatManifestJson.steps[0].tool === "beat_grid" && beatManifestJson.steps[0].result.beat_count === 24 && near(beatManifestJson.final.duration_seconds, snapBeatEnd - snapBeatStart, 0.1), "manifest beat_grid step records the 24-beat grid, then trim snap_to_beat cuts on it (the mp4 decodes one beat more than the wav: 24, same phase)", JSON.stringify(beatManifestJson.steps.map((s) => s.result?.beat_count ?? s.result?.duration_seconds)));
+checkOk(beatManifestJson.steps[0].output === beatManifestJson.input && beatManifestJson.steps[1].output !== beatManifestJson.steps[0].output, "manifest beat_grid step passes the chain file through (its output is the input it analyzed)", beatManifestJson.steps[0].output);
+const beatManifestCacheRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-beatgrid.json") },
+});
+const beatManifestCacheJson = JSON.parse(beatManifestCacheRes.content[0].text);
+checkOk(beatManifestCacheJson.cache_hits === 2 && beatManifestCacheJson.steps.every((s) => s.status === "cached") && beatManifestCacheJson.steps[0].result.beat_count === 24, "manifest beat_grid re-run serves both steps from cache (grid result cached, trim file cached)", JSON.stringify(beatManifestCacheJson.steps.map((s) => s.status)));
 
 // motion --adaptive: two-pass calibration to the clip's own quiet
 // quarter (floor = p25 of the curve, threshold = min(max(fixed,
@@ -3477,7 +3595,7 @@ const findSourceRes = await client.callTool({
   arguments: { directory: path.join(root, "test"), name: "source" },
 });
 const findSourceJson = JSON.parse(findSourceRes.content[0].text);
-checkOk(findSourceJson.total_matches === 11, "find 'source' matches 11 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source, hook-source, sharpness-source, rotate-source, noisy-source)", `got ${findSourceJson.total_matches}`);
+checkOk(findSourceJson.total_matches === 12, "find 'source' matches 12 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source, hook-source, sharpness-source, rotate-source, noisy-source, beat-trim-source)", `got ${findSourceJson.total_matches}`);
 
 const findMp3Res = await client.callTool({
   name: "find",
@@ -4603,7 +4721,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 66 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 66 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 67 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 67 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -6343,7 +6461,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 66 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 67 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -6403,11 +6521,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 66, "GET /mcp reports name/version/transport and 66 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 67, "GET /mcp reports name/version/transport and 67 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 66 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 66 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 67 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 67 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -6431,7 +6549,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 66, "JSON-RPC tools/list returns the same 66 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 67, "JSON-RPC tools/list returns the same 67 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

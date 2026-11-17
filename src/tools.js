@@ -41,7 +41,7 @@ export const TOOL_DEFS = [
 
   {
     name: "trim",
-    description: "Cut a clip out of a media file. Give start (seconds) plus duration OR end. Re-encodes by default for frame-accurate cuts; set stream_copy=true for fast lossless cuts (keyframe boundaries only). With stream_copy, set snap_to_keyframe=true to move start down / end up to the nearest keyframes so the cut lands exactly (see the keyframes tool first), or smart_cut=true to keep the exact start instead: only the head up to the next keyframe is re-encoded (source bitrate x1.2), the rest is stream-copied — exact start, near-lossless speed. Every video trim verifies the cut by default: check_frames compares 3 frames of the output (head/middle/tail) against the source at the requested times and reports cut_verified plus mean_abs_diff per frame (threshold max(5, normal_step)); a snap that moved the cut shows up as mismatched frames. Set check_frames=false to skip the verification. Set dry_run=true to print the exact ffmpeg command(s) that would run and write no file.",
+    description: "Cut a clip out of a media file. Give start (seconds) plus duration OR end. Re-encodes by default for frame-accurate cuts; set stream_copy=true for fast lossless cuts (keyframe boundaries only). With stream_copy, set snap_to_keyframe=true to move start down / end up to the nearest keyframes so the cut lands exactly (see the keyframes tool first), or smart_cut=true to keep the exact start instead: only the head up to the next keyframe is re-encoded (source bitrate x1.2), the rest is stream-copied — exact start, near-lossless speed. Set snap_to_beat=true to move start down / end up to the nearest beats of the music instead (see the beat_grid tool first): the grid is measured from the audio, and the cut refuses when the grid is unreliable (speech, tone, drone — no steady beat to snap to). snap_to_beat works on re-encode cuts too, and refuses snap_to_keyframe and smart_cut. Every video trim verifies the cut by default: check_frames compares 3 frames of the output (head/middle/tail) against the source at the requested times and reports cut_verified plus mean_abs_diff per frame (threshold max(5, normal_step)); a snap that moved the cut shows up as mismatched frames. Set check_frames=false to skip the verification. Set dry_run=true to print the exact ffmpeg command(s) that would run and write no file.",
     schema: {
     input: pathSchema,
     output: pathSchema.describe("Output file path"),
@@ -50,6 +50,7 @@ export const TOOL_DEFS = [
     end: z.number().positive().optional().describe("End time in seconds (alternative to duration)"),
     stream_copy: z.boolean().default(false).describe("Copy streams without re-encoding (fast, keyframe-accurate only)"),
     snap_to_keyframe: z.boolean().default(false).describe("With stream_copy only: snap start/end to the nearest keyframes (start down, end up)"),
+    snap_to_beat: z.boolean().default(false).describe("Snap start/end to the nearest beats of the music (start down, end up; see beat_grid first). Works on re-encode cuts too; refuses snap_to_keyframe and smart_cut, and refuses when the measured beat grid is unreliable"),
     smart_cut: z.boolean().default(false).describe("With stream_copy only: exact start by re-encoding only the head up to the next keyframe (source bitrate x1.2); refuses snap_to_keyframe"),
     check_frames: z.boolean().default(true).describe("Verify the cut: compare 3 output frames against the source at the requested times (default true; false skips the check, audio-only inputs have nothing to check)"),
     dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command(s) that would run (one for a plain cut, three for smart_cut: head re-encode, tail copy, concat) and write no file"),
@@ -62,6 +63,7 @@ export const TOOL_DEFS = [
     end: a.end ?? null,
     streamCopy: a.stream_copy,
     snapToKeyframe: a.snap_to_keyframe,
+    snapToBeat: a.snap_to_beat,
     smartCut: a.smart_cut,
     checkFrames: a.check_frames ?? true,
     dryRun: a.dry_run,
@@ -1267,9 +1269,9 @@ export const TOOL_DEFS = [
 
   {
     name: "batch",
-    description: "Apply ONE operation to many files matching a glob under a folder, in one call: loudness, resize, reframe, compress, convert, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, trim, silence, chroma_key, cut_words, remove_retakes or hook — the same args for every file. Outputs are named <stem>-<operation>.<ext> under the output directory, mirroring the input tree. Returns one row per file (input order) with status ok/error/cached/skipped plus counts, so a failure in one file never hides the rest. Unchanged files are skipped via a content-hash cache (.mediakit-batch-cache.json in the output dir, verified against the output's size + sha256); jobs runs up to 8 files at once under one shared timeout_seconds budget; dry_run lists the planned outputs and writes nothing. cut_words and remove_retakes find each clip's words file by convention (<words_dir>/<stem>.words.json, default the input's own folder) — a clip with no words file fails its own row only. slideshow is the exception: a SET operation — the whole matched set of images (2-32) becomes ONE slideshow video (output_name, default slideshow.mp4) instead of one output per file, and the per-file cache does not apply. hook is the probe-only exception: it writes no file (output is null, output_suffix is null) — the ranked hook windows come back in each row's result, and the cache stores that result instead of a file.",
+    description: "Apply ONE operation to many files matching a glob under a folder, in one call: loudness, resize, reframe, compress, convert, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, trim, silence, chroma_key, cut_words, remove_retakes, slideshow, hook, bpm or beat_grid — the same args for every file. Outputs are named <stem>-<operation>.<ext> under the output directory, mirroring the input tree. Returns one row per file (input order) with status ok/error/cached/skipped plus counts, so a failure in one file never hides the rest. Unchanged files are skipped via a content-hash cache (.mediakit-batch-cache.json in the output dir, verified against the output's size + sha256); jobs runs up to 8 files at once under one shared timeout_seconds budget; dry_run lists the planned outputs and writes nothing. cut_words and remove_retakes find each clip's words file by convention (<words_dir>/<stem>.words.json, default the input's own folder) — a clip with no words file fails its own row only. slideshow is the exception: a SET operation — the whole matched set of images (2-32) becomes ONE slideshow video (output_name, default slideshow.mp4) instead of one output per file, and the per-file cache does not apply. hook, bpm and beat_grid are the probe-only exceptions: they write no file (output is null, output_suffix is null) — the measurement comes back in each row's result, and the cache stores that result instead of a file.",
     schema: {
-    operation: z.enum(["loudness", "resize", "reframe", "compress", "convert", "extract_audio", "reverse", "rotate", "boomerang", "make_loopable", "freeze", "grade", "fit", "trim", "silence", "chroma_key", "cut_words", "remove_retakes", "slideshow", "hook"]).describe("The operation to apply to every matched file"),
+    operation: z.enum(["loudness", "resize", "reframe", "compress", "convert", "extract_audio", "reverse", "rotate", "boomerang", "make_loopable", "freeze", "grade", "fit", "trim", "silence", "chroma_key", "cut_words", "remove_retakes", "slideshow", "hook", "bpm", "beat_grid"]).describe("The operation to apply to every matched file"),
     pattern: z.string().min(1).describe("Glob matched against paths under input_dir: **/*.mp4 for every mp4 at any depth, sub/*.mp4 for one folder, or a bare *.mp4 (matches the basename at any depth)"),
     input_dir: pathSchema.describe("Folder to search under (recursive; hidden dirs, .git, node_modules and .next are skipped)"),
     output_dir: pathSchema.describe("Directory to write outputs + batch-manifest.json into (created if needed; files under it are never treated as inputs)"),
@@ -1301,7 +1303,7 @@ export const TOOL_DEFS = [
 
   {
     name: "manifest",
-    description: "Run a whole edit pipeline from ONE declarative JSON manifest file: {version: 1, input, output, steps: [{tool, args}], qa?} — paths in the manifest are relative to the manifest file. Steps run in order, each feeding the next (slideshow as step 1 only — it builds a video from images in args, so the manifest input should be the first slide image; download as step 1 only — it fetches from a URL in args, and when it is step 1 the manifest input may be omitted entirely; then trim, resize, reframe, compress, convert, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, silence, denoise, interpolate, burn_captions, overlay, chroma_key, cut_words, remove_retakes; hook is the probe-only step — it analyzes the chain file at that point and passes it through unchanged, so its result records WHY the next trim cuts where it does); the whole plan is validated before anything renders, so a typo fails in seconds. Each step is cached by content hash (input bytes + tool + args + sidecar-file bytes, verified against the cached output's size + sha256; a hook step stores only its result, there is no file to verify) — re-running an unchanged manifest re-encodes nothing, and editing step 3 only re-runs from step 3. Set qa to a platform (or 'any') to run qa_report on the final file. dry_run prints the plan and writes nothing — the approve-before-render gate. A step failure aborts the run and keeps the intermediates for inspection.",
+    description: "Run a whole edit pipeline from ONE declarative JSON manifest file: {version: 1, input, output, steps: [{tool, args}], qa?} — paths in the manifest are relative to the manifest file. Steps run in order, each feeding the next (slideshow as step 1 only — it builds a video from images in args, so the manifest input should be the first slide image; download as step 1 only — it fetches from a URL in args, and when it is step 1 the manifest input may be omitted entirely; then trim, resize, reframe, compress, convert, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, silence, denoise, interpolate, burn_captions, overlay, chroma_key, cut_words, remove_retakes; hook, bpm and beat_grid are the probe-only steps — they analyze the chain file at that point and pass it through unchanged, so their results record WHY the next trim cuts where it does); the whole plan is validated before anything renders, so a typo fails in seconds. Each step is cached by content hash (input bytes + tool + args + sidecar-file bytes, verified against the cached output's size + sha256; a probe-only step stores only its result, there is no file to verify) — re-running an unchanged manifest re-encodes nothing, and editing step 3 only re-runs from step 3. Set qa to a platform (or 'any') to run qa_report on the final file. dry_run prints the plan and writes nothing — the approve-before-render gate. A step failure aborts the run and keeps the intermediates for inspection.",
     schema: {
     manifest_path: pathSchema.describe("Path to the manifest JSON file"),
     output: pathSchema.optional().describe("Output file path (overrides the manifest's output; the extension is adjusted to the step chain's final format when needed)"),
@@ -1526,6 +1528,32 @@ export const TOOL_DEFS = [
     max_bpm: z.number().min(20).max(300).default(240).describe("Highest tempo to consider in BPM (default 240)"),
   },
     handler: async (a) => safe(() => core.detectBpm({
+    input: a.input,
+    minBpm: a.min_bpm,
+    maxBpm: a.max_bpm,
+  })),
+  },
+
+
+  // The full beat grid for a clip (probe-only, writes no file): the
+  // same measurement as bpm, but every beat across the file instead
+  // of the first 16 — the cut points trim --snap-beat snaps to, and
+  // what a director hands to an editor. A steady tone or speech
+  // still returns its grid with reliable: false — never snap cuts to
+  // an unreliable grid (trim --snap-beat refuses it). The grid is
+  // rigid by design: one tempo + one phase for the whole file, so a
+  // clip whose tempo drifts will drift off the grid — that is a
+  // known limit (librosa's DP beat tracker handles drift by picking
+  // real onset peaks near the grid; see the backlog).
+  {
+    name: "beat_grid",
+    description: "Return the full beat grid of a clip (probe-only, writes no file): the same spectral-flux + autocorrelation/comb measurement as bpm, expanded to every beat across the file instead of the first 16. Returns bpm, beat_period_seconds, confidence, a reliable flag, onset_recall, onsets_detected, first_beat_seconds, beats (all of them, 3 decimals), beat_count and last_beat_seconds. A steady tone or speech reports reliable: false with a warning — do not snap cuts to an unreliable grid (trim snap_to_beat refuses it). The grid assumes one steady tempo for the whole file; a clip whose tempo drifts will drift off the grid. Files over 10 minutes or under 4s are refused.",
+    schema: {
+    input: pathSchema,
+    min_bpm: z.number().min(20).max(300).default(40).describe("Lowest tempo to consider in BPM (default 40)"),
+    max_bpm: z.number().min(20).max(300).default(240).describe("Highest tempo to consider in BPM (default 240)"),
+  },
+    handler: async (a) => safe(() => core.detectBeatGrid({
     input: a.input,
     minBpm: a.min_bpm,
     maxBpm: a.max_bpm,
