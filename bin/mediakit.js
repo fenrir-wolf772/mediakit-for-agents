@@ -813,6 +813,14 @@ const COMMANDS = {
       ["-o, --output", "Optional .json file to write {chapters:[{title, at}]} into"],
     ],
   },
+  transitions: {
+    usage: "mediakit transitions [--category <name>]",
+    desc: "List the xfade transition catalog, grouped by family (fade, wipe, slide, smooth, shape, diagonal, slice, wind, cover, reveal, other) — every name concat / slideshow / assemble accept. Read this before picking a transition name. --category narrows to one family. Probe-only, writes nothing.",
+    args: [],
+    options: [
+      ["--category", "One category name (fade, wipe, slide, smooth, shape, diagonal, slice, wind, cover, reveal, other) — omit for the full catalog"],
+    ],
+  },
   manifest: {
     usage: "mediakit manifest <manifest.json> [-o <output.mp4>] [--dry-run] [--no-cache] [--keep-intermediates]",
     desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (slideshow as step 1 only — it builds from images in args, so input should be the first slide image; then trim|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|grade|fit|silence|denoise|interpolate|burn-captions|overlay|chroma-key|cut-words|remove-retakes; hook is the probe-only step — it analyzes the chain file at that point and passes it through unchanged), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file.",
@@ -853,7 +861,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 68 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 69 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -1614,6 +1622,11 @@ async function main() {
           input: needInput(),
           minBpm: numOpt(opts, "min_bpm") ?? 40,
           maxBpm: numOpt(opts, "max_bpm") ?? 240,
+        });
+        break;
+      case "transitions":
+        result = core.listTransitions({
+          category: opts.category ?? null,
         });
         break;
       case "mux": {

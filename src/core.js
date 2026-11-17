@@ -1990,21 +1990,60 @@ export async function loudness({ input, output, targetLufs = -14, format = null,
 // different time_base stretches the join (measured: 10s + 10s with
 // 1/15360 vs 1/90000 stream-copied to 116.9s).
 
-const XFADE_TRANSITIONS = [
-  "fade", "fadeblack", "fadewhite", "distance",
-  "wipeleft", "wiperight", "wipeup", "wipedown",
-  "slideleft", "slideright", "slideup", "slidedown",
-  "smoothleft", "smoothright", "smoothup", "smoothdown",
-  "circlecrop", "rectcrop", "circleclose", "circleopen",
-  "horzclose", "horzopen", "vertclose", "vertopen",
-  "diagbl", "diagbr", "diagtl", "diagtr",
-  "hlslice", "hrslice", "vuslice", "vdslice",
-  "dissolve", "pixelize", "radial", "hblur",
-  "wipetl", "wipetr", "wipebl", "wipebr",
-  "zoomin", "fadegrays", "squeezev", "squeezeh",
-  "hlwind", "hrwind", "vuwind", "vdwind",
-  "coverleft", "coverright", "coverup", "coverdown",
+// Transition catalog (turn 91 — kevinten-ai/mcp-ffmpeg's grouped
+// catalog idea, applied to MediaKit's own list): every xfade name
+// `concat` / `slideshow` / `assemble` accepts, grouped by family so
+// an agent picks by look instead of guessing from a flat list. The
+// flat list is derived from the categories — one source of truth,
+// so the count in the docs can never drift from the validator again
+// (it did: the list grew to 52 when slideshow added cover* in turn
+// 43, but the docs kept saying 49). ffmpeg 8.1.2's xfade offers 6
+// more names than the catalog had (fadefast, fadeslow, reveal* —
+// verified by a real encode in turn 91); they are in here too, so
+// the catalog is the complete xfade set on this ffmpeg minus `custom`
+// (which needs a custom expression, not a bare name).
+export const TRANSITION_CATEGORIES = [
+  { name: "fade", description: "Cross-dissolve family: one shot melts into the next, optionally through black, white, grey, or faster/slower than the plain fade.", transitions: ["fade", "fadeblack", "fadewhite", "fadegrays", "fadefast", "fadeslow", "dissolve", "distance"] },
+  { name: "wipe", description: "A hard edge sweeps across the frame — from a side, or from a corner.", transitions: ["wipeleft", "wiperight", "wipeup", "wipedown", "wipetl", "wipetr", "wipebl", "wipebr"] },
+  { name: "slide", description: "The incoming shot pushes the outgoing one off the frame.", transitions: ["slideleft", "slideright", "slideup", "slidedown"] },
+  { name: "smooth", description: "A slide with a soft, eased edge instead of a hard one.", transitions: ["smoothleft", "smoothright", "smoothup", "smoothdown"] },
+  { name: "shape", description: "The new shot opens (or closes) through a geometric mask — circle, rectangle, horizontal or vertical band.", transitions: ["circlecrop", "rectcrop", "circleclose", "circleopen", "horzclose", "horzopen", "vertclose", "vertopen"] },
+  { name: "diagonal", description: "A diagonal edge sweeps from one corner to the opposite.", transitions: ["diagbl", "diagbr", "diagtl", "diagtr"] },
+  { name: "slice", description: "The frame splits into strips that peel away horizontally or vertically.", transitions: ["hlslice", "hrslice", "vuslice", "vdslice"] },
+  { name: "wind", description: "Strips blow across the frame like wind, horizontally or vertically.", transitions: ["hlwind", "hrwind", "vuwind", "vdwind"] },
+  { name: "cover", description: "The incoming shot covers the outgoing one like a curtain sliding in.", transitions: ["coverleft", "coverright", "coverup", "coverdown"] },
+  { name: "reveal", description: "The outgoing shot slides away, revealing the incoming one underneath.", transitions: ["revealleft", "revealright", "revealup", "revealdown"] },
+  { name: "other", description: "Effects with no direction family: pixel dissolve, radial spin, horizontal blur, zoom-in, vertical/horizontal squeeze.", transitions: ["pixelize", "radial", "hblur", "zoomin", "squeezev", "squeezeh"] },
 ];
+
+const XFADE_TRANSITIONS = TRANSITION_CATEGORIES.flatMap((c) => c.transitions);
+
+// List the transition catalog (probe-only, writes no file): the full
+// grouped list `concat` / `slideshow` / `assemble` accept, or one
+// category by name. An agent picking a transition reads this first
+// instead of guessing a name and hitting "unknown transition".
+export function listTransitions({ category = null } = {}) {
+  if (category !== null && category !== undefined) {
+    const found = TRANSITION_CATEGORIES.find((c) => c.name === category);
+    if (!found) {
+      throw new MediaKitError(
+        `unknown transition category: ${category} (categories: ${TRANSITION_CATEGORIES.map((c) => c.name).join(", ")})`,
+        "INVALID_ARG",
+      );
+    }
+    return {
+      operation: "transitions",
+      total: found.transitions.length,
+      category: found.name,
+      categories: [{ name: found.name, description: found.description, count: found.transitions.length, transitions: [...found.transitions] }],
+    };
+  }
+  return {
+    operation: "transitions",
+    total: XFADE_TRANSITIONS.length,
+    categories: TRANSITION_CATEGORIES.map((c) => ({ name: c.name, description: c.description, count: c.transitions.length, transitions: [...c.transitions] })),
+  };
+}
 
 /**
  * A concat clip spec: a plain path, "path@start-end" (either side may
@@ -8017,6 +8056,9 @@ const TOOL_REQUIREMENTS = {
   // tempo_drift is the same family (decode + pure-Node tempogram) —
   // no ffmpeg capability needed either.
   tempo_drift: {},
+  // transitions is a pure data lookup over the catalog — no ffmpeg
+  // capability needed either.
+  transitions: {},
   // chapters only needs silencedetect, and only in input mode — the
   // words-file mode is pure JSON and needs no ffmpeg capability.
   chapters: { filters: ["silencedetect"] },

@@ -152,7 +152,8 @@ user) → `approve` → `render`. Never approve your own technical
 checks — approval means the user saw the preview and said yes.
 A render without approval fails loudly unless the user
 explicitly asks for `--force`. A shot after the first may carry
-`transition: {type, duration}` (one of the 49 xfade names,
+`transition: {type, duration}` (one of the 58 xfade names — see the
+`transitions` tool for the catalog grouped by family,
 centered on the cut, video-only — the audio never moves); a
 video shot needs the handle footage in its source. For real
 animation (not a still with a zoom), use a `canvas_scene` shot:

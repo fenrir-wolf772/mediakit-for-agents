@@ -181,10 +181,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 68 tools present");
-checkOk(missing.length === 0, "tools/list has all 68 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 69 tools present");
+checkOk(missing.length === 0, "tools/list has all 69 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -5012,7 +5012,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 68 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 68 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 69 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 69 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -6043,6 +6043,45 @@ checkOk(/chapters/.test(chapBadText ?? ""), "chapters refuses a malformed words 
 const chapDoctorRes = await client.callTool({ name: "doctor", arguments: {} });
 const chapDoctor = JSON.parse(chapDoctorRes.content[0].text);
 checkOk(chapDoctor.tools?.chapters?.available === true, "doctor reports chapters as available", JSON.stringify(chapDoctor.tools?.chapters));
+
+// Transition catalog (turn 91): the grouped list concat / slideshow /
+// assemble accept — one source of truth in TRANSITION_CATEGORIES, so
+// the docs count can never drift from the validator again (it did:
+// cover* took the list to 52 while the docs kept saying 49).
+const transRes = await client.callTool({ name: "transitions", arguments: {} });
+const trans = JSON.parse(transRes.content[0].text);
+const transNames = trans.categories.flatMap((c) => c.transitions);
+checkOk(trans.operation === "transitions" && trans.total === 58 && trans.categories.length === 11 && transNames.length === 58, "transitions returns the full catalog: 58 names in 11 categories", `total=${trans.total} categories=${trans.categories.length}`);
+checkOk(new Set(transNames).size === 58 && trans.categories.every((c) => c.count === c.transitions.length && c.transitions.length > 0 && typeof c.description === "string" && c.description.length > 10), "transitions: every name in exactly one category, counts match, every family has a description", JSON.stringify(trans.categories.map((c) => `${c.name}:${c.count}`)));
+checkOk(transNames.includes("fadefast") && transNames.includes("fadeslow") && ["revealleft", "revealright", "revealup", "revealdown"].every((n) => transNames.includes(n)), "transitions includes the 6 names ffmpeg 8.1.2 adds over the old 52 (fadefast/fadeslow/reveal*)", "");
+const transWipeRes = await client.callTool({ name: "transitions", arguments: { category: "wipe" } });
+const transWipe = JSON.parse(transWipeRes.content[0].text);
+checkOk(transWipe.total === 8 && transWipe.category === "wipe" && JSON.stringify(transWipe.categories[0].transitions) === JSON.stringify(["wipeleft", "wiperight", "wipeup", "wipedown", "wipetl", "wipetr", "wipebl", "wipebr"]), "transitions --category wipe narrows to the 8 wipes", JSON.stringify(transWipe.categories[0].transitions));
+const transBadText = await callExpectThrow("transitions", { category: "nosuch" });
+checkOk(/unknown transition category/.test(transBadText ?? "") && /fade, wipe/.test(transBadText ?? ""), "transitions refuses an unknown category with the valid list", (transBadText ?? "").slice(0, 200));
+// The catalog IS the validator: concat's "unknown transition" error
+// must list exactly the catalog's names — if a category is edited
+// without the validator (or vice versa) this fails.
+const transConcatBadText = await callExpectThrow("concat", { inputs: [path.join(root, "test/source.mp4"), path.join(root, "test/source.mp4")], output: path.join(root, "outputs/mcp-concat-bad-transition.mp4"), transition: "nosuch" });
+const transMissing = transNames.filter((n) => !transConcatBadText.includes(n));
+checkOk(/unknown transition/.test(transConcatBadText ?? "") && transMissing.length === 0, "concat's unknown-transition error lists exactly the catalog's 58 names (one source of truth)", `missing from error: ${transMissing.join(", ")}`);
+// README catalog section must list every name too — the docs drift
+// guard only checks tool names, so this pins the catalog table.
+const readmeText = await readFile(path.join(root, "README.md"), "utf8");
+const readmeCatalog = readmeText.slice(readmeText.indexOf("| Family |"), readmeText.indexOf("58 names in total"));
+const readmeMissing = transNames.filter((n) => !readmeCatalog.includes(`\`${n}\``));
+checkOk(readmeCatalog.length > 0 && readmeMissing.length === 0, "README transition catalog table lists all 58 names", `missing: ${readmeMissing.join(", ")}`);
+// CLI: full catalog + one category + bad category exits 2.
+const transCli = await runCliJson(["transitions"]);
+checkOk(transCli.total === 58 && transCli.categories.length === 11, "CLI transitions returns the full catalog (58 / 11)", `total=${transCli.total}`);
+const transCliReveal = await runCliJson(["transitions", "--category", "reveal"]);
+checkOk(transCliReveal.total === 4 && JSON.stringify(transCliReveal.categories[0].transitions) === JSON.stringify(["revealleft", "revealright", "revealup", "revealdown"]), "CLI transitions --category reveal returns the 4 reveals", JSON.stringify(transCliReveal.categories[0].transitions));
+let transCliBadCode = 0;
+try { await execFileAsync(process.execPath, [path.join(root, "bin/mediakit.js"), "transitions", "--category", "nosuch"], { env: { ...process.env } }); } catch (e) { transCliBadCode = e.code; }
+checkOk(transCliBadCode === 2, "CLI transitions --category nosuch exits 2", `code=${transCliBadCode}`);
+const transDoctorRes = await client.callTool({ name: "doctor", arguments: {} });
+const transDoctor = JSON.parse(transDoctorRes.content[0].text);
+checkOk(transDoctor.tools?.transitions?.available === true, "doctor reports transitions as available", JSON.stringify(transDoctor.tools?.transitions));
 // Transitions: the same film with a fade into s2, a dissolve into
 // s3 and a fade into s4. Total duration and frame count must stay
 // exactly 10s / 300 frames — the transitions are centered on the
@@ -6813,7 +6852,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 68 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 69 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -6873,11 +6912,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 68, "GET /mcp reports name/version/transport and 68 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 69, "GET /mcp reports name/version/transport and 69 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 68 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 68 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 69 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 69 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -6901,7 +6940,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 68, "JSON-RPC tools/list returns the same 68 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 69, "JSON-RPC tools/list returns the same 69 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

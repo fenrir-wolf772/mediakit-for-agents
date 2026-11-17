@@ -571,7 +571,7 @@ export const TOOL_DEFS = [
     output: pathSchema,
     duration: z.number().min(0.5).max(600).default(3).describe("Visible seconds per image when no per-image duration is given (default 3)"),
     durations: z.array(z.number().min(0.5).max(600)).min(2).max(32).optional().describe("One visible duration per image, in order (overrides duration; a per-image duration in images wins over this)"),
-    transition: z.string().default("fade").describe("xfade transition between every pair: fade (default), fadeblack, wipeleft, dissolve, circlecrop, ... (one of the 49 names concat accepts)"),
+    transition: z.string().default("fade").describe("xfade transition between every pair: fade (default), fadeblack, wipeleft, dissolve, circlecrop, ... (one of the 58 names concat accepts — see the transitions tool for the grouped catalog)"),
     transition_duration: z.number().min(0.1).max(10).default(1).describe("Transition length in seconds (default 1, must be shorter than the shortest slide)"),
     transitions: z.array(z.string()).min(1).max(31).optional().describe("One xfade transition name per join, in order (n-1 entries for n images) — overrides transition when given"),
     transition_durations: z.array(z.number().min(0.1).max(10)).min(1).max(31).optional().describe("One transition length per join, in order (n-1 entries) — each must be shorter than both slides it joins; overrides transition_duration when given"),
@@ -1681,6 +1681,23 @@ export const TOOL_DEFS = [
     thresholdDb: a.threshold_db ?? -40,
     minDuration: a.min_duration ?? 0.5,
     output: a.output ?? null,
+  })),
+  },
+
+  // The transition catalog (probe-only, writes no file): the grouped
+  // list `concat` / `slideshow` / `assemble` accept — read this
+  // before picking a transition name, instead of guessing one and
+  // hitting "unknown transition". `category` narrows to one family
+  // (fade, wipe, slide, smooth, shape, diagonal, slice, wind,
+  // cover, reveal, other); without it the whole catalog comes back.
+  {
+    name: "transitions",
+    description: "List the xfade transition catalog (probe-only, writes no file): every transition name concat / slideshow / assemble accept, grouped by family — fade (cross-dissolve), wipe (hard edge sweep), slide (push off frame), smooth (eased slide), shape (geometric mask), diagonal, slice (strips peel away), wind (strips blow across), cover (curtain in), reveal (outgoing slides away), other (pixelize, radial, blur, zoom, squeeze). Returns total (58 on ffmpeg 8.1.2) plus per-category names and one-line descriptions. Pass category to narrow to one family; an unknown category is refused with the valid list.",
+    schema: {
+    category: z.string().optional().describe("One category name (fade, wipe, slide, smooth, shape, diagonal, slice, wind, cover, reveal, other) — omit for the full catalog"),
+  },
+    handler: async (a) => safe(() => core.listTransitions({
+    category: a.category ?? null,
   })),
   },
 ];
