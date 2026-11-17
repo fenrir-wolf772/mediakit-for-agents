@@ -676,6 +676,15 @@ const COMMANDS = {
       ["--threshold-db", "Silence threshold in dB for speech coverage (default -40)"],
     ],
   },
+  bpm: {
+    usage: "mediakit bpm <input> [--min-bpm 40] [--max-bpm 240]",
+    desc: "Measure the musical tempo of a clip in BPM: spectral-flux onset function, autocorrelation + comb period search with a 120 BPM prior and an onset-recall tie-break (aubio tempo, re-implemented in pure Node). Returns bpm, beat period, confidence, a reliable flag, onset recall and the first 16 beat times — the grid a beat-snapping cut snaps to. A tone or speech reports reliable: false instead of a confident wrong number. Probe-only, writes no file.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--min-bpm", "Lowest tempo to consider in BPM (default 40)"],
+      ["--max-bpm", "Highest tempo to consider in BPM (default 240)"],
+    ],
+  },
   mux: {
     usage: "mediakit mux <video> <audio> -o <output> [--audio-offset <s>] [--shortest] [--dry-run]",
     desc: "Replace a video's audio track with an external audio file, stream-copying both (no re-encode). --audio-offset shifts the new audio (positive = audio later, negative = video later). --dry-run prints the ffmpeg command and writes no file.",
@@ -821,7 +830,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 65 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 66 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -1556,6 +1565,13 @@ async function main() {
           step: numOpt(opts, "step") ?? 0.5,
           top: numOpt(opts, "top") ?? 3,
           thresholdDb: numOpt(opts, "threshold_db") ?? -40,
+        });
+        break;
+      case "bpm":
+        result = await core.detectBpm({
+          input: needInput(),
+          minBpm: numOpt(opts, "min_bpm") ?? 40,
+          maxBpm: numOpt(opts, "max_bpm") ?? 240,
         });
         break;
       case "mux": {

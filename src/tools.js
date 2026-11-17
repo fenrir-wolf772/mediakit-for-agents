@@ -1508,6 +1508,31 @@ export const TOOL_DEFS = [
   },
 
 
+  // Measure the musical tempo of a clip (probe-only, writes no file):
+  // spectral-flux onset function -> autocorrelation + comb filterbank
+  // period search (aubio's tempo pipeline, re-implemented in pure
+  // Node), with a 120 BPM prior and an onset-recall tie-break so a
+  // drum pattern reads as its musical beat, not its subdivision. The
+  // missing piece before beat-grid cut snapping: the returned beat
+  // grid (first 16 beat times) is what a cut snaps to. A steady tone
+  // or speech reports reliable: false instead of a confident wrong
+  // number — never snap cuts to an unreliable grid.
+  {
+    name: "bpm",
+    description: "Measure the musical tempo of a clip in BPM (probe-only, writes no file): decode to mono PCM, build a spectral-flux onset function, find the period by autocorrelation + comb filterbank with a 120 BPM prior and an onset-recall tie-break (aubio tempo, re-implemented in pure Node). Returns bpm (1 decimal), beat_period_seconds, confidence 0-1, reliable flag, onset_recall, onsets_detected, first_beat_seconds and the first 16 beat times. A steady tone has no onsets and speech has no steady beat — both report reliable: false with low confidence instead of a confident wrong number; do not snap cuts to an unreliable grid. Files over 10 minutes or under 4s are refused.",
+    schema: {
+    input: pathSchema,
+    min_bpm: z.number().min(20).max(300).default(40).describe("Lowest tempo to consider in BPM (default 40)"),
+    max_bpm: z.number().min(20).max(300).default(240).describe("Highest tempo to consider in BPM (default 240)"),
+  },
+    handler: async (a) => safe(() => core.detectBpm({
+    input: a.input,
+    minBpm: a.min_bpm,
+    maxBpm: a.max_bpm,
+  })),
+  },
+
+
   // Verify an assemble render against its receipt (heristop/leclap's
   // `verify` idea, turn 63): the receipt (assemble-receipt.json, written
   // next to final.mp4 by every full render) records per-input digests,

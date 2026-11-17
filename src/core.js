@@ -7816,6 +7816,9 @@ const TOOL_REQUIREMENTS = {
   overlay: { filters: ["overlay", "format", "scale", "colorchannelmixer"], encoders: ["libx264"] },
   scenes: { filters: ["select", "signalstats"] },
   hook: { filters: ["astats", "ametadata", "silencedetect", "select"] },
+  // bpm decodes to raw PCM with -ac/-ar (the resampler, not a filter)
+  // and does the analysis in pure Node — no ffmpeg capability needed.
+  bpm: {},
   // chapters only needs silencedetect, and only in input mode — the
   // words-file mode is pure JSON and needs no ffmpeg capability.
   chapters: { filters: ["silencedetect"] },
@@ -9206,6 +9209,267 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
     candidates,
     hook: best,
     suggested_trim: `mediakit trim ${inPath} -o hook.mp4 --start ${best.start} --end ${best.end}`,
+    warnings,
+  };
+}
+
+// ---------------------------------------------------------------- bpm
+// Measure the musical tempo of a clip (the missing piece before
+// beat-grid cut snapping, backlog since turn 68): decode the audio to
+// mono float PCM, build a spectral-flux onset function, then find the
+// period by autocorrelation + a shift-invariant comb filterbank —
+// aubio's tempo pipeline (phase vocoder -> onset function -> peak
+// picker -> beattracking autocorrelation + comb), re-implemented in
+// pure Node with no new dependency. Three traps, each found by
+// measuring the probe in /tmp before any of this shipped:
+//  (1) Integer lags lie: 120 BPM is 21.53 flux frames, and the DOUBLE
+//      period (43.06, nearly integer) out-scored the true one, so the
+//      comb is evaluated at FRACTIONAL lags via linear interpolation
+//      of the autocorrelation, and the winning lag is refined by a
+//      parabola through comb(L-0.5), comb(L), comb(L+0.5) — a 150 BPM
+//      click track read as 152 before the refinement, 150.7 after.
+//  (2) A click is a 1-2 frame spike, and linear ACF interpolation
+//      between a spike frame and a zero frame halves the value at
+//      fractional lags — so the flux is smoothed with a [1,2,1]
+//      kernel before any correlation.
+//  (3) Octaves are genuinely ambiguous on comb alone: a 120 BPM drum
+//      pattern (kick + off-beat hat) scores identically at 60/120/240.
+//      Two tie-breaks, in order: a log-normal prior centred at 120 BPM
+//      (sigma 0.8 in log space — aubio's Rayleigh period weighting,
+//      same idea: 240 BPM keeps 69% of its score, 90 BPM 94%), then
+//      onset recall among candidates within 90% of the best weighted
+//      score — the fraction of strong onsets (weighted by flux) that
+//      land within a quarter-period of the grid. A 60 BPM grid on 120
+//      BPM clicks recalls 0.52; the true grid recalls 1.0.
+// Probe-only: no file is written. The beat grid (first 16 beats) is
+// what the future beat-snapping cut will snap to. A steady tone has
+// no onsets (confidence 0) and speech scores ~0.09 — both report
+// reliable: false instead of a confident wrong number. Files over 10
+// minutes are refused (the raw PCM would be ~53 MB); under 4s there
+// are too few beats to trust.
+const BPM_SAMPLE_RATE = 22050;
+const BPM_MAX_DURATION_SECONDS = 600;
+const BPM_MIN_DURATION_SECONDS = 4;
+const BPM_RELIABLE_CONFIDENCE = 0.35;
+
+// Iterative radix-2 FFT, in place on (re, im). Pure — unit-tested
+// through spectralFluxOnset/estimateTempo without spawning ffmpeg.
+function fftRadix2(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      const tr = re[i]; re[i] = re[j]; re[j] = tr;
+      const ti = im[i]; im[i] = im[j]; im[j] = ti;
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (-2 * Math.PI) / len;
+    const wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cwr = 1, cwi = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const ur = re[i + k], ui = im[i + k];
+        const vr = re[i + k + len / 2] * cwr - im[i + k + len / 2] * cwi;
+        const vi = re[i + k + len / 2] * cwi + im[i + k + len / 2] * cwr;
+        re[i + k] = ur + vr; im[i + k] = ui + vi;
+        re[i + k + len / 2] = ur - vr; im[i + k + len / 2] = ui - vi;
+        const nwr = cwr * wr - cwi * wi;
+        cwi = cwr * wi + cwi * wr;
+        cwr = nwr;
+      }
+    }
+  }
+}
+
+// Spectral-flux onset function (aubio's "specdiff"): 1024-point FFT,
+// 512 hop, Hann window; flux is the sum of positive magnitude
+// differences per bin. Returns the smoothed flux (for correlation),
+// the raw flux (for onset events) and the flux frame rate.
+export function spectralFluxOnset(samples, sampleRate) {
+  const WIN = 1024, HOP = 512;
+  const hann = new Float64Array(WIN);
+  for (let i = 0; i < WIN; i++) hann[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (WIN - 1)));
+  const re = new Float64Array(WIN), im = new Float64Array(WIN);
+  const prev = new Float64Array(WIN / 2 + 1);
+  const raw = [];
+  for (let start = 0; start + WIN <= samples.length; start += HOP) {
+    for (let i = 0; i < WIN; i++) { re[i] = samples[start + i] * hann[i]; im[i] = 0; }
+    fftRadix2(re, im);
+    let f = 0;
+    for (let k = 0; k <= WIN / 2; k++) {
+      const mag = Math.sqrt(re[k] * re[k] + im[k] * im[k]);
+      const d = mag - prev[k];
+      if (d > 0) f += d;
+      prev[k] = mag;
+    }
+    raw.push(f);
+  }
+  const flux = raw.map((v, i) => ((raw[i - 1] ?? 0) + 2 * v + (raw[i + 1] ?? 0)) / 4);
+  return { flux, rawFlux: raw, fps: sampleRate / HOP };
+}
+
+// Pure tempo estimation from a flux curve: autocorrelation + comb
+// filterbank + 120 BPM prior + onset-recall tie-break (see the bpm
+// header). Returns bpm (1 decimal), confidence 0-1, reliable flag,
+// the beat period in flux frames, onset recall, event count, and the
+// first 16 beat times in seconds. Unit-tested on a synthetic flux
+// train without touching ffmpeg.
+export function estimateTempo(flux, fps, rawFlux = flux, minBpm = 40, maxBpm = 240) {
+  const n = flux.length;
+  if (n < 8) return { bpm: null, confidence: 0, reliable: false, lag: null, onset_recall: 0, onsets_detected: 0, first_beat_seconds: null, beats: [], reason: "too few flux frames" };
+  const mean = flux.reduce((a, b) => a + b, 0) / n;
+  const x = flux.map((v) => v - mean);
+  const acf0 = x.reduce((a, v) => a + v * v, 0);
+  if (acf0 <= 0) return { bpm: null, confidence: 0, reliable: false, lag: null, onset_recall: 0, onsets_detected: 0, first_beat_seconds: null, beats: [], reason: "no onset energy" };
+  const minLag = Math.max(1, Math.floor((fps * 60) / maxBpm));
+  const maxLag = Math.min(n - 1, Math.ceil((fps * 60) / minBpm));
+  const acfMax = Math.min(n - 1, 3 * maxLag);
+  const acfArr = new Float64Array(acfMax + 1);
+  for (let lag = 0; lag <= acfMax; lag++) {
+    let s = 0;
+    for (let i = 0; i < n - lag; i++) s += x[i] * x[i + lag];
+    acfArr[lag] = s;
+  }
+  const acfF = (lag) => {
+    if (lag <= 0) return acf0;
+    if (lag >= acfMax) return 0;
+    const lo = Math.floor(lag), frac = lag - lo;
+    return acfArr[lo] * (1 - frac) + acfArr[lo + 1] * frac;
+  };
+  const combF = (lag) => acfF(lag) + 0.5 * acfF(2 * lag) + 0.25 * acfF(3 * lag);
+  const prior = (bpm) => Math.exp(-((Math.log(bpm / 120)) ** 2) / (2 * 0.8 * 0.8));
+  const cands = [];
+  for (let bpm = minBpm; bpm <= maxBpm + 0.001; bpm += 0.1) {
+    const lag = (fps * 60) / bpm;
+    if (lag < minLag || lag > maxLag) continue;
+    cands.push({ bpm: +bpm.toFixed(1), lag, score: combF(lag) * prior(bpm) });
+  }
+  if (!cands.length) return { bpm: null, confidence: 0, reliable: false, lag: null, onset_recall: 0, onsets_detected: 0, first_beat_seconds: null, beats: [], reason: "no candidate period in range" };
+  let best = cands[0];
+  for (const c of cands) if (c.score > best.score) best = c;
+  // Onset events from the raw flux: runs above 25% of max, weighted
+  // by their peak flux (a drum pattern's quiet off-beat hats must not
+  // veto the kick grid, so recall is flux-weighted).
+  const maxFlux = Math.max(...rawFlux);
+  const events = [];
+  {
+    let runStart = -1, runBest = -1;
+    for (let i = 0; i <= n; i++) {
+      const above = i < n && rawFlux[i] >= 0.25 * maxFlux;
+      if (above && runStart < 0) { runStart = i; runBest = i; }
+      else if (above && rawFlux[i] > rawFlux[runBest]) runBest = i;
+      else if (!above && runStart >= 0) { events.push({ frame: runBest, weight: rawFlux[runBest] }); runStart = -1; }
+    }
+  }
+  const totalWeight = events.reduce((a, e) => a + e.weight, 0);
+  const recall = (lag) => {
+    if (!events.length || totalWeight <= 0) return { recall: 0, phase: 0 };
+    let bestOff = 0, bestSum = -Infinity;
+    for (let off = 0; off < lag; off += 0.5) {
+      let s = 0;
+      for (let k = 0; ; k++) {
+        const idx = Math.round(off + k * lag);
+        if (idx >= n) break;
+        s += flux[idx];
+      }
+      if (s > bestSum) { bestSum = s; bestOff = off; }
+    }
+    const tol = lag * 0.25;
+    let hitWeight = 0;
+    for (const e of events) {
+      const k = Math.round((e.frame - bestOff) / lag);
+      const dist = Math.abs(e.frame - (bestOff + k * lag));
+      if (dist <= tol) hitWeight += e.weight;
+    }
+    return { recall: hitWeight / totalWeight, phase: bestOff };
+  };
+  const tied = cands.filter((c) => c.score >= 0.9 * best.score);
+  let pick = best;
+  let pickRec = recall(best.lag);
+  for (const c of tied) {
+    const rec = recall(c.lag);
+    if (rec.recall >= 0.7 && pickRec.recall < 0.7) { pick = c; pickRec = rec; }
+    else if (rec.recall >= 0.7 && pickRec.recall >= 0.7 && c.score > pick.score) { pick = c; pickRec = rec; }
+  }
+  const refineLag = (L) => {
+    const h = 0.5;
+    const y0 = combF(L - h), y1 = combF(L), y2 = combF(L + h);
+    const denom = y0 - 2 * y1 + y2;
+    if (!(denom < 0)) return L;
+    const off = (h * (y0 - y2)) / (2 * denom);
+    return L + Math.max(-h, Math.min(h, off));
+  };
+  const refinedLag = refineLag(pick.lag);
+  const bpm = +((fps * 60) / refinedLag).toFixed(1);
+  const confidence = Math.max(0, Math.min(1, pick.score / (1.75 * acf0)));
+  const beats = [];
+  for (let k = 0; beats.length < 16; k++) {
+    const t = (pickRec.phase + k * refinedLag) / fps;
+    if (t >= n / fps) break;
+    beats.push(+t.toFixed(3));
+  }
+  return {
+    bpm,
+    confidence: +confidence.toFixed(3),
+    reliable: confidence >= BPM_RELIABLE_CONFIDENCE,
+    lag: +refinedLag.toFixed(2),
+    onset_recall: +pickRec.recall.toFixed(2),
+    onsets_detected: events.length,
+    first_beat_seconds: beats[0] ?? null,
+    beats,
+  };
+}
+
+export async function detectBpm({ input, minBpm = 40, maxBpm = 240 }) {
+  const inPath = await requireInput(input);
+  const lo = num(minBpm, "min_bpm", { min: 20, max: 300 });
+  const hi = num(maxBpm, "max_bpm", { min: 20, max: 300 });
+  if (lo >= hi) throw new MediaKitError(`bpm: min_bpm (${lo}) must be below max_bpm (${hi})`, "INVALID_ARG");
+  const meta = await probe(inPath);
+  if (!meta.audio) throw new MediaKitError("bpm needs an audio stream — this file has none", "INVALID_ARG");
+  const total = meta.duration_seconds;
+  if (total === null) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
+  if (total > BPM_MAX_DURATION_SECONDS) {
+    throw new MediaKitError(`bpm refuses files over ${BPM_MAX_DURATION_SECONDS}s (the raw PCM decode would exceed memory) — trim a section first`, "INVALID_ARG");
+  }
+  if (total < BPM_MIN_DURATION_SECONDS) {
+    throw new MediaKitError(`bpm needs at least ${BPM_MIN_DURATION_SECONDS}s of audio (too few beats to trust)`, "INVALID_ARG");
+  }
+  const warnings = [];
+  if (total < 8) warnings.push(`file is ${total}s — fewer than ~10 beats at slow tempos, treat the number as rough`);
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-bpm-"));
+  const rawPath = path.join(tmpDir, "audio.f32");
+  let samples;
+  try {
+    await run(FFMPEG, ["-y", "-v", "error", "-i", inPath, "-vn", "-ac", "1", "-ar", String(BPM_SAMPLE_RATE), "-f", "f32le", rawPath]);
+    const buf = await readFile(rawPath);
+    const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+    samples = new Float32Array(ab);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+  if (!samples.length) throw new MediaKitError("bpm: decoded audio is empty", "PROBE_FAILED");
+  const { flux, rawFlux, fps } = spectralFluxOnset(samples, BPM_SAMPLE_RATE);
+  const est = estimateTempo(flux, fps, rawFlux, lo, hi);
+  if (est.bpm === null) warnings.push(est.reason ?? "no periodic onset found — the number below is a guess");
+  if (!est.reliable) warnings.push(`low confidence (${est.confidence}) — the audio may have no steady beat (speech, ambience, a drone); do not snap cuts to this grid`);
+  return {
+    operation: "bpm",
+    input: inPath,
+    duration_seconds: total,
+    sample_rate_hz: BPM_SAMPLE_RATE,
+    bpm: est.bpm,
+    beat_period_seconds: est.bpm === null ? null : +(60 / est.bpm).toFixed(3),
+    confidence: est.confidence,
+    reliable: est.reliable,
+    onset_recall: est.onset_recall,
+    onsets_detected: est.onsets_detected,
+    first_beat_seconds: est.first_beat_seconds,
+    beats: est.beats,
+    method: "spectral-flux onset + autocorrelation/comb period + 120 BPM prior + onset-recall tie-break (aubio tempo, re-implemented in pure Node)",
     warnings,
   };
 }

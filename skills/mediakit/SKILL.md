@@ -1278,7 +1278,7 @@ exactly the unguarded pattern brookcs3/m3u8-mcp-server's
 verify) — MediaKit's `download` exists so the agent never has to.
 
 ### 52. Test a tool over HTTP before wiring up an MCP client — same tools, curl instead of stdio
-`mediakit mcp --http [--port 3000]` serves the same 65 tools over
+`mediakit mcp --http [--port 3000]` serves the same 66 tools over
 HTTP on `127.0.0.1`: `GET /mcp` (metadata), `GET /mcp/tools`
 (every tool + JSON input schema), `POST /mcp/tools/{name}/invoke`
 (`{"arguments": {...}}`), and `POST /` for JSON-RPC 2.0
@@ -1372,6 +1372,25 @@ a hook. Video-only input scores on cuts alone (energy/speech 0, and
 the warnings say so); audio-only on energy+speech. Files over 20
 minutes are refused: the astats log behind the curve would exceed
 the capture buffer, so trim a section first.
+
+### 56. Measure the tempo before cutting on the beat — `bpm` finds the musical grid
+A cut that lands on the beat feels intentional; a cut half a beat
+off feels like a mistake. `bpm <clip>` measures the tempo in BPM
+(probe-only, writes no file): spectral-flux onset function, then an
+autocorrelation + comb-filterbank period search with a 120 BPM prior
+and an onset-recall tie-break (aubio's tempo pipeline,
+re-implemented in pure Node). It returns `bpm` (1 decimal),
+`beat_period_seconds`, `confidence` 0–1, a `reliable` flag,
+`onset_recall`, `onsets_detected`, `first_beat_seconds` and the
+first 16 `beats` — the grid a future beat-snapping cut snaps to.
+Trust the number only when `reliable` is true: a steady tone has no
+onsets (confidence ~0) and speech has no steady beat (confidence
+~0.09), and both report `reliable: false` with a warning instead of
+a confident wrong number — never snap cuts to an unreliable grid.
+The prior is deliberate, not a bug: a kick + off-beat-hat drum
+pattern scores identically at 60/120/240 on comb alone, and the
+prior is what reads it as its musical beat (120), not its
+subdivision (240). Files over 10 minutes or under 4s are refused.
 
 ## Workflow: vertical captioned clip from a landscape source
 
