@@ -357,12 +357,16 @@ const COMMANDS = {
     ],
   },
   download: {
-    usage: "mediakit download <url> -o <output.mp4> [--max-size-mb 500] [--timeout-seconds 300]",
-    desc: "Download a media file from an http(s) URL into the workspace. Typed and guarded: http/https only (no credentials in the URL, no HLS/DASH playlist in v1), size cap enforced while streaming (default 500 MB), 5 redirects max, 300s timeout, written atomically via <output>.partial and renamed only on success, then probed — a file that is not media is deleted and reported. The output extension is either given (must be a media extension) or derived from the Content-Type / URL path.",
+    usage: "mediakit download <url> -o <output.mp4> [--max-size-mb 500] [--timeout-seconds 300] [--cache] [--cache-dir <dir>] [--max-retries 3] [--rate-limit-rps 0]",
+    desc: "Download a media file from an http(s) URL into the workspace. Typed and guarded: http/https only (no credentials in the URL), size cap enforced while streaming (default 500 MB), 5 redirects max, 300s timeout per attempt, written atomically via <output>.partial and renamed only on success, then probed — a file that is not media is deleted and reported. The output extension is either given (must be a media extension) or derived from the Content-Type / URL path. Transient failures (HTTP 429/5xx, network errors) are retried with exponential backoff honouring Retry-After (default 3 retries; timeouts and deterministic refusals are never retried). --cache reuses a verified per-URL disk cache (size + sha256 checked; playlists are never cached). --rate-limit-rps paces downloads in this process with a token bucket (0 = unlimited).",
     args: [{ name: "url", required: true }],
     options: [
       ["--max-size-mb", "Maximum download size in MB (default 500)"],
-      ["--timeout-seconds", "Whole-download timeout in seconds (default 300)"],
+      ["--timeout-seconds", "Per-attempt timeout in seconds (default 300)"],
+      ["--cache", "Reuse a verified per-URL disk cache (default off; MEDIAKIT_DOWNLOAD_CACHE_DIR or ~/.cache/mediakit/downloads)"],
+      ["--cache-dir", "Cache directory override"],
+      ["--max-retries", "Retries for transient failures, 0-5 (default 3)"],
+      ["--rate-limit-rps", "Token-bucket rate limit in requests/second for this process (default 0 = unlimited; MEDIAKIT_DOWNLOAD_RPS env when the flag is absent)"],
       ["-o, --output", "Output file (required) — with a media extension, or without one (derived from Content-Type / URL path)"],
     ],
   },
@@ -1223,6 +1227,10 @@ async function main() {
           output: needOutput(opts),
           maxSizeMb: numOpt(opts, "max_size_mb") ?? 500,
           timeoutSeconds: numOpt(opts, "timeout_seconds") ?? 300,
+          cache: opts.cache === true,
+          cacheDir: opts.cache_dir ?? null,
+          maxRetries: numOpt(opts, "max_retries") ?? 3,
+          rateLimitRps: numOpt(opts, "rate_limit_rps") ?? null,
         });
         break;
       case "image-to-video":

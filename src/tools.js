@@ -1321,7 +1321,7 @@ export const TOOL_DEFS = [
 
   {
     name: "determinism",
-    description: "Check whether a linear pipeline manifest reproduces byte-identically (heristop/leclap's verify --rerender idea, for the manifest tool — assemble already has verify --rerender; the manifest cache only verifies size + sha256 of an output it already stored, it never proves a fresh run reproduces the same bytes). Runs the same manifest N times (default 2, max 5) with the cache OFF — a cache hit would prove nothing — then compares byte sha256, decoded-frame digest (framemd5, moviepy's test pattern: compare decoded frames, never bytes), and measured properties (duration/frames/dimensions) across runs. Verdict byte_identical means the pipeline reproduces exactly (on this machine two identical libx264 encodes are byte-identical); content_identical means the frames match but container bytes differ, with the differing format tags named (usually creation_time); differs means the pipeline itself is nondeterministic, with the first differing run pair named. A download-first manifest re-fetches its URL on every run. keep_outputs keeps the per-run outputs under .mediakit-determinism-<pid> next to the manifest (removed by default).",
+    description: "Check whether a linear pipeline manifest reproduces byte-identically (heristop/leclap's verify --rerender idea, for the manifest tool — assemble already has verify --rerender; the manifest cache only verifies size + sha256 of an output it already stored, it never proves a fresh run reproduces the same bytes). Runs the same manifest N times (default 2, max 5) with the cache OFF — a cache hit would prove nothing — then compares byte sha256, decoded-frame digest (framemd5, moviepy's test pattern: compare decoded frames, never bytes), and measured properties (duration/frames/dimensions) across runs. Verdict byte_identical means the pipeline reproduces exactly (on this machine two identical libx264 encodes are byte-identical); content_identical means the frames match but container bytes differ, with the differing format tags named (usually creation_time); differs means the pipeline itself is nondeterministic, with the first differing run pair named. A download-first manifest re-fetches its URL on every run, unless the download step sets cache:true (then the verified per-URL cache serves it). keep_outputs keeps the per-run outputs under .mediakit-determinism-<pid> next to the manifest (removed by default).",
     schema: {
     manifest_path: pathSchema.describe("Path to the manifest JSON file to re-run"),
     runs: z.number().int().min(2).max(5).default(2).describe("How many fresh renders to compare (2-5, default 2)"),
@@ -1402,18 +1402,26 @@ export const TOOL_DEFS = [
 // until the last segment arrives.
   {
     name: "download",
-    description: "Download a media file from an http(s) URL into the workspace — stock footage, a reference clip, a music bed. Typed and guarded: http/https only (no credentials in the URL), size cap enforced while streaming for direct files (default 500 MB, refused upfront when Content-Length already exceeds it), 5 redirects max, 300s timeout, written atomically via <output>.partial and renamed only on success, then probed — a file that is not media is deleted and reported, never left as a success. HLS (.m3u8) / DASH (.mpd) playlists are fetched with ffmpeg -c copy (re-mux, never re-encode) under a protocol whitelist, and the size cap is enforced after the fetch. The output extension is either given (must be a media extension) or derived from the Content-Type / URL path. Returns the output path, size, content-type, redirect count and the probe summary (duration, dimensions, codecs).",
+    description: "Download a media file from an http(s) URL into the workspace — stock footage, a reference clip, a music bed. Typed and guarded: http/https only (no credentials in the URL), size cap enforced while streaming for direct files (default 500 MB, refused upfront when Content-Length already exceeds it), 5 redirects max, 300s timeout per attempt, written atomically via <output>.partial and renamed only on success, then probed — a file that is not media is deleted and reported, never left as a success. HLS (.m3u8) / DASH (.mpd) playlists are fetched with ffmpeg -c copy (re-mux, never re-encode) under a protocol whitelist, and the size cap is enforced after the fetch. The output extension is either given (must be a media extension) or derived from the Content-Type / URL path. Transient failures (HTTP 429/5xx, network errors) are retried with exponential backoff 1s/2s/4s honouring Retry-After (default 3 retries; timeouts and deterministic refusals are never retried). cache:true reuses a verified per-URL disk cache (size + sha256 checked, corrupt entries re-fetched; playlists are never cached). rate_limit_rps paces downloads in this process with a token bucket (0 = unlimited). Returns the output path, size, content-type, redirect count, attempts/retries, cache hit status and the probe summary (duration, dimensions, codecs).",
     schema: {
     url: z.string().url().describe("http(s) URL of a direct media file (video/audio/image) or an HLS (.m3u8) / DASH (.mpd) playlist"),
     output: pathSchema.describe("Output file path — with a media extension, or without one (the extension is then derived from the Content-Type / URL path)"),
     max_size_mb: z.number().min(0.01).max(2000).default(500).describe("Maximum download size in MB (default 500); refused upfront when Content-Length exceeds it, aborted mid-stream otherwise"),
-    timeout_seconds: z.number().int().min(1).max(3600).default(300).describe("Whole-download timeout in seconds (default 300)"),
+    timeout_seconds: z.number().int().min(1).max(3600).default(300).describe("Per-attempt timeout in seconds (default 300); each retry gets a fresh budget"),
+    cache: z.boolean().default(false).describe("Reuse a verified per-URL disk cache (default off; lives under MEDIAKIT_DOWNLOAD_CACHE_DIR or ~/.cache/mediakit/downloads, keyed by URL, verified by size + sha256; playlists are never cached)"),
+    cache_dir: z.string().optional().describe("Cache directory override (default: MEDIAKIT_DOWNLOAD_CACHE_DIR env, else ~/.cache/mediakit/downloads)"),
+    max_retries: z.number().int().min(0).max(5).default(3).describe("Retries for transient failures — HTTP 429/5xx and network errors (default 3; 0 = no retry; timeouts and deterministic refusals are never retried)"),
+    rate_limit_rps: z.number().min(0).max(1000).default(0).describe("Token-bucket rate limit in requests/second for this process (default 0 = unlimited; the bucket starts full, so a single download is never delayed)"),
   },
     handler: async (a) => safe(() => core.downloadMedia({
     url: a.url,
     output: a.output,
     maxSizeMb: a.max_size_mb,
     timeoutSeconds: a.timeout_seconds,
+    cache: a.cache,
+    cacheDir: a.cache_dir ?? null,
+    maxRetries: a.max_retries,
+    rateLimitRps: a.rate_limit_rps,
   })),
   },
 

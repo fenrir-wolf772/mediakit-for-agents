@@ -981,8 +981,9 @@ differ, with the differing format tags named (usually
 `creation_time`) — same pictures and sound, different container;
 `differs` means the pipeline itself is nondeterministic, with the
 first differing run pair named. A download-first manifest
-re-fetches its URL on every run, so a changed server file reports
-`differs` honestly. The per-run outputs live under
+re-fetches its URL on every run (unless the download step sets
+`cache:true`, which serves the verified per-URL cache instead), so
+a changed server file reports `differs` honestly. The per-run outputs live under
 `.mediakit-determinism-<pid>` next to the manifest and are removed
 by default (`--keep-outputs` keeps them; a failed run always keeps
 them). This is the linear-manifest sibling of `verify --rerender`,
@@ -1244,22 +1245,37 @@ plenty — a render takes minutes, not seconds.
 ### 51. Pull media from the web with `download` — never with a bare ffmpeg URL input
 `download <url> -o <file>` is the only way to fetch media from the
 web: http(s) only, no credentials in the URL (use a signed URL with
-query parameters), no HLS/DASH playlist in v1 — give a direct file
-URL. The size cap (default 500 MB, `--max-size-mb`) is enforced
-while streaming, not just from Content-Length, so a server that
-lies about the length still cannot fill the disk; a declared length
-over the cap is refused before a body byte is read. Redirects are
-capped at 5 and a redirect off http(s) is refused. The file is
-written to `<output>.partial` and renamed only on success, then
-probed — a download that is not media is deleted and reported, so
-a 200 OK with an HTML error page never becomes a "clip". The
-output extension is either given (must be a media extension) or
-derived from the Content-Type / URL path, and a video served as
-`.mp3` is refused rather than mislabelled. Never `ffmpeg -i <url>`
-directly: that is exactly the unguarded pattern
-brookcs3/m3u8-mcp-server's `m3u8_download` uses (no validation, no
-cap, no timeout, no verify) — MediaKit's `download` exists so the
-agent never has to.
+query parameters). HLS (`.m3u8`) / DASH (`.mpd`) playlists are
+fetched with ffmpeg `-c copy` under a protocol whitelist (no
+`file://` segments) and the size cap is enforced after the fetch.
+The size cap (default 500 MB, `--max-size-mb`) is enforced while
+streaming, not just from Content-Length, so a server that lies about
+the length still cannot fill the disk; a declared length over the
+cap is refused before a body byte is read. Redirects are capped at
+5 and a redirect off http(s) is refused. The file is written to
+`<output>.partial` and renamed only on success, then probed — a
+download that is not media is deleted and reported, so a 200 OK
+with an HTML error page never becomes a "clip". The output
+extension is either given (must be a media extension) or derived
+from the Content-Type / URL path, and a video served as `.mp3` is
+refused rather than mislabelled. Transient failures (HTTP 429/5xx,
+network errors) are retried with exponential backoff 1s/2s/4s
+honouring `Retry-After` (default `--max-retries 3`; timeouts and
+deterministic refusals — 404, bad content-type, over the size cap —
+are never retried, and the final error names the attempt count).
+`--cache` reuses a verified per-URL disk cache
+(`MEDIAKIT_DOWNLOAD_CACHE_DIR` or `~/.cache/mediakit/downloads`,
+keyed by sha256(url), trusted only after size + sha256 still match
+the meta; a corrupt entry is re-fetched, never served) — use it for
+stock URLs a director fetches across runs; playlists are never
+cached and `--cache` on one is refused, not silently ignored.
+`--rate-limit-rps` paces downloads in this process with a token
+bucket (0 = unlimited; `MEDIAKIT_DOWNLOAD_RPS` when the flag is
+absent) — a manifest fetching several URLs in one process stays
+polite to the CDN. Never `ffmpeg -i <url>` directly: that is
+exactly the unguarded pattern brookcs3/m3u8-mcp-server's
+`m3u8_download` uses (no validation, no cap, no timeout, no
+verify) — MediaKit's `download` exists so the agent never has to.
 
 ### 52. Test a tool over HTTP before wiring up an MCP client — same tools, curl instead of stdio
 `mediakit mcp --http [--port 3000]` serves the same 65 tools over

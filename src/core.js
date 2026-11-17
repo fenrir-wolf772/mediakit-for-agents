@@ -5803,7 +5803,186 @@ const DOWNLOAD_MEDIA_CATEGORY = {
   png: "image", jpg: "image", jpeg: "image", webp: "image", gif: "image",
 };
 
-export async function downloadMedia({ url, output, maxSizeMb = DOWNLOAD_DEFAULT_MAX_MB, timeoutSeconds = DOWNLOAD_DEFAULT_TIMEOUT_S }) {
+// Download cache + retry + token bucket (lượt 85, backlog; the
+// lesson from tillo13/ai_storyboard_video_generator's naive
+// `requests.get` download — no timeout, no retry, no validation):
+// a director re-fetches the same stock URL across runs, and a CDN
+// 503 must not fail the whole manifest. Three separate mechanisms:
+//  - cache: opt-in per-URL disk cache under MEDIAKIT_DOWNLOAD_CACHE_DIR
+//    (default ~/.cache/mediakit/downloads), keyed by sha256(url); a
+//    hit is verified by size + sha256 before it is trusted, and a
+//    corrupt entry is a miss, never served. Playlists are NOT cached
+//    (their segments change under the same URL) — cache:true on a
+//    playlist is refused, not silently ignored.
+//  - retry: 429/5xx + network errors are retried (default 3) with
+//    exponential backoff 1s/2s/4s, honouring Retry-After (capped
+//    60s). Other 4xx, content-type/size refusals and timeouts are NOT
+//    retried — retrying a deterministic refusal only burns time.
+//  - token bucket: in-process, one token per download call, only when
+//    rate_limit_rps > 0 (param wins, else MEDIAKIT_DOWNLOAD_RPS env).
+//    A manifest fetching several URLs in one process is paced; a
+//    single CLI call is unaffected (the bucket starts full).
+const DOWNLOAD_DEFAULT_MAX_RETRIES = 3;
+const DOWNLOAD_MAX_RETRIES = 5;
+const DOWNLOAD_BACKOFF_BASE_MS = 1000;
+const DOWNLOAD_BACKOFF_MAX_MS = 8000;
+const DOWNLOAD_RETRY_AFTER_MAX_S = 60;
+const DOWNLOAD_RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+
+function downloadEnvRps() {
+  const raw = process.env.MEDIAKIT_DOWNLOAD_RPS;
+  if (raw === undefined || raw === "") return 0;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.min(n, 1000) : 0;
+}
+
+function downloadCacheDir(cacheDir) {
+  if (typeof cacheDir === "string" && cacheDir.trim()) return cacheDir.trim();
+  const env = process.env.MEDIAKIT_DOWNLOAD_CACHE_DIR;
+  if (typeof env === "string" && env.trim()) return env.trim();
+  return path.join(os.homedir(), ".cache", "mediakit", "downloads");
+}
+
+function downloadCacheKey(url) {
+  return createHash("sha256").update(url).digest("hex");
+}
+
+// A cache hit is trusted only after the stored bytes still match
+// the meta (size + sha256) and the meta names this exact URL —
+// anything else is a miss, never served.
+async function readDownloadCacheEntry(dir, key, url) {
+  const entryDir = path.join(dir, key);
+  try {
+    const meta = JSON.parse(await readFile(path.join(entryDir, "meta.json"), "utf8"));
+    if (meta?.url !== url || typeof meta.sha256 !== "string" || typeof meta.size_bytes !== "number"
+      || typeof meta.ext !== "string" || !meta.ext || typeof meta.stored_at !== "string") return null;
+    const filePath = path.join(entryDir, "file");
+    const st = await stat(filePath);
+    if (st.size !== meta.size_bytes) return null;
+    const sha = createHash("sha256").update(await readFile(filePath)).digest("hex");
+    if (sha !== meta.sha256) return null;
+    return { meta, filePath };
+  } catch {
+    return null;
+  }
+}
+
+// Best effort by design: a cache that cannot be written must not
+// fail a download that already succeeded — returns false instead of
+// throwing. The file is renamed into place before the meta, so a
+// crash mid-store leaves no meta to trust (a miss, not a lie).
+async function storeDownloadCacheEntry(dir, key, { url, finalUrl, contentType, ext, redirects, filePath }) {
+  try {
+    const entryDir = path.join(dir, key);
+    await mkdir(entryDir, { recursive: true });
+    const bytes = await readFile(filePath);
+    const meta = {
+      schema: "mediakit-for-agents/download-cache/1",
+      url, final_url: finalUrl, content_type: contentType ?? null, ext,
+      redirects: redirects ?? null, size_bytes: bytes.length,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      stored_at: new Date().toISOString(),
+    };
+    const tmpFile = path.join(entryDir, `file.tmp-${process.pid}`);
+    await writeFile(tmpFile, bytes);
+    await rename(tmpFile, path.join(entryDir, "file"));
+    const tmpMeta = path.join(entryDir, "meta.json.tmp");
+    await writeFile(tmpMeta, JSON.stringify(meta, null, 2), "utf8");
+    await rename(tmpMeta, path.join(entryDir, "meta.json"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// In-process token bucket: capacity = rps (one burst of rps calls is
+// free), refilled at rps/second. Returns the milliseconds waited
+// (0 when a token was already available, or the limit is off).
+let downloadBucket = null;
+async function acquireDownloadToken(rps) {
+  if (!rps || rps <= 0) return 0;
+  const now = Date.now();
+  if (!downloadBucket || downloadBucket.rps !== rps) {
+    downloadBucket = { rps, tokens: rps, lastMs: now };
+  }
+  const elapsedS = (now - downloadBucket.lastMs) / 1000;
+  downloadBucket.tokens = Math.min(rps, downloadBucket.tokens + elapsedS * rps);
+  downloadBucket.lastMs = now;
+  if (downloadBucket.tokens >= 1) {
+    downloadBucket.tokens -= 1;
+    return 0;
+  }
+  const waitMs = Math.ceil(((1 - downloadBucket.tokens) / rps) * 1000);
+  await new Promise((r) => setTimeout(r, waitMs));
+  downloadBucket.tokens = 0;
+  downloadBucket.lastMs = Date.now();
+  return waitMs;
+}
+
+function parseRetryAfterMs(res) {
+  const raw = res.headers?.get?.("retry-after");
+  if (!raw) return null;
+  const secs = Number(raw.trim());
+  if (Number.isFinite(secs) && secs >= 0) return Math.min(secs, DOWNLOAD_RETRY_AFTER_MAX_S) * 1000;
+  const when = Date.parse(raw);
+  if (Number.isFinite(when)) return Math.max(0, Math.min((when - Date.now()) / 1000, DOWNLOAD_RETRY_AFTER_MAX_S)) * 1000;
+  return null;
+}
+
+function downloadBackoffMs(retryIndex, retryAfterMs) {
+  if (retryAfterMs !== null && retryAfterMs !== undefined) return retryAfterMs;
+  return Math.min(DOWNLOAD_BACKOFF_BASE_MS * 2 ** retryIndex, DOWNLOAD_BACKOFF_MAX_MS);
+}
+
+function retryableDownloadError(message, retryAfterMs = null) {
+  const err = new MediaKitError(message, "DOWNLOAD_FAILED");
+  err.retryable = true;
+  if (retryAfterMs !== null) err.retryAfterMs = retryAfterMs;
+  return err;
+}
+
+// Probe a downloaded file, write its provenance record, and return
+// the result tail shared by the direct, playlist and cache-hit
+// paths. A file that fails the probe is deleted and reported, never
+// left on disk as a success.
+async function probeAndRecordDownload({ outPath, url, finalUrl, redirects, contentType, playlist, maxBytes, cacheInfo = null }) {
+  const info = await fileInfo(outPath);
+  let media;
+  try {
+    media = await probe(outPath);
+  } catch {
+    await unlink(outPath).catch(() => {});
+    throw new MediaKitError("downloaded file is not media (ffprobe could not read it) — deleted", "DOWNLOAD_FAILED");
+  }
+  if (!media.video && !media.audio) {
+    await unlink(outPath).catch(() => {});
+    throw new MediaKitError("downloaded file has no video or audio stream — deleted", "DOWNLOAD_FAILED");
+  }
+  const provenance = await writeDownloadProvenance({
+    outPath, url, finalUrl, redirects,
+    contentType: contentType || null, playlist, media, sizeBytes: info.size_bytes, cache: cacheInfo,
+  });
+  return {
+    operation: "download",
+    url,
+    final_url: finalUrl,
+    redirects,
+    output: outPath,
+    provenance,
+    size_bytes: info.size_bytes,
+    size_human: info.size_human,
+    content_type: contentType || null,
+    max_size_bytes: maxBytes,
+    media: {
+      format: media.format,
+      duration_seconds: media.duration_seconds,
+      video: media.video,
+      audio: media.audio,
+    },
+  };
+}
+
+export async function downloadMedia({ url, output, maxSizeMb = DOWNLOAD_DEFAULT_MAX_MB, timeoutSeconds = DOWNLOAD_DEFAULT_TIMEOUT_S, cache = false, maxRetries = DOWNLOAD_DEFAULT_MAX_RETRIES, rateLimitRps = null, cacheDir = null }) {
   if (typeof url !== "string" || !url.trim()) {
     throw new MediaKitError("download needs a URL", "INVALID_ARG");
   }
@@ -5821,6 +6000,14 @@ export async function downloadMedia({ url, output, maxSizeMb = DOWNLOAD_DEFAULT_
   const maxMb = num(maxSizeMb, "max_size_mb", { min: 0.01, max: 2000 });
   const maxBytes = Math.floor(maxMb * 1024 * 1024);
   const timeoutS = num(timeoutSeconds, "timeout_seconds", { min: 1, max: 3600, integer: true });
+  if (typeof cache !== "boolean") {
+    throw new MediaKitError(`download cache must be true or false, got: ${cache}`, "INVALID_ARG");
+  }
+  const retriesMax = num(maxRetries, "max_retries", { min: 0, max: DOWNLOAD_MAX_RETRIES, integer: true });
+  const rps = rateLimitRps === null || rateLimitRps === undefined
+    ? downloadEnvRps()
+    : num(rateLimitRps, "rate_limit_rps", { min: 0, max: 1000 });
+  const cacheRoot = downloadCacheDir(cacheDir);
   if (typeof output !== "string" || !output.trim()) {
     throw new MediaKitError("download needs an output path", "INVALID_ARG");
   }
@@ -5831,9 +6018,98 @@ export async function downloadMedia({ url, output, maxSizeMb = DOWNLOAD_DEFAULT_
   // A playlist is not a file: hand it to the ffmpeg fetcher, which
   // re-muxes the segments with -c copy under the same timeout.
   if (urlExt === "m3u8" || urlExt === "mpd") {
-    return downloadPlaylistMedia({ url: url.trim(), urlExt, output, maxBytes, maxMb, timeoutS, requestedExt });
+    if (cache) {
+      throw new MediaKitError("download --cache does not cache playlists yet (a playlist's segments change under the same URL) — re-run without --cache", "INVALID_ARG");
+    }
+    const rateWaitMs = await acquireDownloadToken(rps);
+    const pl = await downloadPlaylistMedia({ url: url.trim(), urlExt, output, maxBytes, maxMb, timeoutS, requestedExt, maxRetries: retriesMax });
+    return { ...pl, cached: false, cache_age_seconds: null, cache_stored: null, rate_limited_wait_ms: rateWaitMs };
   }
+  // Cache lookup first: a hit serves no network at all (and takes no
+  // rate-limit token). The entry is trusted only after size + sha256
+  // match the meta — a corrupt entry is a miss, never served.
+  const cacheKey = downloadCacheKey(url.trim());
+  const cachedEntry = cache ? await readDownloadCacheEntry(cacheRoot, cacheKey, url.trim()) : null;
+  const rateWaitMs = await acquireDownloadToken(rps);
+  if (cachedEntry) {
+    const contentType = cachedEntry.meta.content_type;
+    const typeCategory = (contentType ?? "").startsWith("video/") ? "video"
+      : (contentType ?? "").startsWith("audio/") ? "audio"
+      : (contentType ?? "").startsWith("image/") ? "image" : null;
+    const ext = requestedExt || cachedEntry.meta.ext;
+    if (!ext) {
+      throw new MediaKitError("download cache entry has no extension — re-fetch without --cache", "DOWNLOAD_FAILED");
+    }
+    if (typeCategory && DOWNLOAD_MEDIA_CATEGORY[ext] !== typeCategory) {
+      throw new MediaKitError(`download refuses: content-type ${contentType} is ${typeCategory} but the output extension .${ext} is ${DOWNLOAD_MEDIA_CATEGORY[ext]}`, "DOWNLOAD_FAILED");
+    }
+    const finalOutput = requestedExt ? output : `${output}.${ext}`;
+    const outPath = await prepareOutput(finalOutput);
+    const partialPath = `${outPath}.partial`;
+    await copyFile(cachedEntry.filePath, partialPath);
+    await rename(partialPath, outPath);
+    const base = await probeAndRecordDownload({
+      outPath, url: url.trim(), finalUrl: cachedEntry.meta.final_url, redirects: cachedEntry.meta.redirects ?? null,
+      contentType: contentType || null, playlist: null, maxBytes,
+      cacheInfo: { hit: true, stored_at: cachedEntry.meta.stored_at },
+    });
+    return {
+      ...base,
+      cached: true,
+      cache_age_seconds: Math.max(0, Math.round((Date.now() - Date.parse(cachedEntry.meta.stored_at)) / 1000)),
+      cache_stored: null, attempts: 0, retries: 0, retry_wait_ms: 0, rate_limited_wait_ms: rateWaitMs,
+    };
+  }
+  // Fresh fetch, with retries on transient failures only. Each
+  // attempt gets its own timeout budget (timeout_seconds is per
+  // attempt, not for the whole retry loop) — a slow server that
+  // times out is not retried, a 503 that recovers is.
+  let attempts = 0, retries = 0, retryWaitMs = 0;
+  let fetched = null;
+  for (let attempt = 0; attempt <= retriesMax; attempt++) {
+    attempts++;
+    try {
+      fetched = await fetchDirectOnce({ u, output, requestedExt, maxBytes, maxMb, timeoutS });
+      break;
+    } catch (err) {
+      if (attempt >= retriesMax || !err?.retryable) {
+        if (retries > 0) throw new MediaKitError(`${err.message} (after ${attempts} attempts)`, err.code ?? "DOWNLOAD_FAILED");
+        throw err;
+      }
+      const waitMs = downloadBackoffMs(attempt, err.retryAfterMs ?? null);
+      retries++;
+      retryWaitMs += waitMs;
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
+  // Store the fresh bytes under the URL key for the next run.
+  // Best effort: a cache that cannot be written must not fail a
+  // download that already succeeded.
+  let cacheStored = null;
+  if (cache) {
+    cacheStored = await storeDownloadCacheEntry(cacheRoot, cacheKey, {
+      url: url.trim(), finalUrl: fetched.finalUrl, contentType: fetched.contentType,
+      ext: fetched.ext, redirects: fetched.redirects, filePath: fetched.outPath,
+    });
+  }
+  const base = await probeAndRecordDownload({
+    outPath: fetched.outPath, url: url.trim(), finalUrl: fetched.finalUrl, redirects: fetched.redirects,
+    contentType: fetched.contentType, playlist: null, maxBytes,
+    cacheInfo: cache ? { hit: false, stored: cacheStored } : null,
+  });
+  return {
+    ...base,
+    cached: false, cache_age_seconds: null, cache_stored: cacheStored,
+    attempts, retries, retry_wait_ms: retryWaitMs, rate_limited_wait_ms: rateWaitMs,
+  };
+}
 
+// One direct-file fetch attempt: the old downloadMedia body, with
+// each failure classified retryable or not at the throw site.
+// Returns the written file plus what the server said about it; the
+// probe + provenance happen in the caller, outside the retry loop
+// (a file whose bytes fail the probe is deterministic, not transient).
+async function fetchDirectOnce({ u, output, requestedExt, maxBytes, maxMb, timeoutS }) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutS * 1000);
   try {
@@ -5852,7 +6128,7 @@ export async function downloadMedia({ url, output, maxSizeMb = DOWNLOAD_DEFAULT_
         });
       } catch (err) {
         if (err?.name === "AbortError") throw new MediaKitError(`download timed out after ${timeoutS}s`, "DOWNLOAD_TIMEOUT");
-        throw new MediaKitError(`download failed: ${err?.message ?? err}`, "DOWNLOAD_FAILED");
+        throw retryableDownloadError(`download failed: ${err?.message ?? err}`);
       }
       if ([301, 302, 303, 307, 308].includes(attempt.status)) {
         const loc = attempt.headers.get("location");
@@ -5873,6 +6149,12 @@ export async function downloadMedia({ url, output, maxSizeMb = DOWNLOAD_DEFAULT_
       break;
     }
     if (!res.ok) {
+      if (DOWNLOAD_RETRYABLE_STATUS.has(res.status)) {
+        throw retryableDownloadError(
+          `download failed: HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ""}`,
+          parseRetryAfterMs(res),
+        );
+      }
       throw new MediaKitError(`download failed: HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ""}`, "DOWNLOAD_FAILED");
     }
     if (!res.body) throw new MediaKitError("download failed: empty response body", "DOWNLOAD_FAILED");
@@ -5892,6 +6174,7 @@ export async function downloadMedia({ url, output, maxSizeMb = DOWNLOAD_DEFAULT_
     }
     // Final extension: the caller's wins when given; otherwise the
     // Content-Type, then the URL path.
+    const urlExt = path.extname(u.pathname).slice(1).toLowerCase();
     let ext = requestedExt;
     if (!ext) ext = DOWNLOAD_CONTENT_TYPE_EXT[contentType] ?? (DOWNLOAD_EXTENSIONS.includes(urlExt) ? urlExt : "");
     if (!ext) {
@@ -5920,43 +6203,10 @@ export async function downloadMedia({ url, output, maxSizeMb = DOWNLOAD_DEFAULT_
       await unlink(partialPath).catch(() => {});
       if (err instanceof MediaKitError) throw err;
       if (err?.name === "AbortError") throw new MediaKitError(`download timed out after ${timeoutS}s`, "DOWNLOAD_TIMEOUT");
-      throw new MediaKitError(`download failed while streaming: ${err?.message ?? err}`, "DOWNLOAD_FAILED");
+      throw retryableDownloadError(`download failed while streaming: ${err?.message ?? err}`);
     }
     await rename(partialPath, outPath);
-    const info = await fileInfo(outPath);
-    let media;
-    try {
-      media = await probe(outPath);
-    } catch {
-      await unlink(outPath).catch(() => {});
-      throw new MediaKitError("downloaded file is not media (ffprobe could not read it) — deleted", "DOWNLOAD_FAILED");
-    }
-    if (!media.video && !media.audio) {
-      await unlink(outPath).catch(() => {});
-      throw new MediaKitError("downloaded file has no video or audio stream — deleted", "DOWNLOAD_FAILED");
-    }
-    const provenance = await writeDownloadProvenance({
-      outPath, url: url.trim(), finalUrl: current.href, redirects,
-      contentType: contentType || null, playlist: null, media, sizeBytes: info.size_bytes,
-    });
-    return {
-      operation: "download",
-      url: url.trim(),
-      final_url: current.href,
-      redirects,
-      output: outPath,
-      provenance,
-      size_bytes: info.size_bytes,
-      size_human: info.size_human,
-      content_type: contentType || null,
-      max_size_bytes: maxBytes,
-      media: {
-        format: media.format,
-        duration_seconds: media.duration_seconds,
-        video: media.video,
-        audio: media.audio,
-      },
-    };
+    return { outPath, finalUrl: current.href, redirects, contentType, ext };
   } finally {
     clearTimeout(timeoutId);
   }
@@ -5974,7 +6224,7 @@ export async function downloadMedia({ url, output, maxSizeMb = DOWNLOAD_DEFAULT_
 // an over-cap file is deleted and reported, never left as a success.
 const DOWNLOAD_PLAYLIST_CONTAINER_EXTS = ["mp4", "mov", "mkv", "webm", "m4v", "avi", "mp3", "m4a", "wav", "flac", "ogg", "opus"];
 
-async function downloadPlaylistMedia({ url, urlExt, output, maxBytes, maxMb, timeoutS, requestedExt }) {
+async function downloadPlaylistMedia({ url, urlExt, output, maxBytes, maxMb, timeoutS, requestedExt, maxRetries = DOWNLOAD_DEFAULT_MAX_RETRIES }) {
   const ext = requestedExt || "mp4";
   if (!DOWNLOAD_PLAYLIST_CONTAINER_EXTS.includes(ext)) {
     throw new MediaKitError(`download refuses: an HLS/DASH playlist (.${urlExt}) can only be written to a video/audio container (${DOWNLOAD_PLAYLIST_CONTAINER_EXTS.join(", ")}) — got .${ext}`, "INVALID_ARG");
@@ -5997,15 +6247,30 @@ async function downloadPlaylistMedia({ url, urlExt, output, maxBytes, maxMb, tim
     ...(["mp4", "mov", "m4v"].includes(ext) ? ["-movflags", "+faststart"] : []),
     "-f", PLAYLIST_FORMAT[ext], partialPath,
   ];
-  try {
-    await run(FFMPEG, args, { timeoutMs: timeoutS * 1000 });
-  } catch (err) {
-    await unlink(partialPath).catch(() => {});
-    if (err instanceof MediaKitError && /timed out/i.test(err.message)) {
-      throw new MediaKitError(`download timed out after ${timeoutS}s`, "DOWNLOAD_TIMEOUT");
+  // The ffmpeg fetch itself is retried on failure (a 503 on the
+  // playlist is transient; the post-fetch cap below is not — it is a
+  // deterministic refusal). Timeouts are never retried.
+  let attempts = 0, retries = 0, retryWaitMs = 0;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    attempts++;
+    try {
+      await run(FFMPEG, args, { timeoutMs: timeoutS * 1000 });
+      break;
+    } catch (err) {
+      await unlink(partialPath).catch(() => {});
+      if (err instanceof MediaKitError && /timed out/i.test(err.message)) {
+        throw new MediaKitError(`download timed out after ${timeoutS}s`, "DOWNLOAD_TIMEOUT");
+      }
+      if (attempt >= maxRetries) {
+        if (retries > 0 && err instanceof MediaKitError) throw new MediaKitError(`download failed fetching the playlist: ${err.message} (after ${attempts} attempts)`, "DOWNLOAD_FAILED");
+        if (err instanceof MediaKitError) throw new MediaKitError(`download failed fetching the playlist: ${err.message}`, "DOWNLOAD_FAILED");
+        throw err;
+      }
+      const waitMs = downloadBackoffMs(attempt, null);
+      retries++;
+      retryWaitMs += waitMs;
+      await new Promise((r) => setTimeout(r, waitMs));
     }
-    if (err instanceof MediaKitError) throw new MediaKitError(`download failed fetching the playlist: ${err.message}`, "DOWNLOAD_FAILED");
-    throw err;
   }
   // Post-fetch cap: the only place it can bite for a playlist.
   const fetched = await fileInfo(partialPath).catch(() => null);
@@ -6014,41 +6279,11 @@ async function downloadPlaylistMedia({ url, urlExt, output, maxBytes, maxMb, tim
     throw new MediaKitError(`download stopped: HLS/DASH output ${fetched.size_bytes} bytes exceeds max_size_mb ${maxMb} (${maxBytes} bytes) — a playlist's size cannot be capped while streaming, so the file was deleted after the fetch`, "SIZE_LIMIT");
   }
   await rename(partialPath, outPath);
-  const info = await fileInfo(outPath);
-  let media;
-  try {
-    media = await probe(outPath);
-  } catch {
-    await unlink(outPath).catch(() => {});
-    throw new MediaKitError("downloaded playlist produced no media (ffprobe could not read it) — deleted", "DOWNLOAD_FAILED");
-  }
-  if (!media.video && !media.audio) {
-    await unlink(outPath).catch(() => {});
-    throw new MediaKitError("downloaded playlist has no video or audio stream — deleted", "DOWNLOAD_FAILED");
-  }
-  const provenance = await writeDownloadProvenance({
+  const base = await probeAndRecordDownload({
     outPath, url, finalUrl: url, redirects: null,
-    contentType: null, playlist: urlExt, media, sizeBytes: info.size_bytes,
+    contentType: null, playlist: urlExt, maxBytes,
   });
-  return {
-    operation: "download",
-    url,
-    final_url: url,
-    redirects: null,
-    playlist: urlExt,
-    output: outPath,
-    provenance,
-    size_bytes: info.size_bytes,
-    size_human: info.size_human,
-    content_type: null,
-    max_size_bytes: maxBytes,
-    media: {
-      format: media.format,
-      duration_seconds: media.duration_seconds,
-      video: media.video,
-      audio: media.audio,
-    },
-  };
+  return { ...base, playlist: urlExt, attempts, retries, retry_wait_ms: retryWaitMs };
 }
 
 // Provenance by design (edigeh/broll-mcp's rule, turn 65): every
@@ -6058,7 +6293,7 @@ async function downloadPlaylistMedia({ url, urlExt, output, maxBytes, maxMb, tim
 // SHA-256, sizes, versions — and the license is "unknown" unless the
 // server said otherwise: a license is never guessed from a filename
 // or a domain. Check the source before publishing.
-async function writeDownloadProvenance({ outPath, url, finalUrl, redirects, contentType, playlist, media, sizeBytes }) {
+async function writeDownloadProvenance({ outPath, url, finalUrl, redirects, contentType, playlist, media, sizeBytes, cache = null }) {
   const sha256 = createHash("sha256").update(await readFile(outPath)).digest("hex");
   const record = {
     schema: "mediakit-for-agents/provenance/1",
@@ -6066,6 +6301,7 @@ async function writeDownloadProvenance({ outPath, url, finalUrl, redirects, cont
     sha256,
     size_bytes: sizeBytes,
     source: { url, final_url: finalUrl, redirects, content_type: contentType, playlist: playlist ?? null },
+    ...(cache ? { cache } : {}),
     license: { label: "unknown", commercial_use: "unknown", note: "No license was published with this download — check the source before publishing." },
     retrieved_at: new Date().toISOString(),
     mediakit_version: MEDIAKIT_VERSION,
@@ -9996,7 +10232,7 @@ export const MANIFEST_STEPS = {
   // the manifest's `input` may be omitted (see manifest()).
   download: {
     args: ["url", "max_size_mb", "timeout_seconds"],
-    run: (input, output, a) => downloadMedia({ url: a.url, output, maxSizeMb: a.max_size_mb ?? 500, timeoutSeconds: a.timeout_seconds ?? 300 }),
+    run: (input, output, a) => downloadMedia({ url: a.url, output, maxSizeMb: a.max_size_mb ?? 500, timeoutSeconds: a.timeout_seconds ?? 300, cache: a.cache ?? false, maxRetries: a.max_retries ?? 3, rateLimitRps: a.rate_limit_rps ?? 0, cacheDir: a.cache_dir ?? null }),
   },
 };
 

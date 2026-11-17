@@ -6024,6 +6024,8 @@ checkOk(/unknown job/.test(jobUnknownText ?? ""), "job status refuses an unknown
 // server this test controls. Node fetch honours NO_PROXY for
 // 127.0.0.1, so the sandbox proxy is bypassed for these calls.
 const downloadFixture = await readFile(path.join(root, "test/source.mp4"));
+// Hit counters for the retry/cache endpoints below (lượt 85).
+const dlHits = { flaky: 0, always503: 0, cacheable: 0 };
 // HLS/DASH fixtures, generated on the fly from the same source clip
 // (stream copy, so the segments carry the source's own streams —
 // no re-encode, and the suite stays network-free).
@@ -6066,6 +6068,18 @@ const downloadServer = createServer(async (req, res) => {
     const body = Buffer.from("this is not a video file at all, just text pretending to be one");
     res.writeHead(200, { "content-type": "video/mp4", "content-length": body.length });
     res.end(body);
+  } else if (req.url === "/flaky") {
+    // 503 twice, then the fixture: the retry path must recover.
+    // Retry-After: 1 keeps the test fast (1s + 1s of backoff).
+    dlHits.flaky++;
+    if (dlHits.flaky <= 2) { res.writeHead(503, { "retry-after": "1" }); res.end(); }
+    else { res.writeHead(200, { "content-type": "video/mp4", "content-length": downloadFixture.length }); res.end(downloadFixture); }
+  } else if (req.url === "/always-503") {
+    dlHits.always503++;
+    res.writeHead(503); res.end();
+  } else if (req.url === "/cacheable.mp4") {
+    dlHits.cacheable++;
+    res.writeHead(200, { "content-type": "video/mp4", "content-length": downloadFixture.length }); res.end(downloadFixture);
   } else if (req.url === "/slow") {
     // Never responds: the tool's timeout must fire, not the test's.
   } else if (req.url.startsWith("/hls/") || req.url.startsWith("/dash/")) {
@@ -6190,6 +6204,56 @@ await writeFile(dlManNoUrlPath, JSON.stringify({
 }, null, 2));
 const dlManNoUrlText = await callExpectThrow("manifest", { manifest_path: dlManNoUrlPath });
 checkOk(/needs a url/.test(dlManNoUrlText ?? ""), "manifest refuses a download step with no url at lint time", dlManNoUrlText ?? "");
+// Download retry + cache + token bucket (lượt 85): the same local
+// server, now with a flaky endpoint (503 twice, then 200) and a
+// cacheable one with a hit counter.
+const dlFlakyRes = await client.callTool({ name: "download", arguments: { url: `${dlBase}/flaky`, output: path.join(root, "outputs/mcp-download-flaky.mp4") } });
+const dlFlaky = JSON.parse(dlFlakyRes.content[0].text);
+checkOk(dlFlaky.attempts === 3 && dlFlaky.retries === 2 && dlFlaky.retry_wait_ms >= 1900 && dlFlaky.retry_wait_ms <= 5000 && dlFlaky.size_bytes === downloadFixture.length && dlFlaky.cached === false, "download retries a 503 twice and succeeds on attempt 3 (Retry-After 1s honoured: ~2s of backoff)", JSON.stringify({ attempts: dlFlaky.attempts, retries: dlFlaky.retries, retry_wait_ms: dlFlaky.retry_wait_ms }));
+checkOk(dlHits.flaky === 3, "flaky endpoint was hit exactly 3 times (no extra requests)", `hits=${dlHits.flaky}`);
+const dlA503Text = await callExpectThrow("download", { url: `${dlBase}/always-503`, output: path.join(root, "outputs/mcp-download-a503.mp4"), max_retries: 2 });
+checkOk(/HTTP 503/.test(dlA503Text ?? "") && /after 3 attempts/.test(dlA503Text ?? "") && dlHits.always503 === 3, "download gives up after 1 + 2 retries on a permanent 503 and says so (after 3 attempts)", dlA503Text ?? "");
+const dlCacheDir = path.join(root, "outputs/dl-cache");
+const dlCache1Res = await client.callTool({ name: "download", arguments: { url: `${dlBase}/cacheable.mp4`, output: path.join(root, "outputs/mcp-download-cache1.mp4"), cache: true, cache_dir: dlCacheDir } });
+const dlCache1 = JSON.parse(dlCache1Res.content[0].text);
+checkOk(dlCache1.cached === false && dlCache1.cache_stored === true && dlCache1.attempts === 1 && dlHits.cacheable === 1, "download --cache stores the first fetch (cached=false, cache_stored=true, 1 server hit)", JSON.stringify({ cached: dlCache1.cached, cache_stored: dlCache1.cache_stored }));
+const dlCache2Res = await client.callTool({ name: "download", arguments: { url: `${dlBase}/cacheable.mp4`, output: path.join(root, "outputs/mcp-download-cache2.mp4"), cache: true, cache_dir: dlCacheDir } });
+const dlCache2 = JSON.parse(dlCache2Res.content[0].text);
+checkOk(dlCache2.cached === true && dlCache2.attempts === 0 && dlCache2.cache_age_seconds >= 0 && dlHits.cacheable === 1, "download --cache serves the second fetch from disk (cached=true, 0 attempts, server hit count unchanged)", JSON.stringify({ cached: dlCache2.cached, attempts: dlCache2.attempts, hits: dlHits.cacheable }));
+const dlCacheSha = createHash("sha256").update(await readFile(path.join(root, "outputs/mcp-download-cache2.mp4"))).digest("hex");
+const dlFixtureSha = createHash("sha256").update(downloadFixture).digest("hex");
+checkOk(dlCacheSha === dlFixtureSha, "cache-served file is byte-identical to the fixture", dlCacheSha.slice(0, 16));
+const dlCacheMeta = JSON.parse(await readFile(path.join(dlCacheDir, createHash("sha256").update(`${dlBase}/cacheable.mp4`).digest("hex"), "meta.json"), "utf8"));
+checkOk(dlCacheMeta.url === `${dlBase}/cacheable.mp4` && dlCacheMeta.sha256 === dlFixtureSha && dlCacheMeta.size_bytes === downloadFixture.length && dlCacheMeta.ext === "mp4", "cache meta records the URL, sha256, size and extension", JSON.stringify(dlCacheMeta).slice(0, 200));
+// A corrupt cache entry must be a miss, never served: flip a byte
+// in the stored file and the next fetch re-downloads.
+const dlCacheEntryDir = path.join(dlCacheDir, createHash("sha256").update(`${dlBase}/cacheable.mp4`).digest("hex"));
+const dlCacheFile = await readFile(path.join(dlCacheEntryDir, "file"));
+dlCacheFile[0] ^= 0xff;
+await writeFile(path.join(dlCacheEntryDir, "file"), dlCacheFile);
+const dlCache3Res = await client.callTool({ name: "download", arguments: { url: `${dlBase}/cacheable.mp4`, output: path.join(root, "outputs/mcp-download-cache3.mp4"), cache: true, cache_dir: dlCacheDir } });
+const dlCache3 = JSON.parse(dlCache3Res.content[0].text);
+checkOk(dlCache3.cached === false && dlCache3.cache_stored === true && dlHits.cacheable === 2, "a corrupt cache entry is re-fetched (not served) and re-stored", JSON.stringify({ cached: dlCache3.cached, hits: dlHits.cacheable }));
+const dlCacheHlsText = await callExpectThrow("download", { url: `${dlBase}/hls/stream.m3u8`, output: path.join(root, "outputs/mcp-download-hls-cache.mp4"), cache: true });
+checkOk(/does not cache playlists/.test(dlCacheHlsText ?? ""), "download refuses --cache on a playlist instead of silently ignoring it", dlCacheHlsText ?? "");
+// Token bucket (lượt 85): two downloads at 1 req/s in one server
+// process — the first takes a free token, the second waits. The wait
+// is 1000ms MINUS the time the first download itself took (the
+// bucket refills while it runs), so the bound is on the wait being
+// most of a second and on the two calls together taking >=900ms
+// wall-clock — without the bucket both would finish in ~300ms.
+const dlRateT0 = Date.now();
+const dlRate1Res = await client.callTool({ name: "download", arguments: { url: `${dlBase}/cacheable.mp4`, output: path.join(root, "outputs/mcp-download-rate1.mp4"), rate_limit_rps: 1 } });
+const dlRate1 = JSON.parse(dlRate1Res.content[0].text);
+const dlRate2Res = await client.callTool({ name: "download", arguments: { url: `${dlBase}/cacheable.mp4`, output: path.join(root, "outputs/mcp-download-rate2.mp4"), rate_limit_rps: 1 } });
+const dlRate2 = JSON.parse(dlRate2Res.content[0].text);
+const dlRateElapsedMs = Date.now() - dlRateT0;
+checkOk(dlRate1.rate_limited_wait_ms === 0 && dlRate2.rate_limited_wait_ms >= 500 && dlRate2.rate_limited_wait_ms < 5000 && dlRateElapsedMs >= 900, "token bucket at 1 rps: first download waits 0ms, second waits most of a second (bucket refills during the first download), both calls take >=900ms wall-clock", JSON.stringify({ first: dlRate1.rate_limited_wait_ms, second: dlRate2.rate_limited_wait_ms, elapsed_ms: dlRateElapsedMs }));
+// CLI flags for the same features (hermetic cache dir under outputs/).
+const dlCliCache1 = await runCliJson(["download", `${dlBase}/cacheable.mp4`, "-o", path.join(root, "outputs/mcp-download-cli-cache1.mp4"), "--cache", "--cache-dir", path.join(root, "outputs/dl-cache-cli")]);
+checkOk(dlCliCache1.cached === false && dlCliCache1.cache_stored === true, "CLI download --cache stores on first fetch", JSON.stringify({ cached: dlCliCache1.cached, cache_stored: dlCliCache1.cache_stored }));
+const dlCliCache2 = await runCliJson(["download", `${dlBase}/cacheable.mp4`, "-o", path.join(root, "outputs/mcp-download-cli-cache2.mp4"), "--cache", "--cache-dir", path.join(root, "outputs/dl-cache-cli")]);
+checkOk(dlCliCache2.cached === true && dlCliCache2.attempts === 0, "CLI download --cache serves the second fetch from disk", JSON.stringify({ cached: dlCliCache2.cached, attempts: dlCliCache2.attempts }));
 downloadServer.closeAllConnections();
 downloadServer.close();
 
