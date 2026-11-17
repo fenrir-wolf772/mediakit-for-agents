@@ -321,6 +321,7 @@ export const TOOL_DEFS = [
     content_start: z.number().min(0).optional().describe("Scan only from this time (seconds); needs content=true"),
     content_end: z.number().min(0).optional().describe("Scan only up to this time (seconds); needs content=true"),
     peak_threshold_db: z.number().min(-60).max(12).default(-1).describe("Audio peak threshold in dBFS for the content_peaks rule (windows above it are reported; >= 0 dBFS is clipping; float audio can peak above 0)"),
+    faststart: z.boolean().default(false).describe("Also check MP4 faststart (moov before mdat, measured by a pure-Node box walk) — fails when the file is not an MP4 or its moov box comes after mdat; re-mux with -movflags +faststart to fix"),
   },
     handler: async (a) => safe(() => core.check({
     input: a.input,
@@ -330,6 +331,7 @@ export const TOOL_DEFS = [
     contentStart: a.content_start ?? null,
     contentEnd: a.content_end ?? null,
     peakThresholdDb: a.peak_threshold_db,
+    faststart: a.faststart,
   })),
   },
 
@@ -1369,6 +1371,31 @@ export const TOOL_DEFS = [
       force: a.force,
     });
   }),
+  },
+
+
+  // Director scaffold (wilwaldon/Claude-Code-Video-Toolkit project
+  // lifecycle idea, lượt 93): start a video project the way assemble
+  // expects to finish it — a film.json that already validates, a
+  // placeholder voice so the timeline math is real, placeholder
+  // captions, an assets/ layout and a CLAUDE.md with the lifecycle.
+  {
+    name: "init_project",
+    description: "Scaffold a new assemble video project in a directory: a film.json that already validates (preset vertical by default, two template shots, 4s total), a placeholder voice (440 Hz tone WAV, 3s — replace it with the real narration before delivery), placeholder captions, an assets/ layout (shots/, music/) and a CLAUDE.md with the project lifecycle (validate → diagnose → preview → approve → render → verify). The starter film renders a real preview out of the box, so the project is edited, not debugged into existence. Refuses when film.json or CLAUDE.md already exists unless force:true. Use this before writing a film manifest by hand.",
+    schema: {
+    dir: pathSchema.describe("Project directory to create (relative to the workspace, or absolute)"),
+    title: z.string().optional().describe("Film title (default: the directory name)"),
+    preset: z.enum(["vertical", "horizontal", "square", "cinematic", "vertical-60"]).default("vertical").describe("Preset for the whole film (default vertical: 1080x1920, 30fps, clean-bold captions)"),
+    brand: z.string().optional().describe("Brand id (amber-teal | warm-story | minimal-line, or a custom id from MEDIAKIT_BRANDS) — paints the whole film; omit for no brand"),
+    force: z.boolean().default(false).describe("Overwrite an existing film.json / CLAUDE.md in the directory (default false: refuse)"),
+  },
+    handler: async (a) => safe(() => core.initProject({
+    dir: a.dir,
+    title: a.title ?? null,
+    preset: a.preset,
+    brand: a.brand ?? null,
+    force: a.force,
+  })),
   },
 
 

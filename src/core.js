@@ -5,8 +5,8 @@
  * interpreted as a shell command.
  */
 import { execFile, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
-import { access, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
+import { access, copyFile, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -328,6 +328,12 @@ export async function prepareOutput(p, inputs = []) {
   await assertInsideWorkdir(abs, "output");
   await mkdir(path.dirname(abs), { recursive: true });
   await assertInsideWorkdir(abs, "output"); // re-check now the parent exists (symlinks resolved)
+  // Writability pre-check (matthensleyio/FFMpeg.MCP validates the
+  // output directory up front by writing a throwaway file into it):
+  // a read-only directory must fail HERE, before a long render, not
+  // after ffmpeg finishes and cannot write the output. The probe is
+  // deleted immediately; a failure is a loud error, never a skip.
+  await assertOutputWritable(path.dirname(abs));
   return abs;
 }
 
@@ -344,7 +350,23 @@ export async function prepareOutputDir(dir) {
   await assertInsideWorkdir(abs, "output directory");
   await mkdir(abs, { recursive: true });
   await assertInsideWorkdir(abs, "output directory");
+  await assertOutputWritable(abs);
   return abs;
+}
+
+// Write + delete a throwaway file in `dirAbs`: proves the directory
+// is writable right now. Used by prepareOutput / prepareOutputDir so
+// every tool fails fast on a read-only output directory instead of
+// after a render. The name is unique per call (pid + random) so two
+// concurrent runs never collide on the same probe file.
+async function assertOutputWritable(dirAbs) {
+  const probe = path.join(dirAbs, `.mediakit-write-test-${process.pid}-${randomBytes(6).toString("hex")}`);
+  try {
+    await writeFile(probe, "mediakit writability probe");
+  } catch {
+    throw new MediaKitError(`output directory is not writable: ${dirAbs}`, "OUTPUT_NOT_WRITABLE");
+  }
+  await rm(probe, { force: true }).catch(() => {});
 }
 
 export async function fileInfo(p) {
@@ -4466,7 +4488,59 @@ export async function measureLoudness(input) {
   return full === null ? null : +full.i.toFixed(1);
 }
 
-export async function check({ input, platform = "tiktok", content = false, contentStart = null, contentEnd = null, peakThresholdDb = -1, expectedDuration = null }) {
+// ---------------------------------------------------------------- check
+// Faststart probe (wilwaldon/Claude-Code-Video-Toolkit normalize
+// preset: `-movflags faststart` on web/preview output): walk the
+// top-level ISO BMFF boxes and report which of `moov` / `mdat`
+// comes first. A faststart MP4 has moov before mdat so playback can
+// start before the download finishes. Pure Node, no ffmpeg call —
+// only box headers are read (8 bytes each, plus 8 more for a 64-bit
+// largesize), never the box bodies, so the walk is cheap even on a
+// multi-gigabyte file. The first of moov/mdat decides: whichever box
+// opens first is the answer, and a size-0 box runs to end of file,
+// so nothing can follow it.
+export async function probeFaststart(input) {
+  const inPath = await requireInput(input);
+  const fh = await open(inPath, "r");
+  try {
+    let offset = 0;
+    let moovOffset = null;
+    let mdatOffset = null;
+    const header = Buffer.alloc(16);
+    for (;;) {
+      const { bytesRead } = await fh.read(header, 0, 8, offset);
+      if (bytesRead < 8) break; // end of file without moov or mdat
+      let size = header.readUInt32BE(0);
+      const type = header.toString("ascii", 4, 8);
+      let headerLen = 8;
+      if (size === 1) {
+        const { bytesRead: br2 } = await fh.read(header, 8, 8, offset + 8);
+        if (br2 < 8) break;
+        size = Number(header.readBigUInt64BE(8));
+        headerLen = 16;
+      } else if (size === 0) {
+        if (type === "moov") moovOffset = offset;
+        if (type === "mdat") mdatOffset = offset;
+        break;
+      }
+      if (type === "moov" && moovOffset === null) moovOffset = offset;
+      if (type === "mdat" && mdatOffset === null) mdatOffset = offset;
+      if (moovOffset !== null || mdatOffset !== null) break;
+      if (!Number.isFinite(size) || size < headerLen) break; // corrupt header: stop, report unknown
+      offset += size;
+    }
+    const faststart = moovOffset !== null && (mdatOffset === null || moovOffset < mdatOffset);
+    return {
+      operation: "probe_faststart", input: inPath,
+      faststart: moovOffset === null && mdatOffset === null ? null : faststart,
+      moov_offset: moovOffset, mdat_offset: mdatOffset,
+    };
+  } finally {
+    await fh.close();
+  }
+}
+
+export async function check({ input, platform = "tiktok", content = false, contentStart = null, contentEnd = null, peakThresholdDb = -1, expectedDuration = null, faststart = false }) {
   const inPath = await requireInput(input);
   const spec = PLATFORMS[platform];
   if (!spec) throw new MediaKitError(`unknown platform: ${platform} (supported: ${Object.keys(PLATFORMS).join(", ")})`, "INVALID_ARG");
@@ -4538,6 +4612,35 @@ export async function check({ input, platform = "tiktok", content = false, conte
     add("file_size", `<= ${spec.maxFileSizeMB} MB`, `${mb.toFixed(1)} MB`,
       mb <= spec.maxFileSizeMB,
       "upload from desktop/web, or re-encode at a lower bitrate");
+  }
+  // Faststart (opt-in): an MP4 whose moov box sits after mdat makes
+  // a web player download the whole file before the first frame —
+  // the check fails until the file is re-muxed with
+  // `-movflags +faststart`. The box walk is pure Node (see
+  // probeFaststart); a non-MP4 container cannot be faststart at all,
+  // so it fails with that reason instead of a misleading box offset.
+  if (faststart) {
+    const isMp4 = /mp4|mov|m4v|3gp/i.test(meta.format ?? "");
+    if (!isMp4) {
+      add("faststart", "moov before mdat (MP4 faststart)", `not an MP4 container (${meta.format ?? "unknown"})`, false,
+        "faststart only applies to MP4 — convert to MP4 first");
+    } else {
+      const fs = await probeFaststart(inPath);
+      if (fs.faststart === null) {
+        add("faststart", "moov before mdat (MP4 faststart)", "no moov/mdat box found", false,
+          "re-mux with -movflags +faststart");
+      } else {
+        // The box walk stops at the first of moov/mdat, so exactly
+        // one offset is known — and that is the whole answer: the
+        // first box decides. Report it as an ordering, not as two
+        // measured offsets (the second box was never walked to).
+        const actual = fs.faststart
+          ? `moov at ${fs.moov_offset} (before mdat)`
+          : `mdat at ${fs.mdat_offset} (before moov)`;
+        add("faststart", "moov before mdat (MP4 faststart)", actual, fs.faststart,
+          "re-mux with -movflags +faststart");
+      }
+    }
   }
   if (meta.audio) {
     add("audio_codec", spec.audioCodecs.join(" or "), meta.audio.codec,
@@ -8043,6 +8146,9 @@ const TOOL_REQUIREMENTS = {
     filters: ["tblend", "blend", "fps", "split", "trim", "setpts", "geq", "signalstats", "scale", "loudnorm"],
     encoders: ["libx264"],
   },
+  // init_project only needs ffmpeg to render the placeholder voice
+  // (lavfi sine source + pcm_s16le WAV encoder) — no filter.
+  init_project: { encoders: ["pcm_s16le"] },
   mix: { filters: ["sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay"], encoders: ["aac", "libmp3lame"] },
   overlay: { filters: ["overlay", "format", "scale", "colorchannelmixer"], encoders: ["libx264"] },
   scenes: { filters: ["select", "signalstats"] },
@@ -13367,6 +13473,167 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       try { await rm(tmpDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
     }
   }
+}
+
+// ---------------------------------------------------------------- init_project
+// Director scaffold (wilwaldon/Claude-Code-Video-Toolkit project
+// lifecycle idea, lượt 93): one command starts a video project the
+// way assemble expects to finish it — a film.json that already
+// validates, a placeholder voice so the timeline math is real,
+// captions, an assets/ layout, and a CLAUDE.md that walks the agent
+// (or the user) through validate → diagnose → preview → approve →
+// render → verify. The scaffold is deliberately runnable, not a blank
+// template: the starter film renders a real 4-second film out of the
+// box (two template shots, no image assets needed), so the first
+// `assemble --mode validate` passes and the first preview shows
+// motion — the project is then edited, not debugged into existence.
+// The placeholder voice is a 440 Hz tone WAV (WAV, not MP3: MP3
+// encoder delay would shift the measured duration off 3.000s and
+// break the exact frame math), and CLAUDE.md says in plain words to
+// replace it before delivery.
+const INIT_VOICE_SECONDS = 3;
+const INIT_LEAD_SECONDS = 0.5;
+const INIT_TAIL_SECONDS = 0.5;
+
+export async function initProject({ dir, title = null, preset = "vertical", brand = null, force = false }) {
+  if (typeof dir !== "string" || !dir.trim()) {
+    throw new MediaKitError("init_project needs a project directory", "INVALID_ARG");
+  }
+  // Preset + brand go through the same resolvers assemble uses, so a
+  // bad id fails here with the same message — not at first render.
+  const presetDoc = await resolveAssemblePreset(preset ?? "vertical");
+  const brandDoc = await resolveAssembleBrand(brand ?? null, "init_project brand");
+  const absDir = path.resolve(dir);
+  await assertInsideWorkdir(absDir, "project directory");
+  const projectTitle = (typeof title === "string" && title.trim())
+    ? title.trim()
+    : path.basename(absDir);
+  const filmPath = path.join(absDir, "film.json");
+  const claudePath = path.join(absDir, "CLAUDE.md");
+  // Refuse to clobber an existing project unless force says so —
+  // silently overwriting a film.json someone edited would destroy
+  // their film. The check runs before any directory is created, so a
+  // refusal writes nothing.
+  if (!force) {
+    for (const p of [filmPath, claudePath]) {
+      try {
+        await access(p, fsConstants.F_OK);
+        throw new MediaKitError(`init_project refuses to overwrite existing ${path.basename(p)} in ${absDir} (pass force:true to replace it)`, "ALREADY_EXISTS");
+      } catch (err) {
+        if (err instanceof MediaKitError) throw err;
+        // ENOENT: the file does not exist yet — that is the happy path.
+      }
+    }
+  }
+  await mkdir(absDir, { recursive: true });
+  await assertInsideWorkdir(absDir, "project directory"); // re-check now it exists (symlinks resolved)
+  await assertOutputWritable(absDir);
+  const assetsDir = path.join(absDir, "assets");
+  const voicePath = path.join(assetsDir, "voice.wav");
+  const captionsPath = path.join(assetsDir, "captions.srt");
+  await mkdir(path.join(assetsDir, "shots"), { recursive: true });
+  await mkdir(path.join(assetsDir, "music"), { recursive: true });
+  await mkdir(path.join(absDir, "outputs"), { recursive: true });
+  // Placeholder voice: exact 3.000s tone, verified by probe below.
+  // The film math is built on that exact duration (lead 0.5 + voice
+  // 3 + tail 0.5 = 4s; two 2s shots = 120 frames at 30fps), so a
+  // drifted voice would fail validation — measure, do not assume.
+  await run(FFMPEG, ["-y", "-f", "lavfi", "-i", `sine=frequency=440:duration=${INIT_VOICE_SECONDS}`,
+    "-af", "volume=0.5", "-c:a", "pcm_s16le", "-ar", "48000", voicePath]);
+  const voiceMeta = await probe(voicePath);
+  if (!voiceMeta.audio || Math.abs(voiceMeta.duration_seconds - INIT_VOICE_SECONDS) > 0.05) {
+    throw new MediaKitError(`init_project placeholder voice measured ${voiceMeta.duration_seconds}s, expected ${INIT_VOICE_SECONDS}s`, "SMOKE_FAILED");
+  }
+  const totalSeconds = INIT_LEAD_SECONDS + INIT_VOICE_SECONDS + INIT_TAIL_SECONDS;
+  const fps = presetDoc.fps;
+  const cardText = projectTitle.replace(/\s+/g, " ").toUpperCase();
+  const film = {
+    version: 1,
+    title: projectTitle,
+    preset: presetDoc.id,
+    ...(brandDoc ? { brand } : {}),
+    voice: { path: "assets/voice.wav", lead: INIT_LEAD_SECONDS, tail: INIT_TAIL_SECONDS },
+    captions: "assets/captions.srt",
+    chapters: [
+      { title: "Intro", at: 0 },
+      { title: "The turn", at: 2 },
+    ],
+    shots: [
+      { id: "s1", kind: "canvas_scene", template: "title-card", params: { text: cardText }, duration: 2 },
+      { id: "s2", kind: "canvas_scene", template: "rings", duration: 2 },
+    ],
+  };
+  await writeFile(filmPath, `${JSON.stringify(film, null, 2)}\n`, "utf8");
+  const captions = [
+    "1",
+    "00:00:00,500 --> 00:00:02,000",
+    "This is a placeholder voice.",
+    "",
+    "2",
+    "00:00:02,000 --> 00:00:03,500",
+    "Replace assets/voice.wav with your real narration.",
+    "",
+  ].join("\n");
+  await writeFile(captionsPath, captions, "utf8");
+  const brandLine = brandDoc ? ` Brand: ${brand}.` : "";
+  const claudeMd = [
+    `# ${projectTitle} — video project`,
+    "",
+    `Scaffolded by \`mediakit init_project\` (preset: ${presetDoc.id}, ${presetDoc.width}x${presetDoc.height} @ ${fps}fps).${brandLine}`,
+    "This file is the project memory: the layout, the lifecycle, and the rules. Read it before touching film.json.",
+    "",
+    "## Layout",
+    "",
+    "- `film.json` — the film manifest (assemble schema). The voice is the master clock.",
+    "- `assets/voice.wav` — PLACEHOLDER voice (440 Hz tone, 3s). Replace it with the real narration before delivery.",
+    "- `assets/captions.srt` — placeholder captions; rewrite them to match the real voice.",
+    "- `assets/shots/` — still images / video clips referenced by shots.",
+    "- `assets/music/` — music bed (optional).",
+    "- `outputs/` — previews and the final render live here.",
+    "",
+    "## Lifecycle (never skip a step)",
+    "",
+    "validate → diagnose → preview → approve → render → verify.",
+    "",
+    "1. Edit `film.json` (shots, voice, captions, chapters).",
+    "2. `mediakit assemble film.json --mode validate` — the timeline math must pass.",
+    "3. `mediakit diagnose film.json` — real motion, voice loudness, caption coverage. Fix every error.",
+    "4. `mediakit assemble film.json --mode preview -o outputs/preview` — render the first seconds at half size.",
+    "5. Show the preview to the user. Do not approve your own checks — approval means a human saw it.",
+    "6. `mediakit assemble film.json --mode approve -o outputs/preview`",
+    "7. `mediakit assemble film.json --mode render -o outputs`",
+    "8. `mediakit verify outputs/assemble-receipt.json` — the render must verify clean.",
+    "",
+    "## Rules",
+    "",
+    "- The voice is the master clock: total = lead + voice + tail. Shot durations must cover it exactly in frames — no silent trim, pad, or speed change.",
+    "- A still image without zoom may last at most 2.5s (motion gate) — add a zoom or split the shot.",
+    "- Preview before approve, always. `render --force` only when the user explicitly says so.",
+    "- Replace the placeholder voice and captions before delivery — the tone is not narration.",
+    "",
+  ].join("\n");
+  await writeFile(claudePath, claudeMd, "utf8");
+  return {
+    operation: "init_project",
+    dir: absDir,
+    title: projectTitle,
+    preset: presetDoc.id,
+    ...(brandDoc ? { brand } : {}),
+    film: filmPath,
+    voice: voicePath,
+    voice_seconds: voiceMeta.duration_seconds,
+    captions: captionsPath,
+    claude_md: claudePath,
+    total_seconds: totalSeconds,
+    total_frames: Math.round(totalSeconds * fps),
+    shots: film.shots.map((s) => ({ id: s.id, template: s.template, duration: s.duration })),
+    created: [filmPath, voicePath, captionsPath, claudePath],
+    next_steps: [
+      "mediakit assemble film.json --mode validate",
+      "mediakit diagnose film.json",
+      "mediakit assemble film.json --mode preview -o outputs/preview",
+    ],
+  };
 }
 
 // ---------------------------------------------------------------- verify

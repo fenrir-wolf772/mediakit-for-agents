@@ -130,7 +130,11 @@ buttons and caption bar on phones).
 2. `extract_frame` at 3 timestamps (start, middle, end): captions visible
    and correct, subject framed, nothing important cropped out.
 3. `thumbnail` for a quick whole-clip overview.
-4. Record the style id used, so a later re-render or a publishing kit
+4. `check --platform tiktok --faststart` when the file goes to the web:
+   an MP4 whose moov box sits after mdat makes the player download
+   the whole file before the first frame — re-mux with
+   `-movflags +faststart` until the rule passes.
+5. Record the style id used, so a later re-render or a publishing kit
    for this video names the same style.
 
 ### Step 7 — Publishing kit (offer once, after approval)
@@ -143,7 +147,12 @@ final-video approval.
 ## Assemble a film from a manifest (multi-shot)
 When the video is several shots on one voice track, don't run the
 steps above shot by shot — write a film manifest and use `assemble`
-(schema + rules in `references/assemble-manifest.md`). The voice is
+(schema + rules in `references/assemble-manifest.md`). Start with
+`mediakit init <dir>` instead of writing the manifest by hand: it
+scaffolds a project that already validates (a 4s vertical film,
+two template shots, a placeholder voice to replace, placeholder
+captions, and a `CLAUDE.md` with the lifecycle) — edit the scaffold,
+don't debug a blank manifest into existence. The voice is
 the master clock: shots must cover `lead + voice + tail` exactly
 in frames, a still without zoom (and a color card) may last at
 most 2.5s, and captions burn with the locked style's values.

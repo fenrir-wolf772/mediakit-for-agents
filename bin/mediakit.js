@@ -239,7 +239,7 @@ const COMMANDS = {
     ],
   },
   check: {
-    usage: "mediakit check <input> [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin] [--expected-duration <s|MM:SS>] [--content] [--start <s|MM:SS>] [--end <s|MM:SS>] [--peak-threshold <dB>]",
+    usage: "mediakit check <input> [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin] [--expected-duration <s|MM:SS>] [--content] [--start <s|MM:SS>] [--end <s|MM:SS>] [--peak-threshold <dB>] [--faststart]",
     desc: "Verify a file against a platform delivery spec (dimensions, codecs, duration, loudness). --expected-duration fails when the measured duration is more than 0.5s off the brief. --content also scans for black/frozen frames, silence and audio peaks; --start/--end scan only that time range.",
     args: [{ name: "input", required: true }],
     options: [
@@ -249,6 +249,7 @@ const COMMANDS = {
       ["--start", "Scan only from this time, seconds or MM:SS (needs --content)"],
       ["--end", "Scan only up to this time, seconds or MM:SS (needs --content)"],
       ["--peak-threshold", "Audio peak threshold in dBFS for the peaks rule (default -1; >= 0 dBFS is clipping; needs --content)"],
+      ["--faststart", "Also check MP4 faststart (moov before mdat) — fails when the file is not an MP4 or its moov box comes after mdat"],
     ],
   },
   "qa-report": {
@@ -779,6 +780,17 @@ const COMMANDS = {
       ["-o, --output", "Output directory (required for preview/approve/render)"],
     ],
   },
+  init: {
+    usage: "mediakit init <dir> [--title <name>] [--preset vertical|horizontal|square|cinematic|vertical-60] [--brand <id>] [--force]",
+    desc: "Scaffold a new assemble video project: a film.json that already validates (preset vertical by default, two template shots, 4s total), a placeholder voice (440 Hz tone WAV, 3s — replace it with the real narration before delivery), placeholder captions, an assets/ layout (shots/, music/) and a CLAUDE.md with the project lifecycle (validate → diagnose → preview → approve → render → verify). Refuses when film.json or CLAUDE.md already exists unless --force.",
+    args: [{ name: "dir", required: true }],
+    options: [
+      ["--title", "Film title (default: the directory name)"],
+      ["--preset", "Preset for the whole film (default vertical: 1080x1920, 30fps, clean-bold captions)"],
+      ["--brand", "Brand id (amber-teal | warm-story | minimal-line, or a custom id from MEDIAKIT_BRANDS)"],
+      ["--force", "Overwrite an existing film.json / CLAUDE.md in the directory"],
+    ],
+  },
   job: {
     usage: "mediakit job <job-id> | mediakit job --list | mediakit job --cancel <job-id>",
     desc: "Inspect a durable async render job (started by `assemble --async`): status (default) shows progress + the terminal result or error; --list shows all jobs, newest first; --cancel stops a queued or running job (kills the worker's whole process group). Jobs live under MEDIAKIT_JOBS_DIR or <workdir>/.mediakit-jobs.",
@@ -867,7 +879,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 69 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 70 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -1239,6 +1251,7 @@ async function main() {
           contentStart: opts.start ?? null,
           contentEnd: opts.end ?? null,
           peakThresholdDb: numOpt(opts, "peak_threshold") ?? -1,
+          faststart: opts.faststart === true,
         });
         break;
       }
@@ -1794,6 +1807,17 @@ async function main() {
           onProgress: jobId ? async (p) => { await core.updateJobProgress(jobId, jobDir, p); } : null,
           jobId,
           jobDir,
+        });
+        break;
+      }
+      case "init": {
+        if (!positional[0]) fail("missing project directory: mediakit init <dir> [--title <name>] [--preset vertical|horizontal|square|cinematic|vertical-60] [--brand <id>] [--force]");
+        result = await core.initProject({
+          dir: positional[0],
+          title: opts.title ?? null,
+          preset: opts.preset ?? "vertical",
+          brand: opts.brand ?? null,
+          force: opts.force === true,
         });
         break;
       }

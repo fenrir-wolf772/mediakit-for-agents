@@ -181,10 +181,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 69 tools present");
-checkOk(missing.length === 0, "tools/list has all 69 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 70 tools present");
+checkOk(missing.length === 0, "tools/list has all 70 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -1416,6 +1416,79 @@ async function runCliJson(args, env = {}) {
 // Turn 93: the same smoke through the CLI flag.
 const doctorSmokeCli = await runCliJson(["doctor", "--smoke"]);
 checkOk(doctorSmokeCli.ok === true && doctorSmokeCli.smoke?.ran === true && doctorSmokeCli.smoke?.ok === true && doctorSmokeCli.smoke.steps?.length === 4 && doctorSmokeCli.smoke.steps.every((s) => s.ok === true), "CLI doctor --smoke runs the real chain and passes", JSON.stringify(doctorSmokeCli.smoke));
+
+// Turn 94: init_project scaffolds a runnable video project — a
+// film.json that already validates, a measured 3s placeholder voice,
+// captions, an assets/ layout and a CLAUDE.md with the lifecycle.
+const initDir = path.join(root, "outputs/mcp-init-project");
+await rm(initDir, { recursive: true, force: true });
+const initRes = await client.callTool({ name: "init_project", arguments: { dir: initDir, title: "Init Test Film", brand: "amber-teal" } });
+const initJson = JSON.parse(initRes.content[0].text);
+checkOk(initJson.operation === "init_project" && initJson.preset === "vertical" && initJson.brand === "amber-teal" && initJson.title === "Init Test Film" && initJson.total_seconds === 4 && initJson.total_frames === 120, "init_project scaffolds a vertical 4s/120-frame project with the brand", JSON.stringify(initJson).slice(0, 300));
+const initFilm = JSON.parse(await readFile(path.join(initDir, "film.json"), "utf8"));
+checkOk(initFilm.version === 1 && initFilm.preset === "vertical" && initFilm.brand === "amber-teal" && initFilm.voice.path === "assets/voice.wav" && initFilm.voice.lead === 0.5 && initFilm.voice.tail === 0.5 && initFilm.shots.length === 2 && initFilm.shots[0].template === "title-card" && initFilm.shots[1].template === "rings" && initFilm.shots[0].duration === 2 && initFilm.shots[1].duration === 2, "init_project film.json has the preset, brand, placeholder voice and two 2s template shots", JSON.stringify(initFilm.shots));
+// The scaffold's own voice measures exactly 3s on disk, and the
+// scaffold validates through assemble — the timeline math is real,
+// not assumed from the template.
+const initVoiceProbe = await probeStreams(path.join(initDir, "assets/voice.wav"));
+checkOk(near(parseFloat(initVoiceProbe.format?.duration), 3, 0.05) && initVoiceProbe.streams?.some((s) => s.codec_type === "audio"), "init_project placeholder voice is exactly 3s of audio on disk", JSON.stringify(initVoiceProbe.format));
+const initValidate = await runCliJson(["assemble", path.join(initDir, "film.json"), "--mode", "validate"]);
+checkOk(initValidate.mode === "validate" && initValidate.total_seconds === 4 && initValidate.total_frames === 120 && initValidate.voice?.duration_seconds === 3 && initValidate.captions?.cue_count === 2, "the scaffolded film validates through assemble (4s/120 frames, 3s voice, 2 caption cues)", JSON.stringify({ total_seconds: initValidate.total_seconds, voice: initValidate.voice, captions: initValidate.captions }));
+const initClaude = await readFile(path.join(initDir, "CLAUDE.md"), "utf8");
+checkOk(/PLACEHOLDER voice/.test(initClaude) && /validate → diagnose → preview → approve → render → verify/.test(initClaude) && /Do not approve your own checks/.test(initClaude), "init_project CLAUDE.md names the placeholder voice and the full lifecycle", initClaude.split("\n").slice(0, 8).join(" | "));
+// A second init refuses to clobber the project; force replaces it.
+const initAgain = await callExpectThrow("init_project", { dir: initDir, title: "Second" });
+checkOk(/refuses to overwrite/.test(initAgain) && /film\.json/.test(initAgain), "init_project refuses a second scaffold without force", initAgain.slice(0, 200));
+const initForceRes = await client.callTool({ name: "init_project", arguments: { dir: initDir, title: "Forced Film", force: true } });
+checkOk(JSON.parse(initForceRes.content[0].text).title === "Forced Film", "init_project force:true replaces the scaffold", initForceRes.content[0].text.slice(0, 200));
+// Bad ids fail here with the same message assemble would give
+// (brand is a plain string, so it reaches core; preset is a zod
+// enum, so the MCP client rejects it first — both wordings count).
+const initBadPreset = await callExpectThrow("init_project", { dir: path.join(root, "outputs/mcp-init-bad-preset"), preset: "nope" });
+checkOk(/preset must be one of|Invalid enum/i.test(initBadPreset), "init_project refuses an unknown preset", initBadPreset.slice(0, 200));
+const initBadPresetCli = await runCli(["init", path.join(root, "outputs/mcp-init-bad-preset"), "--preset", "nope"], {});
+checkOk(initBadPresetCli.code !== 0 && /preset must be one of/.test(initBadPresetCli.out), "CLI init refuses an unknown preset with the core message", initBadPresetCli.out.slice(0, 200));
+const initBadBrand = await callExpectThrow("init_project", { dir: path.join(root, "outputs/mcp-init-bad-brand"), brand: "nope" });
+checkOk(/must be one of/.test(initBadBrand) && /amber-teal/.test(initBadBrand), "init_project refuses an unknown brand", initBadBrand.slice(0, 200));
+// The same scaffold through the CLI.
+const initCliDir = path.join(root, "outputs/mcp-init-cli");
+await rm(initCliDir, { recursive: true, force: true });
+const initCli = await runCliJson(["init", initCliDir, "--title", "CLI Film", "--preset", "square"]);
+checkOk(initCli.operation === "init_project" && initCli.preset === "square" && initCli.title === "CLI Film" && existsSync(path.join(initCliDir, "film.json")) && existsSync(path.join(initCliDir, "CLAUDE.md")), "CLI init scaffolds the project (square preset)", JSON.stringify(initCli).slice(0, 200));
+const initCliRefuse = await runCli(["init", initCliDir], {});
+checkOk(initCliRefuse.code !== 0 && /refuses to overwrite/.test(initCliRefuse.out), "CLI init refuses a second scaffold without --force", initCliRefuse.out.slice(0, 200));
+
+// Turn 94: check --faststart — moov before mdat, measured by a
+// pure-Node box walk (no ffmpeg call).
+await execFileAsync("ffmpeg", ["-y", "-v", "error", "-i", path.join(root, "test/silence-source.mp4"), "-c", "copy", "-movflags", "+faststart", path.join(root, "outputs/mcp-faststart.mp4")]);
+const fsPassRes = await client.callTool({ name: "check", arguments: { input: path.join(root, "outputs/mcp-faststart.mp4"), platform: "tiktok", faststart: true } });
+const fsPassJson = JSON.parse(fsPassRes.content[0].text);
+const fsPassRule = fsPassJson.checks.find((c) => c.name === "faststart");
+checkOk(fsPassRule?.pass === true && /moov at \d+ \(before mdat\)/.test(fsPassRule.actual), "check faststart:true passes on a +faststart file (moov before mdat)", JSON.stringify(fsPassRule));
+const fsFailRes = await client.callTool({ name: "check", arguments: { input: path.join(root, "test/silence-source.mp4"), platform: "tiktok", faststart: true } });
+const fsFailRule = JSON.parse(fsFailRes.content[0].text).checks.find((c) => c.name === "faststart");
+checkOk(fsFailRule?.pass === false && /mdat at \d+ \(before moov\)/.test(fsFailRule.actual), "check faststart:true fails on a plain file (mdat before moov)", JSON.stringify(fsFailRule));
+const fsMp3Res = await client.callTool({ name: "check", arguments: { input: path.join(root, "test/mix-voice.mp3"), platform: "tiktok", faststart: true } });
+const fsMp3Rule = JSON.parse(fsMp3Res.content[0].text).checks.find((c) => c.name === "faststart");
+checkOk(fsMp3Rule?.pass === false && /not an MP4/.test(fsMp3Rule.actual), "check faststart:true on an MP3 fails as not-an-MP4 instead of a misleading offset", JSON.stringify(fsMp3Rule));
+const fsOffRes = await client.callTool({ name: "check", arguments: { input: path.join(root, "outputs/mcp-faststart.mp4"), platform: "tiktok" } });
+checkOk(!JSON.parse(fsOffRes.content[0].text).checks.some((c) => c.name === "faststart"), "check without faststart adds no faststart rule", "");
+const fsCli = await runCliJson(["check", path.join(root, "outputs/mcp-faststart.mp4"), "--platform", "tiktok", "--faststart"]);
+checkOk(fsCli.checks.find((c) => c.name === "faststart")?.pass === true, "CLI check --faststart passes on the +faststart file", "");
+
+// Turn 94: writability pre-check — /proc is read-only even for
+// root, so a probe write there fails on any Linux box with /proc
+// mounted. If the probe write unexpectedly succeeds here, skip
+// instead of failing the suite on a machine without a read-only /proc.
+const roProbe = path.join("/proc/1", `.mediakit-ro-test-${process.pid}`);
+let roFsWritable = false;
+try { await writeFile(roProbe, "x"); await rm(roProbe, { force: true }); roFsWritable = true; } catch { roFsWritable = false; }
+if (!roFsWritable) {
+  const roTrim = await runCli(["trim", path.join(root, "test/source.mp4"), "--start", "0", "--duration", "1", "-o", "/proc/1/mediakit-ro-out.mp4"], {});
+  checkOk(roTrim.code !== 0 && /not writable/.test(roTrim.out), "trim into /proc fails fast with 'not writable' before ffmpeg runs", roTrim.out.slice(0, 200));
+} else {
+  console.log("SKIP writability-probe assert: /proc/1 is writable here");
+}
 const auditPath = process.env.MEDIAKIT_AUDIT_PATH;
 checkOk(doctorJson.audit?.enabled === true && doctorJson.audit?.path === auditPath && doctorJson.audit?.entries > 0, "doctor: audit enabled, path is the hermetic test file, entries > 0", JSON.stringify(doctorJson.audit));
 const auditAllRes = await client.callTool({ name: "audit", arguments: { limit: 200 } });
@@ -5026,7 +5099,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 69 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 69 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 70 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 70 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -6944,7 +7017,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 69 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 70 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -7004,11 +7077,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 69, "GET /mcp reports name/version/transport and 69 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 70, "GET /mcp reports name/version/transport and 70 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 69 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 69 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 70 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 70 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -7032,7 +7105,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 69, "JSON-RPC tools/list returns the same 69 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 70, "JSON-RPC tools/list returns the same 70 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));
