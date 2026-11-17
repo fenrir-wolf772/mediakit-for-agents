@@ -1225,7 +1225,13 @@ call itself — a job is never born dead. The render runs in a
 detached worker process; poll it with the `job` tool (`status`
 shows `stage` + `percent` + the live `pid`, then the terminal
 `result` — output, duration, frames, LUFS, SHA-256, QA verdict —
-or the `error`). `job --list` shows all jobs, newest first;
+or the `error`). The percent moves continuously inside the long
+stages, not just at stage boundaries: each shot encode, the xfade
+join, the voice pad and the caption burn report ffmpeg's `-progress`
+(`out_time` / total), and `progress.detail` names what is happening
+(`s2 · frame 123/300 · 2.4x`). The mux is a stream copy and the QA
+is probes, so those two stages still report only their boundaries.
+`job --list` shows all jobs, newest first;
 `job --cancel <id>` stops a queued or running job and kills
 the worker's whole process group, ffmpeg children included, so
 nothing keeps encoding after the cancel — and a cancelled job

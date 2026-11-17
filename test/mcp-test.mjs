@@ -13,7 +13,7 @@ import { createServer } from "node:http";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { compareDeterminismRuns, fixForMissing, groupWords, SHORTS_STYLE_IDS } from "../src/core.js";
+import { compareDeterminismRuns, fixForMissing, groupWords, parseFfmpegProgress, runFfmpegWithProgress, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 
 const execFileAsync = promisify(execFile);
@@ -5471,6 +5471,30 @@ const detMissingRes = await client.callTool({ name: "determinism", arguments: { 
 const detMissingJson = JSON.parse(detMissingRes.content[0].text);
 checkOk(detMissingRes.isError === true && /not found or not readable/.test(detMissingJson.error ?? ""), "determinism on a missing manifest errors instead of rendering", JSON.stringify(detMissingJson.error));
 
+// ffmpeg -progress parsing (turn 84): pure — no ffmpeg spawn.
+// Blocks end on their `progress=` line (no blank line between them);
+// out_time_ms=N/A and speed=N/A parse to null, never NaN.
+const progressMulti = parseFfmpegProgress("frame=0\nfps=0.00\nout_time_ms=N/A\nspeed=N/A\nprogress=continue\nframe=90\nfps=67.91\nout_time_us=2933333\nout_time_ms=2933333\nout_time=00:00:02.933333\nspeed=   6.34x\nprogress=end\n");
+checkOk(progressMulti?.outTimeMs === 2933 && progressMulti?.frame === 90 && progressMulti?.speed === 6.34 && progressMulti?.done === true, "parseFfmpegProgress takes the LAST block of a multi-block chunk (out_time_ms 2933333us = 2933ms, frame 90, speed 6.34, done)", JSON.stringify(progressMulti));
+const progressFirstBlock = parseFfmpegProgress("frame=0\nfps=0.00\nout_time_ms=N/A\nspeed=N/A\nprogress=continue\n");
+checkOk(progressFirstBlock?.outTimeMs === null && progressFirstBlock?.frame === 0 && progressFirstBlock?.speed === null && progressFirstBlock?.done === false, "parseFfmpegProgress on the opening block: N/A times/speed become null, done=false", JSON.stringify(progressFirstBlock));
+const progressTimeFallback = parseFfmpegProgress("frame=135\nout_time=00:00:04.500000\nprogress=continue\n");
+checkOk(progressTimeFallback?.outTimeMs === 4500 && progressTimeFallback?.frame === 135 && progressTimeFallback?.done === false, "parseFfmpegProgress falls back to out_time HH:MM:SS.xx when out_time_ms is absent (4500ms)", JSON.stringify(progressTimeFallback));
+const progressUsFallback = parseFfmpegProgress("frame=60\nout_time_us=2000000\nprogress=continue\n");
+checkOk(progressUsFallback?.outTimeMs === 2000, "parseFfmpegProgress falls back to out_time_us / 1000 (2000000us = 2000ms)", JSON.stringify(progressUsFallback));
+checkOk(parseFfmpegProgress("hello\nbitrate= 402.3kbits/s\n") === null && parseFfmpegProgress("") === null && parseFfmpegProgress("frame=12\n")?.frame === 12, "parseFfmpegProgress returns null on garbage/empty input, and still reads an unterminated block (frame 12)", "garbage->null, empty->null, unterminated->frame 12");
+// runFfmpegWithProgress (turn 84): live encode, fractions must arrive
+// DURING the encode (not only at the end), monotonic, ending at 1.
+const progressOut = path.join(root, "outputs/mcp-progress.mp4");
+const progressFractions = [];
+await runFfmpegWithProgress(["-y", "-i", "test/source.mp4", "-c:v", "libx264", "-preset", "medium", "-crf", "23", "-c:a", "aac", "-b:a", "192k", progressOut], {
+  totalSeconds: 10, onProgress: (p) => progressFractions.push(+p.fraction.toFixed(3)),
+});
+const progressOutStreams = await probeStreams(progressOut);
+const progressOutDuration = Number(progressOutStreams?.format?.duration);
+checkOk(progressFractions.length >= 3 && progressFractions.every((v, i) => i === 0 || v >= progressFractions[i - 1]) && progressFractions.at(-1) === 1 && progressFractions.some((v) => v > 0 && v < 0.9) && near(progressOutDuration, 10, 0.2), "runFfmpegWithProgress streams fractions during a 10s medium encode (>=3 callbacks, monotonic, a mid value <0.9, final 1, output 10s)", `fractions=${JSON.stringify(progressFractions)} duration=${progressOutDuration}`);
+await rm(progressOut, { force: true }).catch(() => {});
+
 // diagnose (turn 64): director preflight — validate + measured
 // judgement, probe-only. Fixtures: assemble-diagnose-pass.json (1
 // moving video shot, 1280x720, no extras) must pass clean;
@@ -5946,14 +5970,21 @@ checkOk(typeof asyncJobId === "string" && /^job-\d{8}-\d{6}-[0-9a-f]{8}$/.test(a
 // waited for the render.
 let assembleAsyncJob = null;
 let assembleAsyncSawRunning = false;
+// Turn 84: collect every polled percent — a 6-stage render can only
+// show 0/17/33/50/67/83/100 at stage boundaries, so any other value
+// proves the percent moved INSIDE a stage (ffmpeg -progress).
+const assembleAsyncPercents = [];
 for (let i = 0; i < 150; i++) {
   const jobRes = await client.callTool({ name: "job", arguments: { job_id: asyncJobId, action: "status" } });
   assembleAsyncJob = JSON.parse(jobRes.content[0].text);
   if (assembleAsyncJob.status === "running") assembleAsyncSawRunning = true;
+  if (typeof assembleAsyncJob?.progress?.percent === "number") assembleAsyncPercents.push(assembleAsyncJob.progress.percent);
   if (assembleAsyncJob.status === "done" || assembleAsyncJob.status === "failed") break;
   await new Promise((r) => setTimeout(r, 2000));
 }
 checkOk(assembleAsyncSawRunning && assembleAsyncJob?.status === "done" && assembleAsyncJob?.progress?.percent === 100, "async job moves queued -> running -> done with progress reaching 100%", `status=${assembleAsyncJob?.status} progress=${JSON.stringify(assembleAsyncJob?.progress)}`);
+const assembleAsyncStageBounds = new Set([0, 17, 33, 50, 67, 83, 100]);
+checkOk(assembleAsyncPercents.every((v, i) => i === 0 || v >= assembleAsyncPercents[i - 1]) && assembleAsyncPercents.some((v) => v > 0 && v < 100 && !assembleAsyncStageBounds.has(v)), "async job percent moves INSIDE a stage, not just at stage boundaries (some polled percent is not 0/17/33/50/67/83/100) and never goes backwards", `percents=${JSON.stringify(assembleAsyncPercents)}`);
 checkOk(assembleAsyncJob?.result?.output?.endsWith("final.mp4") && near(assembleAsyncJob?.result?.duration_seconds, 4, 0.15) && assembleAsyncJob?.result?.frames === 120 && near(assembleAsyncJob?.result?.loudness_lufs, -14, 0.5) && assembleAsyncJob?.result?.qa_verdict === "pass" && assembleAsyncJob?.result?.sha256?.length === 64, "async job result carries output + 4s/120 frames/-14 LUFS + qa pass + SHA-256", JSON.stringify(assembleAsyncJob?.result));
 const assembleAsyncFinalFrames = await countFrames(path.join(assembleAsyncOut, "final.mp4"));
 checkOk(assembleAsyncFinalFrames === 120, "async-rendered final.mp4 has exactly 120 frames on disk", `frames=${assembleAsyncFinalFrames}`);

@@ -90,7 +90,13 @@ so they poll instead: start one with `assemble` invoked with
 `GET /mcp/jobs/<job_id>` — the record carries `status`
 (`queued`/`running`/`done`/`failed`/`cancelled`) plus `progress`
 (`stage` + `percent`) and, when finished, the terminal `result` or
-`error`. `POST /mcp/jobs/<job_id>/cancel` stops a queued or running
+`error`. The percent moves continuously inside the long stages, not
+just at stage boundaries: each shot encode, the xfade join, the
+voice pad and the caption burn report ffmpeg's `-progress`
+(`out_time` / total), and `progress.detail` names what is happening
+(`s2 · frame 123/300 · 2.4x`, `voice · 3.1x`). The mux is a stream
+copy and the QA is probes, so those two stages still report only
+their boundaries. `POST /mcp/jobs/<job_id>/cancel` stops a queued or running
 job. Same job store and `job_id` format as the `job` tool over stdio.
 
 Or skip the polling loop: `GET /mcp/jobs/<job_id>/events` streams

@@ -117,6 +117,169 @@ function run(cmd, args, { timeoutMs = 300_000 } = {}) {
   });
 }
 
+// ---------------------------------------------------------------- ffmpeg progress
+// Parse one chunk of ffmpeg `-progress pipe:1` output. Each block is
+// `key=value` lines terminated by a blank line, e.g.
+//   frame=90 / fps=30.00 / out_time_ms=3000000 / speed=2.1x / progress=continue
+// Returns the LAST complete block's fields, or null when the chunk
+// holds no recognizable key. `out_time` (HH:MM:SS.xx) is the fallback
+// when `out_time_ms`/`out_time_us` are absent (older ffmpeg); `done`
+// is true only on a `progress=end` block. Pure — unit-tested without
+// spawning ffmpeg.
+export function parseFfmpegProgress(text) {
+  if (typeof text !== "string" || !text.trim()) return null;
+  let out = null;
+  let cur = null;
+  const flush = () => {
+    if (cur) out = cur;
+    cur = null;
+  };
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) { flush(); continue; }
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq);
+    const value = line.slice(eq + 1);
+    if (!["frame", "fps", "out_time_ms", "out_time_us", "out_time", "speed", "progress"].includes(key)) continue;
+    if (!cur) cur = { outTimeMs: null, frame: null, fps: null, speed: null, done: false };
+    if (key === "frame") cur.frame = Number.parseInt(value, 10);
+    else if (key === "fps") cur.fps = Number.parseFloat(value);
+    // `out_time_ms` LIES about its unit: ffmpeg prints microseconds
+    // there, not milliseconds (measured 2026-11-17: out_time_ms=233333
+    // next to out_time=00:00:00.233333 on the same block) — divide by
+    // 1000, same as out_time_us. `out_time` is the last resort: it
+    // only fills the value when neither microsecond field appeared.
+    else if (key === "out_time_ms") cur.outTimeMs = Math.round(Number.parseInt(value, 10) / 1000);
+    else if (key === "out_time_us") cur.outTimeMs = Math.round(Number.parseInt(value, 10) / 1000);
+    else if (key === "out_time") {
+      if (cur.outTimeMs === null) {
+        const m = /^(\d+):(\d{2}):(\d{2})\.(\d+)$/.exec(value);
+        if (m) cur.outTimeMs = ((+m[1]) * 3600 + (+m[2]) * 60 + (+m[3])) * 1000 + Math.round(Number.parseFloat(`0.${m[4]}`) * 1000);
+      }
+    } else if (key === "speed") cur.speed = Number.parseFloat(value.replace(/x$/, ""));
+    // `progress=` ENDS a block: ffmpeg emits no blank line between
+    // blocks (measured 2026-11-17: `progress=continue` is immediately
+    // followed by the next block's `frame=`), so the block closes
+    // here, not on an empty line.
+    else if (key === "progress") { cur.done = value === "end"; flush(); continue; }
+  }
+  flush();
+  if (!out) return null;
+  if (out.frame !== null && !Number.isFinite(out.frame)) out.frame = null;
+  if (out.fps !== null && !Number.isFinite(out.fps)) out.fps = null;
+  if (out.outTimeMs !== null && !Number.isFinite(out.outTimeMs)) out.outTimeMs = null;
+  if (out.speed !== null && !Number.isFinite(out.speed)) out.speed = null;
+  return out;
+}
+
+// Like run(), but for long encodes where the caller wants LIVE
+// progress: `-progress pipe:1` streams key=value blocks on stdout,
+// parsed as they arrive (run() buffers stdout until exit, so it can
+// never report mid-encode). `-nostats` keeps stderr clean for the
+// error tail. The flags go right before the last argument — the
+// output file — so they apply to that output. Callbacks are throttled
+// to one per 250 ms (plus the final one), because the assemble worker
+// writes job.json on every callback and a per-frame write would
+// drown the render. `onProgress` gets { fraction, frame, fps, speed,
+// outTimeMs }; fraction is out_time / totalSeconds, clamped 0..1, and
+// is forced to 1 on a clean exit (some encodes never emit a block
+// with out_time == total). Without totalSeconds or onProgress this is
+// just run() — same args, same error shape — so callers can pass the
+// options through unconditionally.
+export async function runFfmpegWithProgress(args, { totalSeconds = null, onProgress = null, timeoutMs = 300_000 } = {}) {
+  if (!(totalSeconds > 0) || typeof onProgress !== "function") {
+    return run(FFMPEG, args, { timeoutMs });
+  }
+  const last = args[args.length - 1];
+  if (typeof last !== "string" || last.startsWith("-")) {
+    throw new MediaKitError("runFfmpegWithProgress needs the output file as the last argument", "INVALID_ARG");
+  }
+  const progressArgs = [...args.slice(0, -1), "-progress", "pipe:1", "-nostats", last];
+  return new Promise((resolve, reject) => {
+    const child = spawn(FFMPEG, progressArgs, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdoutBuf = "";
+    let blockText = "";
+    let stderrLines = [];
+    let stderrBuf = "";
+    let lastEmit = 0;
+    let lastFraction = -1;
+    let settled = false;
+    const emit = (fraction, data, force = false) => {
+      const now = Date.now();
+      fraction = Math.min(1, Math.max(0, fraction));
+      if (!force && now - lastEmit < 250 && fraction < 1) return;
+      if (!force && fraction === lastFraction) return;
+      lastEmit = now;
+      lastFraction = fraction;
+      try { onProgress({ fraction, ...data }); } catch { /* progress is advisory */ }
+    };
+    const handleBlock = (text) => {
+      const parsed = parseFfmpegProgress(text);
+      if (!parsed) return;
+      const fraction = parsed.outTimeMs === null ? lastFraction < 0 ? 0 : lastFraction : parsed.outTimeMs / 1000 / totalSeconds;
+      emit(fraction, { frame: parsed.frame, fps: parsed.fps, speed: parsed.speed, outTimeMs: parsed.outTimeMs }, parsed.done);
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      reject(new MediaKitError(`ffmpeg timed out after ${timeoutMs} ms`, "FFMPEG_FAILED"));
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      stdoutBuf += chunk.toString("utf8");
+      let idx;
+      while ((idx = stdoutBuf.indexOf("\n")) !== -1) {
+        const line = stdoutBuf.slice(0, idx);
+        stdoutBuf = stdoutBuf.slice(idx + 1);
+        // A block ends on its `progress=` line (no blank line between
+        // blocks) — a stray blank line flushes too, defensively.
+        if (!line.trim()) {
+          if (blockText) { handleBlock(blockText); blockText = ""; }
+        } else {
+          blockText += `${line}\n`;
+          if (line.startsWith("progress=")) { handleBlock(blockText); blockText = ""; }
+        }
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      stderrBuf += chunk.toString("utf8");
+      let idx;
+      while ((idx = stderrBuf.indexOf("\n")) !== -1) {
+        const line = stderrBuf.slice(0, idx);
+        stderrBuf = stderrBuf.slice(idx + 1);
+        if (line.trim()) {
+          stderrLines.push(line);
+          if (stderrLines.length > 5) stderrLines.shift();
+        }
+      }
+    });
+    child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new MediaKitError(`ffmpeg failed to start: ${err.message}`, "FFMPEG_FAILED"));
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (blockText) handleBlock(blockText);
+      if (stderrBuf.trim()) {
+        stderrLines.push(stderrBuf.trim());
+        if (stderrLines.length > 5) stderrLines = stderrLines.slice(-5);
+      }
+      if (code === 0) {
+        emit(1, { frame: null, fps: null, speed: null, outTimeMs: null }, true);
+        resolve({ stdout: "", stderr: stderrLines.join("\n") });
+      } else {
+        const detail = stderrLines.join(" | ");
+        reject(new MediaKitError(`ffmpeg failed: exited with code ${code}${detail ? ` — ${detail}` : ""}`, "FFMPEG_FAILED"));
+      }
+    });
+  });
+}
+
 // Quote one argv element for display in dry-run plans (same rule
 // mix() uses inline): bare when safe, single-quoted otherwise.
 function quoteArg(s) {
@@ -2339,7 +2502,7 @@ function assColor(value, label) {
   return `&H00${hex.slice(4, 6)}${hex.slice(2, 4)}${hex.slice(0, 2)}&`;
 }
 
-export async function burnCaptions({ input, output, captions, fontSize = null, fontColor = "white", box = true, marginV = null, style = null, outlineColor = "black", maxLines = null, platform = null }) {
+export async function burnCaptions({ input, output, captions, fontSize = null, fontColor = "white", box = true, marginV = null, style = null, outlineColor = "black", maxLines = null, platform = null, onProgress = null }) {
   const inPath = await requireInput(input);
   const capPath = await requireInput(captions, "captions file");
   const outPath = await prepareOutput(output, [inPath]);
@@ -2448,7 +2611,9 @@ export async function burnCaptions({ input, output, captions, fontSize = null, f
     const color = fontColor.toLowerCase() === "white" ? "" : `,PrimaryColour=&H${fontColor}&`;
     vf = `subtitles='${esc}':force_style='${forceStyle}${color}'`;
   }
-  await run(FFMPEG, ["-y", "-i", inPath, "-vf", vf, "-c:a", "copy", outPath]);
+  await runFfmpegWithProgress(["-y", "-i", inPath, "-vf", vf, "-c:a", "copy", outPath], {
+    totalSeconds: meta.duration_seconds, onProgress,
+  });
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
   return { operation: "burn_captions", input: inPath, output: outPath, captions: capPath, font_size: size, margin_v: margin, style: styleName, style_applied: ext !== ".ass", platform: platform ?? null, fit, fit_note: fitNote, ...info, duration_seconds: out.duration_seconds };
@@ -5463,7 +5628,7 @@ export async function chromaKey({ input, output, color = "00FF00", similarity = 
 // Frame 0 is exactly the full image (zoom z0, focus start) and the
 // last frame is exactly the zoomed window (zoom z1, focus end) —
 // the test suite verifies both against crops computed independently.
-export async function zoomPan({ input, output, duration = 5, fps = 30, zoomFrom = 1, zoomTo = 1.5, focusX = 0.5, focusY = 0.5, focusEndX = null, focusEndY = null, width = 1280, height = 720, crf = 23 }) {
+export async function zoomPan({ input, output, duration = 5, fps = 30, zoomFrom = 1, zoomTo = 1.5, focusX = 0.5, focusY = 0.5, focusEndX = null, focusEndY = null, width = 1280, height = 720, crf = 23, onProgress = null }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const dur = num(duration, "duration", { min: 0.5, max: 600 });
@@ -5495,11 +5660,11 @@ export async function zoomPan({ input, output, duration = 5, fps = 30, zoomFrom 
   const xExpr = `min(max(${fxExpr}*iw-(iw/zoom)/2,0),iw-iw/zoom)`;
   const yExpr = `min(max(${fyExpr}*ih-(ih/zoom)/2,0),ih-ih/zoom)`;
   const vf = `scale=${preW}:${preH}:force_original_aspect_ratio=increase,crop=${preW}:${preH},zoompan=z='${zExpr}':x='${xExpr}':y='${yExpr}':d=${n}:s=${w}x${h}:fps=${f}`;
-  await run(FFMPEG, [
+  await runFfmpegWithProgress([
     "-y", "-loop", "1", "-i", inPath, "-vf", vf,
     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", String(c), "-preset", "medium",
     "-t", String(dur), outPath,
-  ]);
+  ], { totalSeconds: dur, onProgress });
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
   const frames = await countVideoFrames(outPath);
@@ -11360,7 +11525,7 @@ function loadCanvasPackage(label) {
 // inside tmpDir, encode them to one segment. Frame count is
 // counted on disk, like every other shot kind. The scratch dir is
 // removed with tmpDir by the caller.
-async function buildAssembleCanvasShot(plan, shot, opts, outPath, tmpDir) {
+async function buildAssembleCanvasShot(plan, shot, opts, outPath, tmpDir, onEncodeProgress = null) {
   const { width, height, fps, crf, preset } = opts;
   const frames = shot.buildFrames;
   const { createCanvas, loadImage } = loadCanvasPackage(`assemble shot ${shot.id}`);
@@ -11376,17 +11541,29 @@ async function buildAssembleCanvasShot(plan, shot, opts, outPath, tmpDir) {
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext("2d");
   try {
+    // Drawing is CPU work in Node, not an ffmpeg encode, so it has no
+    // out_time to measure — the fraction stays 0 while drawing, but
+    // the detail still moves (frame n/N, at most one callback per
+    // 500 ms, so the job record keeps proving the worker is alive).
+    let lastDrawEmit = 0;
     for (let n = 0; n < frames; n++) {
       const t = n / fps;
       ctx.clearRect(0, 0, width, height);
       await draw(ctx, t, width, height, assets, M);
       await writeFile(path.join(framesDir, `frame_${String(n).padStart(5, "0")}.png`), canvas.toBuffer("image/png"));
+      if (typeof onEncodeProgress === "function" && (n === frames - 1 || Date.now() - lastDrawEmit >= 500)) {
+        lastDrawEmit = Date.now();
+        try { onEncodeProgress(0, { frame: n + 1, fps: null, speed: null, outTimeMs: null, phase: `drawing ${n + 1}/${frames}` }); } catch { /* advisory */ }
+      }
     }
-    await run(FFMPEG, [
+    await runFfmpegWithProgress([
       "-y", "-framerate", String(fps), "-i", path.join(framesDir, "frame_%05d.png"),
       "-frames:v", String(frames),
       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", String(crf), "-preset", preset, "-an", outPath,
-    ]);
+    ], {
+      totalSeconds: shot.buildSeconds,
+      onProgress: typeof onEncodeProgress === "function" ? (p) => onEncodeProgress(p.fraction, p) : null,
+    });
   } finally {
     await rm(framesDir, { recursive: true, force: true });
   }
@@ -11410,7 +11587,7 @@ async function buildAssembleCanvasShot(plan, shot, opts, outPath, tmpDir) {
 // on a 540-wide frame overflows both sides (measured 2026-11-13:
 // "MINUS 14 LUFS" clipped to "NUS 14 LU" in the preview). So the
 // layer is re-wrapped for the render width here, not at validate.
-async function applyAssembleTextLayers(plan, shot, opts, inPath) {
+async function applyAssembleTextLayers(plan, shot, opts, inPath, onTextProgress = null) {
   const layers = shot.textLayers ?? [];
   if (!layers.length) return inPath;
   const { fps, crf, preset } = opts;
@@ -11437,10 +11614,13 @@ async function applyAssembleTextLayers(plan, shot, opts, inPath) {
       return `drawtext=fontfile=${TITLECARD_FONT}:textfile=${esc}:fontsize=${size}:fontcolor=0x${layer.color}:borderw=4:bordercolor=black${box}:x=(w-text_w)/2:y=${y}:enable=between(t\\,${segStart}\\,${segEnd})`;
     }).join(",");
     const tmpOut = `${inPath}.text.mp4`;
-    await run(FFMPEG, [
+    await runFfmpegWithProgress([
       "-y", "-i", inPath, "-vf", vf, "-frames:v", String(shot.buildFrames),
       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", String(crf), "-preset", preset, "-an", tmpOut,
-    ]);
+    ], {
+      totalSeconds: shot.buildSeconds,
+      onProgress: typeof onTextProgress === "function" ? (p) => onTextProgress(p.fraction, p) : null,
+    });
     await rename(tmpOut, inPath);
   } finally {
     for (const f of tmpFiles) await unlink(f).catch(() => {});
@@ -11459,10 +11639,28 @@ async function applyAssembleTextLayers(plan, shot, opts, inPath) {
 // from the lavfi color source. Any frame-count mismatch throws — a
 // segment that is a frame short would silently shift every shot
 // after it.
-async function buildAssembleShot(plan, shot, opts, outPath) {
+async function buildAssembleShot(plan, shot, opts, outPath, onShotProgress = null) {
   const { width, height, fps, crf, preset } = opts;
+  // A shot is 1 encode, or 2 when it carries text layers (base build
+  // + drawtext re-encode). Each encode counts equally: the base maps
+  // to [0, 1/n), the text pass to [1/n, 1]. The detail string carries
+  // the live frame/speed so a poller sees movement, not just a number.
+  const encodes = (shot.textLayers?.length ? 2 : 1);
+  const detailFor = (p, phase) => {
+    const parts = [shot.id];
+    if (phase) parts.push(phase);
+    if (p?.frame != null) parts.push(`frame ${p.frame}/${shot.buildFrames}`);
+    if (p?.speed != null) parts.push(`${p.speed}x`);
+    return parts.join(" · ");
+  };
+  const baseProgress = typeof onShotProgress === "function"
+    ? (frac, p, phase) => { try { onShotProgress(frac / encodes, detailFor(p, phase ?? p?.phase)); } catch { /* advisory */ } }
+    : null;
+  const textProgress = typeof onShotProgress === "function"
+    ? (frac, p) => { try { onShotProgress((1 + frac) / encodes, detailFor(p, "text")); } catch { /* advisory */ } }
+    : null;
   if (shot.kind === "canvas_scene") {
-    await buildAssembleCanvasShot(plan, shot, opts, outPath, opts.tmpDir);
+    await buildAssembleCanvasShot(plan, shot, opts, outPath, opts.tmpDir, baseProgress);
   } else if (shot.kind === "image") {
     const z = shot.zoom ?? { from: 1, to: 1, focus: [0.5, 0.5], focus_end: [0.5, 0.5] };
     const r = await zoomPan({
@@ -11471,25 +11669,32 @@ async function buildAssembleShot(plan, shot, opts, outPath) {
       focusX: z.focus[0], focusY: z.focus[1],
       focusEndX: z.focus_end[0], focusEndY: z.focus_end[1],
       width, height, crf,
+      onProgress: baseProgress ? (p) => baseProgress(p.fraction, p) : null,
     });
     if (r.frames !== shot.buildFrames) {
       throw new MediaKitError(`assemble shot ${shot.id}: built ${r.frames} frames, expected ${shot.buildFrames}`, "ASSEMBLE_FRAME_MISMATCH");
     }
   } else if (shot.kind === "video") {
     const vf = `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},setpts=PTS-STARTPTS,fps=${fps},format=yuv420p`;
-    await run(FFMPEG, [
+    await runFfmpegWithProgress([
       "-y", "-ss", String(shot.buildStart), "-t", String(shot.buildSeconds), "-i", shot.source,
       "-vf", vf, "-frames:v", String(shot.buildFrames),
       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", String(crf), "-preset", preset, "-an", outPath,
-    ]);
+    ], {
+      totalSeconds: shot.buildSeconds,
+      onProgress: baseProgress ? (p) => baseProgress(p.fraction, p) : null,
+    });
   } else {
-    await run(FFMPEG, [
+    await runFfmpegWithProgress([
       "-y", "-f", "lavfi", "-i", `color=c=0x${shot.color}:s=${width}x${height}:r=${fps}`,
       "-frames:v", String(shot.buildFrames),
       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", String(crf), "-preset", preset, "-an", outPath,
-    ]);
+    ], {
+      totalSeconds: shot.buildSeconds,
+      onProgress: baseProgress ? (p) => baseProgress(p.fraction, p) : null,
+    });
   }
-  await applyAssembleTextLayers(plan, shot, opts, outPath);
+  await applyAssembleTextLayers(plan, shot, opts, outPath, textProgress);
   const counted = await countVideoFrames(outPath);
   if (counted !== shot.buildFrames) {
     throw new MediaKitError(`assemble shot ${shot.id}: built ${counted} frames, expected ${shot.buildFrames}`, "ASSEMBLE_FRAME_MISMATCH");
@@ -11503,7 +11708,7 @@ async function buildAssembleShot(plan, shot, opts, outPath) {
 // joined video has exactly the nominal frame count; the caller
 // verifies that on disk. The final fps filter pins the frame rate
 // after the chain.
-async function joinAssembleSegments(segmentPaths, joins, opts, outPath) {
+async function joinAssembleSegments(segmentPaths, joins, opts, outPath, onJoinProgress = null, totalSeconds = null) {
   const { fps, crf, preset } = opts;
   const graph = [];
   let vLabel = "0:v";
@@ -11528,7 +11733,10 @@ async function joinAssembleSegments(segmentPaths, joins, opts, outPath) {
     "-map", "[vout]", "-c:v", "libx264", "-pix_fmt", "yuv420p",
     "-crf", String(crf), "-preset", preset, "-an", outPath,
   );
-  await run(FFMPEG, args);
+  await runFfmpegWithProgress(args, {
+    totalSeconds,
+    onProgress: typeof onJoinProgress === "function" ? (p) => onJoinProgress(p.fraction, p) : null,
+  });
   return outPath;
 }
 
@@ -11536,7 +11744,7 @@ async function joinAssembleSegments(segmentPaths, joins, opts, outPath) {
 // <manifestDir>/.mediakit-assemble-cache/<sha256>.mp4 + index.json
 // {key: {output_size_bytes, output_sha256}}. A hit is verified by
 // size + SHA-256, never trusted on filename alone.
-async function assembleCachedShot(plan, shot, opts, tmpDir) {
+async function assembleCachedShot(plan, shot, opts, tmpDir, onShotProgress = null) {
   const cacheDir = path.join(plan.manifestDir, ASSEMBLE_CACHE_DIRNAME);
   const indexPath = path.join(cacheDir, "index.json");
   const key = createHash("sha256").update(stableStringify({
@@ -11570,7 +11778,7 @@ async function assembleCachedShot(plan, shot, opts, tmpDir) {
     } catch { /* cached segment gone or changed: rebuild */ }
   }
   await mkdir(cacheDir, { recursive: true });
-  await buildAssembleShot(plan, shot, { ...opts, tmpDir }, segPath);
+  await buildAssembleShot(plan, shot, { ...opts, tmpDir }, segPath, onShotProgress);
   try {
     await copyFile(segPath, cacheFile);
     const st = await stat(cacheFile);
@@ -11583,15 +11791,18 @@ async function assembleCachedShot(plan, shot, opts, tmpDir) {
 // Voice padded to the film timeline: adelay by lead, apad to the
 // total duration. The padded voice IS the final timeline, so mix()
 // SFX timestamps and the music loop both land in absolute time.
-async function buildPaddedVoice(plan, totalSeconds, outPath) {
+async function buildPaddedVoice(plan, totalSeconds, outPath, onVoiceProgress = null) {
   const leadMs = Math.round(plan.voice.lead * 1000);
   const af = leadMs > 0
     ? `adelay=${leadMs}:all=1,apad=whole_dur=${totalSeconds}`
     : `apad=whole_dur=${totalSeconds}`;
-  await run(FFMPEG, [
+  await runFfmpegWithProgress([
     "-y", "-i", plan.voice.path, "-af", af,
     "-c:a", "aac", "-b:a", "192k", "-t", String(totalSeconds), outPath,
-  ]);
+  ], {
+    totalSeconds,
+    onProgress: typeof onVoiceProgress === "function" ? (p) => onVoiceProgress(p.fraction, p) : null,
+  });
   const meta = await probe(outPath);
   if (!meta.audio) throw new MediaKitError("assemble could not build the padded voice track", "PROBE_FAILED");
   return outPath;
@@ -11723,10 +11934,13 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
     approvalStatus = await requireAssembleApproval(plan, force);
   }
 
-  // Progress reporting for async jobs: stage-level, honest about
-  // what is known — the caller polls the job record, so a stage
-  // name + a percent that only moves when a stage actually starts
-  // or finishes. A progress callback must never fail the render.
+  // Progress reporting for async jobs: stage-level at the boundaries,
+  // and frame-level INSIDE the long ffmpeg steps — each shot encode,
+  // the xfade join, the voice pad and the caption burn report
+  // out_time/total through runFfmpegWithProgress, so the percent
+  // moves continuously instead of jumping stage to stage (turn 84).
+  // The mux is a stream copy and the qa is probes, so those two stay
+  // boundary-only. A progress callback must never fail the render.
   const PROGRESS_STAGES = isPreview ? ["shots", "join", "audio", "mux", "captions"] : ["shots", "join", "audio", "mux", "captions", "qa"];
   const emitProgress = (stage, fraction, detail = null) => {
     if (typeof onProgress !== "function") return;
@@ -11788,7 +12002,9 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
   try {
     for (const [i, shot] of renderShotsBuilt.entries()) {
       emitProgress("shots", i / renderShotsBuilt.length, shot.id);
-      const r = await assembleCachedShot(plan, shot, opts, tmpDir);
+      const r = await assembleCachedShot(plan, shot, opts, tmpDir, (frac, detail) => {
+        emitProgress("shots", (i + frac) / renderShotsBuilt.length, detail);
+      });
       if (r.cached) cacheHits++;
       segmentPaths.push(r.path);
     }
@@ -11800,7 +12016,9 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       await writeFile(listPath, segmentPaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join("\n") + "\n", "utf8");
       await run(FFMPEG, ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-movflags", "+faststart", videoOnlyPath]);
     } else {
-      await joinAssembleSegments(segmentPaths, joins, opts, videoOnlyPath);
+      await joinAssembleSegments(segmentPaths, joins, opts, videoOnlyPath, (frac, p) => {
+        emitProgress("join", frac, p?.speed != null ? `join · ${p.speed}x` : "join");
+      }, renderTotalSeconds);
     }
     emitProgress("join", 1);
     const concatFrames = await countVideoFrames(videoOnlyPath);
@@ -11808,9 +12026,14 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       throw new MediaKitError(`assemble concat produced ${concatFrames} frames, expected ${renderTotalFrames}`, "ASSEMBLE_FRAME_MISMATCH");
     }
     // Audio: padded voice (the final timeline) + music bed + SFX.
+    // The pad is the first of two audio steps (pad, then mix/loudness),
+    // so it reports 0..0.5 of the stage and the mix completes it — an
+    // approximation of the work split, stated here, not a measurement.
     emitProgress("audio", 0);
     const paddedPath = path.join(tmpDir, "voice-padded.m4a");
-    await buildPaddedVoice(plan, renderTotalSeconds, paddedPath);
+    await buildPaddedVoice(plan, renderTotalSeconds, paddedPath, (frac, p) => {
+      emitProgress("audio", frac * 0.5, p?.speed != null ? `voice · ${p.speed}x` : "voice");
+    });
     const previewSfx = isPreview ? plan.sfx.filter((s) => s.at_seconds < renderTotalSeconds) : plan.sfx;
     const mixedPath = path.join(tmpDir, "mixed.m4a");
     if (plan.music) {
@@ -11865,6 +12088,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
         fontSize: bv.font_size == null ? null : Math.max(8, Math.round(bv.font_size * burnScale)),
         marginV: bv.margin_v == null ? null : Math.max(0, Math.round(bv.margin_v * burnScale)),
         style: bv.style ?? "background",
+        onProgress: (p) => emitProgress("captions", p.fraction, p?.speed != null ? `captions · ${p.speed}x` : "captions"),
       });
     } else {
       await copyFile(muxedPath, finalPath);
