@@ -51,6 +51,7 @@ export const TOOL_DEFS = [
     stream_copy: z.boolean().default(false).describe("Copy streams without re-encoding (fast, keyframe-accurate only)"),
     snap_to_keyframe: z.boolean().default(false).describe("With stream_copy only: snap start/end to the nearest keyframes (start down, end up)"),
     snap_to_beat: z.boolean().default(false).describe("Snap start/end to the nearest beats of the music (start down, end up; see beat_grid first). Works on re-encode cuts too; refuses snap_to_keyframe and smart_cut, and refuses when the measured beat grid is unreliable"),
+    snap_beat_method: z.enum(["grid", "dp"]).default("grid").describe("Which beat grid snap_to_beat snaps to: grid (one steady tempo for the whole file) or dp (the DP tracker follows real onset peaks, so it stays on the beat when the tempo drifts — see beat_grid)"),
     smart_cut: z.boolean().default(false).describe("With stream_copy only: exact start by re-encoding only the head up to the next keyframe (source bitrate x1.2); refuses snap_to_keyframe"),
     check_frames: z.boolean().default(true).describe("Verify the cut: compare 3 output frames against the source at the requested times (default true; false skips the check, audio-only inputs have nothing to check)"),
     dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command(s) that would run (one for a plain cut, three for smart_cut: head re-encode, tail copy, concat) and write no file"),
@@ -64,6 +65,7 @@ export const TOOL_DEFS = [
     streamCopy: a.stream_copy,
     snapToKeyframe: a.snap_to_keyframe,
     snapToBeat: a.snap_to_beat,
+    snapBeatMethod: a.snap_beat_method ?? "grid",
     smartCut: a.smart_cut,
     checkFrames: a.check_frames ?? true,
     dryRun: a.dry_run,
@@ -1541,22 +1543,28 @@ export const TOOL_DEFS = [
   // what a director hands to an editor. A steady tone or speech
   // still returns its grid with reliable: false — never snap cuts to
   // an unreliable grid (trim --snap-beat refuses it). The grid is
-  // rigid by design: one tempo + one phase for the whole file, so a
-  // clip whose tempo drifts will drift off the grid — that is a
-  // known limit (librosa's DP beat tracker handles drift by picking
-  // real onset peaks near the grid; see the backlog).
+  // rigid by default: one tempo + one phase for the whole file, so a
+  // clip whose tempo drifts will drift off it — method "dp" runs the
+  // DP beat tracker instead (librosa's beat_track, Ellis 2007,
+  // re-implemented in pure Node): it picks real onset peaks near the
+  // grid, so the beats stay on the music while the tempo moves, and
+  // reports tempo_drift_seconds — how far the DP beats sit from the
+  // rigid grid at worst (0.373s on a 120->132 drift take, 0.026s on
+  // a steady 120 click track).
   {
     name: "beat_grid",
-    description: "Return the full beat grid of a clip (probe-only, writes no file): the same spectral-flux + autocorrelation/comb measurement as bpm, expanded to every beat across the file instead of the first 16. Returns bpm, beat_period_seconds, confidence, a reliable flag, onset_recall, onsets_detected, first_beat_seconds, beats (all of them, 3 decimals), beat_count and last_beat_seconds. A steady tone or speech reports reliable: false with a warning — do not snap cuts to an unreliable grid (trim snap_to_beat refuses it). The grid assumes one steady tempo for the whole file; a clip whose tempo drifts will drift off the grid. Files over 10 minutes or under 4s are refused.",
+    description: "Return the full beat grid of a clip (probe-only, writes no file): the same spectral-flux + autocorrelation/comb measurement as bpm, expanded to every beat across the file instead of the first 16. Returns bpm, beat_period_seconds, confidence, a reliable flag, onset_recall, onsets_detected, first_beat_seconds, beats (all of them, 3 decimals), beat_count and last_beat_seconds. A steady tone or speech reports reliable: false with a warning — do not snap cuts to an unreliable grid (trim snap_to_beat refuses it). The grid is rigid by default: one steady tempo for the whole file, so a clip whose tempo drifts will drift off it. Set method=\"dp\" to run the DP beat tracker instead (librosa beat_track, re-implemented in pure Node): it picks real onset peaks near the grid, so the beats stay on the music while the tempo moves, and reports tempo_drift_seconds (worst distance from the rigid grid) and tempo_drift_cv (interval variation). Files over 10 minutes or under 4s are refused.",
     schema: {
     input: pathSchema,
     min_bpm: z.number().min(20).max(300).default(40).describe("Lowest tempo to consider in BPM (default 40)"),
     max_bpm: z.number().min(20).max(300).default(240).describe("Highest tempo to consider in BPM (default 240)"),
+    method: z.enum(["grid", "dp"]).default("grid").describe("grid: one steady tempo + phase for the whole file (default); dp: DP beat tracker that follows real onset peaks, for takes whose tempo drifts"),
   },
     handler: async (a) => safe(() => core.detectBeatGrid({
     input: a.input,
     minBpm: a.min_bpm,
     maxBpm: a.max_bpm,
+    method: a.method ?? "grid",
   })),
   },
 

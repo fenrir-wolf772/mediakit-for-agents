@@ -18,8 +18,8 @@ const COMMANDS = {
     options: [],
   },
   trim: {
-    usage: "mediakit trim <input> --start <s|MM:SS> (--duration <s|MM:SS> | --end <s|MM:SS>) -o <output> [--stream-copy] [--snap] [--snap-beat] [--smart-cut] [--no-check-frames] [--dry-run]",
-    desc: "Cut a clip. Re-encodes by default (frame-accurate); --stream-copy is fast but keyframe-only. --snap (with --stream-copy) moves start/end onto the nearest keyframes. --snap-beat moves start/end onto the nearest beats of the music instead (start down, end up; refuses --snap and --smart-cut, and refuses when the measured beat grid is unreliable — see beat_grid). --smart-cut (with --stream-copy) keeps the exact start: only the head up to the next keyframe is re-encoded, the rest is copied. Every video trim verifies the cut by default: 3 output frames (head/middle/tail) are compared against the source at the requested times and the result reports cut_verified plus mean_abs_diff per frame; --no-check-frames skips the verification (audio-only inputs have nothing to check). --dry-run prints the exact ffmpeg command(s) that would run (three for --smart-cut) and writes no file. Times accept seconds or MM:SS.",
+    usage: "mediakit trim <input> --start <s|MM:SS> (--duration <s|MM:SS> | --end <s|MM:SS>) -o <output> [--stream-copy] [--snap] [--snap-beat [--snap-beat-method grid|dp]] [--smart-cut] [--no-check-frames] [--dry-run]",
+    desc: "Cut a clip. Re-encodes by default (frame-accurate); --stream-copy is fast but keyframe-only. --snap (with --stream-copy) moves start/end onto the nearest keyframes. --snap-beat moves start/end onto the nearest beats of the music instead (start down, end up; refuses --snap and --smart-cut, and refuses when the measured beat grid is unreliable — see beat_grid). --snap-beat-method dp snaps to the DP tracker's beats, which follow real onsets when the tempo drifts; grid (default) snaps to the one-tempo grid. --smart-cut (with --stream-copy) keeps the exact start: only the head up to the next keyframe is re-encoded, the rest is copied. Every video trim verifies the cut by default: 3 output frames (head/middle/tail) are compared against the source at the requested times and the result reports cut_verified plus mean_abs_diff per frame; --no-check-frames skips the verification (audio-only inputs have nothing to check). --dry-run prints the exact ffmpeg command(s) that would run (three for --smart-cut) and writes no file. Times accept seconds or MM:SS.",
     args: [{ name: "input", required: true }],
     options: [
       ["--start", "Start time in seconds or MM:SS (default 0)"],
@@ -28,6 +28,7 @@ const COMMANDS = {
       ["--stream-copy", "Copy streams without re-encoding"],
       ["--snap", "Snap start/end to the nearest keyframes (needs --stream-copy)"],
       ["--snap-beat", "Snap start/end to the nearest beats of the music (start down, end up; refuses --snap and --smart-cut)"],
+      ["--snap-beat-method", "Which beat grid --snap-beat snaps to: grid (default, one steady tempo) or dp (DP tracker, follows real onsets when the tempo drifts)"],
       ["--smart-cut", "Exact start with stream copy: re-encode only the head up to the next keyframe (needs --stream-copy, refuses --snap)"],
       ["--no-check-frames", "Skip the 3-frame cut verification"],
       ["--dry-run", "Print the exact ffmpeg command(s) and write no file"],
@@ -687,12 +688,13 @@ const COMMANDS = {
     ],
   },
   beat_grid: {
-    usage: "mediakit beat_grid <input> [--min-bpm 40] [--max-bpm 240]",
-    desc: "Return the full beat grid of a clip: the same measurement as bpm, expanded to every beat across the file instead of the first 16. Returns bpm, beat period, confidence, a reliable flag, onset recall, first_beat_seconds, beats (all of them), beat_count and last_beat_seconds. The cut points trim --snap-beat snaps to. A tone or speech reports reliable: false — do not snap cuts to an unreliable grid. The grid assumes one steady tempo for the whole file; a clip whose tempo drifts will drift off the grid. Probe-only, writes no file.",
+    usage: "mediakit beat_grid <input> [--min-bpm 40] [--max-bpm 240] [--method grid|dp]",
+    desc: "Return the full beat grid of a clip: the same measurement as bpm, expanded to every beat across the file instead of the first 16. Returns bpm, beat period, confidence, a reliable flag, onset recall, first_beat_seconds, beats (all of them), beat_count and last_beat_seconds. The cut points trim --snap-beat snaps to. A tone or speech reports reliable: false — do not snap cuts to an unreliable grid. The grid is rigid by default (one steady tempo for the whole file); --method dp runs the DP beat tracker instead, which follows real onset peaks when the tempo drifts, and reports tempo_drift_seconds + tempo_drift_cv. Probe-only, writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--min-bpm", "Lowest tempo to consider in BPM (default 40)"],
       ["--max-bpm", "Highest tempo to consider in BPM (default 240)"],
+      ["--method", "grid (default, one steady tempo) or dp (DP tracker, follows real onsets when the tempo drifts)"],
     ],
   },
   mux: {
@@ -1005,6 +1007,7 @@ async function main() {
           streamCopy: opts.stream_copy === true,
           snapToKeyframe: opts.snap === true,
           snapToBeat: opts.snap_beat === true,
+          snapBeatMethod: opts.snap_beat_method ?? "grid",
           smartCut: opts.smart_cut === true,
           checkFrames: opts.check_frames !== false,
           dryRun: opts.dry_run === true,
@@ -1590,6 +1593,7 @@ async function main() {
           input: needInput(),
           minBpm: numOpt(opts, "min_bpm") ?? 40,
           maxBpm: numOpt(opts, "max_bpm") ?? 240,
+          method: opts.method ?? "grid",
         });
         break;
       case "mux": {

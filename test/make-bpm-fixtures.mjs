@@ -71,8 +71,29 @@ function drumTrack(bpm) {
   return s;
 }
 
+// Click track whose tempo drifts linearly from bpmStart to bpmEnd
+// over the 12s (a live take speeding up, or two takes stitched):
+// the rigid one-tempo grid cannot follow it, so it is the ground
+// truth for the DP beat tracker (lượt 88). Click times are built by
+// accumulating the instantaneous period 60/bpm(t); the test
+// recomputes the same accumulation in-test, so no sidecar file.
+function driftClickTrack(bpmStart, bpmEnd) {
+  const n = Math.floor(SECONDS * SR);
+  const s = new Float32Array(n);
+  for (let t = 0; t < SECONDS;) {
+    const start = Math.floor(t * SR);
+    for (let i = 0; i < Math.floor(0.03 * SR); i++) {
+      const u = i / SR;
+      s[start + i] += Math.sin(2 * Math.PI * 1000 * u) * Math.exp(-u * 180) * 0.9;
+    }
+    t += 60 / (bpmStart + ((bpmEnd - bpmStart) * t) / SECONDS);
+  }
+  return s;
+}
+
 writeWav("bpm-click-90.wav", clickTrack(90));
 writeWav("bpm-click-120.wav", clickTrack(120));
 writeWav("bpm-click-150.wav", clickTrack(150));
 writeWav("bpm-click-180.wav", clickTrack(180));
 writeWav("bpm-drum-120.wav", drumTrack(120));
+writeWav("bpm-drift-120-132.wav", driftClickTrack(120, 132));

@@ -13,7 +13,7 @@ import { createServer } from "node:http";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { compareDeterminismRuns, estimateTempo, fixForMissing, groupWords, parseFfmpegProgress, runFfmpegWithProgress, spectralFluxOnset, SHORTS_STYLE_IDS } from "../src/core.js";
+import { compareDeterminismRuns, estimateTempo, fixForMissing, groupWords, parseFfmpegProgress, runFfmpegWithProgress, spectralFluxOnset, trackBeatsDP, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 
 const execFileAsync = promisify(execFile);
@@ -1957,6 +1957,84 @@ checkOk(hookManifestDryJson.dry_run === true && hookManifestDryJson.steps[0].out
   console.log("beat_grid unit (synthetic 120 click train, maxBeats 5000):", JSON.stringify({ beats: unitGrid.beats.length, first: unitGrid.beats[0], last: unitGrid.beats[unitGrid.beats.length - 1] }));
   checkOk(unitGrid.beats.length === 23 && near(unitGrid.beats[0], 0.488, 0.03) && near(unitGrid.beats[1] - unitGrid.beats[0], 0.5, 0.02) && near(unitGrid.beats[unitGrid.beats.length - 1], 11.491, 0.03), "beat_grid unit: full grid is 23 beats, 0.488 first, 0.5s apart, 11.491 last", JSON.stringify(unitGrid.beats.slice(0, 3)));
 }
+// DP beat tracker unit (lượt 88, librosa beat_track re-implemented):
+// a take whose tempo drifts 120 -> 132 BPM over 12s. The rigid grid
+// is built from the mean period, so it drifts off the true clicks;
+// the DP must stay on them. Ground truth is the same accumulation
+// the fixture generator uses (period 60/bpm(t), bpm linear in time).
+// The first click sits at t=0, where the flux window is truncated,
+// so the DP is allowed to miss it (count within 1 of truth).
+{
+  const sr = 22050, seconds = 12;
+  const driftTrain = new Float32Array(seconds * sr);
+  const driftTruth = [];
+  for (let t = 0; t < seconds;) {
+    driftTruth.push(t);
+    const start = Math.floor(t * sr);
+    for (let i = 0; i < Math.floor(0.03 * sr); i++) {
+      const u = i / sr;
+      driftTrain[start + i] += Math.sin(2 * Math.PI * 1000 * u) * Math.exp(-u * 180) * 0.9;
+    }
+    t += 60 / (120 + (12 * t) / seconds);
+  }
+  const dFlux = spectralFluxOnset(driftTrain, sr);
+  const dGrid = estimateTempo(dFlux.flux, dFlux.fps, dFlux.rawFlux, 40, 240, 5000);
+  const dDp = trackBeatsDP(dFlux.flux, dFlux.fps, dGrid.lag);
+  const dpErr = (beats, truth) => Math.max(...beats.map((b) => Math.min(...truth.map((t) => Math.abs(b - t)))));
+  const gridVsDp = Math.max(...dDp.beats.map((b) => Math.min(...dGrid.beats.map((g) => Math.abs(b - g)))));
+  console.log("dp unit (drift 120->132):", JSON.stringify({ gridBpm: dGrid.bpm, gridBeats: dGrid.beats.length, dpBeats: dDp.beat_count, dpMaxErr: +dpErr(dDp.beats, driftTruth).toFixed(3), gridVsDp: +gridVsDp.toFixed(3), cv: dDp.tempo_drift_cv }));
+  checkOk(dDp.beat_count >= driftTruth.length - 1 && dDp.beat_count <= driftTruth.length && dpErr(dDp.beats, driftTruth) <= 0.05, "dp unit: drift take tracks the real clicks (count within 1 of truth, every beat within 0.05s of a true click)", JSON.stringify({ count: dDp.beat_count, truth: driftTruth.length, maxErr: +dpErr(dDp.beats, driftTruth).toFixed(3) }));
+  checkOk(gridVsDp > 0.3, "dp unit: the rigid grid drifts off the DP track by >0.3s on a 120->132 take (the drift the DP exists to fix)", JSON.stringify({ gridVsDp: +gridVsDp.toFixed(3) }));
+  // Same tracker on the steady 120 train: DP and grid must agree
+  // within a flux frame (0.023s) — the DP changes nothing when
+  // there is no drift to follow.
+  const steadyTrain = new Float32Array(seconds * sr);
+  for (let b = 0; ; b++) {
+    const t0 = (b * 60) / 120;
+    if (t0 >= seconds) break;
+    const start = Math.floor(t0 * sr);
+    for (let i = 0; i < Math.floor(0.03 * sr); i++) {
+      const u = i / sr;
+      steadyTrain[start + i] += Math.sin(2 * Math.PI * 1000 * u) * Math.exp(-u * 180) * 0.9;
+    }
+  }
+  const sFlux = spectralFluxOnset(steadyTrain, sr);
+  const sGrid = estimateTempo(sFlux.flux, sFlux.fps, sFlux.rawFlux, 40, 240, 5000);
+  const sDp = trackBeatsDP(sFlux.flux, sFlux.fps, sGrid.lag);
+  const steadyDev = Math.max(...sDp.beats.map((b) => Math.min(...sGrid.beats.map((g) => Math.abs(b - g)))));
+  checkOk(sDp.beat_count === 23 && steadyDev <= 0.05 && sDp.tempo_drift_cv <= 0.05, "dp unit: steady 120 train — DP agrees with the rigid grid (23 beats, deviation <=0.05s, cv <=0.05)", JSON.stringify({ count: sDp.beat_count, dev: +steadyDev.toFixed(3), cv: sDp.tempo_drift_cv }));
+  // The drum pattern (kick + off-beat hat) must NOT subdivide: the
+  // DP keeps one beat per 0.5s. Tightness 1 failed this (29 beats);
+  // tightness 2 prices a half-period detour above any onset's gain.
+  const drumTrain = (() => {
+    const s = new Float32Array(seconds * sr);
+    let seed = 12345;
+    const rand = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    for (let b = 0; ; b++) {
+      const t0 = (b * 60) / 120;
+      if (t0 >= seconds) break;
+      const start = Math.floor(t0 * sr);
+      for (let i = 0; i < Math.floor(0.15 * sr); i++) {
+        const u = i / sr;
+        s[start + i] += Math.sin(2 * Math.PI * 60 * u) * Math.exp(-u * 25) * 0.9;
+      }
+      const hatAt = t0 + 0.25;
+      if (hatAt < seconds) {
+        const hs = Math.floor(hatAt * sr);
+        for (let i = 0; i < Math.floor(0.04 * sr); i++) {
+          const u = i / sr;
+          s[hs + i] += (rand() * 2 - 1) * Math.exp(-u * 120) * 0.25;
+        }
+      }
+    }
+    return s;
+  })();
+  const drumFlux = spectralFluxOnset(drumTrain, sr);
+  const drumGrid = estimateTempo(drumFlux.flux, drumFlux.fps, drumFlux.rawFlux, 40, 240, 5000);
+  const drumDp = trackBeatsDP(drumFlux.flux, drumFlux.fps, drumGrid.lag);
+  const drumMinInterval = Math.min(...drumDp.intervals_seconds);
+  checkOk(drumDp.beat_count === 24 && drumMinInterval >= 0.45 && drumDp.tempo_drift_cv <= 0.05, "dp unit: kick+hat drum pattern does not subdivide (24 beats, min interval >=0.45s, cv <=0.05)", JSON.stringify({ count: drumDp.beat_count, minInterval: drumMinInterval, cv: drumDp.tempo_drift_cv }));
+}
 async function callBpm(input, extra = {}) {
   const res = await client.callTool({ name: "bpm", arguments: { input, ...extra } });
   return JSON.parse(res.content[0].text);
@@ -2001,6 +2079,29 @@ const gridTone = await callBeatGrid(path.join(root, "test/mix-music.mp3"));
 checkOk(gridTone.reliable === false && gridTone.confidence < 0.35 && gridTone.warnings.some((w) => /low confidence/.test(w)), "beat_grid on a steady tone reports reliable: false instead of a grid to snap to", JSON.stringify({ conf: gridTone.confidence, beats: gridTone.beats.length }));
 const gridVideoOnly = await callExpectThrow("beat_grid", { input: path.join(root, "test/content-video-only.mp4") });
 checkOk(/needs an audio stream/.test(gridVideoOnly), "beat_grid refuses video-only input", gridVideoOnly.slice(0, 120));
+
+// beat_grid method "dp" (lượt 88): the DP tracker follows real
+// onset peaks when the tempo drifts. Fixture
+// test/bpm-drift-120-132.wav is a 120 -> 132 BPM click track over
+// 12s; ground truth is the same period accumulation the generator
+// uses. The rigid grid reports the mean tempo (125.9) and drifts
+// off by 0.373s; the DP must land on the true clicks instead.
+const driftTruth = [];
+for (let t = 0; t < 12;) { driftTruth.push(t); t += 60 / (120 + (12 * t) / 12); }
+const gridDp = await callBeatGrid(path.join(root, "test/bpm-drift-120-132.wav"), { method: "dp" });
+console.log("beat_grid dp (drift 120->132):", JSON.stringify({ bpm: gridDp.bpm, count: gridDp.beat_count, drift: gridDp.tempo_drift_seconds, cv: gridDp.tempo_drift_cv, first: gridDp.first_beat_seconds, last: gridDp.last_beat_seconds }));
+const dpMaxErr = Math.max(...gridDp.beats.map((b) => Math.min(...driftTruth.map((t) => Math.abs(b - t)))));
+checkOk(gridDp.grid_method === "dp" && gridDp.beat_count >= driftTruth.length - 1 && gridDp.beat_count <= driftTruth.length && dpMaxErr <= 0.05 && near(gridDp.bpm, 125.9, 1) && gridDp.reliable === true && near(gridDp.tempo_drift_seconds, 0.373, 0.05) && near(gridDp.tempo_drift_cv, 0.034, 0.02), "beat_grid method dp tracks the drifting take (25 beats on the true clicks, mean tempo 125.9, drift 0.373s, cv 0.034)", JSON.stringify({ count: gridDp.beat_count, truth: driftTruth.length, maxErr: +dpMaxErr.toFixed(3), drift: gridDp.tempo_drift_seconds, cv: gridDp.tempo_drift_cv }));
+const gridDefault = await callBeatGrid(path.join(root, "test/bpm-drift-120-132.wav"));
+checkOk(gridDefault.grid_method === "grid" && gridDefault.tempo_drift_seconds === null && gridDefault.tempo_drift_cv === null && gridDefault.beat_count === 25, "beat_grid defaults to the rigid grid (grid_method grid, no drift fields)", JSON.stringify({ method: gridDefault.grid_method, drift: gridDefault.tempo_drift_seconds }));
+const gridDpSteady = await callBeatGrid(path.join(root, "test/bpm-click-120.wav"), { method: "dp" });
+checkOk(gridDpSteady.grid_method === "dp" && gridDpSteady.beat_count === 23 && gridDpSteady.tempo_drift_seconds <= 0.05 && gridDpSteady.tempo_drift_cv <= 0.05, "beat_grid method dp on a steady 120 track agrees with the rigid grid (23 beats, drift <=0.05s)", JSON.stringify({ count: gridDpSteady.beat_count, drift: gridDpSteady.tempo_drift_seconds, cv: gridDpSteady.tempo_drift_cv }));
+const gridDpDrum = await callBeatGrid(path.join(root, "test/bpm-drum-120.wav"), { method: "dp" });
+const drumDpIntervals = [];
+for (let i = 1; i < gridDpDrum.beats.length; i++) drumDpIntervals.push(gridDpDrum.beats[i] - gridDpDrum.beats[i - 1]);
+checkOk(gridDpDrum.beat_count === 24 && Math.min(...drumDpIntervals) >= 0.45, "beat_grid method dp does not subdivide the kick+hat drum pattern (24 beats, min interval >=0.45s)", JSON.stringify({ count: gridDpDrum.beat_count, minInterval: Math.min(...drumDpIntervals).toFixed(3) }));
+const gridBadMethod = await callExpectThrow("beat_grid", { input: path.join(root, "test/bpm-click-120.wav"), method: "fft" });
+checkOk(/method|Invalid enum/i.test(gridBadMethod), "beat_grid refuses an unknown method", gridBadMethod.slice(0, 160));
 
 // trim --snap-beat (lượt 87): snap start down / end up onto the
 // beat grid. Expected edges are computed from the measured grid
@@ -2047,6 +2148,38 @@ const drySnapBeatJson = JSON.parse(drySnapBeatRes.content[0].text);
 checkOk(drySnapBeatJson.dry_run === true && drySnapBeatJson.snapped === true && near(drySnapBeatJson.beat_start, snapBeatStart, 0.001) && near(drySnapBeatJson.beat_end, snapBeatEnd, 0.001) && drySnapBeatJson.bpm === 120 && drySnapBeatJson.commands?.[0]?.includes(`-ss ${snapBeatStart}`), "trim dry-run with snap_to_beat reports the snapped beats in the plan", JSON.stringify(drySnapBeatJson).slice(0, 220));
 checkOk(!existsSync(drySnapBeatPath), "trim dry-run (snap-beat) writes no file", drySnapBeatPath);
 
+// trim --snap-beat-method dp (lượt 88): the same 1.13-3.27 window
+// on the drifting take (test/beat-drift-trim.mp4, flat video over
+// the 120 -> 132 click track). Expected edges are computed from the
+// DP grid measured on the mp4 itself (probe-first — AAC decode
+// shifts the phase a little, like the 23->24 beat trap in lượt 87),
+// and the DP cut must land on DIFFERENT beats than the rigid grid
+// cut on the same window, or the method flag changed nothing.
+const driftMp4GridDp = await callBeatGrid(path.join(root, "test/beat-drift-trim.mp4"), { method: "dp" });
+const driftMp4Grid = await callBeatGrid(path.join(root, "test/beat-drift-trim.mp4"));
+const dpSnapStart = [...driftMp4GridDp.beats].reverse().find((t) => t <= 1.13) ?? 0;
+const dpSnapEnd = driftMp4GridDp.beats.find((t) => t >= 3.27) ?? 12;
+const gridSnapStart = [...driftMp4Grid.beats].reverse().find((t) => t <= 1.13) ?? 0;
+const gridSnapEnd = driftMp4Grid.beats.find((t) => t >= 3.27) ?? 12;
+console.log("trim snap-beat dp vs grid on drift mp4:", JSON.stringify({ dp: `${dpSnapStart}-${dpSnapEnd}`, grid: `${gridSnapStart}-${gridSnapEnd}`, dpDrift: driftMp4GridDp.tempo_drift_seconds }));
+const snapBeatDpRes = await client.callTool({
+  name: "trim",
+  arguments: {
+    input: path.join(root, "test/beat-drift-trim.mp4"),
+    output: path.join(root, "outputs/mcp-trim-snapbeat-dp.mp4"),
+    start: 1.13, end: 3.27, snap_to_beat: true, snap_beat_method: "dp",
+  },
+});
+const snapBeatDpJson = JSON.parse(snapBeatDpRes.content[0].text);
+checkOk(snapBeatDpJson.snapped === true && near(snapBeatDpJson.start, dpSnapStart, 0.001) && near(snapBeatDpJson.beat_start, dpSnapStart, 0.001) && near(snapBeatDpJson.beat_end, dpSnapEnd, 0.001) && snapBeatDpJson.beat_method === "dp" && near(snapBeatDpJson.duration_seconds, dpSnapEnd - dpSnapStart, 0.001) && near(snapBeatDpJson.duration_actual, dpSnapEnd - dpSnapStart, 0.1), "trim snap_to_beat + snap_beat_method dp cuts on the DP beats (start down, end up)", JSON.stringify({ start: snapBeatDpJson.start, end: snapBeatDpJson.beat_end, method: snapBeatDpJson.beat_method }));
+checkOk(dpSnapStart !== gridSnapStart || dpSnapEnd !== gridSnapEnd, "trim snap-beat dp lands on different beats than the rigid grid on a drifting take (the method flag changes the cut)", JSON.stringify({ dp: `${dpSnapStart}-${dpSnapEnd}`, grid: `${gridSnapStart}-${gridSnapEnd}` }));
+checkOk(snapBeatDpJson.cut_verified === true, "trim snap-beat dp still verifies (flat fixture: all frames identical, so the moved cut matches)", JSON.stringify(snapBeatDpJson.check_frames_match));
+const drySnapBeatDpRes = await client.callTool({ name: "trim", arguments: { input: path.join(root, "test/beat-drift-trim.mp4"), output: path.join(root, "outputs/mcp-dry-trim-snapbeat-dp.mp4"), start: 1.13, end: 3.27, snap_to_beat: true, snap_beat_method: "dp", dry_run: true } });
+const drySnapBeatDpJson = JSON.parse(drySnapBeatDpRes.content[0].text);
+checkOk(drySnapBeatDpJson.dry_run === true && drySnapBeatDpJson.beat_method === "dp" && near(drySnapBeatDpJson.beat_start, dpSnapStart, 0.001) && near(drySnapBeatDpJson.beat_end, dpSnapEnd, 0.001) && !existsSync(path.join(root, "outputs/mcp-dry-trim-snapbeat-dp.mp4")), "trim dry-run with snap_beat_method dp reports the DP beats and writes no file", JSON.stringify({ method: drySnapBeatDpJson.beat_method, start: drySnapBeatDpJson.beat_start }));
+const snapBeatBadMethod = await callExpectThrow("trim", { input: path.join(root, "test/beat-drift-trim.mp4"), output: path.join(root, "outputs/mcp-trim-snapbeat-badmethod.mp4"), start: 1, duration: 2, snap_to_beat: true, snap_beat_method: "fft" });
+checkOk(/method|Invalid enum/i.test(snapBeatBadMethod), "trim snap_to_beat refuses an unknown snap_beat_method", snapBeatBadMethod.slice(0, 160));
+
 // bpm + beat_grid in batch + manifest (lượt 87): probe-only like
 // hook — no file written, the measurement comes back in the row /
 // step result, and the cache stores that result.
@@ -2090,6 +2223,33 @@ const beatManifestCacheRes = await client.callTool({
 });
 const beatManifestCacheJson = JSON.parse(beatManifestCacheRes.content[0].text);
 checkOk(beatManifestCacheJson.cache_hits === 2 && beatManifestCacheJson.steps.every((s) => s.status === "cached") && beatManifestCacheJson.steps[0].result.beat_count === 24, "manifest beat_grid re-run serves both steps from cache (grid result cached, trim file cached)", JSON.stringify(beatManifestCacheJson.steps.map((s) => s.status)));
+
+// batch + manifest with the DP method (lượt 88): the method arg
+// flows through the shared BATCH_OPERATIONS table, so batch rows
+// and manifest steps both report grid_method dp + the drift.
+await copyFile(path.join(root, "test/bpm-drift-120-132.wav"), path.join(root, "outputs/mcp-batch-beat-in/bpm-drift-120-132.wav"));
+const gridDpBatchRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "beat_grid", pattern: "bpm-drift-120-132.wav", input_dir: path.join(root, "outputs/mcp-batch-beat-in"), output_dir: path.join(root, "outputs/mcp-batch-beat-out"), args: { method: "dp" }, jobs: 1 },
+});
+const gridDpBatchJson = JSON.parse(gridDpBatchRes.content[0].text);
+checkOk(gridDpBatchJson.succeeded === 1 && gridDpBatchJson.results[0].output === null && gridDpBatchJson.results[0].result?.grid_method === "dp" && gridDpBatchJson.results[0].result?.tempo_drift_seconds > 0.3, "batch beat_grid with args {method: dp} reports the DP track (grid_method dp, drift >0.3s)", JSON.stringify({ method: gridDpBatchJson.results[0].result?.grid_method, drift: gridDpBatchJson.results[0].result?.tempo_drift_seconds }));
+const beatDpManifestRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-beatgrid-dp.json") },
+});
+const beatDpManifestJson = JSON.parse(beatDpManifestRes.content[0].text);
+console.log("manifest beat_grid dp:", JSON.stringify(beatDpManifestJson.steps.map((s) => ({ tool: s.tool, status: s.status, method: s.result?.grid_method ?? s.result?.beat_method, drift: s.result?.tempo_drift_seconds }))), "| final", beatDpManifestJson.final?.duration_seconds);
+const dpManifestBeats = beatDpManifestJson.steps[0].result?.beats ?? [];
+const dpManifestStart = [...dpManifestBeats].reverse().find((t) => t <= 1.13) ?? 0;
+const dpManifestEnd = dpManifestBeats.find((t) => t >= 3.27) ?? 12;
+checkOk(beatDpManifestJson.steps_run === 2 && beatDpManifestJson.steps.every((s) => s.status === "ok") && beatDpManifestJson.steps[0].result.grid_method === "dp" && beatDpManifestJson.steps[0].result.tempo_drift_seconds > 0.3 && beatDpManifestJson.steps[1].result.beat_method === "dp" && near(beatDpManifestJson.final.duration_seconds, dpManifestEnd - dpManifestStart, 0.1), "manifest beat_grid {method: dp} + trim snap_beat_method dp cuts on the DP beats", JSON.stringify({ drift: beatDpManifestJson.steps[0].result.tempo_drift_seconds, final: beatDpManifestJson.final?.duration_seconds }));
+const beatDpManifestCacheRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-beatgrid-dp.json") },
+});
+const beatDpManifestCacheJson = JSON.parse(beatDpManifestCacheRes.content[0].text);
+checkOk(beatDpManifestCacheJson.cache_hits === 2 && beatDpManifestCacheJson.steps.every((s) => s.status === "cached") && beatDpManifestCacheJson.steps[0].result.grid_method === "dp", "manifest beat_grid dp re-run serves both steps from cache", JSON.stringify(beatDpManifestCacheJson.steps.map((s) => s.status)));
 
 // motion --adaptive: two-pass calibration to the clip's own quiet
 // quarter (floor = p25 of the curve, threshold = min(max(fixed,

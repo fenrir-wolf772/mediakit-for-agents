@@ -1410,13 +1410,21 @@ stream-copy; it refuses `--snap` and `--smart-cut` (pick one grid,
 or one exact-start method). It refuses outright when the grid is
 unreliable — a tone measured 43.2 BPM at confidence 0.004 is not a
 grid, it is a guess, and the error says so; cut with plain `trim`
-instead. Two honest limits: the grid is rigid — one tempo + one
-phase for the whole file, so a clip whose tempo drifts will drift
-off the grid (librosa's DP beat tracker handles drift by picking
-real onset peaks near the grid; a future improvement, not this
-tool); and the grid is only as precise as one flux frame (~23 ms),
-so a snap can sit ~12 ms off the true click — inaudible for a cut
-point. `bpm` and `beat_grid` are probe-only steps in `batch` and
+instead. Two honest limits: the grid is only as precise as one flux
+frame (~23 ms), so a snap can sit ~12 ms off the true click —
+inaudible for a cut point; and the rigid grid assumes one tempo for
+the whole file. When the take drifts, use the DP tracker:
+`beat_grid --method dp` runs librosa's `beat_track` (Ellis 2007,
+re-implemented in pure Node) — dynamic programming over the flux
+frames with a log-Gaussian transition cost around the measured
+period (tightness 2, calibrated: 1 subdivides a kick+hat pattern
+into 29 beats, 2 keeps it clean at 24) — and returns `grid_method:
+"dp"` plus `tempo_drift_seconds` (worst distance from the rigid
+grid: 0.373s on a 120→132 drift take, 0.026s on a steady 120 click
+track) and `tempo_drift_cv`. `trim --snap-beat --snap-beat-method
+dp` cuts on those beats instead (reported as `beat_method: "dp"`),
+and `method`/`snap_beat_method` flow through `batch` and `manifest`
+too. `bpm` and `beat_grid` are probe-only steps in `batch` and
 `manifest` too: they analyze the chain file at that point and pass
 it through unchanged, so a manifest can record the grid before the
 `trim --snap-beat` step that cuts on it.

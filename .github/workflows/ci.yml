@@ -192,6 +192,7 @@ jobs:
           node bin/mediakit.js bpm test/bpm-drum-120.wav | grep '"bpm": 120'
           node bin/mediakit.js bpm test/mix-music.mp3 | grep '"reliable": false'
           node bin/mediakit.js beat_grid test/bpm-click-120.wav | grep '"beat_count": 23'
+          node bin/mediakit.js beat_grid test/bpm-drift-120-132.wav --method dp | grep '"tempo_drift_seconds": 0.373'
           node bin/mediakit.js trim test/beat-trim-source.mp4 -o outputs/ci-trim-snapbeat.mp4 --start 1.13 --end 3.27 --snap-beat | grep '"beat_start": 0.988'
           node bin/mediakit.js batch bpm --pattern 'bpm-click-120.wav' --input-dir test -o outputs/ci-batch-bpm --args-json '{}' | grep '"succeeded": 1'
           printf '%s' '{"version":1,"input":"../test/beat-trim-source.mp4","output":"ci-manifest-beatgrid.mp4","steps":[{"tool":"beat_grid","args":{}},{"tool":"trim","args":{"start":1.13,"end":3.27,"snap_to_beat":true}}]}' > outputs/ci-manifest-beatgrid.json

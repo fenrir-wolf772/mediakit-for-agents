@@ -986,7 +986,7 @@ async function smartCutTrim({ inPath, outPath, s, dur, dryRun = false, checkFram
   }, { inPath, outPath, requestedStart: s, checkFrames, outMeta: out });
 }
 
-export async function trim({ input, output, start = 0, duration = null, end = null, streamCopy = false, snapToKeyframe = false, smartCut = false, snapToBeat = false, dryRun = false, checkFrames = true }) {
+export async function trim({ input, output, start = 0, duration = null, end = null, streamCopy = false, snapToKeyframe = false, smartCut = false, snapToBeat = false, snapBeatMethod = "grid", dryRun = false, checkFrames = true }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const s = parseTime(start, "start");
@@ -1031,7 +1031,7 @@ export async function trim({ input, output, start = 0, duration = null, end = nu
   // end UP to the nearest keyframe at/after it, so the stream-copy cut
   // lands exactly on keyframes instead of ffmpeg's silent rounding.
   let sActual = s, durActual = dur, snapped = false, kfStart = null, kfEnd = null;
-  let beatStart = null, beatEnd = null, beatBpm = null, beatConfidence = null;
+  let beatStart = null, beatEnd = null, beatBpm = null, beatConfidence = null, beatMethod = null;
   if (snapToKeyframe) {
     if (!streamCopy) throw new MediaKitError("snap_to_keyframe needs stream_copy (re-encode cuts are already frame-accurate)", "INVALID_ARG");
     const kf = await listKeyframes({ input: inPath });
@@ -1055,7 +1055,7 @@ export async function trim({ input, output, start = 0, duration = null, end = nu
   // the first beat snaps to 0 (the file start); an end past the last
   // beat snaps to the file duration.
   if (snapToBeat) {
-    const grid = await detectBpm({ input: inPath, fullGrid: true });
+    const grid = await detectBpm({ input: inPath, fullGrid: true, method: snapBeatMethod });
     if (!grid.reliable || !grid.beats.length) {
       throw new MediaKitError(`snap_to_beat needs a reliable beat grid — bpm measured ${grid.bpm ?? "unknown"} (confidence ${grid.confidence}, reliable: false); this audio has no steady beat, so there is nothing musical to snap to — cut with plain trim instead`, "INVALID_ARG");
     }
@@ -1070,6 +1070,7 @@ export async function trim({ input, output, start = 0, duration = null, end = nu
     snapped = sActual !== s || +(sActual + durActual).toFixed(3) !== +reqEnd.toFixed(3);
     beatBpm = grid.bpm;
     beatConfidence = grid.confidence;
+    beatMethod = grid.grid_method;
   }
 
   // -ss after -i = accurate seek (re-encode path); with stream copy we
@@ -1087,7 +1088,7 @@ export async function trim({ input, output, start = 0, duration = null, end = nu
       } : {}),
       ...(snapToBeat ? {
         requested_start: s, requested_end: +(s + dur).toFixed(3),
-        snapped, beat_start: beatStart, beat_end: beatEnd, bpm: beatBpm, beat_confidence: beatConfidence,
+        snapped, beat_start: beatStart, beat_end: beatEnd, bpm: beatBpm, beat_confidence: beatConfidence, beat_method: beatMethod,
       } : {}),
       commands: [formatCommand(args)],
       note: "Dry run: no file written. Probes (and the keyframe list for --snap) are read-only; they ran to compute the cut.",
@@ -1107,7 +1108,7 @@ export async function trim({ input, output, start = 0, duration = null, end = nu
     } : {}),
     ...(snapToBeat ? {
       requested_start: s, requested_end: +(s + dur).toFixed(3),
-      snapped, beat_start: beatStart, beat_end: beatEnd, bpm: beatBpm, beat_confidence: beatConfidence,
+      snapped, beat_start: beatStart, beat_end: beatEnd, bpm: beatBpm, beat_confidence: beatConfidence, beat_method: beatMethod,
     } : {}),
     ...info, duration_actual: meta.duration_seconds,
   }, { inPath, outPath, requestedStart: s, checkFrames, outMeta: meta });
@@ -9474,11 +9475,87 @@ export function estimateTempo(flux, fps, rawFlux = flux, minBpm = 40, maxBpm = 2
   };
 }
 
-export async function detectBpm({ input, minBpm = 40, maxBpm = 240, fullGrid = false }) {
+// DP beat tracker (librosa's beat_track, Ellis 2007, re-implemented
+// in pure Node — no librosa code): the rigid grid above assumes one
+// tempo + one phase for the whole file, so a take that speeds up
+// drifts off it by the end. The DP instead picks REAL onset peaks
+// near the grid: state = flux frame, transition cost =
+// tightness * (log(interval / period))^2, so a beat exactly one
+// period after the last costs nothing and a beat half a period away
+// costs ~0.48 * tightness. Flux is normalised to [0, 1] first, so
+// tightness 2 (calibrated on disk 2026-11-17): tightness 1 lets the
+// DP subdivide the kick+hat drum fixture — a hat onset (~0.45
+// normalised flux) pays two half-period jumps at 0.48 each, so it
+// inserts 5 extra beats (29 vs 24); tightness 2 prices the pair at
+// ~1.92, above any single onset's gain, and the drum grid comes out
+// clean at 24 beats / 0.5s apart. Drift tracking is unaffected
+// from 2 to 20 (a 5% interval drift costs 2*(log 1.05)^2 = 0.005),
+// so 2 is the stiffest setting that still follows real drift.
+// Predecessors are windowed to [0.5, 1.5] x period —
+// O(n * period) instead of O(n^2), so a 10-minute file stays fast.
+// The chain backtracks from the best score in the last period, and
+// the first/last beat is trimmed when its onset is weak (librosa
+// trim). Returns beats in seconds plus the interval CV (how much
+// the spacing itself varies — ~0.02 even on a steady click track,
+// because flux frames quantise to ~23ms, so compare against a
+// steady fixture rather than against 0).
+export function trackBeatsDP(flux, fps, periodFrames, { tightness = 2 } = {}) {
+  const n = flux.length;
+  const maxFlux = Math.max(...flux);
+  if (n < 8 || !(maxFlux > 0) || !(periodFrames >= 2)) {
+    return { beats: [], beat_count: 0, intervals_seconds: [], tempo_drift_cv: 0, reason: "too few flux frames or no onset energy" };
+  }
+  const fn = flux.map((v) => v / maxFlux);
+  const tau = periodFrames;
+  const lo = Math.max(1, Math.ceil(0.5 * tau));
+  const hi = Math.max(lo, Math.floor(1.5 * tau));
+  const dp = new Float64Array(n);
+  const prev = new Int32Array(n).fill(-1);
+  for (let t = 0; t < n; t++) {
+    let best = 0, bestPrev = -1;
+    for (let d = lo; d <= hi && t - d >= 0; d++) {
+      const p = t - d;
+      const r = d / tau;
+      const cand = dp[p] - tightness * (Math.log(r) ** 2);
+      if (cand > best) { best = cand; bestPrev = p; }
+    }
+    dp[t] = fn[t] + best;
+    prev[t] = bestPrev;
+  }
+  // Backtrack from the best score in the last period — the final
+  // beat must sit within one period of the end.
+  const lastWin = Math.max(0, n - Math.ceil(1.5 * tau));
+  let end = lastWin;
+  for (let t = lastWin + 1; t < n; t++) if (dp[t] > dp[end]) end = t;
+  const frames = [];
+  for (let t = end; t >= 0; t = prev[t]) {
+    frames.push(t);
+    if (prev[t] < 0) break;
+  }
+  frames.reverse();
+  // Trim weak end beats (librosa trim): a chain that starts/ends on
+  // a frame below 25% of the max flux is an onset the grid found by
+  // accident, not a beat.
+  while (frames.length > 1 && fn[frames[0]] < 0.25) frames.shift();
+  while (frames.length > 1 && fn[frames[frames.length - 1]] < 0.25) frames.pop();
+  const beats = frames.map((f) => +(f / fps).toFixed(3));
+  const intervals = [];
+  for (let i = 1; i < beats.length; i++) intervals.push(+(beats[i] - beats[i - 1]).toFixed(3));
+  let cv = 0;
+  if (intervals.length >= 2) {
+    const mean = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+    const sd = Math.sqrt(intervals.reduce((a, v) => a + (v - mean) ** 2, 0) / intervals.length);
+    cv = +(sd / mean).toFixed(3);
+  }
+  return { beats, beat_count: beats.length, intervals_seconds: intervals, tempo_drift_cv: cv };
+}
+
+export async function detectBpm({ input, minBpm = 40, maxBpm = 240, fullGrid = false, method = "grid" }) {
   const inPath = await requireInput(input);
   const lo = num(minBpm, "min_bpm", { min: 20, max: 300 });
   const hi = num(maxBpm, "max_bpm", { min: 20, max: 300 });
   if (lo >= hi) throw new MediaKitError(`bpm: min_bpm (${lo}) must be below max_bpm (${hi})`, "INVALID_ARG");
+  if (method !== "grid" && method !== "dp") throw new MediaKitError(`beat_grid method must be "grid" or "dp", got: ${method}`, "INVALID_ARG");
   const meta = await probe(inPath);
   if (!meta.audio) throw new MediaKitError("bpm needs an audio stream — this file has none", "INVALID_ARG");
   const total = meta.duration_seconds;
@@ -9513,6 +9590,36 @@ export async function detectBpm({ input, minBpm = 40, maxBpm = 240, fullGrid = f
   const est = estimateTempo(flux, fps, rawFlux, lo, hi, fullGrid ? 5000 : 16);
   if (est.bpm === null) warnings.push(est.reason ?? "no periodic onset found — the number below is a guess");
   if (!est.reliable) warnings.push(`low confidence (${est.confidence}) — the audio may have no steady beat (speech, ambience, a drone); do not snap cuts to this grid`);
+  // method "dp" (beat_grid only — bpm keeps the rigid grid's first
+  // 16): run the DP tracker on the measured period and replace the
+  // rigid beats with real onset peaks. tempo_drift_seconds is the
+  // headline number — how far the DP beats sit from the rigid grid
+  // at worst (0.373s on the 120->132 drift fixture, 0.026s on a
+  // steady 120 click track): it is what a cut snapped to the rigid
+  // grid would miss by the end of the clip. When the DP finds too
+  // few beats it falls back to the rigid grid and says so, instead
+  // of returning a confident wrong track.
+  let beats = est.beats;
+  let gridMethod = "grid";
+  let tempoDriftSeconds = null;
+  let tempoDriftCv = null;
+  if (fullGrid && method === "dp" && est.bpm !== null) {
+    const dp = trackBeatsDP(flux, fps, est.lag);
+    if (dp.beat_count >= 2) {
+      let drift = 0;
+      for (const b of dp.beats) {
+        let m = Infinity;
+        for (const g of est.beats) m = Math.min(m, Math.abs(b - g));
+        drift = Math.max(drift, m);
+      }
+      beats = dp.beats;
+      gridMethod = "dp";
+      tempoDriftSeconds = +drift.toFixed(3);
+      tempoDriftCv = dp.tempo_drift_cv;
+    } else {
+      warnings.push("DP beat tracker found too few beats — fell back to the rigid grid");
+    }
+  }
   return {
     operation: fullGrid ? "beat_grid" : "bpm",
     input: inPath,
@@ -9524,11 +9631,14 @@ export async function detectBpm({ input, minBpm = 40, maxBpm = 240, fullGrid = f
     reliable: est.reliable,
     onset_recall: est.onset_recall,
     onsets_detected: est.onsets_detected,
-    first_beat_seconds: est.first_beat_seconds,
-    beats: est.beats,
+    first_beat_seconds: beats[0] ?? null,
+    beats,
     ...(fullGrid ? {
-      beat_count: est.beats.length,
-      last_beat_seconds: est.beats.length ? est.beats[est.beats.length - 1] : null,
+      beat_count: beats.length,
+      last_beat_seconds: beats.length ? beats[beats.length - 1] : null,
+      grid_method: gridMethod,
+      tempo_drift_seconds: tempoDriftSeconds,
+      tempo_drift_cv: tempoDriftCv,
     } : {}),
     method: "spectral-flux onset + autocorrelation/comb period + 120 BPM prior + onset-recall tie-break (aubio tempo, re-implemented in pure Node)",
     warnings,
@@ -9542,8 +9652,8 @@ export async function detectBpm({ input, minBpm = 40, maxBpm = 240, fullGrid = f
 // 4s-10min); an unreliable grid is still returned with reliable:
 // false and a warning, never a confident wrong number — the caller
 // (trim --snap-beat) refuses to snap to it.
-export async function detectBeatGrid({ input, minBpm = 40, maxBpm = 240 }) {
-  return detectBpm({ input, minBpm, maxBpm, fullGrid: true });
+export async function detectBeatGrid({ input, minBpm = 40, maxBpm = 240, method = "grid" }) {
+  return detectBpm({ input, minBpm, maxBpm, fullGrid: true, method });
 }
 
 // ---------------------------------------------------------------- motion
@@ -9945,8 +10055,8 @@ export const BATCH_OPERATIONS = {
     run: (input, output, a) => fitDuration({ input, output, duration: a.duration, method: a.method ?? "speed", maxFps: a.max_fps ?? null }),
   },
   trim: {
-    args: ["start", "end", "duration", "stream_copy", "snap_to_keyframe", "snap_to_beat", "smart_cut", "check_frames"],
-    run: (input, output, a) => trim({ input, output, start: a.start ?? 0, duration: a.duration ?? null, end: a.end ?? null, streamCopy: a.stream_copy ?? false, snapToKeyframe: a.snap_to_keyframe ?? false, snapToBeat: a.snap_to_beat ?? false, smartCut: a.smart_cut ?? false, checkFrames: a.check_frames ?? true }),
+    args: ["start", "end", "duration", "stream_copy", "snap_to_keyframe", "snap_to_beat", "snap_beat_method", "smart_cut", "check_frames"],
+    run: (input, output, a) => trim({ input, output, start: a.start ?? 0, duration: a.duration ?? null, end: a.end ?? null, streamCopy: a.stream_copy ?? false, snapToKeyframe: a.snap_to_keyframe ?? false, snapToBeat: a.snap_to_beat ?? false, snapBeatMethod: a.snap_beat_method ?? "grid", smartCut: a.smart_cut ?? false, checkFrames: a.check_frames ?? true }),
   },
   silence: {
     args: ["threshold_db", "min_duration", "margin"],
@@ -10025,8 +10135,8 @@ export const BATCH_OPERATIONS = {
   },
   beat_grid: {
     probeOnly: true,
-    args: ["min_bpm", "max_bpm"],
-    run: (input, output, a) => detectBeatGrid({ input, minBpm: a.min_bpm ?? 40, maxBpm: a.max_bpm ?? 240 }),
+    args: ["min_bpm", "max_bpm", "method"],
+    run: (input, output, a) => detectBeatGrid({ input, minBpm: a.min_bpm ?? 40, maxBpm: a.max_bpm ?? 240, method: a.method ?? "grid" }),
   },
   // slideshow in batch is a SET operation, not a per-file one: the
   // whole matched set becomes ONE slideshow (batch() branches on it
