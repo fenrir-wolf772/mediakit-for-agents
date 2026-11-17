@@ -788,6 +788,15 @@ const COMMANDS = {
       ["-o, --output", "Output file (overrides the manifest's output; extension is adjusted to the step chain's final format when needed)"],
     ],
   },
+  determinism: {
+    usage: "mediakit determinism <manifest.json> [--runs 2] [--keep-outputs]",
+    desc: "Check whether a linear pipeline manifest reproduces byte-identically: run the same manifest N times (default 2, max 5) with the cache OFF, then compare byte sha256, decoded-frame digest (framemd5), and measured properties (duration/frames/dimensions) across runs. Verdict byte_identical means the pipeline reproduces exactly; content_identical means the frames match but container bytes differ, with the differing format tags named; differs means the pipeline itself is nondeterministic, with the first differing run pair named. A download-first manifest re-fetches its URL on every run. --keep-outputs keeps the per-run outputs under .mediakit-determinism-<pid> next to the manifest (removed by default; always kept when a run fails).",
+    args: [{ name: "manifest", required: true }],
+    options: [
+      ["--runs", "How many fresh renders to compare (2-5, default 2)"],
+      ["--keep-outputs", "Keep the per-run output files under .mediakit-determinism-<pid> next to the manifest"],
+    ],
+  },
   doctor: {
     usage: "mediakit doctor",
     desc: "Read-only preflight: ffmpeg/ffprobe versions, available filters/encoders, and which tools that enables.",
@@ -808,7 +817,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 64 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 65 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -1684,6 +1693,15 @@ async function main() {
           cache: opts.cache !== false,
           dryRun: opts.dry_run === true,
           keepIntermediates: opts.keep_intermediates === true,
+        });
+        break;
+      }
+      case "determinism": {
+        if (!positional[0]) fail("missing manifest file: mediakit determinism <manifest.json> [--runs 2]");
+        result = await core.checkManifestDeterminism({
+          manifestPath: positional[0],
+          runs: numOpt(opts, "runs") ?? 2,
+          keepOutputs: opts.keep_outputs === true,
         });
         break;
       }

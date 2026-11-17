@@ -1320,6 +1320,22 @@ export const TOOL_DEFS = [
 
 
   {
+    name: "determinism",
+    description: "Check whether a linear pipeline manifest reproduces byte-identically (heristop/leclap's verify --rerender idea, for the manifest tool — assemble already has verify --rerender; the manifest cache only verifies size + sha256 of an output it already stored, it never proves a fresh run reproduces the same bytes). Runs the same manifest N times (default 2, max 5) with the cache OFF — a cache hit would prove nothing — then compares byte sha256, decoded-frame digest (framemd5, moviepy's test pattern: compare decoded frames, never bytes), and measured properties (duration/frames/dimensions) across runs. Verdict byte_identical means the pipeline reproduces exactly (on this machine two identical libx264 encodes are byte-identical); content_identical means the frames match but container bytes differ, with the differing format tags named (usually creation_time); differs means the pipeline itself is nondeterministic, with the first differing run pair named. A download-first manifest re-fetches its URL on every run. keep_outputs keeps the per-run outputs under .mediakit-determinism-<pid> next to the manifest (removed by default).",
+    schema: {
+    manifest_path: pathSchema.describe("Path to the manifest JSON file to re-run"),
+    runs: z.number().int().min(2).max(5).default(2).describe("How many fresh renders to compare (2-5, default 2)"),
+    keep_outputs: z.boolean().default(false).describe("Keep the per-run output files under .mediakit-determinism-<pid> next to the manifest (removed by default; always kept when a run fails)"),
+  },
+    handler: async (a) => safe(() => core.checkManifestDeterminism({
+    manifestPath: a.manifest_path,
+    runs: a.runs,
+    keepOutputs: a.keep_outputs,
+  })),
+  },
+
+
+  {
     name: "assemble",
     description: "Film assembler (Autopilot-style): build a finished video from ONE declarative film manifest — shots on a voice-led timeline, mixed audio, burned captions, QA and a receipt. The voice is the master clock: total = lead + measured voice duration + tail, and shot durations must cover that total EXACTLY in frames (no silent trim/pad/speed change). Modes: validate (no writes), preview (first N seconds at half size — show it to the user), approve (records the fingerprint of the previewed files; a human must have seen the preview), render (needs a matching approval, unless force:true). Shot segments are cached by content hash, so a re-render rebuilds only changed shots. v1: plain cuts, no per-shot text layers, one aspect per manifest. async:true (render only) returns a job_id immediately and renders in the background — poll the job tool. chapters [{title, at}] in the manifest become MP4 chapters in final.mp4. `preset` in the manifest (vertical/horizontal/square/cinematic/vertical-60) picks width/height/fps/style for the whole film; explicit fields win and are reported in preset_overrides, preset-filled fields in preset_applied. `brand` in the manifest (amber-teal/warm-story/minimal-line, see skills/shorts-video/brands.json — or your own ids from a MEDIAKIT_BRANDS file) paints the whole film in one channel look — palette fills template colors and text-layer color/size, its style fills the caption style when no preset or explicit style sets one; explicit values win and are reported in brand_overrides, brand-filled fields in brand_applied. NOT the manifest tool (that runs a linear edit pipeline).",
     schema: {

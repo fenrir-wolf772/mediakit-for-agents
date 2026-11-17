@@ -964,6 +964,31 @@ enforced after the fetch, since its total size is unknowable until
 the last segment arrives — so keep `max_size_mb` tight on playlists
 you do not trust.
 
+### 40a. A manifest that must reproduce: run determinism before you trust the receipt
+A manifest cache hit proves the cached bytes are unchanged — it
+never proves a fresh run would produce the same bytes. When a
+delivery must reproduce (a report video, a client render), run
+`determinism` on the manifest before you ship: it re-runs the same
+manifest N times (default 2, max 5) with the cache OFF and compares
+byte sha256, decoded-frame digest (`framemd5` — moviepy's test
+pattern: compare decoded frames, never bytes), and measured
+properties (duration/frames/dimensions) across runs. Verdict
+`byte_identical` means the pipeline reproduces exactly (measured:
+two identical libx264 encodes on this machine are byte-identical,
+and ffmpeg 8.1.2 writes no `creation_time` into mp4 by default);
+`content_identical` means the frames match but container bytes
+differ, with the differing format tags named (usually
+`creation_time`) — same pictures and sound, different container;
+`differs` means the pipeline itself is nondeterministic, with the
+first differing run pair named. A download-first manifest
+re-fetches its URL on every run, so a changed server file reports
+`differs` honestly. The per-run outputs live under
+`.mediakit-determinism-<pid>` next to the manifest and are removed
+by default (`--keep-outputs` keeps them; a failed run always keeps
+them). This is the linear-manifest sibling of `verify --rerender`,
+which does the same for an assemble film — use `verify` for films,
+`determinism` for pipelines.
+
 ### 41. One style id for the whole video — don't retype hex values
 Pick the style once (`clean-bold`, `minimal-line` or `warm-story`,
 locked in `skills/shorts-video/styles.json`) and pass
@@ -1231,7 +1256,7 @@ cap, no timeout, no verify) — MediaKit's `download` exists so the
 agent never has to.
 
 ### 52. Test a tool over HTTP before wiring up an MCP client — same tools, curl instead of stdio
-`mediakit mcp --http [--port 3000]` serves the same 64 tools over
+`mediakit mcp --http [--port 3000]` serves the same 65 tools over
 HTTP on `127.0.0.1`: `GET /mcp` (metadata), `GET /mcp/tools`
 (every tool + JSON input schema), `POST /mcp/tools/{name}/invoke`
 (`{"arguments": {...}}`), and `POST /` for JSON-RPC 2.0

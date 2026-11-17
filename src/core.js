@@ -7354,6 +7354,9 @@ const DOCTOR_ENCODERS = [
 const DOCTOR_DECODERS = [
   "librsvg",
 ];
+const DOCTOR_MUXERS = [
+  "framemd5",
+];
 // Tool -> capabilities it needs. A tool is available when all listed
 // filters exist and at least one listed encoder exists (empty list =
 // no requirement).
@@ -7435,6 +7438,10 @@ const TOOL_REQUIREMENTS = {
   zoom_pan: { filters: ["zoompan", "scale", "crop"], encoders: ["libx264"] },
   image_to_video: { filters: ["scale", "pad"], encoders: ["libx264", "libvpx-vp9"] },
   slideshow: { filters: ["scale", "pad", "xfade", "acrossfade", "fps"], encoders: ["libx264", "aac"] },
+  // determinism hashes decoded frames with the framemd5 muxer
+  // (moviepy's test pattern: compare decoded frames, never bytes) —
+  // the muxer is a capability like a filter or encoder.
+  determinism: { muxers: ["framemd5"] },
   job: {},
   doctor: {},
   audit: {},
@@ -7500,10 +7507,12 @@ export async function doctor() {
   const filtersOut = await listCapabilities("filters");
   const encodersOut = await listCapabilities("encoders");
   const decodersOut = await listCapabilities("decoders");
+  const muxersOut = await listCapabilities("muxers");
   const has = (text, name) => new RegExp(`\\b${name}\\b`).test(text);
   const filters = Object.fromEntries(DOCTOR_FILTERS.map((f) => [f, has(filtersOut, f)]));
   const encoders = Object.fromEntries(DOCTOR_ENCODERS.map((e) => [e, has(encodersOut, e)]));
   const decoders = Object.fromEntries(DOCTOR_DECODERS.map((d) => [d, has(decodersOut, d)]));
+  const muxers = Object.fromEntries(DOCTOR_MUXERS.map((m) => [m, has(muxersOut, m)]));
   const gpu = await detectGpu(encodersOut);
   const tools = {};
   let allOk = Boolean(ffmpegVersion && ffprobeVersion);
@@ -7511,6 +7520,7 @@ export async function doctor() {
     const missing = [];
     for (const f of req.filters ?? []) if (!filters[f]) missing.push(`filter:${f}`);
     for (const d of req.decoders ?? []) if (!decoders[d]) missing.push(`decoder:${d}`);
+    for (const m of req.muxers ?? []) if (!muxers[m]) missing.push(`muxer:${m}`);
     const enc = req.encoders ?? [];
     if (enc.length && !enc.some((e) => encoders[e])) missing.push(`encoder:${enc.join("|")}`);
     tools[name] = { available: missing.length === 0, ...(missing.length ? { missing, fix: fixForMissing(missing) } : {}) };
@@ -7563,6 +7573,7 @@ export async function doctor() {
     filters,
     encoders,
     decoders,
+    muxers,
     tools,
     ok: allOk,
   };
@@ -9378,6 +9389,32 @@ async function hashFile(file) {
   return h.digest("hex");
 }
 
+// Digest of the DECODED frames (moviepy's test pattern: compare
+// decoded frames, never bytes — a re-encode is lossy and container
+// metadata moves, so bytes are the stricter check, not the content
+// check). `ffmpeg -f framemd5` hashes every decoded frame of every
+// stream (video + audio); the `#` comment header lines are stripped
+// before hashing so only frame lines count. Null when the file has
+// no decodable stream.
+async function frameDigest(file) {
+  const { stdout } = await run(FFMPEG, ["-hide_banner", "-loglevel", "error", "-i", file, "-f", "framemd5", "-"]);
+  const lines = stdout.split("\n").filter((l) => l.trim() && !l.startsWith("#"));
+  if (!lines.length) return null;
+  return createHash("sha256").update(lines.join("\n")).digest("hex");
+}
+
+// Container-level metadata tags (creation_time, encoder, ...) —
+// the usual suspect when two renders have identical frames but
+// different bytes. Null when ffprobe cannot read the file.
+async function formatTags(file) {
+  try {
+    const { stdout } = await run(FFPROBE, ["-v", "error", "-show_entries", "format_tags", "-of", "json", file]);
+    return JSON.parse(stdout).format?.tags ?? {};
+  } catch {
+    return null;
+  }
+}
+
 // ffmpeg version string for receipts (leclap's render manifest
 // records the toolchain, so a rerender on a different ffmpeg build
 // can be told apart from a real drift instead of silently failing
@@ -10134,6 +10171,144 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
     },
     qa_result: qaResult,
     ...(keepIntermediates ? { intermediates_dir: tmpDir } : {}),
+  };
+}
+
+// ---------------------------------------------------------------- determinism
+// Manifest determinism check (heristop/leclap's `verify --rerender`
+// idea, applied to the linear manifest tool instead of assemble —
+// assemble already has verify --rerender; the manifest cache only
+// verifies size + sha256 of an output it already stored, it never
+// proves a fresh run reproduces the same bytes). Run the same
+// manifest N times with the cache OFF — a cache hit would prove
+// nothing — into per-run temp dirs, then compare:
+//   * byte sha256 equal on every run -> verdict "byte_identical":
+//     the pipeline reproduces exactly (measured on this machine:
+//     two identical libx264 encodes are byte-identical, and ffmpeg
+//     8.1.2 writes no creation_time into mp4 by default).
+//   * bytes differ but framemd5 (decoded-frame digest) equal on
+//     every run -> verdict "content_identical": same pictures and
+//     same sound, different container bytes — the differing format
+//     tags are named (usually creation_time), so the cause is
+//     visible instead of a bare "differs".
+//   * framemd5 differs -> verdict "differs": the pipeline itself is
+//     nondeterministic (a step embeds wall-clock time, randomness,
+//     or a re-fetched download that changed); the first differing
+//     run pair and the level that moved are named.
+// Measured properties (duration/frames/dimensions) are compared too
+// — a run that drifts in length is not identical even if its digest
+// somehow matches. A download-first manifest re-fetches its URL on
+// every run, so a changed server file reports "differs" honestly.
+// The temp dir is removed unless keepOutputs (then outputs_dir is
+// returned so the runs can be inspected by hand).
+export async function checkManifestDeterminism({ manifestPath, runs = 2, keepOutputs = false }) {
+  const n = num(runs, "runs", { min: 2, max: 5, integer: true });
+  const manifestAbs = await requireInput(manifestPath, "manifest");
+  const manifestDir = path.dirname(manifestAbs);
+  const workDir = await prepareOutputDir(path.join(manifestDir, `.mediakit-determinism-${process.pid}`));
+  const startedAt = Date.now();
+  const runRows = [];
+  let failed = false;
+  try {
+    for (let i = 0; i < n; i++) {
+      const runOut = path.join(workDir, `run-${i}`, "final.mp4");
+      let r;
+      try {
+        r = await manifest({ manifestPath: manifestAbs, output: runOut, cache: false });
+      } catch (e) {
+        failed = true;
+        const code = e instanceof MediaKitError ? e.code : "ERROR";
+        throw new MediaKitError(`determinism run ${i + 1}/${n} failed: ${e.message} [${code}] — outputs kept in ${workDir}`, code);
+      }
+      const outPath = r.output;
+      const info = await fileInfo(outPath);
+      const meta = await probe(outPath);
+      const frames = meta.video ? await countVideoFrames(outPath) : null;
+      runRows.push({
+        index: i,
+        output: outPath,
+        sha256: await hashFile(outPath),
+        framemd5: await frameDigest(outPath),
+        size_bytes: info.size_bytes,
+        duration_seconds: meta.duration_seconds,
+        frames,
+        dimensions: meta.video ? `${meta.video.width}x${meta.video.height}` : null,
+        format_tags: await formatTags(outPath),
+      });
+    }
+  } finally {
+    // A failed run keeps its outputs for inspection (the error
+    // names the directory); a successful run removes them unless
+    // the caller asked to keep them.
+    if (!keepOutputs && !failed) {
+      try { await rm(workDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+    }
+  }
+  const comparison = compareDeterminismRuns(runRows);
+  return {
+    operation: "determinism",
+    manifest: manifestAbs,
+    runs: n,
+    ...comparison,
+    ffmpeg_version: await ffmpegVersionString(),
+    elapsed_seconds: +((Date.now() - startedAt) / 1000).toFixed(1),
+    ...(keepOutputs ? { outputs_dir: workDir } : {}),
+    runs_detail: runRows,
+  };
+}
+
+// Pure comparison of per-run digests, so every verdict branch is
+// unit-testable without faking a nondeterministic render (the suite
+// imports this directly and feeds it fabricated rows). `rows` are the
+// runs_detail rows: {sha256, framemd5, duration_seconds, frames,
+// dimensions, format_tags}.
+export function compareDeterminismRuns(rows) {
+  const first = rows[0];
+  const byteIdentical = rows.every((r) => r.sha256 === first.sha256);
+  const framesIdentical = rows.every((r) => r.framemd5 !== null && r.framemd5 === first.framemd5);
+  const propsIdentical = rows.every((r) =>
+    r.duration_seconds === first.duration_seconds && r.frames === first.frames && r.dimensions === first.dimensions);
+  let verdict;
+  let firstDifference = null;
+  let differingTags = null;
+  if (byteIdentical && propsIdentical) {
+    verdict = "byte_identical";
+  } else if (framesIdentical && propsIdentical) {
+    verdict = "content_identical";
+    // Same frames, different bytes: name the container tags that
+    // moved, so the cause is visible. A tag present in one run and
+    // absent (or different) in another is a difference.
+    const keys = [...new Set(rows.flatMap((r) => Object.keys(r.format_tags ?? {})))];
+    differingTags = keys.filter((k) => rows.some((r) => (r.format_tags ?? {})[k] !== (first.format_tags ?? {})[k]));
+    firstDifference = {
+      level: "bytes",
+      detail: differingTags.length
+        ? `identical frames, different container bytes — format tags differ: ${differingTags.join(", ")}`
+        : "identical frames, different container bytes — no format tag differs, the bytes moved inside the container",
+    };
+  } else {
+    verdict = "differs";
+    let pair = null;
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i].framemd5 !== first.framemd5 || rows[i].duration_seconds !== first.duration_seconds
+        || rows[i].frames !== first.frames || rows[i].dimensions !== first.dimensions) { pair = i; break; }
+    }
+    firstDifference = {
+      level: framesIdentical ? "properties" : "frames",
+      runs: pair === null ? [0, 1] : [0, pair],
+      detail: framesIdentical
+        ? "decoded frames match but a measured property moved between runs"
+        : "decoded frames differ between runs — the pipeline is nondeterministic",
+    };
+  }
+  return {
+    verdict,
+    deterministic: verdict !== "differs",
+    byte_identical: byteIdentical,
+    frames_identical: framesIdentical,
+    properties_identical: propsIdentical,
+    ...(differingTags ? { differing_format_tags: differingTags } : {}),
+    ...(firstDifference ? { first_difference: firstDifference } : {}),
   };
 }
 

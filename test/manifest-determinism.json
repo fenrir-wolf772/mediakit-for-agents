@@ -1,0 +1,1 @@
+{"input":"source.mp4","output":"determinism-final.mp4","steps":[{"args":{"end":8,"start":2},"tool":"trim"},{"args":{"height":360,"width":640},"tool":"resize"}],"version":1}

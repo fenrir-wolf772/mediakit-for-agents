@@ -13,7 +13,7 @@ import { createServer } from "node:http";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { fixForMissing, groupWords, SHORTS_STYLE_IDS } from "../src/core.js";
+import { compareDeterminismRuns, fixForMissing, groupWords, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 
 const execFileAsync = promisify(execFile);
@@ -181,10 +181,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 64 tools present");
-checkOk(missing.length === 0, "tools/list has all 64 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 65 tools present");
+checkOk(missing.length === 0, "tools/list has all 65 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -4549,7 +4549,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 64 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 64 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 65 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 65 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -5439,6 +5439,38 @@ const verifyRerenderJson = JSON.parse(verifyRerenderRes.content[0].text);
 checkOk(verifyRerenderJson.verdict === "pass" && verifyRerenderJson.mode === "rerender" && verifyRerenderJson.rerender_removed === true && verifyRerenderJson.items?.find((i) => i.name === "output_bytes")?.status === "matched", "verify --rerender passes: the re-render is byte-identical and the temp dir is removed", JSON.stringify({ verdict: verifyRerenderJson.verdict, removed: verifyRerenderJson.rerender_removed, first: verifyRerenderJson.first_difference }));
 checkOk(existsSync(path.join(verifyTinyOut, "final.mp4")) && readdirSync(verifyTinyOut).filter((n) => n.startsWith(".mediakit-verify-rerender-")).length === 0, "verify rerender keeps the original final.mp4 and leaves no rerender temp dir behind", readdirSync(verifyTinyOut).join(", "));
 
+// determinism (turn 83): the linear manifest tool must reproduce
+// byte-identically across fresh renders (cache off — a cache hit
+// would prove nothing). Fixture test/manifest-determinism.json
+// (source.mp4, trim 2-8 + resize 640x360): measured on this machine,
+// two identical libx264 encodes are byte-identical, so the verdict
+// must be byte_identical with one sha256 + one framemd5 across runs.
+// The pure comparator is unit-tested directly with fabricated rows
+// (all three verdicts), so the MCP block only needs the real render.
+const detRes = await client.callTool({ name: "determinism", arguments: { manifest_path: path.join(root, "test/manifest-determinism.json") } }, undefined, { timeout: 300000 });
+const detJson = JSON.parse(detRes.content[0].text);
+checkOk(detJson.verdict === "byte_identical" && detJson.deterministic === true && detJson.byte_identical === true && detJson.frames_identical === true && detJson.runs === 2 && detJson.runs_detail?.length === 2 && detJson.runs_detail[0].sha256 === detJson.runs_detail[1].sha256 && detJson.runs_detail[0].framemd5 === detJson.runs_detail[1].framemd5 && detJson.runs_detail[0].frames === 180 && detJson.runs_detail[0].dimensions === "640x360" && near(detJson.runs_detail[0].duration_seconds, 6, 0.05), "determinism on the trim+resize manifest: byte_identical, both runs one sha256 + one framemd5, 180 frames / 6s / 640x360", JSON.stringify(detJson.runs_detail?.map((r) => r.sha256.slice(0, 12))));
+checkOk(readdirSync(path.join(root, "test")).filter((n) => n.startsWith(".mediakit-determinism-")).length === 0, "determinism removes its per-run temp dir by default", readdirSync(path.join(root, "test")).filter((n) => n.startsWith(".mediakit-")).join(", "));
+const det3Res = await client.callTool({ name: "determinism", arguments: { manifest_path: path.join(root, "test/manifest-determinism.json"), runs: 3 } }, undefined, { timeout: 300000 });
+const det3Json = JSON.parse(det3Res.content[0].text);
+checkOk(det3Json.verdict === "byte_identical" && det3Json.runs === 3 && det3Json.runs_detail?.length === 3 && new Set(det3Json.runs_detail.map((r) => r.sha256)).size === 1, "determinism runs=3: three fresh renders, one sha256", JSON.stringify(det3Json.runs_detail?.map((r) => r.sha256.slice(0, 12))));
+// Pure comparator, fabricated rows — every verdict branch without
+// faking a nondeterministic render.
+const detRow = (sha, frame, dur = 6, frames = 180, tags = {}) => ({ sha256: sha, framemd5: frame, duration_seconds: dur, frames, dimensions: "640x360", format_tags: tags });
+checkOk(compareDeterminismRuns([detRow("a", "f"), detRow("a", "f")]).verdict === "byte_identical", "compareDeterminismRuns: equal bytes + frames -> byte_identical", JSON.stringify(compareDeterminismRuns([detRow("a", "f"), detRow("a", "f")]).verdict));
+const detContent = compareDeterminismRuns([detRow("a", "f", 6, 180, { creation_time: "2026-11-17T06:00:00Z" }), detRow("b", "f", 6, 180, { creation_time: "2026-11-17T06:00:05Z" })]);
+checkOk(detContent.verdict === "content_identical" && detContent.differing_format_tags?.includes("creation_time") && detContent.first_difference?.level === "bytes", "compareDeterminismRuns: same frames, different bytes + moved creation_time -> content_identical naming the tag", JSON.stringify(detContent));
+const detDiff = compareDeterminismRuns([detRow("a", "f"), detRow("b", "g")]);
+checkOk(detDiff.verdict === "differs" && detDiff.deterministic === false && detDiff.first_difference?.level === "frames" && JSON.stringify(detDiff.first_difference?.runs) === "[0,1]", "compareDeterminismRuns: different frames -> differs at the frames level with the run pair", JSON.stringify(detDiff.first_difference));
+const detProps = compareDeterminismRuns([detRow("a", "f", 6, 180), detRow("a", "f", 6.5, 195)]);
+checkOk(detProps.verdict === "differs" && detProps.frames_identical === true && detProps.first_difference?.level === "properties", "compareDeterminismRuns: same frames, moved duration -> differs at the properties level", JSON.stringify(detProps.first_difference));
+// Error paths: runs below the schema minimum, and a missing manifest.
+const detBadRuns = await callExpectThrow("determinism", { manifest_path: path.join(root, "test/manifest-determinism.json"), runs: 1 });
+checkOk(/greater than or equal to 2/.test(detBadRuns), "determinism runs=1 is refused (zod schema, min 2)", detBadRuns.slice(0, 160));
+const detMissingRes = await client.callTool({ name: "determinism", arguments: { manifest_path: path.join(root, "test/no-such-manifest.json") } });
+const detMissingJson = JSON.parse(detMissingRes.content[0].text);
+checkOk(detMissingRes.isError === true && /not found or not readable/.test(detMissingJson.error ?? ""), "determinism on a missing manifest errors instead of rendering", JSON.stringify(detMissingJson.error));
+
 // diagnose (turn 64): director preflight — validate + measured
 // judgement, probe-only. Fixtures: assemble-diagnose-pass.json (1
 // moving video shot, 1280x720, no extras) must pass clean;
@@ -6162,7 +6194,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 64 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 65 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -6222,11 +6254,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 64, "GET /mcp reports name/version/transport and 64 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 65, "GET /mcp reports name/version/transport and 65 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 64 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 64 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 65 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 65 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -6250,7 +6282,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 64, "JSON-RPC tools/list returns the same 64 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 65, "JSON-RPC tools/list returns the same 65 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

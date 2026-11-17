@@ -69,11 +69,12 @@ const probeList = (name) => {
 const probedFilters = probeList("DOCTOR_FILTERS");
 const probedEncoders = probeList("DOCTOR_ENCODERS");
 const probedDecoders = probeList("DOCTOR_DECODERS");
+const probedMuxers = probeList("DOCTOR_MUXERS");
 const reqMatch = coreSrc.match(/const TOOL_REQUIREMENTS = \{([\s\S]*?)\n\};/);
 if (!reqMatch) problems.push("could not find TOOL_REQUIREMENTS in src/core.js");
 if (reqMatch) {
-  for (const [, list, kind] of [...reqMatch[1].matchAll(/(filters|encoders|decoders): \[([^\]]*)\]/g)]) {
-    const probed = kind === "filters" ? probedFilters : kind === "encoders" ? probedEncoders : probedDecoders;
+  for (const [, list, kind] of [...reqMatch[1].matchAll(/(filters|encoders|decoders|muxers): \[([^\]]*)\]/g)]) {
+    const probed = kind === "filters" ? probedFilters : kind === "encoders" ? probedEncoders : kind === "decoders" ? probedDecoders : probedMuxers;
     for (const name of [...list.matchAll(/"([a-z0-9_]+)"/g)].map((x) => x[1])) {
       if (!probed.has(name)) problems.push(`TOOL_REQUIREMENTS names ${kind.slice(0, -1)} "${name}" but it is not in DOCTOR_${kind.toUpperCase()} — doctor would report its tool missing on a healthy machine`);
     }
