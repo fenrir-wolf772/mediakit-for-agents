@@ -309,7 +309,7 @@ const COMMANDS = {
   rotate: {
     usage: "mediakit rotate <input> -o <output> [--angle 90|180|270 | --flip horizontal|vertical] [--crf 23]",
     desc: "Rotate a clip 90/180/270 degrees clockwise, or flip it horizontally/vertically. The angle applies to the frame the viewer sees (a phone clip coded 1280x720 with rotation 90 rotates from its 720x1280 display size); the output carries no rotation metadata, so no player double-rotates it. Reports input_rotation vs output_rotation measured on disk.",
-    opts: [
+    options: [
       ["--angle", "Clockwise degrees: 90, 180 or 270 (exactly one of --angle/--flip)"],
       ["--flip", "Flip: horizontal or vertical (use instead of --angle)"],
       ["--crf", "CRF quality 0-51 (default 23)"],
@@ -659,14 +659,17 @@ const COMMANDS = {
     options: [],
   },
   motion: {
-    usage: "mediakit motion <input> [--threshold 0.001] [--min-still-seconds 2] [--window 1] [--lag-seconds 0]",
-    desc: "Measure real movement: per-second curve of the fraction of pixels that changed between adjacent frames, still intervals, and a verdict (moving / mostly-static / static). --lag-seconds N compares frames N seconds apart instead, catching motion too slow for one frame step (a slow fade, a creeping zoom). Probe-only, writes no file. The director's motion gate for a shot.",
+    usage: "mediakit motion <input> [--threshold 0.001] [--min-still-seconds 2] [--window 1] [--lag-seconds 0] [--adaptive [--adaptive-factor 2] [--adaptive-cap 0.005]]",
+    desc: "Measure real movement: per-second curve of the fraction of pixels that changed between adjacent frames, still intervals, and a verdict (moving / mostly-static / static). --lag-seconds N compares frames N seconds apart instead, catching motion too slow for one frame step (a slow fade, a creeping zoom). --adaptive calibrates the still threshold to the clip instead of the fixed 0.001 (floor = 25th percentile of the curve × --adaptive-factor, capped at --adaptive-cap). Probe-only, writes no file. The director's motion gate for a shot.",
     args: [{ name: "input", required: true }],
     options: [
       ["--threshold", "Still threshold on the moved-pixel fraction 0-0.5 (default 0.001 = 0.1% of pixels)"],
       ["--min-still-seconds", "A still interval must last at least this long to be reported (default 2)"],
       ["--window", "Curve window in seconds (default 1)"],
       ["--lag-seconds", "Compare frames this many whole seconds apart instead of adjacent frames (default 0). Still intervals are corrected to clip time"],
+      ["--adaptive", "Calibrate the still threshold to the clip: floor = 25th percentile of the motion curve × --adaptive-factor, capped at --adaptive-cap (light grain on a static shot reads still instead of flickering across the fixed threshold)"],
+      ["--adaptive-factor", "Multiplier for the adaptive floor (default 2, 1-10; only with --adaptive)"],
+      ["--adaptive-cap", "Cap for the adaptive threshold (default 0.005, 0.0005-0.05; only with --adaptive)"],
     ],
   },
   hook: {
@@ -759,6 +762,7 @@ const COMMANDS = {
       ["--max-files", "Cap on matched files (default 200; extra matches reported via truncated)"],
       ["--dry-run", "List matched files + planned outputs without running anything"],
       ["-o, --output", "Output directory (required, created if needed)"],
+      ["--output-dir", "Alias for -o <output-dir>"],
     ],
   },
   assemble: {
@@ -904,6 +908,70 @@ function fail(message, code = 1) {
   process.exit(code);
 }
 
+// Edit distance between two flag spellings (for "did you mean").
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[n];
+}
+
+// The CLI allowlist is the command's declared options in COMMANDS:
+// every --flag a case reads must be listed there. --help/-h and
+// -o/--output are always allowed. A `--no-x` entry allows the key x;
+// a positive `--x` entry allows the same key (so --no-dry-run is
+// accepted wherever --dry-run is declared).
+function allowedOptKeys(cmd) {
+  const keys = new Set(["help", "output"]);
+  for (const [flag] of COMMANDS[cmd].options) {
+    for (const part of flag.split(",")) {
+      const f = part.trim();
+      if (!f) continue;
+      keys.add(f.startsWith("--no-") ? f.slice(5).replace(/-/g, "_") : f.replace(/^--?/, "").replace(/-/g, "_"));
+    }
+  }
+  return keys;
+}
+
+function declaredLongFlags(cmd) {
+  const flags = [];
+  for (const [flag] of COMMANDS[cmd].options) {
+    for (const part of flag.split(",")) {
+      const f = part.trim();
+      if (f.startsWith("--")) flags.push(f);
+    }
+  }
+  return flags;
+}
+
+// Refuse an option the command does not declare, instead of silently
+// ignoring it (lượt 91: `concat --transitions fade` ran a plain
+// 20s concat — the plural flag was swallowed and the output looked
+// right until the duration was checked). Exit 2, like every other
+// CLI usage error. A near-miss (edit distance <= 2) names the flag
+// the user probably meant; anything further gets no guess.
+function validateOpts(cmd, opts, argv) {
+  const allowed = allowedOptKeys(cmd);
+  for (const key of Object.keys(opts)) {
+    if (allowed.has(key)) continue;
+    const dashKey = key.replace(/_/g, "-");
+    const token = argv.find((a) => a === `--${dashKey}` || a.startsWith(`--${dashKey}=`) || a === `--no-${dashKey}` || a.startsWith(`--no-${dashKey}=`)) ?? `--${dashKey}`;
+    let best = null, bestD = Infinity;
+    for (const cand of declaredLongFlags(cmd)) {
+      const d = levenshtein(token, cand);
+      if (d < bestD) { bestD = d; best = cand; }
+    }
+    const suggestion = bestD <= 2 ? ` (did you mean ${best}?)` : "";
+    fail(`unknown option ${token} for command '${cmd}'${suggestion}\nRun 'mediakit ${cmd} --help' to list options.`, 2);
+  }
+}
+
 /** Minimal flag parser: --key value, --key=value, --flag, -o value. */
 function parseArgs(argv) {
   const positional = [];
@@ -995,6 +1063,7 @@ async function main() {
 
   const { positional, opts } = parseArgs(rest);
   if (opts.help) { printHelp(cmd); return; }
+  validateOpts(cmd, opts, rest);
   // Audit hook: every dispatched CLI tool call is recorded (tool,
   // args hash + redacted copy, input/output files + SHA-256,
   // duration, status) — the CLI side of the operation envelope.

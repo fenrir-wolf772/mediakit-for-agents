@@ -56,6 +56,11 @@ mediakit extract-frame clip.mp4 --timestamp 3.5 -o frame.png
 Every call returns JSON with the output path, size, and verified
 duration/dimensions. If a call fails, read the error — it usually tells you
 exactly what was wrong (missing file, crop out of bounds, bad format).
+The CLI refuses an option a command does not declare (exit 2, e.g.
+`unknown option --transitions for command 'concat' (did you mean
+--transition?)`) instead of silently ignoring it — a mistyped flag can
+never quietly change what a command does. `mediakit <command> --help`
+lists exactly the options that command accepts.
 
 ## Rules that save you rework
 

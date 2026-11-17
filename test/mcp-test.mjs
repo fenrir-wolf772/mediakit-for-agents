@@ -6079,6 +6079,74 @@ checkOk(transCliReveal.total === 4 && JSON.stringify(transCliReveal.categories[0
 let transCliBadCode = 0;
 try { await execFileAsync(process.execPath, [path.join(root, "bin/mediakit.js"), "transitions", "--category", "nosuch"], { env: { ...process.env } }); } catch (e) { transCliBadCode = e.code; }
 checkOk(transCliBadCode === 2, "CLI transitions --category nosuch exits 2", `code=${transCliBadCode}`);
+// CLI unknown-option guard (lượt 92 — the lượt 91 trap: `concat
+// --transitions fade` silently ran a plain 20s concat because
+// parseArgs swallowed the plural flag). Every --flag a case reads
+// must be declared in that command's COMMANDS options, or the CLI
+// refuses it with exit 2 instead of running the wrong thing.
+const guardTypo = await runCli(["concat", path.join(root, "test/source.mp4"), path.join(root, "test/source.mp4"), "--transitions", "fade", "-o", path.join(root, "outputs/mcp-concat-typo.mp4")]);
+checkOk(guardTypo.code === 2 && /unknown option --transitions/.test(guardTypo.out) && /did you mean --transition\?/.test(guardTypo.out) && !existsSync(path.join(root, "outputs/mcp-concat-typo.mp4")), "CLI concat --transitions exits 2, names the flag, suggests --transition, and writes nothing", guardTypo.out.slice(0, 200));
+const guardNearMiss = await runCli(["concat", path.join(root, "test/source.mp4"), path.join(root, "test/source.mp4"), "--transiton", "fade", "-o", path.join(root, "outputs/mcp-concat-typo2.mp4")]);
+checkOk(guardNearMiss.code === 2 && /unknown option --transiton/.test(guardNearMiss.out) && /did you mean --transition\?/.test(guardNearMiss.out), "CLI concat --transiton (one letter off) also suggests --transition", guardNearMiss.out.slice(0, 200));
+const guardCrossCmd = await runCli(["trim", path.join(root, "test/source.mp4"), "--start", "0", "--duration", "2", "--transition-duration", "1", "-o", path.join(root, "outputs/mcp-trim-typo.mp4")]);
+checkOk(guardCrossCmd.code === 2 && /unknown option --transition-duration/.test(guardCrossCmd.out) && !/did you mean/.test(guardCrossCmd.out), "CLI trim --transition-duration exits 2: a concat-only flag is not accepted on trim (and no bogus suggestion, --transition is not a trim flag)", guardCrossCmd.out.slice(0, 200));
+const guardNoFlag = await runCli(["trim", path.join(root, "test/source.mp4"), "--start", "0", "--duration", "2", "--no-foo", "-o", path.join(root, "outputs/mcp-trim-typo2.mp4")]);
+checkOk(guardNoFlag.code === 2 && /unknown option --no-foo/.test(guardNoFlag.out) && !/did you mean/.test(guardNoFlag.out), "CLI trim --no-foo exits 2 and names the flag as typed (no far-fetched suggestion)", guardNoFlag.out.slice(0, 200));
+const guardEqForm = await runCli(["trim", path.join(root, "test/source.mp4"), "--start=0", "--duration", "2", "--bogus=1", "-o", path.join(root, "outputs/mcp-trim-typo3.mp4")]);
+checkOk(guardEqForm.code === 2 && /unknown option --bogus/.test(guardEqForm.out), "CLI --bogus=1 (equals form) is refused too", guardEqForm.out.slice(0, 200));
+// The drift the guard exposed while it was built: rotate's COMMANDS
+// entry spelled its list `opts:` instead of `options:`, so --help
+// printed no options; motion's --adaptive trio and batch's
+// --output-dir alias were read by their cases but never declared.
+// All three must be accepted now that they are declared.
+const guardRotateHelp = await runCli(["rotate", "--help"]);
+checkOk(guardRotateHelp.code === 0 && /--flip/.test(guardRotateHelp.out) && /--angle/.test(guardRotateHelp.out), "CLI rotate --help lists --flip and --angle (the opts: typo is fixed)", guardRotateHelp.out.slice(0, 200));
+const guardRotateFlip = await runCliJson(["rotate", path.join(root, "test/rotate-source.mp4"), "--flip", "horizontal", "-o", path.join(root, "outputs/mcp-rotate-flip.mp4")]);
+checkOk(guardRotateFlip.dimensions === "640x360" && guardRotateFlip.flip === "horizontal" && guardRotateFlip.output_rotation === null, "CLI rotate --flip horizontal runs (declared now) and keeps 640x360 with no rotation left", JSON.stringify(guardRotateFlip));
+const guardMotionAdaptive = await runCliJson(["motion", path.join(root, "test/motion-noise-light.mp4"), "--adaptive"]);
+checkOk(guardMotionAdaptive.verdict === "static" && guardMotionAdaptive.threshold > 0.001, "CLI motion --adaptive runs (declared now) and calibrates the threshold above the fixed 0.001", `verdict=${guardMotionAdaptive.verdict} thr=${guardMotionAdaptive.threshold}`);
+const guardBatchOutDir = await runCliJson(["batch", "bpm", "--pattern", "bpm-click-120.wav", "--input-dir", "test", "--output-dir", path.join(root, "outputs/mcp-batch-outdir"), "--dry-run"]);
+checkOk(guardBatchOutDir.dry_run === true && guardBatchOutDir.files_total === 1 && guardBatchOutDir.output_dir === path.join(root, "outputs/mcp-batch-outdir"), "CLI batch --output-dir runs (declared alias now) and dry-runs 1 file into it", JSON.stringify(guardBatchOutDir).slice(0, 200));
+// Static audit: the allowlist must stay true — parse bin/mediakit.js
+// and assert every option a case reads (opts.x, numOpt(opts, "x"),
+// tripleOpt(opts, "x")) is declared in that command's COMMANDS
+// options, and no command entry misspells the list key as `opts:`.
+// This pins the motion/batch/rotate drift class so it cannot recur.
+const cliSrc = await readFile(path.join(root, "bin/mediakit.js"), "utf8");
+const cliBlock = cliSrc.slice(cliSrc.indexOf("const COMMANDS"), cliSrc.indexOf("function printHelp"));
+const cliCmdOpts = {};
+for (const em of cliBlock.matchAll(/^  (?:"([^"]+)"|([\w-]+)): \{([\s\S]*?)^  \},$/gm)) {
+  const name = em[1] || em[2];
+  const om = em[3].match(/(?:options|opts): \[([\s\S]*?)\n    \],/);
+  const keys = new Set(["help", "output"]);
+  if (om) for (const line of om[1].split("\n")) {
+    const fm = line.match(/\[("([^"]+)")/);
+    if (!fm) continue;
+    for (const part of fm[2].split(",")) {
+      const f = part.trim();
+      if (f) keys.add(f.startsWith("--no-") ? f.slice(5).replace(/-/g, "_") : f.replace(/^--?/, "").replace(/-/g, "_"));
+    }
+  }
+  cliCmdOpts[name] = keys;
+}
+const cliSwitch = cliSrc.slice(cliSrc.indexOf("switch (cmd)"));
+const cliCases = [...cliSwitch.matchAll(/case "([\w-]+)":/g)].map((m) => [m[1], m.index]);
+cliCases.push(["__END__", cliSwitch.length]);
+const cliDrift = [];
+for (let i = 0; i < cliCases.length - 1; i++) {
+  const [name, start] = cliCases[i];
+  const body = cliSwitch.slice(start, cliCases[i + 1][1]);
+  const used = new Set([
+    ...[...body.matchAll(/opts\.([a-z_0-9]+)/g)].map((x) => x[1]),
+    ...[...body.matchAll(/numOpt\(opts, "([a-z_0-9]+)"\)/g)].map((x) => x[1]),
+    ...[...body.matchAll(/tripleOpt\(opts, "([a-z_0-9]+)"\)/g)].map((x) => x[1]),
+  ]);
+  const allowed = cliCmdOpts[name];
+  if (!allowed) { cliDrift.push(`${name}: no COMMANDS entry`); continue; }
+  for (const k of used) if (!allowed.has(k)) cliDrift.push(`${name}: reads undeclared --${k.replace(/_/g, "-")}`);
+}
+checkOk(cliDrift.length === 0, "static audit: every option a CLI case reads is declared in its COMMANDS options (no drift)", cliDrift.join("; "));
+checkOk(!/^\s+opts: \[$/m.test(cliBlock), "static audit: no COMMANDS entry misspells its list key as opts: (rotate typo class)", "");
 const transDoctorRes = await client.callTool({ name: "doctor", arguments: {} });
 const transDoctor = JSON.parse(transDoctorRes.content[0].text);
 checkOk(transDoctor.tools?.transitions?.available === true, "doctor reports transitions as available", JSON.stringify(transDoctor.tools?.transitions));
