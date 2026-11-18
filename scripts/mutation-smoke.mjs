@@ -88,8 +88,8 @@ const MUTANTS = [
   {
     id: "loudness-default-target",
     file: "src/core.js",
-    from: "export async function loudness({ input, output, targetLufs = -14, format = null, compressor = null }) {",
-    to: "export async function loudness({ input, output, targetLufs = -16, format = null, compressor = null }) {",
+    from: "export async function loudness({ input, output, targetLufs = -14, format = null, compressor = null, dryRun = false }) {",
+    to: "export async function loudness({ input, output, targetLufs = -16, format = null, compressor = null, dryRun = false }) {",
     suite: "loudness defaults to -14 LUFS (CLI passes -14 explicitly, so this probes the core default directly)",
     probe: async (tmp) => {
       // The CLI passes --target-lufs explicitly, so the core default
