@@ -13,7 +13,7 @@ import { createServer } from "node:http";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { compareDeterminismRuns, estimateDecodedWork, estimateTempo, fixForMissing, groupWords, localTempoCurve, parseFfmpegProgress, runFfmpegWithProgress, spectralFluxOnset, trackBeatsDP, SHORTS_STYLE_IDS } from "../src/core.js";
+import { compareDeterminismRuns, estimateDecodedWork, estimateTempo, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, parseFfmpegProgress, runFfmpegWithProgress, spectralFluxOnset, trackBeatsDP, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 
 const execFileAsync = promisify(execFile);
@@ -2142,6 +2142,73 @@ const hookShortJson = JSON.parse(hookShortRes.content[0].text);
 checkOk(hookShortJson.hook.start === 0 && hookShortJson.hook.end === 9 && hookShortJson.warnings.some((w) => /shorter than --duration/.test(w)), "hook on a file shorter than --duration returns the whole file + warning", JSON.stringify(hookShortJson.hook));
 const hookBadText = await callExpectThrow("hook", { input: path.join(root, "test/mix-voice.mp3"), duration: 25 });
 checkOk(/less than or equal to 20/.test(hookBadText), "hook refuses --duration over 20", hookBadText.slice(0, 120));
+// hook clip history (podcli's clip-history idea): record the winner
+// once, never re-suggest it. Pure helpers first (no ffmpeg).
+checkOk(hookOverlapSeconds({ start: 15, end: 25 }, { start: 20, end: 30 }) === 5, "hookOverlapSeconds: [15,25) vs [20,30) overlaps 5s", "5");
+checkOk(hookOverlapSeconds({ start: 0, end: 10 }, { start: 10, end: 20 }) === 0, "hookOverlapSeconds: touching windows overlap 0s", "0");
+const hookDupRecs = [{ source_sha256: "x", start: 15, end: 25, score: 0.9, recorded_at: "2026-01-01T00:00:00.000Z" }];
+const hookDupHit = hookDuplicateOf({ start: 20, end: 30 }, hookDupRecs, 0.5);
+checkOk(hookDupHit !== null && hookDupHit.overlap_seconds === 5 && hookDupHit.start === 15 && hookDupHit.end === 25, "hookDuplicateOf: 5/10 = 0.5 meets the default threshold", JSON.stringify(hookDupHit));
+checkOk(hookDuplicateOf({ start: 20, end: 30 }, hookDupRecs, 0.6) === null, "hookDuplicateOf: 5/10 = 0.5 is below a 0.6 threshold", "null");
+checkOk(hookDuplicateOf({ start: 0, end: 10 }, hookDupRecs, 0.5) === null, "hookDuplicateOf: a merely touching window is not a duplicate", "null");
+// No history file: history null, every candidate fresh (not "unknown").
+checkOk(hookJson.history === null && hookJson.candidates.every((c) => c.duplicate === false && c.duplicate_of === null), "hook without history_file: history null, all candidates fresh", JSON.stringify(hookJson.history));
+const hookHistPath = path.join(root, "outputs", "hook-history.json");
+await rm(hookHistPath, { force: true });
+// Record the winner into a fresh file.
+const hookRecRes = await client.callTool({
+  name: "hook",
+  arguments: { input: path.join(root, "test/hook-source.mp4"), duration: 10, step: 0.5, top: 3, history_file: hookHistPath, record: true },
+});
+const hookRecJson = JSON.parse(hookRecRes.content[0].text);
+checkOk(hookRecJson.history.recorded === true && hookRecJson.history.records_checked === 0 && hookRecJson.history.records_total === 1 && hookRecJson.hook.duplicate === false, "hook --record creates the history file with the winner [15,25)", JSON.stringify(hookRecJson.history));
+const hookHistDoc = JSON.parse(await readFile(hookHistPath, "utf8"));
+const hookSrcSha = createHash("sha256").update(await readFile(path.join(root, "test/hook-source.mp4"))).digest("hex");
+checkOk(hookHistDoc.version === 1 && hookHistDoc.records.length === 1 && hookHistDoc.records[0].source_sha256 === hookSrcSha && hookHistDoc.records[0].start === 15 && hookHistDoc.records[0].end === 25 && hookHistDoc.records[0].score === 0.943 && typeof hookHistDoc.records[0].recorded_at === "string", "history file on disk: version 1, one record, sha/start/end/score match the winner", JSON.stringify(hookHistDoc.records[0]));
+// Same file again: the winner is a duplicate, and --record does not
+// append it a second time.
+const hookDupRes = await client.callTool({
+  name: "hook",
+  arguments: { input: path.join(root, "test/hook-source.mp4"), duration: 10, step: 0.5, top: 3, history_file: hookHistPath, record: true },
+});
+const hookDupJson = JSON.parse(hookDupRes.content[0].text);
+checkOk(hookDupJson.hook.duplicate === true && hookDupJson.hook.duplicate_of.start === 15 && hookDupJson.hook.duplicate_of.end === 25 && hookDupJson.hook.duplicate_of.overlap_seconds === 10 && hookDupJson.history.records_checked === 1 && hookDupJson.history.duplicates_found === 1 && hookDupJson.history.recorded === false, "hook re-run flags the winner a duplicate (overlap 10s) and does not re-record it", JSON.stringify(hookDupJson.hook));
+const hookHistDoc2 = JSON.parse(await readFile(hookHistPath, "utf8"));
+checkOk(hookHistDoc2.records.length === 1, "history file still has exactly 1 record after the duplicate re-run", `records=${hookHistDoc2.records.length}`);
+// The threshold moves the line: candidate 2 [9.5,19.5) overlaps the
+// recorded [15,25) by 4.5s = 0.45 of the shorter window — fresh at
+// the default 0.5, a duplicate at 0.4.
+const hookThRes = await client.callTool({
+  name: "hook",
+  arguments: { input: path.join(root, "test/hook-source.mp4"), duration: 10, step: 0.5, top: 3, history_file: hookHistPath, history_overlap: 0.4 },
+});
+const hookThJson = JSON.parse(hookThRes.content[0].text);
+checkOk(hookThJson.candidates[1].start === 9.5 && hookThJson.candidates[1].duplicate === true && hookThJson.candidates[1].duplicate_of.overlap_seconds === 4.5, "history_overlap 0.4 flags the 4.5s-overlap candidate a duplicate", JSON.stringify(hookThJson.candidates[1]));
+const hookThDefRes = await client.callTool({
+  name: "hook",
+  arguments: { input: path.join(root, "test/hook-source.mp4"), duration: 10, step: 0.5, top: 3, history_file: hookHistPath },
+});
+const hookThDefJson = JSON.parse(hookThDefRes.content[0].text);
+checkOk(hookThDefJson.candidates[1].duplicate === false, "default history_overlap 0.5 leaves the 4.5s-overlap candidate fresh", JSON.stringify(hookThDefJson.candidates[1]));
+// A different source is never a duplicate of this file's record.
+const hookOtherRes = await client.callTool({
+  name: "hook",
+  arguments: { input: path.join(root, "test/mix-voice.mp3"), duration: 4, step: 0.5, top: 2, history_file: hookHistPath },
+});
+const hookOtherJson = JSON.parse(hookOtherRes.content[0].text);
+checkOk(hookOtherJson.history.records_checked === 0 && hookOtherJson.history.duplicates_found === 0 && hookOtherJson.candidates.every((c) => c.duplicate === false), "hook history only matches the same source sha256", JSON.stringify(hookOtherJson.history));
+// record without a history file is refused; a corrupt or wrong-shape
+// history file fails loudly instead of being silently ignored.
+const hookRecNoFile = await callExpectThrow("hook", { input: path.join(root, "test/mix-voice.mp3"), duration: 4, record: true });
+checkOk(/needs --history-file/.test(hookRecNoFile), "hook --record without --history-file is refused", hookRecNoFile.slice(0, 120));
+const hookHistBadPath = path.join(root, "outputs", "hook-history-bad.json");
+await writeFile(hookHistBadPath, "{not json", "utf8");
+const hookBadHist = await callExpectThrow("hook", { input: path.join(root, "test/mix-voice.mp3"), duration: 4, history_file: hookHistBadPath });
+checkOk(/not valid JSON/.test(hookBadHist), "hook refuses a corrupt history file", hookBadHist.slice(0, 120));
+await writeFile(hookHistBadPath, JSON.stringify({ version: 2, records: [] }), "utf8");
+const hookBadShape = await callExpectThrow("hook", { input: path.join(root, "test/mix-voice.mp3"), duration: 4, history_file: hookHistBadPath });
+checkOk(/wrong shape/.test(hookBadShape), "hook refuses a history file with the wrong shape", hookBadShape.slice(0, 120));
+
 
 // hook in batch + manifest (lượt 69): hook is the first probe-only
 // operation — no file is written, so a batch row's output is null
@@ -2195,6 +2262,60 @@ const hookManifestDryRes = await client.callTool({
 });
 const hookManifestDryJson = JSON.parse(hookManifestDryRes.content[0].text);
 checkOk(hookManifestDryJson.dry_run === true && hookManifestDryJson.steps[0].output === hookManifestDryJson.input && hookManifestDryJson.steps[1].input === hookManifestDryJson.input, "manifest hook dry-run plans the hook step as a pass-through (output = input)", JSON.stringify(hookManifestDryJson.steps.map((s) => s.output)));
+
+// hook clip history in batch + manifest: the same history file is
+// shared across files, the cache key hashes its bytes (so a recorded
+// window invalidates the cached duplicate flags instead of serving
+// stale ones), and parallel batch workers append under a lockdir.
+const hookHistBatchPath = path.join(root, "outputs", "hook-history-batch.json");
+await rm(hookHistBatchPath, { force: true });
+const hookBatchHistRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "hook", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-hook-in"), output_dir: path.join(root, "outputs/mcp-batch-hook-out"), args: { duration: 10, history_file: hookHistBatchPath, record: true }, jobs: 2 },
+});
+const hookBatchHistJson = JSON.parse(hookBatchHistRes.content[0].text);
+checkOk(hookBatchHistJson.succeeded === 2 && hookBatchHistJson.results.every((r) => r.status === "ok" && r.result.history.recorded === true && r.result.history.duplicates_found === 0), "batch hook --record records both winners into one shared history file", JSON.stringify(hookBatchHistJson.results.map((r) => r.result?.history)));
+const hookHistBatchDoc = JSON.parse(await readFile(hookHistBatchPath, "utf8"));
+checkOk(hookHistBatchDoc.records.length === 2 && new Set(hookHistBatchDoc.records.map((r) => r.source_sha256)).size === 2, "batch history file has exactly 2 records, one per source (no lost update under jobs: 2)", JSON.stringify(hookHistBatchDoc.records.map((r) => `${r.source}:${r.start}-${r.end}`)));
+const hookBatchHist2Res = await client.callTool({
+  name: "batch",
+  arguments: { operation: "hook", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-hook-in"), output_dir: path.join(root, "outputs/mcp-batch-hook-out"), args: { duration: 10, history_file: hookHistBatchPath, record: true }, jobs: 2 },
+});
+const hookBatchHist2Json = JSON.parse(hookBatchHist2Res.content[0].text);
+checkOk(hookBatchHist2Json.succeeded === 2 && hookBatchHist2Json.cached === 0 && hookBatchHist2Json.results.every((r) => r.status === "ok" && r.result.history.duplicates_found === 1 && r.result.history.recorded === false), "batch hook second run re-runs (history bytes changed the cache key) and flags both winners duplicates", JSON.stringify(hookBatchHist2Json.results.map((r) => r.result?.history)));
+const hookBatchHist3Res = await client.callTool({
+  name: "batch",
+  arguments: { operation: "hook", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-hook-in"), output_dir: path.join(root, "outputs/mcp-batch-hook-out"), args: { duration: 10, history_file: hookHistBatchPath, record: true }, jobs: 2 },
+});
+const hookBatchHist3Json = JSON.parse(hookBatchHist3Res.content[0].text);
+checkOk(hookBatchHist3Json.cached === 2 && hookBatchHist3Json.results.every((r) => r.status === "cached"), "batch hook third run serves both rows from cache (history unchanged since run 2)", JSON.stringify(hookBatchHist3Json.results.map((r) => r.status)));
+const hookHistBatchDoc3 = JSON.parse(await readFile(hookHistBatchPath, "utf8"));
+checkOk(hookHistBatchDoc3.records.length === 2, "batch history file still has exactly 2 records after the duplicate runs", `records=${hookHistBatchDoc3.records.length}`);
+// Manifest: the hook step records through the manifest-relative path,
+// and the history file is hashed into the step cache key.
+await rm(path.join(root, "outputs/mcp-manifest-hook-history.mp4"), { force: true });
+await rm(path.join(root, "outputs/hook-history-manifest.json"), { force: true });
+const hookManifestHistRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-hook-history.json") },
+});
+const hookManifestHistJson = JSON.parse(hookManifestHistRes.content[0].text);
+checkOk(hookManifestHistJson.steps[0].status === "ok" && hookManifestHistJson.steps[0].result.history.recorded === true && (hookManifestHistJson.steps[1].status === "ok" || hookManifestHistJson.steps[1].status === "cached") && near(hookManifestHistJson.final.duration_seconds, 10, 0.05), "manifest hook step records the winner, then trim cuts it (final 10s; the trim may be cached from an identical earlier run — the hook step is the one under test here)", JSON.stringify(hookManifestHistJson.steps.map((s) => s.result?.history ?? s.status)));
+const hookHistManifestDoc = JSON.parse(await readFile(path.join(root, "outputs/hook-history-manifest.json"), "utf8"));
+checkOk(hookHistManifestDoc.records.length === 1 && hookHistManifestDoc.records[0].start === 15 && hookHistManifestDoc.records[0].end === 25, "manifest history file has the one recorded window [15,25)", JSON.stringify(hookHistManifestDoc.records));
+const hookManifestHist2Res = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-hook-history.json") },
+});
+const hookManifestHist2Json = JSON.parse(hookManifestHist2Res.content[0].text);
+checkOk(hookManifestHist2Json.cache_hits === 1 && hookManifestHist2Json.steps[0].status === "ok" && hookManifestHist2Json.steps[0].result.history.duplicates_found === 1 && hookManifestHist2Json.steps[0].result.history.recorded === false && hookManifestHist2Json.steps[1].status === "cached", "manifest hook re-run re-runs the hook step (history changed the key) and flags the duplicate, trim stays cached", JSON.stringify(hookManifestHist2Json.steps.map((s) => s.status)));
+const hookManifestHist3Res = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-hook-history.json") },
+});
+const hookManifestHist3Json = JSON.parse(hookManifestHist3Res.content[0].text);
+checkOk(hookManifestHist3Json.cache_hits === 2 && hookManifestHist3Json.steps.every((s) => s.status === "cached"), "manifest hook third run serves both steps from cache (history unchanged)", JSON.stringify(hookManifestHist3Json.steps.map((s) => s.status)));
+
 
 // bpm: tempo from a spectral-flux onset function + autocorrelation /
 // comb period search (aubio tempo, re-implemented in pure Node).

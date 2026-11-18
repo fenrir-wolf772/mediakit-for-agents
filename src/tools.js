@@ -1608,13 +1608,16 @@ export const TOOL_DEFS = [
   // seconds of a Short.
   {
     name: "hook",
-    description: "Find the best hook window in a clip (probe-only, writes no file): slide a window of duration seconds across the file and score each candidate on three measured signals — mean audio energy (astats RMS per frame, binned and normalized against the file's own loudest bin), speech coverage (silencedetect complement), and scene cuts (a window opening on a cut, plus cuts inside it, reads as a new beat). Score is 0.5*energy + 0.3*speech + 0.2*cut, fixed weights so two runs rank the same way; the top windows are greedy non-overlapping, so they are alternatives, not the same window shifted by one step. Returns the ranked candidates with the score breakdown, the per-step energy curve, pacing from real cuts (slow/medium/fast-cut), and a suggested_trim command that cuts the winning window. Video-only input scores on cuts alone; audio-only on energy+speech. Files over 20 minutes are refused (the astats log would exceed the capture buffer).",
+    description: "Find the best hook window in a clip (probe-only, writes no file): slide a window of duration seconds across the file and score each candidate on three measured signals — mean audio energy (astats RMS per frame, binned and normalized against the file's own loudest bin), speech coverage (silencedetect complement), and scene cuts (a window opening on a cut, plus cuts inside it, reads as a new beat). Score is 0.5*energy + 0.3*speech + 0.2*cut, fixed weights so two runs rank the same way; the top windows are greedy non-overlapping, so they are alternatives, not the same window shifted by one step. Returns the ranked candidates with the score breakdown, the per-step energy curve, pacing from real cuts (slow/medium/fast-cut), and a suggested_trim command that cuts the winning window. Video-only input scores on cuts alone; audio-only on energy+speech. Files over 20 minutes are refused (the astats log would exceed the capture buffer). Clip history: pass history_file (a JSON file {version: 1, records: [{source_sha256, start, end, score, recorded_at}]}) to check every candidate against moments already cut — a candidate is duplicate when it comes from the same source file (sha256) and overlaps a recorded window by >= history_overlap (default 0.5) of the shorter window, reported as duplicate + duplicate_of on the candidate; history reports records_checked/duplicates_found/recorded. With record: true the winning window is appended to the history file (atomic write, only the winner — the alternatives were never cut, so they stay eligible); record without history_file is refused. A missing history file is an empty history; a corrupt one fails loudly.",
     schema: {
     input: pathSchema,
     duration: z.number().min(4).max(20).default(15).describe("Hook window length in seconds, 4-20 (default 15 — the sonic-match 12-20s hook range)"),
     step: z.number().min(0.25).max(2).default(0.5).describe("Slide step in seconds (default 0.5)"),
     top: z.number().int().min(1).max(5).default(3).describe("How many ranked windows to return (default 3)"),
     threshold_db: z.number().min(-90).max(0).default(-40).describe("Silence threshold in dB for speech coverage (default -40)"),
+    history_file: z.string().optional().describe("JSON clip-history file to check candidates against (see description); a missing file is an empty history"),
+    record: z.boolean().default(false).describe("Append the winning window to history_file after the run (needs history_file; only the winner is recorded)"),
+    history_overlap: z.number().min(0.05).max(1).default(0.5).describe("Overlap fraction of the shorter window that marks a duplicate (default 0.5)"),
   },
     handler: async (a) => safe(() => core.findHook({
     input: a.input,
@@ -1622,6 +1625,9 @@ export const TOOL_DEFS = [
     step: a.step,
     top: a.top,
     thresholdDb: a.threshold_db,
+    historyFile: a.history_file ?? null,
+    record: a.record ?? false,
+    historyOverlap: a.history_overlap ?? 0.5,
   })),
   },
 

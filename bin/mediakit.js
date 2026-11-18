@@ -702,14 +702,17 @@ const COMMANDS = {
     ],
   },
   hook: {
-    usage: "mediakit hook <input> [--duration 15] [--step 0.5] [--top 3] [--threshold-db -40]",
-    desc: "Find the best hook window in a clip: slide a --duration window across the file and score each candidate on measured audio energy (astats RMS), speech coverage (silencedetect) and scene cuts (a window opening on a cut scores higher). Returns the ranked top windows with the score breakdown, the per-step energy curve, pacing from real cuts, and a suggested trim command for the winner. Probe-only, writes no file. The director's opening-shot picker.",
+    usage: "mediakit hook <input> [--duration 15] [--step 0.5] [--top 3] [--threshold-db -40] [--history-file <path>] [--record] [--history-overlap 0.5]",
+    desc: "Find the best hook window in a clip: slide a --duration window across the file and score each candidate on measured audio energy (astats RMS), speech coverage (silencedetect) and scene cuts (a window opening on a cut scores higher). Returns the ranked top windows with the score breakdown, the per-step energy curve, pacing from real cuts, and a suggested trim command for the winner. Probe-only, writes no file. The director's opening-shot picker. Clip history: --history-file <path> checks every candidate against moments already cut (JSON {version: 1, records: [{source_sha256, start, end, score, recorded_at}]}); a candidate from the same source file overlapping a recorded window by >= --history-overlap (default 0.5) of the shorter window is flagged duplicate with duplicate_of. --record appends the winning window to the history file (only the winner — the alternatives were never cut); a missing history file is an empty history, a corrupt one fails loudly.",
     args: [{ name: "input", required: true }],
     options: [
       ["--duration", "Hook window length in seconds, 4-20 (default 15)"],
       ["--step", "Slide step in seconds, 0.25-2 (default 0.5)"],
       ["--top", "How many ranked windows to return, 1-5 (default 3)"],
       ["--threshold-db", "Silence threshold in dB for speech coverage (default -40)"],
+      ["--history-file", "JSON clip-history file to check candidates against (missing = empty history)"],
+      ["--record", "Append the winning window to --history-file after the run (needs --history-file)"],
+      ["--history-overlap", "Overlap fraction of the shorter window that marks a duplicate, 0.05-1 (default 0.5)"],
     ],
   },
   bpm: {
@@ -1795,6 +1798,9 @@ async function main() {
           step: numOpt(opts, "step") ?? 0.5,
           top: numOpt(opts, "top") ?? 3,
           thresholdDb: numOpt(opts, "threshold_db") ?? -40,
+          historyFile: opts.history_file ?? null,
+          record: opts.record === true,
+          historyOverlap: numOpt(opts, "history_overlap") ?? 0.5,
         });
         break;
       case "bpm":

@@ -10115,12 +10115,118 @@ async function energyCurveDb(input, step) {
     .map(([bin, acc]) => ({ t: +(bin * step).toFixed(3), energy_db: +(acc.sum / acc.n).toFixed(2) }));
 }
 
-export async function findHook({ input, duration = 15, step = 0.5, top = 3, thresholdDb = -40 }) {
+// ---------------------------------------------------------------- hook history
+// Clip history (podcli's clip-history idea, lượt 99): a JSON file of
+// hook windows already cut/published, keyed by the source file's
+// sha256. `hook --history-file` checks every candidate against it so
+// the director never re-suggests a moment that already shipped, and
+// `--record` appends the winning window after the run. Duplicate =
+// same source sha256 AND overlap >= history_overlap (default 0.5) of
+// the SHORTER window — a 10s window overlapping a recorded 10s window
+// by 5s is a duplicate; a window merely touching it is not. Only the
+// winner is recorded, never the also-ran candidates: the alternatives
+// were never cut, so they stay eligible. A corrupt history file fails
+// loudly (unknown is not missing); a missing file is an empty
+// history, not an error — the first run creates it. Appends are
+// atomic (.partial + rename, like patch_manifest) under a lockdir so
+// parallel batch workers cannot clobber each other's record (mkdir is
+// atomic; a lock older than 30s is stolen, so a crashed worker never
+// blocks the file forever). The manifest cache key hashes the history
+// file (MANIFEST_FILE_ARGS) and the batch cache key hashes it via
+// spec.extraHash, so recording a window invalidates the cached hook
+// result instead of serving stale duplicate flags.
+const HOOK_HISTORY_VERSION = 1;
+
+export function hookOverlapSeconds(a, b) {
+  return Math.max(0, Math.min(a.end, b.end) - Math.max(a.start, b.start));
+}
+
+export function hookDuplicateOf(window, records, overlapThreshold = 0.5) {
+  const len = window.end - window.start;
+  if (!(len > 0)) return null;
+  for (const r of records) {
+    const overlap = hookOverlapSeconds(window, r);
+    const shorter = Math.min(len, r.end - r.start);
+    if (shorter > 0 && overlap / shorter >= overlapThreshold) {
+      return {
+        start: r.start,
+        end: r.end,
+        score: typeof r.score === "number" ? r.score : null,
+        recorded_at: typeof r.recorded_at === "string" ? r.recorded_at : null,
+        overlap_seconds: +overlap.toFixed(3),
+      };
+    }
+  }
+  return null;
+}
+
+async function loadHookHistory(historyFile) {
+  let raw;
+  try {
+    raw = await readFile(historyFile, "utf8");
+  } catch {
+    return { version: HOOK_HISTORY_VERSION, records: [] }; // missing file = empty history
+  }
+  let doc;
+  try {
+    doc = JSON.parse(raw);
+  } catch {
+    throw new MediaKitError(`hook history file is not valid JSON: ${historyFile}`, "INVALID_ARG");
+  }
+  if (!doc || doc.version !== HOOK_HISTORY_VERSION || !Array.isArray(doc.records)) {
+    throw new MediaKitError(`hook history file has the wrong shape (want {version: 1, records: [...]}): ${historyFile}`, "INVALID_ARG");
+  }
+  for (const r of doc.records) {
+    if (typeof r?.source_sha256 !== "string" || typeof r?.start !== "number" || typeof r?.end !== "number" || !(r.end > r.start)) {
+      throw new MediaKitError(`hook history file has a bad record (want {source_sha256, start, end, ...}): ${historyFile}`, "INVALID_ARG");
+    }
+  }
+  return doc;
+}
+
+async function appendHookHistory(historyFile, record) {
+  const abs = await prepareOutput(historyFile, []);
+  const lockDir = `${abs}.lock`;
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    try {
+      await mkdir(lockDir);
+      break;
+    } catch {
+      // Lock held: wait a tick, or steal it if the holder crashed
+      // (mtime older than 30s) instead of waiting forever.
+      try {
+        const st = await stat(lockDir);
+        if (Date.now() - st.mtimeMs > 30_000) await rm(lockDir, { recursive: true, force: true });
+      } catch { /* lock vanished between mkdir and stat: retry */ }
+      if (Date.now() > deadline) throw new MediaKitError(`hook history file is locked by another run: ${historyFile}`, "ERROR");
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+  try {
+    const doc = await loadHookHistory(abs);
+    const already = doc.records.some((r) => r.source_sha256 === record.source_sha256 && r.start === record.start && r.end === record.end);
+    if (!already) doc.records.push(record);
+    const partial = `${abs}.partial-${process.pid}-${randomBytes(4).toString("hex")}`;
+    await writeFile(partial, JSON.stringify(doc, null, 2), "utf8");
+    await rename(partial, abs);
+    return doc.records.length;
+  } finally {
+    await rm(lockDir, { recursive: true, force: true });
+  }
+}
+
+export async function findHook({ input, duration = 15, step = 0.5, top = 3, thresholdDb = -40, historyFile = null, record = false, historyOverlap = 0.5 }) {
   const inPath = await requireInput(input);
   const hookDur = num(duration, "duration", { min: 4, max: 20 });
   const stepSec = num(step, "step", { min: 0.25, max: 2 });
   const topN = num(top, "top", { min: 1, max: 5, integer: true });
   const threshold = num(thresholdDb, "threshold_db", { min: -90, max: 0 });
+  const overlapThreshold = num(historyOverlap, "history_overlap", { min: 0.05, max: 1 });
+  if (record !== false && record !== true) throw new MediaKitError(`record must be true or false, got: ${record}`, "INVALID_ARG");
+  const historyAbs = historyFile === null || historyFile === undefined ? null : path.resolve(String(historyFile));
+  if (record && !historyAbs) throw new MediaKitError("hook --record needs --history-file: there is nowhere to record the window", "INVALID_ARG");
+  if (historyAbs) await assertInsideWorkdir(historyAbs, "history file");
   const meta = await probe(inPath);
   const total = meta.duration_seconds;
   if (total === null) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
@@ -10203,6 +10309,39 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
   const cutsPerMinute = meta.video ? +(cuts.length / (total / 60)).toFixed(1) : null;
   const pacing = cutsPerMinute === null ? null : cutsPerMinute < 6 ? "slow" : cutsPerMinute <= 20 ? "medium" : "fast-cut";
   if (effDur < hookDur) warnings.push(`file is ${total}s, shorter than --duration ${hookDur}s — the whole file is the only window`);
+  // Clip history: same source (sha256) + overlap >= threshold of the
+  // shorter window marks a candidate a duplicate of a moment already
+  // cut. Without a history file every candidate is fresh (duplicate
+  // false, not "unknown") — the absence of a file is not a verdict.
+  let history = null;
+  if (historyAbs) {
+    const sourceSha256 = await hashFile(inPath);
+    const doc = await loadHookHistory(historyAbs);
+    const sameSource = doc.records.filter((r) => r.source_sha256 === sourceSha256);
+    let duplicatesFound = 0;
+    for (const w of candidates) {
+      const dup = hookDuplicateOf(w, sameSource, overlapThreshold);
+      w.duplicate = dup !== null;
+      w.duplicate_of = dup;
+      if (dup) duplicatesFound++;
+    }
+    let recorded = false;
+    let recordsTotal = doc.records.length;
+    if (record && best && !best.duplicate) {
+      recordsTotal = await appendHookHistory(historyAbs, {
+        source_sha256: sourceSha256,
+        source: path.basename(inPath),
+        start: best.start,
+        end: best.end,
+        score: best.score,
+        recorded_at: new Date().toISOString(),
+      });
+      recorded = true;
+    }
+    history = { file: historyAbs, records_checked: sameSource.length, duplicates_found: duplicatesFound, recorded, records_total: recordsTotal };
+  } else {
+    for (const w of candidates) { w.duplicate = false; w.duplicate_of = null; }
+  }
   return {
     operation: "hook",
     input: inPath,
@@ -10216,6 +10355,7 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
     candidates,
     hook: best,
     suggested_trim: `mediakit trim ${inPath} -o hook.mp4 --start ${best.start} --end ${best.end}`,
+    history,
     warnings,
   };
 }
@@ -11242,8 +11382,12 @@ export const BATCH_OPERATIONS = {
   // output_suffix null.
   hook: {
     probeOnly: true,
-    args: ["duration", "step", "top", "threshold_db"],
-    run: (input, output, a) => findHook({ input, duration: a.duration ?? 15, step: a.step ?? 0.5, top: a.top ?? 3, thresholdDb: a.threshold_db ?? -40 }),
+    args: ["duration", "step", "top", "threshold_db", "history_file", "record", "history_overlap"],
+    run: (input, output, a) => findHook({ input, duration: a.duration ?? 15, step: a.step ?? 0.5, top: a.top ?? 3, thresholdDb: a.threshold_db ?? -40, historyFile: a.history_file ?? null, record: a.record ?? false, historyOverlap: a.history_overlap ?? 0.5 }),
+    // The history file is a sidecar like cut_words' words file: hash
+    // its bytes into the cache key, so a recorded window invalidates
+    // the cached duplicate flags instead of serving stale ones.
+    extraHash: async (input, a) => hashSidecar(a.history_file),
   },
   // bpm / beat_grid in batch are probe-only like hook: no file is
   // written, the measurement comes back in the row's `result`, and
@@ -11861,7 +12005,7 @@ const MANIFEST_MAX_STEPS = 32;
 // args, and resolving "FF0000" relative to the manifest would turn
 // a color into a missing file). The resolver and the cache-key loop
 // below both skip hex backgrounds via isHexColorArg.
-const MANIFEST_FILE_ARGS = ["captions", "overlay", "words_file", "background", "audio"];
+const MANIFEST_FILE_ARGS = ["captions", "overlay", "words_file", "background", "audio", "history_file"];
 
 // A manifest slideshow step's array args, validated here (the
 // generic loop below only allows scalars). images: paths or

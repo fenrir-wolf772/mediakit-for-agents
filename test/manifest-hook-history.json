@@ -1,0 +1,1 @@
+{"input":"hook-source.mp4","output":"../outputs/mcp-manifest-hook-history.mp4","steps":[{"args":{"duration":10,"history_file":"../outputs/hook-history-manifest.json","record":true},"tool":"hook"},{"args":{"end":25,"start":15},"tool":"trim"}],"version":1}

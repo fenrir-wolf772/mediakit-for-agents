@@ -1432,6 +1432,25 @@ the warnings say so); audio-only on energy+speech. Files over 20
 minutes are refused: the astats log behind the curve would exceed
 the capture buffer, so trim a section first.
 
+Clip history — don't re-suggest a moment that already shipped.
+`hook <clip> --history-file hooks.json --record` checks every
+candidate against the JSON history file and appends the winning
+window after the run, so the next run on the same footage skips it.
+A candidate is a duplicate when it comes from the same source file
+(sha256) and overlaps a recorded window by >= `--history-overlap`
+(default 0.5) of the shorter window; duplicates are flagged
+`duplicate` + `duplicate_of` (start/end/score/recorded_at/overlap)
+on the candidate, and `history` reports
+records_checked/duplicates_found/recorded. Only the winner is
+recorded — the alternatives were never cut, so they stay eligible,
+and a duplicate winner is never recorded twice. A missing history
+file is an empty history (the first `--record` run creates it); a
+corrupt or wrong-shape file fails loudly. The history file is part
+of the batch/manifest cache key, so recording a window invalidates
+the cached hook result instead of serving stale duplicate flags.
+Keep one history file per series, not per clip: the sha256 is what
+separates sources.
+
 ### 56. Measure the tempo before cutting on the beat — `bpm` finds the musical grid
 A cut that lands on the beat feels intentional; a cut half a beat
 off feels like a mistake. `bpm <clip>` measures the tempo in BPM
