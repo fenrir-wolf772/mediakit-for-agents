@@ -5561,6 +5561,208 @@ export async function freezeFrame({ input, output, at = null, hold = 2, crf = 23
   };
 }
 
+// ---------------------------------------------------------------- fastforward
+// Speed up marked spans of a clip, with a badge on the sped-up
+// footage (khang-nyb/demo-recorder's render() idea: their fastForward
+// fast-forwards backend waits in a screen recording and burns a
+// ">> tua nhanh x8" badge on the sped spans; MediaKit's version is
+// a general tool, not a screen recorder). The timeline is split
+// into pieces — normal spans at 1x, marked spans at N x — and the
+// pieces are re-joined with concat, so the output is shorter by
+// exactly the saved time and everything after a span keeps its
+// place. Video speeds up with setpts; audio keeps its pitch with
+// chained atempo (the same atempoChain fit uses). The badge is a
+// dark box + drawtext bottom-right, sized from the display frame
+// height, so it lands the same relative size on a vertical phone
+// clip and a landscape one. Spans are clamped to the clip, sorted,
+// and overlaps collapse onto the previous span's end (the
+// demo-recorder merge rule) instead of erroring on input order.
+// The result measures the speed-up on disk: timing_check_mapped
+// (input frame mid-span vs the output frame it should land on,
+// ~0 when the mapping is right) against timing_check_unmapped
+// (the same input frame vs the output frame at the unshifted time
+// — large on footage that actually changes, ~0 on a flat colour,
+// which is why the tests use the red/blue scenes fixture).
+const FASTFORWARD_MAX_SEGMENTS = 16;
+
+export async function fastForwardClip({ input, segments, output, badge = true, label = null, crf = 23 }) {
+  const inPath = await requireInput(input);
+  const outPath = await prepareOutput(output, [inPath]);
+  const c = num(crf, "crf", { min: 0, max: 51, integer: true });
+  const wantBadge = badge !== false;
+  const badgeLabel = label === null || label === undefined ? "fast-forward" : String(label);
+  if (!badgeLabel.trim()) throw new MediaKitError("fastforward --label must not be empty", "INVALID_ARG");
+  if (!Array.isArray(segments) || segments.length < 1 || segments.length > FASTFORWARD_MAX_SEGMENTS) {
+    throw new MediaKitError(`fastforward needs 1-${FASTFORWARD_MAX_SEGMENTS} segments {start, end, speed}, got: ${Array.isArray(segments) ? `${segments.length} entries` : typeof segments}`, "INVALID_ARG");
+  }
+  const spans = segments.map((s, j) => {
+    if (!s || typeof s !== "object" || Array.isArray(s)) {
+      throw new MediaKitError(`fastforward segments[${j}] must be an object {start, end, speed}`, "INVALID_ARG");
+    }
+    for (const k of Object.keys(s)) {
+      if (!["start", "end", "speed"].includes(k)) {
+        throw new MediaKitError(`fastforward segments[${j}] does not take "${k}" (only start, end, speed)`, "INVALID_ARG");
+      }
+    }
+    const start = parseTime(s.start, `segments[${j}].start`);
+    const end = parseTime(s.end, `segments[${j}].end`);
+    const speed = num(s.speed, `segments[${j}].speed`, { min: 1.1, max: 16 });
+    if (!(end > start)) throw new MediaKitError(`fastforward segments[${j}] needs end > start (got ${start}s-${end}s)`, "INVALID_ARG");
+    return { start, end, speed };
+  });
+  const meta = await probe(inPath);
+  const D = meta.duration_seconds;
+  if (!Number.isFinite(D) || D <= 0) throw new MediaKitError("fastforward needs an input with a known duration", "INVALID_ARG");
+  if (!meta.video && !meta.audio) throw new MediaKitError("fastforward needs a video or audio input", "INVALID_ARG");
+  const fps = meta.video?.fps ?? null;
+  if (meta.video && (!fps || !Number.isFinite(fps) || fps <= 0)) {
+    throw new MediaKitError("fastforward needs a video with a known frame rate", "INVALID_ARG");
+  }
+  const f = (n) => +n.toFixed(3);
+  // Clamp to the clip, drop spans that land entirely outside it,
+  // sort, then collapse overlaps onto the previous span's end.
+  const clamped = spans
+    .map((s) => ({ ...s, start: Math.max(0, s.start), end: Math.min(D, s.end), clamped: s.start < 0 || s.end > D }))
+    .filter((s) => s.end - s.start > 0.05);
+  if (!clamped.length) throw new MediaKitError(`fastforward: every span lies outside this ${D}s clip`, "INVALID_ARG");
+  clamped.sort((a, b) => a.start - b.start);
+  const merged = [];
+  for (const s of clamped) {
+    const prev = merged[merged.length - 1];
+    if (prev && s.start < prev.end) {
+      if (s.end - prev.end <= 0.05) continue; // swallowed whole by the previous span
+      merged.push({ ...s, start: prev.end, clamped: true });
+    } else merged.push(s);
+  }
+  // Pieces alternate 1x and fast; outStart is the piece's position
+  // on the shortened output timeline.
+  const pieces = [];
+  let cursor = 0;
+  for (const s of merged) {
+    if (s.start - cursor > 0.01) pieces.push({ start: cursor, end: s.start, speed: 1 });
+    pieces.push({ start: s.start, end: s.end, speed: s.speed });
+    cursor = s.end;
+  }
+  if (D - cursor > 0.01) pieces.push({ start: cursor, end: D, speed: 1 });
+  let t = 0;
+  for (const p of pieces) {
+    p.outStart = +t.toFixed(3);
+    p.outDur = (p.end - p.start) / p.speed;
+    t += p.outDur;
+  }
+  const expected = +t.toFixed(3);
+  const applied = merged.map((s) => {
+    const p = pieces.find((q) => q.start === s.start && q.speed === s.speed);
+    return {
+      start_seconds: s.start, end_seconds: s.end, speed: s.speed,
+      out_start_seconds: p.outStart, out_end_seconds: +(p.outStart + p.outDur).toFixed(3),
+      clamped: s.clamped,
+    };
+  });
+  // Badge geometry from the display frame (rotation-aware): the
+  // box is drawn by drawtext itself (box=1 auto-sizes to the text,
+  // so a long label can never overflow the frame — a fixed-size
+  // drawbox would clip ">> fast-forward x16" on a 360p clip).
+  // Font scales with frame height: 30px at 1080 high.
+  const disp = displayDims(meta);
+  let badgeGeom = null;
+  let badgeFiles = {};
+  let tmpDir = null;
+  if (meta.video && wantBadge) {
+    const sc = disp.height / 1080;
+    badgeGeom = {
+      label: badgeLabel,
+      fontsize: Math.round(30 * sc),
+      margin: Math.round(24 * sc),
+      border: Math.max(4, Math.round(8 * sc)),
+      anchor: "bottom-right",
+    };
+  }
+  try {
+    if (badgeGeom) {
+      tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-fastforward-"));
+      const speeds = [...new Set(pieces.filter((p) => p.speed > 1).map((p) => p.speed))];
+      for (let i = 0; i < speeds.length; i++) {
+        const file = path.join(tmpDir, `badge-${i}.txt`);
+        await writeFile(file, `>> ${badgeLabel} x${String(+speeds[i].toFixed(2))}`, "utf8");
+        badgeFiles[speeds[i]] = file;
+      }
+    }
+    const n = pieces.length;
+    const fc = [];
+    if (meta.video) {
+      fc.push(`[0:v]split=${n}${pieces.map((_, i) => `[v${i}]`).join("")}`);
+      for (let i = 0; i < n; i++) {
+        const p = pieces[i];
+        // Parentheses matter: setpts=PTS-STARTPTS/4 parses as
+        // PTS-(STARTPTS/4) and shifts every piece — the bug the
+        // broll setpts fix taught (lượt 95).
+        let chain = `[v${i}]trim=start=${f(p.start)}:end=${f(p.end)},setpts=(PTS-STARTPTS)${p.speed > 1 ? `/${f(p.speed)}` : ""}`;
+        if (p.speed > 1 && badgeGeom) {
+          const esc = badgeFiles[p.speed].replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
+          const off = badgeGeom.margin + badgeGeom.border;
+          chain += `,drawtext=fontfile=${TITLECARD_FONT}:textfile=${esc}:fontsize=${badgeGeom.fontsize}:fontcolor=white:box=1:boxcolor=black@0.7:boxborderw=${badgeGeom.border}:x=w-tw-${off}:y=h-th-${off}`;
+        }
+        chain += `[pv${i}]`;
+        fc.push(chain);
+      }
+      fc.push(`${pieces.map((_, i) => `[pv${i}]`).join("")}concat=n=${n}:v=1:a=0,fps=${fps},format=yuv420p[v]`);
+    }
+    if (meta.audio) {
+      fc.push(`[0:a]asplit=${n}${pieces.map((_, i) => `[a${i}]`).join("")}`);
+      for (let i = 0; i < n; i++) {
+        const p = pieces[i];
+        fc.push(`[a${i}]atrim=start=${f(p.start)}:end=${f(p.end)},asetpts=PTS-STARTPTS${p.speed > 1 ? `,${atempoChain(p.speed)}` : ""}[pa${i}]`);
+      }
+      fc.push(`${pieces.map((_, i) => `[pa${i}]`).join("")}concat=n=${n}:v=0:a=1[aout]`);
+    }
+    const ext = path.extname(outPath).slice(1).toLowerCase();
+    const audioCodec = AUDIO_FORMATS[ext] ?? VIDEO_CONTAINER_AUDIO[ext] ?? "aac";
+    const args = ["-y", "-i", inPath, "-filter_complex", fc.join(";")];
+    if (meta.video) args.push("-map", "[v]", "-c:v", "libx264", "-crf", String(c), "-preset", "medium");
+    if (meta.audio) args.push("-map", "[aout]", "-c:a", audioCodec, ...audioBitrateArgs(audioCodec));
+    // -t caps the AAC encoder padding tail so the measured duration
+    // lands on the expected one (the fit --t lesson, lượt 8).
+    args.push("-t", String(expected), outPath);
+    await run(FFMPEG, args);
+    const info = await fileInfo(outPath);
+    const out = await probe(outPath);
+    const actual = out.duration_seconds;
+    let mapped = null;
+    let unmapped = null;
+    let frames = null;
+    if (meta.video) {
+      const fast = pieces.find((p) => p.speed > 1);
+      const srcMid = fast.start + (fast.end - fast.start) / 2;
+      const outMid = fast.outStart + (fast.end - fast.start) / 2 / fast.speed;
+      mapped = await frameDiffMean(inPath, srcMid, outMid, fps, outPath);
+      unmapped = await frameDiffMean(inPath, srcMid, fast.outStart + (fast.end - fast.start) / 2, fps, outPath);
+      frames = await countFrames(outPath);
+    }
+    return {
+      operation: "fastforward", input: inPath, output: outPath,
+      source_duration_seconds: D,
+      segments: applied,
+      duration_expected_seconds: expected,
+      duration_seconds: actual,
+      duration_error_seconds: actual === null ? null : +(actual - expected).toFixed(3),
+      timing_check_mapped: mapped,
+      timing_check_unmapped: unmapped,
+      frames,
+      // Estimate: the source's last frame sits a fraction of a
+      // frame before D, so the true count can land 1 frame under
+      // duration*fps (probe: 300-frame source -> 240, not 241).
+      frames_expected: meta.video ? Math.round(expected * fps) : null,
+      badge: badgeGeom,
+      has_audio: !!meta.audio,
+      dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+      size_bytes: info.size_bytes,
+    };
+  } finally {
+    if (tmpDir) await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 // ---------------------------------------------------------------- boomerang
 // Play a clip forward then backwards — the ping-pong loop
 // (Zulko/moviepy's TimeSymmetrize/TimeMirror idea): output = the
@@ -8117,6 +8319,7 @@ const TOOL_REQUIREMENTS = {
   boomerang: { filters: ["split", "reverse", "trim", "setpts", "concat", "asplit", "areverse", "atrim", "asetpts", "blend", "signalstats"], encoders: ["libx264", "aac"] },
   make_loopable: { filters: ["split", "asplit", "trim", "atrim", "setpts", "asetpts", "format", "fade", "overlay", "concat", "acrossfade", "blend", "signalstats"], encoders: ["libx264", "aac"] },
   freeze: { filters: ["split", "asplit", "trim", "atrim", "setpts", "asetpts", "loop", "concat", "fps", "format", "volume", "apad", "blend", "signalstats"], encoders: ["libx264", "aac"] },
+  fastforward: { filters: ["split", "asplit", "trim", "atrim", "setpts", "asetpts", "atempo", "concat", "fps", "format", "drawtext"], encoders: ["libx264", "aac"] },
   interpolate: { filters: ["minterpolate"], encoders: ["libx264"] },
   denoise: { filters: ["hqdn3d", "nlmeans"], encoders: ["libx264"] },
   segment: {},
@@ -11481,6 +11684,14 @@ export const MANIFEST_STEPS = {
     args: ["clips", "audio"],
     run: (input, output, a) => insertBroll({ input, output, clips: a.clips, audio: a.audio ?? "main" }),
   },
+  // fastforward speeds up marked spans — segments is an array of
+  // {start, end, speed} like the MCP shape (same exemption as
+  // broll's clips). Batch does NOT take it: spans are per-clip
+  // editorial decisions, like broll clips (lượt 95).
+  fastforward: {
+    args: ["segments", "badge", "label", "crf"],
+    run: (input, output, a) => fastForwardClip({ input, output, segments: a.segments, badge: a.badge ?? true, label: a.label ?? null, crf: a.crf ?? 23 }),
+  },
   // Manifest overrides the batch shape: a manifest is one input, so
   // the step takes one words file, not a words directory.
   cut_words: {
@@ -11586,6 +11797,34 @@ function validateBrollManifestArgs(step, args, label) {
   }
 }
 
+function validateFastForwardManifestArgs(step, args, label) {
+  if (!Array.isArray(args.segments) || args.segments.length < 1 || args.segments.length > FASTFORWARD_MAX_SEGMENTS) {
+    throw new MediaKitError(`${label} (fastforward) segments must be an array of 1-${FASTFORWARD_MAX_SEGMENTS} {start, end, speed} objects, got: ${Array.isArray(args.segments) ? `${args.segments.length} entries` : typeof args.segments}`, "INVALID_ARG");
+  }
+  args.segments.forEach((s, j) => {
+    if (!s || typeof s !== "object" || Array.isArray(s)) {
+      throw new MediaKitError(`${label} (fastforward) segments[${j}] must be an object {start, end, speed}`, "INVALID_ARG");
+    }
+    if ((typeof s.start !== "number" && typeof s.start !== "string") || (typeof s.start === "number" && !(s.start >= 0))) {
+      throw new MediaKitError(`${label} (fastforward) segments[${j}].start must be seconds or MM:SS >= 0`, "INVALID_ARG");
+    }
+    if ((typeof s.end !== "number" && typeof s.end !== "string") || (typeof s.end === "number" && !(s.end >= 0))) {
+      throw new MediaKitError(`${label} (fastforward) segments[${j}].end must be seconds or MM:SS >= 0`, "INVALID_ARG");
+    }
+    if (typeof s.speed !== "number" || !(s.speed > 1) || s.speed > 16) {
+      throw new MediaKitError(`${label} (fastforward) segments[${j}].speed must be a number in (1, 16], got: ${s.speed}`, "INVALID_ARG");
+    }
+    for (const k of Object.keys(s)) {
+      if (!["start", "end", "speed"].includes(k)) {
+        throw new MediaKitError(`${label} (fastforward) segments[${j}] does not take "${k}" (only start, end, speed)`, "INVALID_ARG");
+      }
+    }
+  });
+  if (args.badge !== undefined && args.badge !== null && typeof args.badge !== "boolean") {
+    throw new MediaKitError(`${label} (fastforward) badge must be true/false, got: ${args.badge}`, "INVALID_ARG");
+  }
+}
+
 const isHexColorArg = (v) => typeof v === "string" && (/^#?[0-9A-Fa-f]{6}$/.test(v.trim()) || /^0x[0-9A-Fa-f]{6}$/.test(v.trim()));
 
 export async function manifest({ manifestPath, output = null, cache = true, dryRun = false, keepIntermediates = false }) {
@@ -11654,6 +11893,7 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
     }
     if (step.tool === "slideshow") validateSlideshowManifestArgs(step, args, label);
     if (step.tool === "broll") validateBrollManifestArgs(step, args, label);
+    if (step.tool === "fastforward") validateFastForwardManifestArgs(step, args, label);
     // download fetches from a URL — same rule as slideshow, and the
     // URL is checked at lint time, not after step 1 starts.
     if (step.tool === "download" && i > 0) {
@@ -11669,6 +11909,7 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
       const v = args[k];
       if (step.tool === "slideshow" && (k === "images" || k === "durations")) continue; // arrays, validated above
       if (step.tool === "broll" && k === "clips") continue; // array of {file, at, ...}, validated above
+      if (step.tool === "fastforward" && k === "segments") continue; // array of {start, end, speed}, validated above
       if (v !== null && typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") {
         throw new MediaKitError(`${label} (${step.tool}): argument "${k}" must be a string, number or boolean`, "INVALID_ARG");
       }

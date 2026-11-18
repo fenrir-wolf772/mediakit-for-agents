@@ -418,6 +418,32 @@ export const TOOL_DEFS = [
 
 
   {
+    name: "fastforward",
+    description: "Speed up marked spans of a clip and burn a badge on them (khang-nyb/demo-recorder's render() idea: their demo tool fast-forwards dead backend waits and stamps \">> tua nhanh x8\" on the sped footage; this is the general version). The timeline is split into pieces — normal spans at 1x, marked spans at N x — and re-joined, so the output is shorter by exactly the saved time and everything after a span keeps its place. Video speeds up with setpts, audio keeps its pitch with chained atempo. Spans are clamped to the clip, sorted, and overlaps collapse onto the previous span's end instead of failing on input order. The badge is a dark box + text bottom-right, sized from the display frame height (same relative size on vertical and landscape clips); set badge false to skip it. Re-encodes video (libx264, crf 23 default), AAC pinned 192k. The result measures the speed-up on disk: duration_expected vs duration_seconds, timing_check_mapped (input frame mid-span vs the output frame it should land on, ~0 when the mapping is right) vs timing_check_unmapped, and the frame count.",
+    schema: {
+    input: pathSchema,
+    segments: z.array(z.object({
+      start: z.union([z.number().min(0), z.string()]).describe("Span start, seconds or MM:SS"),
+      end: z.union([z.number().min(0), z.string()]).describe("Span end, seconds or MM:SS (must be after start)"),
+      speed: z.number().min(1.1).max(16).describe("Speed factor for this span, 1.1-16 (1.1 = barely faster, 16 = sixteen times faster)"),
+    })).min(1).max(16).describe("1-16 spans to speed up, in any order (sorted; overlaps collapse onto the previous span's end)"),
+    output: pathSchema,
+    badge: z.boolean().default(true).describe("Burn the \">> fast-forward xN\" badge on sped spans (default true)"),
+    label: z.string().optional().describe("Badge word (default \"fast-forward\"); the badge reads \">> <label> x<speed>\""),
+    crf: z.number().int().min(0).max(51).default(23),
+  },
+    handler: async (a) => safe(() => core.fastForwardClip({
+    input: a.input,
+    segments: a.segments,
+    output: a.output,
+    badge: a.badge,
+    label: a.label ?? null,
+    crf: a.crf,
+  })),
+  },
+
+
+  {
     name: "reverse",
     description: "Play a clip backwards: video frames reversed with the `reverse` filter, audio reversed with `areverse` (on by default; set audio false to keep the audio playing forward under reversed video). Re-encodes video (libx264, crf 23 default). The `reverse` filter buffers every frame, so very long inputs cost memory. The result reports whether video/audio were actually reversed, plus duration measured on disk.",
     schema: {

@@ -136,6 +136,15 @@ buttons and caption bar on phones).
   `--audio main` (default) the main audio plays straight through the
   cutaway; with `--audio mix` both play together.
 
+### Step 5c — Fast-forward (optional)
+- Dead air and long waits get sped up, not cut: `mediakit fastforward
+  in.mp4 --span 5-9@4 -o out.mp4` plays 5–9s at 4x (saves 3s) and burns
+  a `">> fast-forward x4"` badge bottom-right on the sped span, so the
+  viewer knows the wait was compressed. Spans are repeatable (max 16),
+  clamped to the clip, and overlaps collapse onto the previous span's
+  end; everything after a span keeps its place and the audio keeps its
+  pitch. `--no-badge` skips the badge, `--label` changes its word.
+
 ### Step 6 — Verify before you call it done
 1. `probe` the final file: 1080×1920, duration as expected.
 2. `extract_frame` at 3 timestamps (start, middle, end): captions visible

@@ -297,6 +297,18 @@ const COMMANDS = {
       ["-o, --output", "Output file (required)"],
     ],
   },
+  fastforward: {
+    usage: "mediakit fastforward <input> -o <output> --span 5-9@4 [--span ...] [--no-badge] [--label ...] [--crf 23]",
+    desc: "Speed up marked spans of a clip and burn a badge on them: --span <start>-<end>@<speed> is repeatable (max 16), times in seconds or MM:SS, speed 1.1-16. The output is shorter by exactly the saved time and everything after a span keeps its place; audio keeps its pitch (atempo). Spans are clamped to the clip and overlaps collapse onto the previous span's end. The badge reads \">> fast-forward xN\" bottom-right (use --no-badge to skip it, --label to change the word). Reports duration_expected vs duration_seconds plus timing_check_mapped vs timing_check_unmapped.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--span", "Span to speed up: <start>-<end>@<speed>, repeatable, max 16 (times in seconds or MM:SS, speed 1.1-16)"],
+      ["--no-badge", "Skip the \">> fast-forward xN\" badge on sped spans"],
+      ["--label", "Badge word (default \"fast-forward\")"],
+      ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["-o, --output", "Output file (required)"],
+    ],
+  },
   reverse: {
     usage: "mediakit reverse <input> -o <output> [--no-audio] [--crf 23]",
     desc: "Play a clip backwards: video frames reversed, audio reversed too by default. Reports whether each stream was actually reversed. Works on audio-only input as well.",
@@ -854,7 +866,7 @@ const COMMANDS = {
   },
   manifest: {
     usage: "mediakit manifest <manifest.json> [-o <output.mp4>] [--dry-run] [--no-cache] [--keep-intermediates]",
-    desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (slideshow as step 1 only — it builds from images in args, so input should be the first slide image; then trim|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|grade|fit|silence|denoise|interpolate|burn-captions|overlay|chroma-key|cut-words|remove-retakes; hook is the probe-only step — it analyzes the chain file at that point and passes it through unchanged), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file.",
+    desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (slideshow as step 1 only — it builds from images in args, so input should be the first slide image; then trim|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|fastforward|broll|grade|fit|silence|denoise|interpolate|burn-captions|overlay|chroma-key|cut-words|remove-retakes; hook is the probe-only step — it analyzes the chain file at that point and passes it through unchanged), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file.",
     args: [{ name: "manifest", required: true }],
     options: [
       ["--dry-run", "Validate the manifest and list the planned steps without running anything"],
@@ -894,7 +906,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 71 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 72 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -1096,6 +1108,27 @@ function parseBrollClipSpecs(raw) {
     const file = parts.join("@");
     if (!file || !at) fail(`bad --clip value (want <file>@<seconds>[@<duration>]): ${spec}`);
     return { file, at, duration };
+  });
+}
+
+// Parse --span specs: <start>-<end>@<speed>, times in seconds or
+// MM:SS. Split speed from the right on "@", then split the range on
+// "-" (MM:SS uses ":", so "-" is unambiguous here).
+function parseFastForwardSpanSpecs(raw) {
+  if (raw === undefined) return [];
+  const specs = Array.isArray(raw) ? raw : [raw];
+  return specs.map((spec) => {
+    if (typeof spec !== "string") fail(`bad --span value: ${spec}`);
+    const atIdx = spec.lastIndexOf("@");
+    if (atIdx < 0) fail(`bad --span value (want <start>-<end>@<speed>): ${spec}`);
+    const speed = spec.slice(atIdx + 1).trim();
+    const range = spec.slice(0, atIdx);
+    const dashIdx = range.indexOf("-");
+    if (dashIdx < 0) fail(`bad --span value (want <start>-<end>@<speed>): ${spec}`);
+    const start = range.slice(0, dashIdx).trim();
+    const end = range.slice(dashIdx + 1).trim();
+    if (!start || !end || !speed) fail(`bad --span value (want <start>-<end>@<speed>): ${spec}`);
+    return { start, end, speed: Number(speed) };
   });
 }
 
@@ -1334,6 +1367,18 @@ async function main() {
           crf: numOpt(opts, "crf") ?? 23,
         });
         break;
+      case "fastforward": {
+        const spanSpecs = parseFastForwardSpanSpecs(opts.span);
+        if (!spanSpecs.length) fail("missing required option: --span <start>-<end>@<speed> (repeatable)");
+        result = await core.fastForwardClip({
+          input: needInput(), output: needOutput(opts),
+          segments: spanSpecs,
+          badge: opts.badge !== false,
+          label: opts.label ?? null,
+          crf: numOpt(opts, "crf") ?? 23,
+        });
+        break;
+      }
       case "reverse":
         result = await core.reverseClip({
           input: needInput(), output: needOutput(opts),

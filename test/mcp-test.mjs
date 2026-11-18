@@ -181,10 +181,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 71 tools present");
-checkOk(missing.length === 0, "tools/list has all 71 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 72 tools present");
+checkOk(missing.length === 0, "tools/list has all 72 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -691,6 +691,109 @@ const freezeManifestRes = await client.callTool({
 });
 const freezeManifestJson = JSON.parse(freezeManifestRes.content[0].text);
 checkOk(freezeManifestJson.steps_run === 1 && freezeManifestJson.steps.every((s) => s.status === "ok") && near(freezeManifestJson.final.duration_seconds, 12.039, 0.05), "manifest freeze step runs and final is 12.039s", JSON.stringify(freezeManifestJson.final?.duration_seconds));
+
+// fastforward (lượt 96): speed up marked spans with a badge
+// (khang-nyb/demo-recorder's render() idea — their tool
+// fast-forwards dead waits in a screen recording and stamps
+// ">> tua nhanh x8" on the sped footage). Fixture
+// test/scenes-source.mp4 is red 0-5s + blue 5-10s (10.039s, 300
+// frames at 30fps): span [2,6)@2 saves 2s, so the output is
+// 8.039s — red at t=1 and t=3 (inside the span, source 4s), blue
+// at t=4.5 (after the span, source 6.5s). The badge is a dark box
+// bottom-right only inside sped spans.
+const ffRes = await client.callTool({
+  name: "fastforward",
+  arguments: { input: path.join(root, "test/scenes-source.mp4"), segments: [{ start: 2, end: 6, speed: 2 }], output: path.join(root, "outputs/mcp-fastforward.mp4") },
+});
+const ffJson = JSON.parse(ffRes.content[0].text);
+console.log("fastforward call:", JSON.stringify(ffJson.segments), "|", ffJson.duration_seconds + "s", "| mapped", ffJson.timing_check_mapped, "unmapped", ffJson.timing_check_unmapped, "| frames", ffJson.frames);
+checkOk(near(ffJson.duration_seconds, 8.039, 0.05) && near(ffJson.duration_error_seconds, 0, 0.05) && ffJson.duration_expected_seconds === 8.039, "fastforward output is D - saved time (10.039 - 2 = 8.039s)", JSON.stringify(ffJson.duration_seconds));
+checkOk(ffJson.segments?.length === 1 && ffJson.segments[0].start_seconds === 2 && ffJson.segments[0].end_seconds === 6 && ffJson.segments[0].speed === 2 && ffJson.segments[0].out_start_seconds === 2 && ffJson.segments[0].out_end_seconds === 4 && ffJson.segments[0].clamped === false, "fastforward echoes the span: 2-6s @2x lands at out 2-4s, not clamped", JSON.stringify(ffJson.segments));
+checkOk(ffJson.timing_check_mapped !== null && ffJson.timing_check_mapped <= 2 && ffJson.timing_check_unmapped !== null && ffJson.timing_check_unmapped > 20, "fastforward timing check: mapped frame ~0, unshifted frame far off (the shift is real)", `mapped=${ffJson.timing_check_mapped} unmapped=${ffJson.timing_check_unmapped}`);
+checkOk(ffJson.frames === 240 && Math.abs(ffJson.frames - ffJson.frames_expected) <= 2, "fastforward frame count is 240 (60 + 60 sped + 120), within 1 of the duration estimate", `frames=${ffJson.frames} expected~${ffJson.frames_expected}`);
+checkOk(ffJson.badge?.label === "fast-forward" && ffJson.badge?.fontsize === 10 && ffJson.badge?.anchor === "bottom-right" && ffJson.has_audio === true && ffJson.dimensions === "640x360", "fastforward echoes badge geometry (10px at 360 high, bottom-right) and keeps audio/dimensions", JSON.stringify(ffJson.badge));
+const ffT1R = await planeMean(path.join(root, "outputs/mcp-fastforward.mp4"), "320:180:160:90", "r", 1);
+const ffT1B = await planeMean(path.join(root, "outputs/mcp-fastforward.mp4"), "320:180:160:90", "b", 1);
+const ffT3R = await planeMean(path.join(root, "outputs/mcp-fastforward.mp4"), "320:180:160:90", "r", 3);
+const ffT3B = await planeMean(path.join(root, "outputs/mcp-fastforward.mp4"), "320:180:160:90", "b", 3);
+const ffT45R = await planeMean(path.join(root, "outputs/mcp-fastforward.mp4"), "320:180:160:90", "r", 4.5);
+const ffT45B = await planeMean(path.join(root, "outputs/mcp-fastforward.mp4"), "320:180:160:90", "b", 4.5);
+console.log("fastforward pixels: t=1 R/B =", ffT1R, ffT1B, "| t=3 R/B =", ffT3R, ffT3B, "| t=4.5 R/B =", ffT45R, ffT45B);
+checkOk(ffT1R > 200 && ffT1B < 20 && ffT3R > 200 && ffT3B < 20, "fastforward stays red before and inside the span (t=3 is source 4s, still red)", `t1 R=${ffT1R} B=${ffT1B} | t3 R=${ffT3R} B=${ffT3B}`);
+checkOk(ffT45R < 20 && ffT45B > 200, "fastforward is blue after the span (t=4.5 is source 6.5s, past the cut)", `t4.5 R=${ffT45R} B=${ffT45B}`);
+// Badge: the bottom-right corner darkens inside a sped span and
+// nowhere else; --no-badge leaves it untouched.
+const ffNoBadgeRes = await client.callTool({
+  name: "fastforward",
+  arguments: { input: path.join(root, "test/scenes-source.mp4"), segments: [{ start: 2, end: 6, speed: 2 }], output: path.join(root, "outputs/mcp-fastforward-nobadge.mp4"), badge: false },
+});
+const ffNoBadgeJson = JSON.parse(ffNoBadgeRes.content[0].text);
+checkOk(ffNoBadgeJson.badge === null && near(ffNoBadgeJson.duration_seconds, 8.039, 0.05), "fastforward badge:false reports badge null and the same 8.039s", JSON.stringify(ffNoBadgeJson.badge));
+const ffBadgeR = await planeMean(path.join(root, "outputs/mcp-fastforward.mp4"), "120:30:520:330", "r", 3);
+const ffNoBadgeR = await planeMean(path.join(root, "outputs/mcp-fastforward-nobadge.mp4"), "120:30:520:330", "r", 3);
+const ffBadgeOffR = await planeMean(path.join(root, "outputs/mcp-fastforward.mp4"), "120:30:520:330", "r", 1);
+console.log("fastforward badge corner R: in-span =", ffBadgeR, "| no-badge =", ffNoBadgeR, "| outside span =", ffBadgeOffR);
+checkOk(ffBadgeR !== null && ffBadgeR < 200 && ffNoBadgeR !== null && ffNoBadgeR > 240, "badge darkens the bottom-right corner inside a sped span (dark box over red)", `badge R=${ffBadgeR} no-badge R=${ffNoBadgeR}`);
+checkOk(ffBadgeOffR !== null && ffBadgeOffR > 240, "no badge outside sped spans (corner stays full red at t=1)", `R=${ffBadgeOffR}`);
+// Audio follows the same map: silence-source.mp4 is tone [0,2),
+// [4,6), [7,9) with silence [2,4), [6,7); span [3,7)@2 moves the
+// gaps to [2,3.5) and [4.5,5) and the output is 7s.
+const ffAudioRes = await client.callTool({
+  name: "fastforward",
+  arguments: { input: path.join(root, "test/silence-source.mp4"), segments: [{ start: 3, end: 7, speed: 2 }], output: path.join(root, "outputs/mcp-fastforward-audio.mp4") },
+});
+const ffAudioJson = JSON.parse(ffAudioRes.content[0].text);
+checkOk(near(ffAudioJson.duration_seconds, 7, 0.05) && near(ffAudioJson.duration_error_seconds, 0, 0.05), "fastforward audio timing: 9s - 2s saved = 7s", JSON.stringify(ffAudioJson.duration_seconds));
+const { stderr: ffSdErr } = await execFileAsync("ffmpeg", ["-v", "info", "-i", path.join(root, "outputs/mcp-fastforward-audio.mp4"), "-map", "0:a", "-af", "silencedetect=noise=-40dB:d=0.3", "-f", "null", "-"]);
+const ffSdStarts = [...ffSdErr.matchAll(/silence_start: ([0-9.]+)/g)].map((m) => parseFloat(m[1]));
+checkOk(ffSdStarts.some((t) => near(t, 2, 0.15)) && ffSdStarts.some((t) => near(t, 4.5, 0.15)), "silencedetect finds the tone gaps shifted to [2,3.5) and [4.5,5)", `gaps at ${ffSdStarts.join(", ")}`);
+// Audio-only input: no video chain, no badge, duration still exact.
+const ffMp3Res = await client.callTool({
+  name: "fastforward",
+  arguments: { input: path.join(root, "test/mix-voice.mp3"), segments: [{ start: 2, end: 5, speed: 2 }], output: path.join(root, "outputs/mcp-fastforward-mp3.mp3") },
+});
+const ffMp3Json = JSON.parse(ffMp3Res.content[0].text);
+checkOk(near(ffMp3Json.duration_seconds, 7.5, 0.05) && ffMp3Json.badge === null && ffMp3Json.dimensions === null && ffMp3Json.has_audio === true, "fastforward on audio-only input: 9s - 1.5s saved = 7.5s, no badge, no dimensions", JSON.stringify(ffMp3Json.duration_seconds));
+// Overlap + clamp: a span starting inside the previous one starts
+// where the previous ended; a span past the end clamps to the clip.
+const ffOverlapRes = await client.callTool({
+  name: "fastforward",
+  arguments: { input: path.join(root, "test/scenes-source.mp4"), segments: [{ start: 2, end: 6, speed: 2 }, { start: 5, end: 8, speed: 2 }], output: path.join(root, "outputs/mcp-fastforward-overlap.mp4") },
+});
+const ffOverlapJson = JSON.parse(ffOverlapRes.content[0].text);
+checkOk(ffOverlapJson.segments[1].start_seconds === 6 && ffOverlapJson.segments[1].clamped === true && near(ffOverlapJson.duration_seconds, 7.039, 0.05), "overlapping span collapses onto the previous span's end (5-8 -> 6-8, clamped) and duration follows", JSON.stringify(ffOverlapJson.segments));
+const ffClampRes = await client.callTool({
+  name: "fastforward",
+  arguments: { input: path.join(root, "test/scenes-source.mp4"), segments: [{ start: 8, end: 20, speed: 2 }], output: path.join(root, "outputs/mcp-fastforward-clamp.mp4") },
+});
+const ffClampJson = JSON.parse(ffClampRes.content[0].text);
+checkOk(ffClampJson.segments[0].clamped === true && ffClampJson.segments[0].end_seconds === 10.039 && near(ffClampJson.duration_seconds, 9.02, 0.05), "span past the end clamps to the clip end (8-20 -> 8-10.039) and reports it", JSON.stringify(ffClampJson.segments));
+// Refusals: speed 1 (zod floor 1.1), end before start, empty list.
+const ffSpeed1Text = await callExpectThrow("fastforward", { input: path.join(root, "test/scenes-source.mp4"), segments: [{ start: 2, end: 6, speed: 1 }], output: path.join(root, "outputs/mcp-fastforward-bad.mp4") });
+checkOk(/1\.1/.test(ffSpeed1Text), "fastforward refuses speed 1 (must be over 1.1)", ffSpeed1Text.slice(0, 200));
+const ffBackwardsText = await callExpectThrow("fastforward", { input: path.join(root, "test/scenes-source.mp4"), segments: [{ start: 6, end: 2, speed: 2 }], output: path.join(root, "outputs/mcp-fastforward-bad2.mp4") });
+checkOk(/end > start/.test(ffBackwardsText), "fastforward refuses end before start", ffBackwardsText.slice(0, 200));
+const ffEmptyText = await callExpectThrow("fastforward", { input: path.join(root, "test/scenes-source.mp4"), segments: [], output: path.join(root, "outputs/mcp-fastforward-bad3.mp4") });
+checkOk(/at least 1/.test(ffEmptyText), "fastforward refuses an empty segments list", ffEmptyText.slice(0, 200));
+// CLI: --span start-end@speed renders; missing --span exits 2.
+const ffCli = await runCli(["fastforward", path.join(root, "test/scenes-source.mp4"), "--span", "2-6@2", "-o", path.join(root, "outputs/mcp-fastforward-cli.mp4")]);
+let ffCliJson = null;
+try { ffCliJson = JSON.parse(ffCli.out); } catch { /* not JSON */ }
+checkOk(ffCli.code === 0 && near(ffCliJson?.duration_seconds, 8.039, 0.05) && ffCliJson?.segments?.[0]?.speed === 2, "CLI fastforward --span 2-6@2 renders 8.039s", ffCli.out.slice(0, 200));
+const ffCliNoSpanErr = await runCliExpectError(["fastforward", path.join(root, "test/scenes-source.mp4"), "-o", path.join(root, "outputs/mcp-fastforward-nospan.mp4")]);
+checkOk(ffCliNoSpanErr !== null && /--span/.test(ffCliNoSpanErr), "CLI fastforward without --span exits 2 naming --span", (ffCliNoSpanErr ?? "").slice(0, 160));
+// Manifest: fastforward as a pipeline step (segments array, like
+// broll clips), plus a bad-segments refusal.
+const ffManifestPath = path.join(root, "outputs/mcp-manifest-fastforward.json");
+await writeFile(ffManifestPath, JSON.stringify({ version: 1, input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-manifest-fastforward.mp4"), steps: [{ tool: "fastforward", args: { segments: [{ start: 2, end: 6, speed: 2 }] } }] }), "utf8");
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const ffManifestRes = await client.callTool({ name: "manifest", arguments: { manifest_path: ffManifestPath } });
+const ffManifestJson = JSON.parse(ffManifestRes.content[0].text);
+checkOk(ffManifestJson.steps?.[0]?.status === "ok" && near(ffManifestJson.final?.duration_seconds, 8.039, 0.05), "manifest fastforward step runs ok, final 8.039s", JSON.stringify(ffManifestJson.steps?.map((s) => s.status)));
+const ffManifestBadPath = path.join(root, "outputs/mcp-manifest-fastforward-bad.json");
+await writeFile(ffManifestBadPath, JSON.stringify({ version: 1, input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-manifest-fastforward-bad.mp4"), steps: [{ tool: "fastforward", args: { segments: [{ start: 2, end: 6 }] } }] }), "utf8");
+const ffManifestBadText = await callExpectThrow("manifest", { manifest_path: ffManifestBadPath });
+checkOk(/segments\[0\]\.speed/.test(ffManifestBadText), "manifest refuses a fastforward step whose segment has no speed, before rendering", ffManifestBadText.slice(0, 200));
 
 // boomerang: forward + reverse ping-pong. Fixture
 // test/scenes-source.mp4 is red 5s + blue 5s (10.039s, 300 frames
@@ -4644,10 +4747,16 @@ const gifProbe = await probeStreams(path.join(root, "outputs/mcp-demo.gif"));
 checkOk(gifProbe?.streams?.[0]?.codec_name === "gif" && gifProbe?.streams?.[0]?.width === 640, "independent ffprobe sees a 640-wide GIF", JSON.stringify(gifProbe?.streams));
 checkOk(statSync(path.join(root, "outputs/mcp-demo.gif")).size === gifJson.size_bytes, "on-disk file size matches the reported size_bytes", `disk ${statSync(path.join(root, "outputs/mcp-demo.gif")).size} vs ${gifJson.size_bytes}`);
 // Tight budget (0.5 MB): the ladder must step fps, then width, down.
+// The tight ladder runs 4+ GIF encodes of a 10s clip — over the
+// SDK's 60s default when the machine is busy (same trap as the mci
+// interpolate and the impossible-budget call below, same 300s
+// override). Lượt 96 caught it: the full suite crashed here with
+// "Request timed out" (60s) while a GTA render + rembg job loaded
+// the machine; the tool itself is fine.
 const gifTightRes = await client.callTool({
   name: "export_gif",
   arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-demo-tight.gif"), max_size_mb: 0.5 },
-});
+}, undefined, { timeout: 300000 });
 const gifTightJson = JSON.parse(gifTightRes.content[0].text);
 console.log("export_gif tight ladder:", JSON.stringify(gifTightJson.attempts));
 checkOk(gifTightJson.size_budget_met === true && gifTightJson.size_bytes <= 500_000, "export_gif fits the 0.5 MB budget", JSON.stringify({ size: gifTightJson.size_bytes, attempts: gifTightJson.attempts_tried }));
@@ -5266,7 +5375,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 71 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 71 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 72 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 72 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -7184,7 +7293,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 71 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 72 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -7244,11 +7353,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 71, "GET /mcp reports name/version/transport and 71 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 72, "GET /mcp reports name/version/transport and 72 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 71 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 71 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 72 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 72 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -7272,7 +7381,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 71, "JSON-RPC tools/list returns the same 71 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 72, "JSON-RPC tools/list returns the same 72 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));
