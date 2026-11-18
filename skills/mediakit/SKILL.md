@@ -199,7 +199,11 @@ it (`frames` or `extract_frame`) — never trust the duration alone.
 `convert` with no codec arguments stream-copies both streams (a fast
 re-mux). Pass `--video-codec libx264` only when you actually need to change
 the codec. CRF 23 is a good default for H.264; 18–20 for near-lossless,
-28+ for small files.
+28+ for small files. `--encoder auto` uses a working hardware encoder
+(nvenc/qsv/vaapi/videotoolbox/amf) when the machine has one and falls
+back to software otherwise — the result says which one ran
+(`encoder_used`, `encoder_fallback`); a named encoder that cannot
+probe-encode fails instead of silently falling back.
 
 ### 10. Measure bars before you crop; package last
 `cropdetect` samples frames across the whole file (not just the start,

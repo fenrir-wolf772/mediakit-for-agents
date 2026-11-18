@@ -7436,45 +7436,76 @@ const VIDEO_CODECS = { libx264: "mp4", libx265: "mp4", vp9: "webm", av1: "mp4", 
 // so the GOP there is a maximum, not an exact spacing. The result
 // measures the keyframes on the output file (count + gap stats), so
 // the spacing is verified, not assumed.
-export async function convert({ input, output, videoCodec = null, audioCodec = null, crf = 23, preset = "medium", gop = null, gopSeconds = null, dryRun = false }) {
+export async function convert({ input, output, videoCodec = null, audioCodec = null, crf = 23, preset = "medium", gop = null, gopSeconds = null, dryRun = false, encoder = null }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const c = num(crf, "crf", { min: 0, max: 51, integer: true });
   if (gop !== null && gop !== undefined && gopSeconds !== null && gopSeconds !== undefined) {
     throw new MediaKitError("convert --gop and --gop-seconds are mutually exclusive (one way to set the interval)", "INVALID_ARG");
   }
+  const encReq = encoder ?? null;
+  if (encReq !== null && (!videoCodec || videoCodec === "copy")) {
+    throw new MediaKitError("convert --encoder needs a video re-encode (pass --video-codec libx264, libx265, av1 or vp9); stream-copy has no encoder to choose", "INVALID_ARG");
+  }
   const gopFramesReq = (gop === null || gop === undefined) ? null : num(gop, "gop", { min: 1, max: 10000, integer: true });
   const gopSecsReq = (gopSeconds === null || gopSeconds === undefined) ? null : num(gopSeconds, "gop_seconds", { min: 0.1, max: 3600 });
-  const meta = gopFramesReq !== null || gopSecsReq !== null ? await probe(inPath) : null;
+  const meta = gopFramesReq !== null || gopSecsReq !== null || encReq !== null ? await probe(inPath) : null;
   let gopFrames = null;
   let gopSecondsOut = null;
+  // Resolved encoder: { requested, used, fallback, fallbackReason }.
+  // `used` is the encoder name that goes on the command line (a
+  // hardware name, or the software codec when no encoder was asked
+  // for / auto fell back). Resolved here, before the argv is built,
+  // so dry-run prints the exact command that would run.
+  let resolved = { requested: null, used: videoCodec, fallback: false, fallbackReason: null };
+  let hwArgs = null;
   if (meta) {
-    if (!meta.video) throw new MediaKitError("convert --gop needs a video input", "INVALID_ARG");
-    if (!videoCodec || videoCodec === "copy") {
-      throw new MediaKitError("convert --gop needs a video re-encode (pass --video-codec libx264); stream-copy cannot move keyframes", "INVALID_ARG");
+    if (!meta.video) throw new MediaKitError(`convert ${encReq !== null ? "--encoder" : "--gop"} needs a video input`, "INVALID_ARG");
+    if (encReq !== null) {
+      resolved = await resolveVideoEncoder({ videoCodec, encoder: encReq });
+      if (!resolved.fallback && resolved.requested !== null) hwArgs = hwEncoderArgs(resolved.used, c, preset);
     }
-    if (gopFramesReq !== null) {
-      gopFrames = gopFramesReq;
-      gopSecondsOut = meta.video.fps ? +(gopFrames / meta.video.fps).toFixed(3) : null;
-    } else {
-      if (!meta.video.fps) throw new MediaKitError("convert --gop-seconds needs a source with a known frame rate", "INVALID_ARG");
-      gopFrames = Math.max(1, Math.round(meta.video.fps * gopSecsReq));
-      gopSecondsOut = gopSecsReq;
+    // The GOP block only runs when a GOP was actually requested —
+    // meta is also non-null for --encoder alone, and an encoder-only
+    // convert must not get a 1-frame GOP by accident.
+    if (gopFramesReq !== null || gopSecsReq !== null) {
+      if (!videoCodec || videoCodec === "copy") {
+        throw new MediaKitError("convert --gop needs a video re-encode (pass --video-codec libx264); stream-copy cannot move keyframes", "INVALID_ARG");
+      }
+      if (gopFramesReq !== null) {
+        gopFrames = gopFramesReq;
+        gopSecondsOut = meta.video.fps ? +(gopFrames / meta.video.fps).toFixed(3) : null;
+      } else {
+        if (!meta.video.fps) throw new MediaKitError("convert --gop-seconds needs a source with a known frame rate", "INVALID_ARG");
+        gopFrames = Math.max(1, Math.round(meta.video.fps * gopSecsReq));
+        gopSecondsOut = gopSecsReq;
+      }
     }
   }
+  const hwEncoder = hwArgs ? resolved.used : null;
   const args = ["-y", "-i", inPath];
   if (videoCodec) {
     if (!(videoCodec in VIDEO_CODECS)) throw new MediaKitError(`unsupported video codec: ${videoCodec}`, "INVALID_ARG");
-    args.push("-c:v", videoCodec);
-    if (videoCodec !== "copy") {
-      args.push("-crf", String(c), "-preset", preset);
-      if (gopFrames !== null) {
-        // -keyint_min is a libx264/libx265/mpeg4 option; libvpx/aom
-        // take -g only. Scene-cut suppression is codec-specific too.
-        args.push("-g", String(gopFrames));
-        if (["libx264", "libx265", "mpeg4"].includes(videoCodec)) args.push("-keyint_min", String(gopFrames));
-        if (["libx264", "mpeg4"].includes(videoCodec)) args.push("-sc_threshold", "0");
-        if (videoCodec === "libx265") args.push("-x265-params", "scenecut=0");
+    if (hwEncoder) {
+      // Hardware path: the encoder's own quality knob (see
+      // hwEncoderArgs) instead of software -crf/-preset, plus -g for
+      // the GOP. -keyint_min/-sc_threshold/-x265-params are
+      // libx264/libx265-only and are skipped here.
+      if (hwArgs.videoFilter) args.push("-vf", hwArgs.videoFilter);
+      args.push("-c:v", hwEncoder, ...hwArgs.args);
+      if (gopFrames !== null) args.push("-g", String(gopFrames));
+    } else {
+      args.push("-c:v", videoCodec);
+      if (videoCodec !== "copy") {
+        args.push("-crf", String(c), "-preset", preset);
+        if (gopFrames !== null) {
+          // -keyint_min is a libx264/libx265/mpeg4 option; libvpx/aom
+          // take -g only. Scene-cut suppression is codec-specific too.
+          args.push("-g", String(gopFrames));
+          if (["libx264", "libx265", "mpeg4"].includes(videoCodec)) args.push("-keyint_min", String(gopFrames));
+          if (["libx264", "mpeg4"].includes(videoCodec)) args.push("-sc_threshold", "0");
+          if (videoCodec === "libx265") args.push("-x265-params", "scenecut=0");
+        }
       }
     }
   } else {
@@ -7483,11 +7514,24 @@ export async function convert({ input, output, videoCodec = null, audioCodec = n
   if (audioCodec) args.push("-c:a", audioCodec, ...audioBitrateArgs(audioCodec));
   else args.push("-c:a", "copy");
   args.push(outPath);
+  // `video_codec` reports the encoder actually used (a hardware name
+  // when one ran, the software codec otherwise) — not the request.
+  const videoCodecUsed = hwEncoder ?? videoCodec ?? "copy";
+  const encoderFields = {
+    encoder_requested: resolved.requested,
+    encoder_used: resolved.used,
+    encoder_fallback: resolved.fallback,
+    encoder_fallback_reason: resolved.fallbackReason,
+    preset_used: hwArgs?.presetUsed ?? null,
+    preset_ignored: hwArgs?.presetIgnored ?? null,
+  };
   if (dryRun) {
     return {
       operation: "convert", dry_run: true, input: inPath, output: outPath,
-      video_codec: videoCodec ?? "copy", audio_codec: audioCodec ?? "copy",
+      video_codec: videoCodecUsed, audio_codec: audioCodec ?? "copy",
       gop_frames: gopFrames, gop_seconds: gopSecondsOut, keyframes: null,
+      codec_verified: null, codec_name: null,
+      ...encoderFields,
       commands: [formatCommand(args)],
       note: "Dry run: no file written. The keyframe spacing is measured on the real output, so it reports null here.",
     };
@@ -7495,6 +7539,21 @@ export async function convert({ input, output, videoCodec = null, audioCodec = n
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
+  // Verify the output codec on disk (the extract_audio rule from
+  // turn 102): the codec_name ffprobe reads must be the family the
+  // requested codec encodes — a hardware encoder that silently wrote
+  // something else, or a fallback that did not take, fails here
+  // instead of shipping a mislabelled file. Stream-copy has no
+  // re-encode to verify, so it reports null.
+  let codecVerified = null;
+  const codecName = out.video?.codec ?? null;
+  if (videoCodec && videoCodec !== "copy") {
+    const expected = FAMILY_CODEC_NAME[SOFTWARE_CODEC_FAMILY[videoCodec]];
+    codecVerified = codecName === expected;
+    if (!codecVerified) {
+      throw new MediaKitError(`convert wrote codec ${codecName ?? "none"} but ${videoCodec} encodes ${expected} — the output codec does not match the requested codec`, "VERIFY_FAILED");
+    }
+  }
   let keyframes = null;
   if (gopFrames !== null) {
     // Measure the spacing on the output file — the GOP is only real
@@ -7510,8 +7569,10 @@ export async function convert({ input, output, videoCodec = null, audioCodec = n
   }
   return {
     operation: "convert", input: inPath, output: outPath,
-    video_codec: videoCodec ?? "copy", audio_codec: audioCodec ?? "copy",
+    video_codec: videoCodecUsed, audio_codec: audioCodec ?? "copy",
     gop_frames: gopFrames, gop_seconds: gopSecondsOut, keyframes,
+    codec_verified: codecVerified, codec_name: codecName,
+    ...encoderFields,
     ...info, duration_seconds: out.duration_seconds,
     dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
   };
@@ -8632,8 +8693,9 @@ export function fixForMissing(missing) {
 // calling one available. Listed is not usable; a failed probe encode
 // is the truth. A missing GPU never fails doctor (CPU-only machines
 // are fine) — this is informational, so agents can pick a hardware
-// encoder when one really works.
-const GPU_ENCODERS = [
+// encoder when one really works. Exported: convert --encoder and the
+// MCP convert tool validate against this same list.
+export const GPU_ENCODERS = [
   "h264_nvenc", "hevc_nvenc", "av1_nvenc",
   "h264_qsv", "hevc_qsv", "av1_qsv",
   "h264_vaapi", "hevc_vaapi", "vp9_vaapi", "av1_vaapi",
@@ -8641,23 +8703,118 @@ const GPU_ENCODERS = [
   "h264_amf", "hevc_amf", "av1_amf",
 ];
 
+// Software codec -> codec family, so a requested hardware encoder can
+// be checked against the requested codec (an h264 encoder cannot
+// encode an hevc request). mpeg4 has no hardware encoder in this
+// list, so convert --encoder refuses it outright.
+export const SOFTWARE_CODEC_FAMILY = { libx264: "h264", libx265: "hevc", av1: "av1", vp9: "vp9" };
+
+// Encoder name -> family: the part before the first underscore
+// (h264_nvenc -> h264, hevc_qsv -> hevc, vp9_vaapi -> vp9).
+export function hwEncoderFamily(encoder) {
+  return String(encoder ?? "").split("_")[0] || null;
+}
+
+// The codec_name ffprobe reports for one family (h264_nvenc and
+// libx264 both decode as "h264") — used to verify an encode really
+// produced the family it claims, instead of trusting the argv.
+const FAMILY_CODEC_NAME = { h264: "h264", hevc: "hevc", av1: "av1", vp9: "vp9" };
+
+// One tiny probe encode: 0.2s of 64x64 testsrc straight to null (2
+// frames), with a hard 10s cap so a hanging driver init cannot stall
+// the caller. On a GPU-less machine every attempt fails in well under
+// a second (measured 2026-11-12: nvenc/qsv/vaapi all fail in <1s
+// total). Pure true/false — the caller decides what a failure means.
+export async function probeEncoder(encoder) {
+  try {
+    await run(FFMPEG, ["-hide_banner", "-nostats", "-f", "lavfi", "-i", "testsrc=duration=0.2:size=64x64:rate=10", "-c:v", encoder, "-frames:v", "2", "-f", "null", "-"], { timeoutMs: 10_000 });
+    return true;
+  } catch { /* not usable on this machine — the caller tries the next one, or reports it */ }
+  return false;
+}
+
+// First WORKING encoder of one family, in GPU_ENCODERS order (best
+// first). A present-but-broken encoder is skipped, never returned.
+export async function probeWorkingEncoder(family) {
+  for (const enc of GPU_ENCODERS.filter((e) => hwEncoderFamily(e) === family)) {
+    if (await probeEncoder(enc)) return enc;
+  }
+  return null;
+}
+
 async function detectGpu(encodersOut) {
   const has = (name) => new RegExp(`\\b${name}\\b`).test(encodersOut);
   const present = GPU_ENCODERS.filter(has);
   let working = null;
   for (const enc of present) {
-    try {
-      // 0.2s of 64x64 testsrc straight to null: 2 frames, and a hard
-      // 10s cap per encoder so a hanging driver init cannot stall
-      // doctor. On a GPU-less machine every attempt fails in well
-      // under a second (measured 2026-11-12: nvenc/qsv/vaapi all
-      // fail in <1s total).
-      await run(FFMPEG, ["-hide_banner", "-nostats", "-f", "lavfi", "-i", "testsrc=duration=0.2:size=64x64:rate=10", "-c:v", enc, "-frames:v", "2", "-f", "null", "-"], { timeoutMs: 10_000 });
-      working = enc;
-      break;
-    } catch { /* not usable on this machine — try the next one */ }
+    if (await probeEncoder(enc)) { working = enc; break; }
   }
   return { available: working !== null, encoders: present, working_encoder: working };
+}
+
+// Resolve which encoder a convert actually uses (turn 104, podcli's
+// "hardware encode with fallback" idea — but NOT a silent fallback:
+// an explicitly requested encoder that fails is an error, and an
+// `auto` fallback to software is reported in the result, never
+// hidden). Presence in `ffmpeg -encoders` proves nothing — BtbN's
+// static builds ship nvenc/qsv/vaapi/amf in every GPL build, but
+// each one still needs its driver + GPU at runtime (nv-codec-headers
+// / oneVPL / libva / AMF headers are compile-time only), so the only
+// honest test is a probe encode, the same one doctor runs.
+export async function resolveVideoEncoder({ videoCodec, encoder }) {
+  if (!encoder) return { requested: null, used: videoCodec, fallback: false, fallbackReason: null };
+  const family = SOFTWARE_CODEC_FAMILY[videoCodec];
+  if (!family) throw new MediaKitError(`convert --encoder has no hardware encoder for codec ${videoCodec} (hardware encoders exist for h264/hevc/av1/vp9 only)`, "INVALID_ARG");
+  if (encoder === "auto") {
+    const working = await probeWorkingEncoder(family);
+    if (working) return { requested: "auto", used: working, fallback: false, fallbackReason: null };
+    return { requested: "auto", used: videoCodec, fallback: true, fallbackReason: `no working hardware encoder for ${family} on this machine (doctor gpu.available=false) — fell back to software ${videoCodec}` };
+  }
+  if (!GPU_ENCODERS.includes(encoder)) throw new MediaKitError(`unsupported hardware encoder: ${encoder} (supported: ${GPU_ENCODERS.join(", ")} or "auto")`, "INVALID_ARG");
+  if (hwEncoderFamily(encoder) !== family) throw new MediaKitError(`hardware encoder ${encoder} encodes ${hwEncoderFamily(encoder)}, not ${family} (requested codec ${videoCodec})`, "INVALID_ARG");
+  if (!(await probeEncoder(encoder))) throw new MediaKitError(`hardware encoder ${encoder} is not usable on this machine (probe encode failed; an explicitly requested encoder never falls back silently — use --encoder auto to allow a software fallback)`, "HW_ENCODER_UNAVAILABLE");
+  return { requested: encoder, used: encoder, fallback: false, fallbackReason: null };
+}
+
+// Quality + preset argv for a hardware encoder. Software -crf/-preset
+// do not exist on these encoders (ffmpeg rejects an unknown AVOption
+// with "Option not found"), so each family gets its own quality knob,
+// mapped from the same 0–51 crf the caller already passed:
+// - nvenc: -cq (0–51, same scale) + -preset p1–p7 (x264 preset names
+//   mapped to the nearest p-level; unknown names land on p4).
+// - qsv: -global_quality (0–51) + -preset (same names as x264).
+// - vaapi: -qp (0–51) + -vf format=nv12,hwupload (vaapi cannot take
+//   system-memory frames); no -preset exists — reported as ignored.
+// - videotoolbox: -q:v 0–100 (higher is better, so 100 − crf scaled);
+//   no -preset.
+// - amf: -quality speed/balanced/quality + -qp_i/-qp_p; no -preset.
+// Returns { args, videoFilter, presetUsed, presetIgnored }: the
+// caller reports presetUsed/presetIgnored so a dropped preset is
+// visible, never silent.
+export function hwEncoderArgs(encoder, crf, preset) {
+  const kind = String(encoder).split("_").pop();
+  const x264Presets = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"];
+  if (kind === "nvenc") {
+    const pMap = { ultrafast: "p1", superfast: "p2", veryfast: "p3", faster: "p4", fast: "p5", medium: "p4", slow: "p6", slower: "p7", veryslow: "p7" };
+    const p = pMap[preset] ?? "p4";
+    return { args: ["-cq", String(crf), "-preset", p], videoFilter: null, presetUsed: p, presetIgnored: null };
+  }
+  if (kind === "qsv") {
+    const p = x264Presets.includes(preset) ? preset : "medium";
+    return { args: ["-global_quality", String(crf), "-preset", p], videoFilter: null, presetUsed: p, presetIgnored: null };
+  }
+  if (kind === "vaapi") {
+    return { args: ["-qp", String(crf)], videoFilter: "format=nv12,hwupload", presetUsed: null, presetIgnored: "vaapi has no -preset option (preset ignored)" };
+  }
+  if (kind === "videotoolbox") {
+    const q = Math.round(100 - (crf / 51) * 100);
+    return { args: ["-q:v", String(q)], videoFilter: null, presetUsed: null, presetIgnored: "videotoolbox has no -preset option (preset ignored)" };
+  }
+  if (kind === "amf") {
+    const q = ["ultrafast", "superfast", "veryfast", "faster", "fast"].includes(preset) ? "speed" : ["slow", "slower", "veryslow"].includes(preset) ? "quality" : "balanced";
+    return { args: ["-quality", q, "-qp_i", String(crf), "-qp_p", String(crf)], videoFilter: null, presetUsed: q, presetIgnored: null };
+  }
+  throw new MediaKitError(`no quality mapping for hardware encoder ${encoder}`, "INVALID_ARG");
 }
 
 // ---------------------------------------------------------------- doctor smoke
@@ -11481,8 +11638,8 @@ export const BATCH_OPERATIONS = {
     run: (input, output, a) => compress({ input, output, quality: a.quality ?? "medium", maxWidth: a.max_width ?? null, crf: a.crf ?? null, preset: a.preset ?? null, targetSizeMb: a.target_size_mb ?? null, resolutionLadder: a.resolution_ladder ?? true, qualityProof: a.quality_proof ?? true }),
   },
   convert: {
-    args: ["video_codec", "audio_codec", "crf", "preset", "gop", "gop_seconds"],
-    run: (input, output, a) => convert({ input, output, videoCodec: a.video_codec ?? null, audioCodec: a.audio_codec ?? null, crf: a.crf ?? 23, preset: a.preset ?? "medium", gop: a.gop ?? null, gopSeconds: a.gop_seconds ?? null }),
+    args: ["video_codec", "audio_codec", "crf", "preset", "gop", "gop_seconds", "encoder"],
+    run: (input, output, a) => convert({ input, output, videoCodec: a.video_codec ?? null, audioCodec: a.audio_codec ?? null, crf: a.crf ?? 23, preset: a.preset ?? "medium", gop: a.gop ?? null, gopSeconds: a.gop_seconds ?? null, encoder: a.encoder ?? null }),
   },
   extract_audio: {
     args: ["format", "whisper", "channel"],

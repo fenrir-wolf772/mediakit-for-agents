@@ -457,8 +457,8 @@ const COMMANDS = {
     ],
   },
   convert: {
-    usage: "mediakit convert <input> -o <output> [--video-codec <c>] [--audio-codec <c>] [--crf <n>] [--preset <p>] [--gop <frames>] [--gop-seconds <s>] [--dry-run]",
-    desc: "Change container or codec. Omit a codec to stream-copy that stream. --gop / --gop-seconds sets an exact keyframe interval on re-encode (measured on the output file). --dry-run prints the exact ffmpeg command and writes no file.",
+    usage: "mediakit convert <input> -o <output> [--video-codec <c>] [--audio-codec <c>] [--crf <n>] [--preset <p>] [--gop <frames>] [--gop-seconds <s>] [--encoder <auto|name>] [--dry-run]",
+    desc: "Change container or codec. Omit a codec to stream-copy that stream. --gop / --gop-seconds sets an exact keyframe interval on re-encode (measured on the output file). --encoder auto probes for the first working hardware encoder of the codec family and falls back to software when none works (the fallback is reported, never silent); a named hardware encoder (h264_nvenc, hevc_qsv, h264_vaapi, ...) must probe-usable or the call fails. --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--video-codec", "libx264 | libx265 | vp9 | av1 | mpeg4 | copy"],
@@ -467,6 +467,7 @@ const COMMANDS = {
       ["--preset", "Encoding preset (default medium)"],
       ["--gop", "Keyframe interval in frames (needs --video-codec re-encode)"],
       ["--gop-seconds", "Keyframe interval in seconds (from source fps; needs --video-codec re-encode)"],
+      ["--encoder", "Hardware encoder: auto (probe + reported software fallback) or h264_nvenc | hevc_nvenc | av1_nvenc | h264_qsv | hevc_qsv | av1_qsv | h264_vaapi | hevc_vaapi | vp9_vaapi | av1_vaapi | h264_videotoolbox | hevc_videotoolbox | h264_amf | hevc_amf | av1_amf"],
       ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
@@ -1350,6 +1351,7 @@ async function main() {
           gop: numOpt(opts, "gop") ?? null,
           gopSeconds: numOpt(opts, "gop_seconds") ?? null,
           dryRun: opts.dry_run === true,
+          encoder: opts.encoder ?? null,
         });
         break;
       case "grade": {

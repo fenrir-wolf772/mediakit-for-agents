@@ -1973,6 +1973,111 @@ const convertGopBothRes = await client.callTool({
 const convertGopBothJson = JSON.parse(convertGopBothRes.content[0].text);
 checkOk(convertGopBothRes.isError === true && /mutually exclusive/.test(convertGopBothJson.error ?? ""), "convert --gop + --gop-seconds is refused", JSON.stringify(convertGopBothJson));
 
+// convert --encoder (lượt 104, podcli's hardware-encode-with-fallback
+// idea — but the fallback is reported, never silent): this VM has no
+// working GPU encoder, so auto must fall back to software libx264 AND
+// say so, and the output codec must still verify as h264 on disk.
+const convertEncAutoRes = await client.callTool({
+  name: "convert",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    output: path.join(root, "outputs/mcp-convert-enc-auto.mp4"),
+    video_codec: "libx264",
+    encoder: "auto",
+  },
+});
+const convertEncAutoJson = JSON.parse(convertEncAutoRes.content[0].text);
+console.log("convert encoder auto:", JSON.stringify({ requested: convertEncAutoJson.encoder_requested, used: convertEncAutoJson.encoder_used, fallback: convertEncAutoJson.encoder_fallback, verified: convertEncAutoJson.codec_verified }));
+checkOk(convertEncAutoJson.encoder_requested === "auto" && convertEncAutoJson.encoder_used === "libx264" && convertEncAutoJson.encoder_fallback === true, "convert --encoder auto falls back to libx264 on a GPU-less machine and reports it", JSON.stringify(convertEncAutoJson).slice(0, 300));
+checkOk(convertEncAutoJson.codec_verified === true && convertEncAutoJson.codec_name === "h264" && near(convertEncAutoJson.duration_seconds, 10, 0.15), "convert --encoder auto output verifies as h264 / 10s on disk", JSON.stringify(convertEncAutoJson).slice(0, 300));
+checkOk(typeof convertEncAutoJson.encoder_fallback_reason === "string" && /no working hardware encoder/.test(convertEncAutoJson.encoder_fallback_reason), "convert --encoder auto names the fallback reason", convertEncAutoJson.encoder_fallback_reason ?? "");
+
+// An explicitly requested hardware encoder must fail, not silently
+// fall back to software — that is the rule from lượt 90/95.
+const convertEncNvencRes = await client.callTool({
+  name: "convert",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    output: path.join(root, "outputs/mcp-convert-enc-nvenc.mp4"),
+    video_codec: "libx264",
+    encoder: "h264_nvenc",
+  },
+});
+const convertEncNvencJson = JSON.parse(convertEncNvencRes.content[0].text);
+checkOk(convertEncNvencRes.isError === true && /not usable/.test(convertEncNvencJson.error ?? ""), "convert --encoder h264_nvenc fails on a GPU-less machine instead of silently falling back", JSON.stringify(convertEncNvencJson));
+checkOk(!existsSync(path.join(root, "outputs/mcp-convert-enc-nvenc.mp4")), "failed explicit-encoder convert writes no output file", "mcp-convert-enc-nvenc.mp4 exists");
+
+const convertEncBadText = await callExpectThrow("convert", {
+  input: path.join(root, "test/source.mp4"),
+  output: path.join(root, "outputs/mcp-convert-enc-bad.mp4"),
+  video_codec: "libx264",
+  encoder: "h264_fakegpu",
+});
+checkOk(/Invalid enum value/.test(convertEncBadText) && /h264_fakegpu/.test(convertEncBadText), "convert --encoder with an unknown name is refused at schema validation (core also rejects it: CLI prints 'unsupported hardware encoder')", convertEncBadText.slice(0, 300));
+const convertEncBadCli = await runCli(["convert", path.join(root, "test/source.mp4"), "-o", path.join(root, "outputs/mcp-convert-enc-bad-cli.mp4"), "--video-codec", "libx264", "--encoder", "h264_fakegpu"], {});
+checkOk(convertEncBadCli.code !== 0 && /unsupported hardware encoder/.test(convertEncBadCli.out), "CLI convert --encoder with an unknown name prints the core message", convertEncBadCli.out.slice(0, 300));
+
+const convertEncMismatchRes = await client.callTool({
+  name: "convert",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    output: path.join(root, "outputs/mcp-convert-enc-mismatch.mp4"),
+    video_codec: "libx265",
+    encoder: "h264_nvenc",
+  },
+});
+const convertEncMismatchJson = JSON.parse(convertEncMismatchRes.content[0].text);
+checkOk(convertEncMismatchRes.isError === true && /encodes h264, not hevc/.test(convertEncMismatchJson.error ?? ""), "convert --encoder refuses a family mismatch (h264 encoder, hevc codec)", JSON.stringify(convertEncMismatchJson));
+
+const convertEncCopyRes = await client.callTool({
+  name: "convert",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    output: path.join(root, "outputs/mcp-convert-enc-copy.mp4"),
+    encoder: "auto",
+  },
+});
+const convertEncCopyJson = JSON.parse(convertEncCopyRes.content[0].text);
+checkOk(convertEncCopyRes.isError === true && /needs a video re-encode/.test(convertEncCopyJson.error ?? ""), "convert --encoder with stream-copy is refused", JSON.stringify(convertEncCopyJson));
+
+const convertEncMpeg4Res = await client.callTool({
+  name: "convert",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    output: path.join(root, "outputs/mcp-convert-enc-mpeg4.mp4"),
+    video_codec: "mpeg4",
+    encoder: "auto",
+  },
+});
+const convertEncMpeg4Json = JSON.parse(convertEncMpeg4Res.content[0].text);
+checkOk(convertEncMpeg4Res.isError === true && /no hardware encoder for codec mpeg4/.test(convertEncMpeg4Json.error ?? ""), "convert --encoder auto refuses mpeg4 (no hardware encoder for it)", JSON.stringify(convertEncMpeg4Json));
+
+// CLI: the same auto fallback through the command line, plus a
+// dry-run that shows the resolved software command.
+const convertEncCliJson = await runCliJson(["convert", path.join(root, "test/source.mp4"), "-o", path.join(root, "outputs/mcp-convert-enc-cli.mp4"), "--video-codec", "libx264", "--encoder", "auto"]);
+checkOk(convertEncCliJson.encoder_used === "libx264" && convertEncCliJson.encoder_fallback === true && convertEncCliJson.codec_verified === true, "CLI convert --encoder auto falls back and verifies", JSON.stringify(convertEncCliJson).slice(0, 300));
+const convertEncDryJson = await runCliJson(["convert", path.join(root, "test/source.mp4"), "-o", path.join(root, "outputs/mcp-convert-enc-dry.mp4"), "--video-codec", "libx264", "--encoder", "auto", "--dry-run"]);
+checkOk(convertEncDryJson.encoder_fallback === true && convertEncDryJson.commands[0].includes("-c:v libx264") && !existsSync(path.join(root, "outputs/mcp-convert-enc-dry.mp4")), "CLI convert --encoder auto --dry-run prints the fallback command and writes no file", convertEncDryJson.commands?.[0] ?? "");
+
+// Batch + manifest pass-through: encoder rides the same args list as
+// the other convert options, so both must see the fallback result.
+await rm(path.join(root, "outputs/mcp-batch-enc-in"), { recursive: true, force: true });
+await rm(path.join(root, "outputs/mcp-batch-enc-out"), { recursive: true, force: true });
+await mkdir(path.join(root, "outputs/mcp-batch-enc-in"), { recursive: true });
+await copyFile(path.join(root, "test/source.mp4"), path.join(root, "outputs/mcp-batch-enc-in/source.mp4"));
+const batchEncRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "convert", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-enc-in"), output_dir: path.join(root, "outputs/mcp-batch-enc-out"), args: { video_codec: "libx264", encoder: "auto" } },
+});
+const batchEncJson = JSON.parse(batchEncRes.content[0].text);
+checkOk(batchEncJson.succeeded === 1 && batchEncJson.results[0].result?.encoder_fallback === true && batchEncJson.results[0].result?.codec_verified === true, "batch convert --encoder auto reports the fallback in its row result", JSON.stringify(batchEncJson.results.map((r) => r.result?.encoder_fallback)));
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const encManifestPath = path.join(root, "outputs/mcp-manifest-enc.json");
+await writeFile(encManifestPath, JSON.stringify({ version: 1, input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-manifest-enc.mp4"), steps: [{ tool: "convert", args: { video_codec: "libx264", encoder: "auto" } }] }), "utf8");
+const encManifestRes = await client.callTool({ name: "manifest", arguments: { manifest_path: encManifestPath } });
+const encManifestJson = JSON.parse(encManifestRes.content[0].text);
+checkOk(encManifestJson.steps_run === 1 && encManifestJson.steps[0].status === "ok" && encManifestJson.steps[0].result?.encoder_fallback === true && encManifestJson.steps[0].result?.codec_verified === true && near(encManifestJson.final.duration_seconds, 10, 0.15), "manifest convert step with encoder auto runs and reports the fallback (final 10s)", JSON.stringify(encManifestJson.steps.map((s) => s.result?.encoder_fallback)));
+
 const concatTransRes = await client.callTool({
   name: "concat",
   arguments: {

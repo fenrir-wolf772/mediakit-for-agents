@@ -695,7 +695,7 @@ export const TOOL_DEFS = [
 
   {
     name: "convert",
-    description: "Change container or codec. Omit video_codec/audio_codec to stream-copy that stream. crf 23 is a good default for H.264. gop (frames) or gop_seconds sets an exact keyframe interval on re-encode (scene-cut keyframes disabled for libx264/libx265/mpeg4); the result measures the keyframes on the output file. A GOP is required for keyframe-snapped stream-copy cuts. Set dry_run=true to print the exact ffmpeg command and write no file.",
+    description: "Change container or codec. Omit video_codec/audio_codec to stream-copy that stream. crf 23 is a good default for H.264. gop (frames) or gop_seconds sets an exact keyframe interval on re-encode (scene-cut keyframes disabled for libx264/libx265/mpeg4); the result measures the keyframes on the output file. A GOP is required for keyframe-snapped stream-copy cuts. encoder picks the video encoder: \"auto\" probes for the first working hardware encoder of the codec family and falls back to software when none works (the fallback is reported in encoder_fallback, never silent); a named hardware encoder (h264_nvenc, hevc_qsv, h264_vaapi, ...) must probe-usable or the call fails. The result reports encoder_used and verifies the output codec on disk (codec_verified). Set dry_run=true to print the exact ffmpeg command and write no file.",
     schema: {
     input: pathSchema,
     output: pathSchema,
@@ -705,6 +705,7 @@ export const TOOL_DEFS = [
     preset: z.string().default("medium"),
     gop: z.number().int().min(1).max(10000).optional().describe("Keyframe interval in frames (needs a video re-encode; mutually exclusive with gop_seconds)"),
     gop_seconds: z.number().min(0.1).max(3600).optional().describe("Keyframe interval in seconds, converted to frames from the source fps (mutually exclusive with gop)"),
+    encoder: z.enum(["auto", ...core.GPU_ENCODERS]).optional().describe("Hardware encoder: \"auto\" probes for the first working encoder of the codec family and falls back to software (reported, never silent); a named encoder must probe-usable or the call fails. Needs a video re-encode (pass video_codec); mpeg4 has no hardware encoder"),
     dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file (keyframes report null — they are measured on the real output)"),
   },
     handler: async (a) => safe(() => core.convert({
@@ -717,6 +718,7 @@ export const TOOL_DEFS = [
     gop: a.gop ?? null,
     gopSeconds: a.gop_seconds ?? null,
     dryRun: a.dry_run,
+    encoder: a.encoder ?? null,
   })),
   },
 
