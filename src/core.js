@@ -1942,7 +1942,44 @@ function normalizeCompressor(compressor) {
   };
 }
 
-export async function loudness({ input, output, targetLufs = -14, format = null, compressor = null }) {
+// Two-pass loudnorm argv: pass 1 measured the input (or the
+// compressed temp), pass 2 applies the exact linear gain. Extracted
+// so loudness --dry-run prints the byte-identical command the real
+// run executes, instead of rebuilding it a second time and drifting.
+function loudnessTwoPassArgs({ inPath, normSource, normMeasured, target, codec, outPath }) {
+  const args = ["-y", "-i", inPath];
+  if (normSource !== inPath) args.push("-i", normSource);
+  args.push(
+    "-af", `loudnorm=I=${target}:TP=-2:LRA=11:measured_I=${normMeasured.i}:measured_TP=${normMeasured.tp}:measured_LRA=${normMeasured.lra}:measured_thresh=${normMeasured.thresh}:offset=${normMeasured.offset}:linear=true`,
+    "-ar", "48000",
+  );
+  if (normSource !== inPath) args.push("-map", "0:v?", "-map", "1:a");
+  args.push("-c:v", "copy", "-c:a", codec, ...audioBitrateArgs(codec), outPath);
+  return args;
+}
+
+// Single-pass fallback when the measurement failed: no measured_*
+// values exist, so loudnorm estimates on the fly. With a compressor
+// the compression runs inline in the same graph (no temp file).
+function loudnessSinglePassArgs({ inPath, target, codec, outPath, comp }) {
+  return [
+    "-y", "-i", inPath,
+    "-af", `${comp ? `acompressor=threshold=${+(10 ** (comp.threshold_db / 20)).toFixed(4)}:ratio=${comp.ratio}:attack=${comp.attack_ms}:release=${comp.release_ms}:knee=${comp.knee_db}:detection=${comp.detection},` : ""}loudnorm=I=${target}:TP=-2:LRA=11`,
+    "-ar", "48000", "-c:v", "copy", "-c:a", codec, ...audioBitrateArgs(codec), outPath,
+  ];
+}
+
+// Compressor pre-stage render: speech to a lossless temp the
+// loudnorm pass then measures. Same argv in the real run and in
+// dry-run (the temp path is deterministic for this process).
+function loudnessCompressorArgs({ inPath, comp, compPath }) {
+  const thrLin = +(10 ** (comp.threshold_db / 20)).toFixed(4);
+  return ["-y", "-i", inPath, "-vn",
+    "-af", `acompressor=threshold=${thrLin}:ratio=${comp.ratio}:attack=${comp.attack_ms}:release=${comp.release_ms}:knee=${comp.knee_db}:detection=${comp.detection}`,
+    "-ar", "48000", "-c:a", "pcm_s16le", compPath];
+}
+
+export async function loudness({ input, output, targetLufs = -14, format = null, compressor = null, dryRun = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const target = num(targetLufs, "target_lufs", { min: -70, max: 0 });
@@ -1973,6 +2010,36 @@ export async function loudness({ input, output, targetLufs = -14, format = null,
   // -0.04), so the in-graph target sits 0.5 dB below the -1.5 on-disk
   // goal and the file passes the qa true-peak max of -0.3 dBTP.
   const measured = await measureLoudnessFull(inPath);
+  if (dryRun) {
+    // The measurement above is read-only (loudnorm stats pass), so
+    // the two-pass command is exact when no compressor is used. With
+    // a compressor the real run renders the temp first and re-measures
+    // IT: the second command below assumes that measurement succeeds
+    // (two inputs, audio from the temp) and shows the uncompressed
+    // input's measured_* values as placeholders — both the values and
+    // the temp mapping will differ in the real run, and the note says
+    // so instead of pretending the command is exact.
+    const commands = [];
+    let note = "Dry run: no file written.";
+    if (comp && measured) {
+      const compPath = path.join(path.dirname(outPath), `.loudness-comp-${process.pid}.wav`);
+      commands.push(formatCommand(loudnessCompressorArgs({ inPath, comp, compPath })));
+      commands.push(formatCommand(loudnessTwoPassArgs({ inPath, normSource: compPath, normMeasured: measured, target, codec, outPath })));
+      note += " The loudnorm measured_* values are from the uncompressed input — the real run re-measures the compressed temp first, so they will differ.";
+    } else if (measured) {
+      commands.push(formatCommand(loudnessTwoPassArgs({ inPath, normSource: inPath, normMeasured: measured, target, codec, outPath })));
+    } else {
+      commands.push(formatCommand(loudnessSinglePassArgs({ inPath, target, codec, outPath, comp })));
+      note += " The input could not be measured, so the real run falls back to single-pass loudnorm (same command).";
+    }
+    return {
+      operation: "loudness", dry_run: true, input: inPath, output: outPath,
+      target_lufs: target, input_lufs: measured?.i ?? null,
+      two_pass: measured !== null,
+      ...(comp ? { compressor: { threshold_db: comp.threshold_db, ratio: comp.ratio, attack_ms: comp.attack_ms, release_ms: comp.release_ms, knee_db: comp.knee_db, detection: comp.detection }, compressed_lufs: null } : {}),
+      format: ext, commands, note,
+    };
+  }
   let twoPass = false;
   let compressedLufs = null;
   let compPath = null;
@@ -1985,12 +2052,7 @@ export async function loudness({ input, output, targetLufs = -14, format = null,
     let normMeasured = measured;
     if (comp) {
       compPath = path.join(path.dirname(outPath), `.loudness-comp-${process.pid}.wav`);
-      const thrLin = +(10 ** (comp.threshold_db / 20)).toFixed(4);
-      await run(FFMPEG, [
-        "-y", "-i", inPath, "-vn",
-        "-af", `acompressor=threshold=${thrLin}:ratio=${comp.ratio}:attack=${comp.attack_ms}:release=${comp.release_ms}:knee=${comp.knee_db}:detection=${comp.detection}`,
-        "-ar", "48000", "-c:a", "pcm_s16le", compPath,
-      ]);
+      await run(FFMPEG, loudnessCompressorArgs({ inPath, comp, compPath }));
       const compMeasured = await measureLoudnessFull(compPath);
       if (compMeasured) {
         normMeasured = compMeasured;
@@ -1999,23 +2061,12 @@ export async function loudness({ input, output, targetLufs = -14, format = null,
       }
     }
     if (normMeasured) {
-      const args = ["-y", "-i", inPath];
-      if (normSource !== inPath) args.push("-i", normSource);
-      args.push(
-        "-af", `loudnorm=I=${target}:TP=-2:LRA=11:measured_I=${normMeasured.i}:measured_TP=${normMeasured.tp}:measured_LRA=${normMeasured.lra}:measured_thresh=${normMeasured.thresh}:offset=${normMeasured.offset}:linear=true`,
-        "-ar", "48000",
-      );
-      if (normSource !== inPath) args.push("-map", "0:v?", "-map", "1:a");
-      args.push("-c:v", "copy", "-c:a", codec, ...audioBitrateArgs(codec), outPath);
+      const args = loudnessTwoPassArgs({ inPath, normSource, normMeasured, target, codec, outPath });
       await run(FFMPEG, args);
       twoPass = true;
     } else {
       // Measurement failed (unusual input): fall back to single-pass.
-      await run(FFMPEG, [
-        "-y", "-i", inPath,
-        "-af", `${comp ? `acompressor=threshold=${+(10 ** (comp.threshold_db / 20)).toFixed(4)}:ratio=${comp.ratio}:attack=${comp.attack_ms}:release=${comp.release_ms}:knee=${comp.knee_db}:detection=${comp.detection},` : ""}loudnorm=I=${target}:TP=-2:LRA=11`,
-        "-ar", "48000", "-c:v", "copy", "-c:a", codec, ...audioBitrateArgs(codec), outPath,
-      ]);
+      await run(FFMPEG, loudnessSinglePassArgs({ inPath, target, codec, outPath, comp }));
     }
   } finally {
     if (compPath) await unlink(compPath).catch(() => {});
@@ -5263,7 +5314,7 @@ function cdlFilterChain(c) {
   return chain;
 }
 
-export async function grade({ input, output, preset = null, filter = null, crf = 23, cdl = null }) {
+export async function grade({ input, output, preset = null, filter = null, crf = 23, cdl = null, dryRun = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const c = num(crf, "crf", { min: 0, max: 51, integer: true });
@@ -5290,6 +5341,19 @@ export async function grade({ input, output, preset = null, filter = null, crf =
   const mid = meta.duration_seconds !== null ? +(meta.duration_seconds / 2).toFixed(3) : 0;
   const before = await frameChannelMeans(inPath, mid);
   const args = ["-y", "-i", inPath, "-vf", chain, "-c:v", "libx264", "-crf", String(c), "-preset", "medium", "-c:a", "copy", outPath];
+  if (dryRun) {
+    // color_before is measured on the input (read-only frame means),
+    // so it is real here; color_after/dimensions/duration/size are
+    // measured on the output file, so they report null.
+    return {
+      operation: "grade", dry_run: true, input: inPath, output: outPath,
+      preset: name, filter: chain, crf: c, cdl: cdlNorm,
+      color_before: before, color_after: null,
+      dimensions: null, duration_seconds: null, size_bytes: null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. color_after is measured on the real output, so it reports null here.",
+    };
+  }
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const after = await frameChannelMeans(outPath, mid);
@@ -5379,7 +5443,7 @@ export async function reverseClip({ input, output, audio = true, crf = 23 }) {
 // same pixels. Audio is re-encoded by output extension with the
 // AAC 192k pin (reverseClip's rule: hardcoding aac wrote AAC into
 // an .mp3 container once).
-export async function rotateClip({ input, output, angle = null, flip = null, crf = 23 }) {
+export async function rotateClip({ input, output, angle = null, flip = null, crf = 23, dryRun = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const c = num(crf, "crf", { min: 0, max: 51, integer: true });
@@ -5409,6 +5473,26 @@ export async function rotateClip({ input, output, angle = null, flip = null, crf
   const args = ["-y", "-i", inPath, "-vf", filter, "-c:v", "libx264", "-crf", String(c), "-preset", "medium"];
   if (meta.audio) args.push("-c:a", audioCodec, ...audioBitrateArgs(audioCodec));
   args.push(outPath);
+  if (dryRun) {
+    // The expected display size is exact: a 90/270 transpose swaps
+    // the display axes, a 180/flip keeps them. output_rotation,
+    // duration and size are measured on the real output, so they
+    // report null (the real run strips rotation metadata, so
+    // output_rotation stays null there too).
+    const swap = angleOut === 90 || angleOut === 270;
+    const dw = meta.video.display_width, dh = meta.video.display_height;
+    return {
+      operation: "rotate", dry_run: true, input: inPath, output: outPath,
+      angle: angleOut, flip: flipOut, filter,
+      input_rotation: meta.video.rotation ?? null,
+      input_dimensions: `${dw}x${dh}`,
+      output_rotation: null,
+      dimensions: swap ? `${dh}x${dw}` : `${dw}x${dh}`,
+      duration_seconds: null, size_bytes: null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. dimensions is the expected display size after the rotation; output_rotation/duration/size are measured on the real output, so they report null here.",
+    };
+  }
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);

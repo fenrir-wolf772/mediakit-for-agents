@@ -316,6 +316,35 @@ const loudReframeRes = await client.callTool({
 });
 const loudReframeJson = JSON.parse(loudReframeRes.content[0].text);
 checkOk(near(loudReframeJson.output_lufs, -14, 0.5), "loudness fixes the reframed file to -14 LUFS", `got ${loudReframeJson.output_lufs}`);
+// loudness --dry-run (lượt 105): the measurement pass is read-only,
+// so the two-pass command is exact; with a compressor the loudnorm
+// measured_* values come from the uncompressed input (the real run
+// re-measures the compressed temp first) and the note says so.
+const loudDryRes = await client.callTool({
+  name: "loudness",
+  arguments: { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-loud-dry.mp3"), dry_run: true },
+});
+const loudDry = JSON.parse(loudDryRes.content[0].text);
+console.log("loudness dry-run:", JSON.stringify({ dry_run: loudDry.dry_run, two_pass: loudDry.two_pass, input_lufs: loudDry.input_lufs, commands: loudDry.commands }));
+checkOk(loudDry.dry_run === true && loudDry.two_pass === true && near(loudDry.input_lufs, -22.1, 1), "loudness dry-run reports dry_run + two_pass + measured input LUFS", JSON.stringify(loudDry));
+checkOk(loudDry.commands?.length === 1 && loudDry.commands[0].includes("loudnorm=I=-14") && loudDry.commands[0].includes("measured_I="), "loudness dry-run prints the exact two-pass loudnorm command", loudDry.commands?.[0] ?? "");
+checkOk(!existsSync(path.join(root, "outputs/mcp-loud-dry.mp3")), "loudness dry-run writes no file", "outputs/mcp-loud-dry.mp3");
+const loudCompDryRes = await client.callTool({
+  name: "loudness",
+  arguments: { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-loud-comp-dry.mp3"), compressor: true, dry_run: true },
+});
+const loudCompDry = JSON.parse(loudCompDryRes.content[0].text);
+console.log("loudness compressor dry-run:", JSON.stringify({ commands: loudCompDry.commands?.length, compressed_lufs: loudCompDry.compressed_lufs, note: loudCompDry.note }));
+checkOk(loudCompDry.commands?.length === 2 && loudCompDry.commands[0].includes("acompressor") && loudCompDry.commands[0].includes("pcm_s16le"), "loudness dry-run with compressor prints the compressor render first", loudCompDry.commands?.[0] ?? "");
+checkOk(loudCompDry.commands?.[1]?.includes("-map") && loudCompDry.commands[1].includes("1:a") && loudCompDry.compressed_lufs === null && /re-measures/.test(loudCompDry.note ?? ""), "loudness compressor dry-run: second command takes audio from the temp, note says the real run re-measures", loudCompDry.note ?? "");
+checkOk(!existsSync(path.join(root, "outputs/mcp-loud-comp-dry.mp3")), "loudness compressor dry-run writes no file", "outputs/mcp-loud-comp-dry.mp3");
+const loudCliDryJson = await runCliJson(["loudness", path.join(root, "test/mix-voice.mp3"), "-o", path.join(root, "outputs/mcp-loud-cli-dry.mp3"), "--dry-run"]);
+checkOk(loudCliDryJson.dry_run === true && loudCliDryJson.commands?.[0]?.includes("loudnorm=I=-14") && !existsSync(path.join(root, "outputs/mcp-loud-cli-dry.mp3")), "CLI loudness --dry-run prints the command and writes no file", JSON.stringify(loudCliDryJson.commands));
+// The overwrite guard (reel-ffmpeg-mcp study, lượt 105): prepareOutput
+// refuses output == input even in dry-run mode.
+let loudGuardCliCode = null, loudGuardCliOut = "";
+try { await execFileAsync(process.execPath, [path.join(root, "bin/mediakit.js"), "loudness", path.join(root, "test/mix-voice.mp3"), "-o", path.join(root, "test/mix-voice.mp3"), "--dry-run"], { env: { ...process.env } }); } catch (e) { loudGuardCliCode = e.code; loudGuardCliOut = (e.stdout ?? "") + (e.stderr ?? ""); }
+checkOk(loudGuardCliCode === 2 && /OUTPUT_OVERWRITES_INPUT/.test(loudGuardCliOut), "loudness dry-run still refuses output == input (exit 2, OUTPUT_OVERWRITES_INPUT)", `code=${loudGuardCliCode} ${loudGuardCliOut.slice(0, 200)}`);
 const checkGoodRes = await client.callTool({
   name: "check",
   arguments: { input: path.join(root, "outputs/mcp-reframe-loud.mp4"), platform: "tiktok" },
@@ -510,6 +539,19 @@ const gradeBoth = await callExpectThrow("grade", { input: path.join(root, "test/
 checkOk(/mutually exclusive/.test(gradeBoth), "grade refuses preset + filter together", gradeBoth.slice(0, 200));
 const gradeAudioOnly = await callExpectThrow("grade", { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-grade-audio.mp4"), preset: "warm" });
 checkOk(/needs a video input/.test(gradeAudioOnly), "grade refuses an audio-only input", gradeAudioOnly.slice(0, 200));
+// grade --dry-run (lượt 105): color_before is measured on the input
+// (read-only), color_after is measured on the output file, so null.
+const gradeDryRes = await client.callTool({
+  name: "grade",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-grade-dry.mp4"), preset: "warm", dry_run: true },
+});
+const gradeDry = JSON.parse(gradeDryRes.content[0].text);
+console.log("grade dry-run:", JSON.stringify({ preset: gradeDry.preset, color_before: gradeDry.color_before, color_after: gradeDry.color_after }));
+checkOk(gradeDry.dry_run === true && gradeDry.preset === "warm" && gradeDry.filter?.includes("colorbalance") && typeof gradeDry.color_before?.r === "number" && gradeDry.color_after === null, "grade dry-run reports the preset + real color_before, color_after null", JSON.stringify(gradeDry));
+checkOk(gradeDry.commands?.length === 1 && gradeDry.commands[0].includes("colorbalance"), "grade dry-run prints the exact grade command", gradeDry.commands?.[0] ?? "");
+checkOk(!existsSync(path.join(root, "outputs/mcp-grade-dry.mp4")), "grade dry-run writes no file", "outputs/mcp-grade-dry.mp4");
+const gradeDryBad = await callExpectThrow("grade", { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-grade-dry-bad.mp4"), preset: "neon", dry_run: true });
+checkOk(/preset|Invalid enum/i.test(gradeDryBad), "grade dry-run still validates the preset before returning", gradeDryBad.slice(0, 200));
 
 // reverse: video + audio backwards, verified on pixels and on the
 // silence gaps. scenes-source is red [0,5) then blue [5,10); the
@@ -1066,6 +1108,26 @@ checkOk(proofManifestJson.steps_run === 1 && proofManifestStep?.quality_proof?.a
 // CLI: rotate --angle 180 keeps 640x360.
 const rotCliJson = await runCliJson(["rotate", path.join(root, "test/rotate-source.mp4"), "-o", path.join(root, "outputs/mcp-rotate-cli.mp4"), "--angle", "180"]);
 checkOk(rotCliJson.dimensions === "640x360" && rotCliJson.angle === 180 && rotCliJson.output_rotation === null, "CLI rotate --angle 180 keeps 640x360, no rotation left", JSON.stringify(rotCliJson));
+// rotate --dry-run (lượt 105): dimensions is the EXPECTED display
+// size (90/270 swaps the axes, flip keeps them); output_rotation /
+// duration / size are measured on the real output, so null.
+const rotDryRes = await client.callTool({
+  name: "rotate",
+  arguments: { input: path.join(root, "test/rotate-source.mp4"), output: path.join(root, "outputs/mcp-rotate-dry.mp4"), angle: 90, dry_run: true },
+});
+const rotDry = JSON.parse(rotDryRes.content[0].text);
+console.log("rotate dry-run:", JSON.stringify({ dimensions: rotDry.dimensions, filter: rotDry.filter, output_rotation: rotDry.output_rotation }));
+checkOk(rotDry.dry_run === true && rotDry.dimensions === "360x640" && rotDry.input_dimensions === "640x360" && rotDry.filter === "transpose=1" && rotDry.output_rotation === null, "rotate 90 dry-run reports the swapped expected dimensions (360x640)", JSON.stringify(rotDry));
+checkOk(rotDry.commands?.length === 1 && rotDry.commands[0].includes("transpose=1"), "rotate dry-run prints the exact transpose command", rotDry.commands?.[0] ?? "");
+checkOk(!existsSync(path.join(root, "outputs/mcp-rotate-dry.mp4")), "rotate dry-run writes no file", "outputs/mcp-rotate-dry.mp4");
+const rotFlipDryRes = await client.callTool({
+  name: "rotate",
+  arguments: { input: path.join(root, "test/rotate-source.mp4"), output: path.join(root, "outputs/mcp-rotate-flip-dry.mp4"), flip: "horizontal", dry_run: true },
+});
+const rotFlipDry = JSON.parse(rotFlipDryRes.content[0].text);
+checkOk(rotFlipDry.dimensions === "640x360" && rotFlipDry.filter === "hflip", "rotate flip dry-run keeps the dimensions (no axis swap)", JSON.stringify(rotFlipDry));
+const rotDryNeither = await callExpectThrow("rotate", { input: path.join(root, "test/rotate-source.mp4"), output: path.join(root, "outputs/mcp-rotate-neither-dry.mp4"), dry_run: true });
+checkOk(/exactly one of angle or flip/.test(rotDryNeither), "rotate dry-run still requires exactly one of angle/flip", rotDryNeither.slice(0, 200));
 
 // Display-dims geometry (lượt 75): crop/reframe/resize validate
 // against the frame the viewer sees, not the stored pixels.
@@ -5123,6 +5185,10 @@ const dryTrimSmartRes = await client.callTool({ name: "trim", arguments: { input
 const dryTrimSmartJson = JSON.parse(dryTrimSmartRes.content[0].text);
 checkOk(dryTrimSmartJson.dry_run === true && dryTrimSmartJson.mode === "smart-cut" && dryTrimSmartJson.commands?.length === 3 && dryTrimSmartJson.commands[0].includes("-b:v") && dryTrimSmartJson.commands[1].includes("-c copy") && dryTrimSmartJson.commands[2].includes("-f concat"), "trim dry-run with --smart-cut lists three commands (head re-encode, tail copy, concat)", JSON.stringify(dryTrimSmartJson.commands?.map((c) => c.slice(0, 80))));
 checkOk(!existsSync(dryTrimPath), "trim dry-run (smart-cut) writes no file and leaves no temp dir", dryTrimPath);
+// The overwrite guard (reel-ffmpeg-mcp study, lượt 105): prepareOutput
+// refuses output == input — a trim must never eat its own source.
+const guardTrim = await callExpectThrow("trim", { input: path.join(root, "test/source.mp4"), output: path.join(root, "test/source.mp4"), start: 1, duration: 2 });
+checkOk(/OUTPUT_OVERWRITES_INPUT/.test(guardTrim), "trim refuses output == input (OUTPUT_OVERWRITES_INPUT)", guardTrim.slice(0, 200));
 const dryResizePath = path.join(root, "outputs/mcp-dry-resize.mp4");
 const dryResizeRes = await client.callTool({ name: "resize", arguments: { input: path.join(root, "test/source.mp4"), output: dryResizePath, preset: "720p", dry_run: true } });
 const dryResizeJson = JSON.parse(dryResizeRes.content[0].text);

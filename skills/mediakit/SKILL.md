@@ -770,7 +770,15 @@ delete `.mediakit-assemble-cache` next to the manifest to force fresh
 shot builds. Before any cut, `trim`/`resize`/`convert`/`crop` all
 take `--dry-run`: the exact ffmpeg command(s) that would run, no file
 written — three commands for `trim --smart-cut` (head re-encode, tail
-copy, concat), one for the rest. The plan is computed from real probes
+copy, concat), one for the rest. `loudness`/`grade`/`rotate` take it
+too: `loudness` prints the two-pass loudnorm command (two commands
+with a compressor — render the temp, then normalize; the loudnorm
+`measured_*` values come from the uncompressed input, because the
+real run re-measures the compressed temp first), `grade` prints its
+filter chain with the input's real `color_before` (`color_after`
+null — measured on the real output), `rotate` prints the transpose
+with the expected display size (`360x640` for a 90° turn of a
+640x360 clip). The plan is computed from real probes
 (the keyframe list for `--snap`, the GOP for `--gop`), so a dry-run
 that prints the wrong cut is a bug, not a guess — read the command
 before you run it.

@@ -111,8 +111,8 @@ const COMMANDS = {
     ],
   },
   loudness: {
-    usage: "mediakit loudness <input> -o <output> [--target-lufs <n>] [--format <fmt>] [--compressor] [--compressor-threshold <dB>] [--compressor-ratio <n>]",
-    desc: "Normalize loudness (default -14 LUFS, YouTube/Spotify standard). --compressor runs a gentle compressor (threshold -24 dB, ratio 4) before the loudnorm pass, for quiet high-crest speech.",
+    usage: "mediakit loudness <input> -o <output> [--target-lufs <n>] [--format <fmt>] [--compressor] [--compressor-threshold <dB>] [--compressor-ratio <n>] [--dry-run]",
+    desc: "Normalize loudness (default -14 LUFS, YouTube/Spotify standard). --compressor runs a gentle compressor (threshold -24 dB, ratio 4) before the loudnorm pass, for quiet high-crest speech. --dry-run prints the exact ffmpeg command(s) that would run and writes no file (with --compressor the loudnorm measured_* values come from the uncompressed input — the real run re-measures the compressed temp first).",
     args: [{ name: "input", required: true }],
     options: [
       ["--target-lufs", "Target loudness in LUFS (default -14)"],
@@ -120,6 +120,7 @@ const COMMANDS = {
       ["--compressor", "Compress before normalizing (threshold -24 dB, ratio 4)"],
       ["--compressor-threshold", "Compressor threshold in dB (default -24, only with --compressor)"],
       ["--compressor-ratio", "Compressor ratio (default 4, only with --compressor)"],
+      ["--dry-run", "Print the exact ffmpeg command(s) and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -263,8 +264,8 @@ const COMMANDS = {
     ],
   },
   grade: {
-    usage: "mediakit grade <input> -o <output> [--preset warm|cool|cinematic|noir|vintage] [--filter <vf-chain>] [--cdl-slope 1.2,1,0.8 --cdl-offset 0,0,0 --cdl-power 1,1,1 --cdl-saturation 1] [--crf 23]",
-    desc: "Color-grade a video with a named preset, one custom filter chain, or an ASC CDL (--cdl-slope/--cdl-offset/--cdl-power as r,g,b triples + --cdl-saturation; any one of them selects CDL mode, mutually exclusive with --preset/--filter). Reports the mean R/G/B before and after, measured on the middle frame.",
+    usage: "mediakit grade <input> -o <output> [--preset warm|cool|cinematic|noir|vintage] [--filter <vf-chain>] [--cdl-slope 1.2,1,0.8 --cdl-offset 0,0,0 --cdl-power 1,1,1 --cdl-saturation 1] [--crf 23] [--dry-run]",
+    desc: "Color-grade a video with a named preset, one custom filter chain, or an ASC CDL (--cdl-slope/--cdl-offset/--cdl-power as r,g,b triples + --cdl-saturation; any one of them selects CDL mode, mutually exclusive with --preset/--filter). Reports the mean R/G/B before and after, measured on the middle frame. --dry-run prints the exact ffmpeg command and writes no file (color_before is still measured on the input; color_after reports null).",
     args: [{ name: "input", required: true }],
     options: [
       ["--preset", "warm (default) | cool | cinematic | noir | vintage — fixed filter chains"],
@@ -274,6 +275,7 @@ const COMMANDS = {
       ["--cdl-power", "ASC CDL power (gamma) as r,g,b (0.1-4, e.g. 1,1,1.1)"],
       ["--cdl-saturation", "ASC CDL saturation (0-4, 0 = grayscale, 1 = unchanged)"],
       ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -321,12 +323,13 @@ const COMMANDS = {
     ],
   },
   rotate: {
-    usage: "mediakit rotate <input> -o <output> [--angle 90|180|270 | --flip horizontal|vertical] [--crf 23]",
-    desc: "Rotate a clip 90/180/270 degrees clockwise, or flip it horizontally/vertically. The angle applies to the frame the viewer sees (a phone clip coded 1280x720 with rotation 90 rotates from its 720x1280 display size); the output carries no rotation metadata, so no player double-rotates it. Reports input_rotation vs output_rotation measured on disk.",
+    usage: "mediakit rotate <input> -o <output> [--angle 90|180|270 | --flip horizontal|vertical] [--crf 23] [--dry-run]",
+    desc: "Rotate a clip 90/180/270 degrees clockwise, or flip it horizontally/vertically. The angle applies to the frame the viewer sees (a phone clip coded 1280x720 with rotation 90 rotates from its 720x1280 display size); the output carries no rotation metadata, so no player double-rotates it. Reports input_rotation vs output_rotation measured on disk. --dry-run prints the exact ffmpeg command and writes no file (dimensions is the expected display size after the rotation).",
     options: [
       ["--angle", "Clockwise degrees: 90, 180 or 270 (exactly one of --angle/--flip)"],
       ["--flip", "Flip: horizontal or vertical (use instead of --angle)"],
       ["--crf", "CRF quality 0-51 (default 23)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file path"],
     ],
   },
@@ -1262,6 +1265,7 @@ async function main() {
           targetLufs: numOpt(opts, "target_lufs") ?? -14,
           format: opts.format ?? null,
           compressor: opts.compressor === true ? { threshold_db: numOpt(opts, "compressor_threshold") ?? -24, ratio: numOpt(opts, "compressor_ratio") ?? 4 } : null,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "concat":
@@ -1368,6 +1372,7 @@ async function main() {
           filter: opts.filter ?? null,
           crf: numOpt(opts, "crf") ?? 23,
           cdl,
+          dryRun: opts.dry_run === true,
         });
         break;
       }
@@ -1411,6 +1416,7 @@ async function main() {
           angle: numOpt(opts, "angle") ?? null,
           flip: opts.flip ?? null,
           crf: numOpt(opts, "crf") ?? 23,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "boomerang":

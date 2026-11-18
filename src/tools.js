@@ -189,7 +189,7 @@ export const TOOL_DEFS = [
 
   {
     name: "loudness",
-    description: "Normalize loudness to a target (default -14 LUFS, the YouTube/Spotify standard) with two-pass loudnorm: the input is measured first, then the exact linear gain is applied, and the output is re-measured on disk. Pass compressor=true for quiet, high-crest speech (a gentle compressor, threshold -24 dB / ratio 4 by default, runs before the loudnorm pass — without it a peak-limited voice stalls below target and the result says so in `warning`). Good for speech and creator audio.",
+    description: "Normalize loudness to a target (default -14 LUFS, the YouTube/Spotify standard) with two-pass loudnorm: the input is measured first, then the exact linear gain is applied, and the output is re-measured on disk. Pass compressor=true for quiet, high-crest speech (a gentle compressor, threshold -24 dB / ratio 4 by default, runs before the loudnorm pass — without it a peak-limited voice stalls below target and the result says so in `warning`). Good for speech and creator audio. Set dry_run=true to print the exact ffmpeg command(s) that would run and write no file (the loudnorm measurement still runs, read-only; with a compressor the loudnorm measured_* values come from the uncompressed input because the real run re-measures the compressed temp first — the note says so).",
     schema: {
     input: pathSchema,
     output: pathSchema,
@@ -198,6 +198,7 @@ export const TOOL_DEFS = [
     compressor: z.boolean().optional().describe("Run a gentle compressor (threshold -24 dB, ratio 4, peak detection) before the loudnorm pass — for quiet, high-crest speech that two-pass alone cannot lift to target"),
     compressor_threshold: z.number().min(-60).max(0).optional().describe("Compressor threshold in dB (default -24, only with compressor=true)"),
     compressor_ratio: z.number().min(1).max(20).optional().describe("Compressor ratio (default 4, only with compressor=true)"),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command(s) that would run (two when a compressor is used: render the temp, then normalize) and write no file"),
   },
     handler: async (a) => safe(() => core.loudness({
     input: a.input,
@@ -205,6 +206,7 @@ export const TOOL_DEFS = [
     targetLufs: a.target_lufs,
     format: a.format ?? null,
     compressor: a.compressor ? { threshold_db: a.compressor_threshold ?? -24, ratio: a.compressor_ratio ?? 4 } : null,
+    dryRun: a.dry_run,
   })),
   },
 
@@ -356,13 +358,14 @@ export const TOOL_DEFS = [
 
   {
     name: "grade",
-    description: "Color-grade a video with a named preset (warm, cool, cinematic, noir, vintage) or one custom video filter chain (--filter). Re-encodes video (libx264, crf 23 default), copies audio through untouched. The result reports the filter actually applied and the mean R/G/B of the middle frame before and after, measured on disk — so the grade is verified on pixels, not assumed from the filter string. Presets are fixed chains: warm pushes red and pulls blue, cool does the opposite, noir is black-and-white, vintage is faded and desaturated.",
+    description: "Color-grade a video with a named preset (warm, cool, cinematic, noir, vintage) or one custom video filter chain (--filter). Re-encodes video (libx264, crf 23 default), copies audio through untouched. The result reports the filter actually applied and the mean R/G/B of the middle frame before and after, measured on disk — so the grade is verified on pixels, not assumed from the filter string. Presets are fixed chains: warm pushes red and pulls blue, cool does the opposite, noir is black-and-white, vintage is faded and desaturated. Set dry_run=true to print the exact ffmpeg command and write no file (color_before is still measured on the input, read-only; color_after reports null — it is measured on the real output).",
     schema: {
     input: pathSchema,
     output: pathSchema,
     preset: z.enum(["warm", "cool", "cinematic", "noir", "vintage"]).optional().describe("Named grade preset (default warm when neither preset nor filter is given; mutually exclusive with filter)"),
     filter: z.string().optional().describe("One custom video filter chain, e.g. 'eq=saturation=0.5' (mutually exclusive with preset)"),
     crf: z.number().int().min(0).max(51).default(23),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
     cdl: z.object({
       slope: z.array(z.number().min(0).max(4)).length(3).optional().describe("ASC CDL slope per channel [r, g, b] (0-4, default 1,1,1)"),
       offset: z.array(z.number().min(-1).max(1)).length(3).optional().describe("ASC CDL offset per channel [r, g, b] (-1 to 1, default 0,0,0)"),
@@ -377,6 +380,7 @@ export const TOOL_DEFS = [
     filter: a.filter ?? null,
     crf: a.crf,
     cdl: a.cdl ?? null,
+    dryRun: a.dry_run,
   })),
   },
 
@@ -465,13 +469,14 @@ export const TOOL_DEFS = [
 
   {
     name: "rotate",
-    description: "Rotate or flip a clip: angle 90/180/270 clockwise, or flip horizontal/vertical (exactly one of angle/flip). The angle applies to the frame the viewer sees — ffmpeg autorotates on decode, so a phone clip coded 1280x720 with rotation 90 rotates from its 720x1280 display size (rotate 90 gives 1280x720, rotate 180 keeps 720x1280). The re-encode strips the display-matrix/rotate metadata, so the output reports rotation null and no player double-rotates it (yuan66-hub's rotate has no such guard). Re-encodes video (libx264, crf 23 default), AAC pinned 192k. The result reports input_rotation vs output_rotation plus the display dimensions before and after, measured on disk.",
+    description: "Rotate or flip a clip: angle 90/180/270 clockwise, or flip horizontal/vertical (exactly one of angle/flip). The angle applies to the frame the viewer sees — ffmpeg autorotates on decode, so a phone clip coded 1280x720 with rotation 90 rotates from its 720x1280 display size (rotate 90 gives 1280x720, rotate 180 keeps 720x1280). The re-encode strips the display-matrix/rotate metadata, so the output reports rotation null and no player double-rotates it (yuan66-hub's rotate has no such guard). Re-encodes video (libx264, crf 23 default), AAC pinned 192k. The result reports input_rotation vs output_rotation plus the display dimensions before and after, measured on disk. Set dry_run=true to print the exact ffmpeg command and write no file (dimensions is the expected display size after the rotation; output_rotation/duration/size report null — measured on the real output).",
     schema: {
     input: pathSchema,
     output: pathSchema,
     angle: z.number().int().optional().describe("Clockwise degrees: 90, 180 or 270 (exactly one of angle/flip)"),
     flip: z.enum(["horizontal", "vertical"]).optional().describe("Flip direction (exactly one of angle/flip)"),
     crf: z.number().int().min(0).max(51).default(23),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
     handler: async (a) => safe(() => core.rotateClip({
     input: a.input,
@@ -479,6 +484,7 @@ export const TOOL_DEFS = [
     angle: a.angle ?? null,
     flip: a.flip ?? null,
     crf: a.crf,
+    dryRun: a.dry_run,
   })),
   },
 
