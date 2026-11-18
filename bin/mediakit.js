@@ -639,6 +639,21 @@ const COMMANDS = {
       ["-o, --output", "Output file (required)"],
     ],
   },
+  broll: {
+    usage: "mediakit broll <input> --clip <file>@<at>[@<duration>] [--clip ...] -o <output> [--position fullscreen|top-left|top-center|top-right|center-left|center|center-right|bottom-left|bottom-center|bottom-right] [--scale 0.5] [--width <px>] [--margin 24] [--fade <s>] [--audio main|broll|mix]",
+    desc: "Insert B-roll clips into the main video at timestamps. --clip is repeatable (max 8): <file>@<seconds|MM:SS>[@<duration>] — the clip covers the whole frame (fullscreen, default) or sits as a PiP at --position, dissolving in/out over --fade seconds. Windows must not overlap; a window running past the end of the main video is clamped. The output duration is exactly the main duration. --audio broll swaps the main audio for B-roll audio inside each window, mix keeps both.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--clip", "B-roll clip: <file>@<seconds|MM:SS>[@<duration>] — repeatable, max 8"],
+      ["--position", "fullscreen (default) | 9 PiP positions: top-left, top-center, top-right, center-left, center, center-right, bottom-left, bottom-center, bottom-right"],
+      ["--margin", "PiP margin from the edge in pixels (default 24)"],
+      ["--width", "PiP width in pixels (keeps aspect; overrides --scale)"],
+      ["--scale", "PiP width as a fraction of the main width (default 0.5)"],
+      ["--fade", "Dissolve in/out at both edges, seconds (default 0, at most half the window)"],
+      ["--audio", "main (default) | broll | mix"],
+      ["-o, --output", "Output file (required)"],
+    ],
+  },
   scenes: {
     usage: "mediakit scenes <input> [--threshold 0.3] [--detector ffmpeg|content] [--min-scene-len 15] [--flash-frames 5] [--fades] [--fade-threshold 20] [--min-fade-frames 2]",
     desc: "Detect scene changes / hard cuts; returns cut timestamps + the segments between them. Probe-only, writes no file. --detector content scores hue/sat/luma separately and catches hue-only cuts the ffmpeg metric misses (default threshold 0.05 for content, 0.3 for ffmpeg); --min-scene-len merges too-short scenes and --flash-frames drops 1-frame blips (content only). --fades also reports fade in/out (dark core + measured ramp).",
@@ -879,7 +894,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 70 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 71 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -1061,6 +1076,26 @@ function parseSfxSpecs(raw) {
     const file = parts.join("@");
     if (!file || !at) fail(`bad --sfx value (want <file>@<seconds>[@<volume>]): ${spec}`);
     return { file, at, volume };
+  });
+}
+
+// Parse --clip specs: <file>@<seconds|MM:SS>[@<duration>]. Split from
+// the right, so a file path may itself contain "@". The time strings
+// are left as-is for core.parseTime (MM:SS works); duration defaults
+// to the clip's own length (clamped to the main video in core).
+function parseBrollClipSpecs(raw) {
+  if (raw === undefined) return [];
+  const specs = Array.isArray(raw) ? raw : [raw];
+  return specs.map((spec) => {
+    if (typeof spec !== "string") fail(`bad --clip value: ${spec}`);
+    const parts = spec.split("@");
+    if (parts.length < 2) fail(`bad --clip value (want <file>@<seconds>[@<duration>]): ${spec}`);
+    let duration = null;
+    if (parts.length >= 3) duration = parts.pop();
+    const at = parts.pop();
+    const file = parts.join("@");
+    if (!file || !at) fail(`bad --clip value (want <file>@<seconds>[@<duration>]): ${spec}`);
+    return { file, at, duration };
   });
 }
 
@@ -1606,6 +1641,25 @@ async function main() {
           opacity: numOpt(opts, "opacity") ?? 1,
           start: opts.start ?? null,
           end: opts.end ?? null,
+          audio: opts.audio ?? "main",
+        });
+        break;
+      }
+      case "broll": {
+        const clipSpecs = parseBrollClipSpecs(opts.clip);
+        if (!clipSpecs.length) fail("missing required option: --clip <file>@<seconds>[@<duration>] (repeatable)");
+        const position = opts.position ?? "fullscreen";
+        result = await core.insertBroll({
+          input: needInput(), output: needOutput(opts),
+          clips: clipSpecs.map((s) => ({
+            file: s.file, at: s.at,
+            duration: s.duration ?? null,
+            position,
+            scale: position === "fullscreen" ? null : (numOpt(opts, "scale") ?? 0.5),
+            width: position === "fullscreen" ? null : (numOpt(opts, "width") ?? null),
+            margin: numOpt(opts, "margin") ?? 24,
+            fade: numOpt(opts, "fade") ?? 0,
+          })),
           audio: opts.audio ?? "main",
         });
         break;

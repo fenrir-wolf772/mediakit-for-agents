@@ -181,10 +181,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 70 tools present");
-checkOk(missing.length === 0, "tools/list has all 70 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 71 tools present");
+checkOk(missing.length === 0, "tools/list has all 71 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -3164,6 +3164,173 @@ console.log("pip call:", pipJson.position, pipJson.x + "," + pipJson.y, "|", pip
 checkOk(pipJson.x === 936 && pipJson.y === 516 && pipJson.pip_size === "320x180", "pip default lands at 936,516 as 320x180", `got ${pipJson.x},${pipJson.y} ${pipJson.pip_size}`);
 checkOk(pipJson.dimensions === "1280x720" && near(pipJson.duration_seconds, 10, 0.05), "pip keeps 1280x720 / 10s", `got ${pipJson.dimensions} ${pipJson.duration_seconds}s`);
 
+// broll (turn 95): insert B-roll at timestamps — fullscreen cover or
+// PiP, dissolve fades, audio swap/mix. Fixtures: broll-main.mp4 is a
+// red 1280x720 10s clip with a 440 Hz tone; broll-blue.mp4 a blue
+// 640x360 6s clip with an 880 Hz tone; broll-blue-noaudio.mp4 the
+// same blue clip with no audio track.
+const brollRes = await client.callTool({
+  name: "broll",
+  arguments: {
+    input: path.join(root, "test/broll-main.mp4"),
+    clips: [{ file: path.join(root, "test/broll-blue.mp4"), at: 2, duration: 3 }],
+    output: path.join(root, "outputs/mcp-broll.mp4"),
+  },
+});
+const brollJson = JSON.parse(brollRes.content[0].text);
+console.log("broll call:", brollJson.dimensions, "|", brollJson.duration_seconds + "s", "|", JSON.stringify(brollJson.clips));
+checkOk(brollJson.dimensions === "1280x720" && near(brollJson.duration_seconds, 10, 0.05), "broll keeps 1280x720 / 10s — the main timeline is never cut", `got ${brollJson.dimensions} ${brollJson.duration_seconds}s`);
+checkOk(brollJson.clips?.length === 1 && brollJson.clips[0].at === 2 && brollJson.clips[0].duration_seconds === 3 && brollJson.clips[0].end_seconds === 5 && brollJson.clips[0].position === "fullscreen" && brollJson.clips[0].size === "1280x720" && brollJson.clips[0].clamped === false, "broll echoes the window: at 2, 3s, ends 5, fullscreen 1280x720, not clamped", JSON.stringify(brollJson.clips));
+const brollBeforeR = await planeMean(path.join(root, "outputs/mcp-broll.mp4"), "640:360:320:180", "r", 1);
+const brollBeforeB = await planeMean(path.join(root, "outputs/mcp-broll.mp4"), "640:360:320:180", "b", 1);
+const brollInR = await planeMean(path.join(root, "outputs/mcp-broll.mp4"), "640:360:320:180", "r", 3);
+const brollInB = await planeMean(path.join(root, "outputs/mcp-broll.mp4"), "640:360:320:180", "b", 3);
+const brollAfterR = await planeMean(path.join(root, "outputs/mcp-broll.mp4"), "640:360:320:180", "r", 7);
+const brollAfterB = await planeMean(path.join(root, "outputs/mcp-broll.mp4"), "640:360:320:180", "b", 7);
+console.log("broll pixels: before R/B =", brollBeforeR, brollBeforeB, "| in R/B =", brollInR, brollInB, "| after R/B =", brollAfterR, brollAfterB);
+checkOk(brollBeforeR > 200 && brollBeforeB < 20, "broll before the window is still the red main clip", `R=${brollBeforeR} B=${brollBeforeB}`);
+checkOk(brollInR < 20 && brollInB > 200, "broll inside the window is the blue clip, fullscreen", `R=${brollInR} B=${brollInB}`);
+checkOk(brollAfterR > 200 && brollAfterB < 20, "broll after the window is the red main clip again", `R=${brollAfterR} B=${brollAfterB}`);
+
+// PiP: the same blue clip as a bottom-right overlay, scale 0.5 ->
+// 640x360 at (616,336); the main clip shows through everywhere else.
+const brollPipRes = await client.callTool({
+  name: "broll",
+  arguments: {
+    input: path.join(root, "test/broll-main.mp4"),
+    clips: [{ file: path.join(root, "test/broll-blue.mp4"), at: 2, duration: 3, position: "bottom-right", scale: 0.5 }],
+    output: path.join(root, "outputs/mcp-broll-pip.mp4"),
+  },
+});
+const brollPipJson = JSON.parse(brollPipRes.content[0].text);
+checkOk(brollPipJson.clips[0].size === "640x360" && brollPipJson.clips[0].x === 616 && brollPipJson.clips[0].y === 336, "broll PiP bottom-right scale 0.5 lands at 616,336 as 640x360", JSON.stringify(brollPipJson.clips));
+const brollPipCornerB = await planeMean(path.join(root, "outputs/mcp-broll-pip.mp4"), "200:100:700:400", "b", 3);
+const brollPipCornerR = await planeMean(path.join(root, "outputs/mcp-broll-pip.mp4"), "200:100:700:400", "r", 3);
+const brollPipTopR = await planeMean(path.join(root, "outputs/mcp-broll-pip.mp4"), "400:200:0:0", "r", 3);
+checkOk(brollPipCornerB > 200 && brollPipCornerR < 20, "broll PiP corner is blue inside the window", `R=${brollPipCornerR} B=${brollPipCornerB}`);
+checkOk(brollPipTopR > 200, "broll PiP leaves the top-left red (main shows through outside the PiP)", `R=${brollPipTopR}`);
+
+// Fade: mid-dissolve the frame is a true red+blue blend, and the
+// window settles to full blue once the dissolve finishes.
+const brollFadeRes = await client.callTool({
+  name: "broll",
+  arguments: {
+    input: path.join(root, "test/broll-main.mp4"),
+    clips: [{ file: path.join(root, "test/broll-blue.mp4"), at: 2, duration: 4, fade: 1 }],
+    output: path.join(root, "outputs/mcp-broll-fade.mp4"),
+  },
+});
+const brollFadeJson = JSON.parse(brollFadeRes.content[0].text);
+checkOk(brollFadeJson.clips[0].fade_seconds === 1, "broll echoes fade 1s", JSON.stringify(brollFadeJson.clips));
+const brollFadeMidR = await planeMean(path.join(root, "outputs/mcp-broll-fade.mp4"), "640:360:320:180", "r", 2.5);
+const brollFadeMidB = await planeMean(path.join(root, "outputs/mcp-broll-fade.mp4"), "640:360:320:180", "b", 2.5);
+const brollFadeFullB = await planeMean(path.join(root, "outputs/mcp-broll-fade.mp4"), "640:360:320:180", "b", 4);
+console.log("broll fade: mid R/B =", brollFadeMidR, brollFadeMidB, "| full B =", brollFadeFullB);
+checkOk(brollFadeMidR > 80 && brollFadeMidR < 180 && brollFadeMidB > 80 && brollFadeMidB < 180, "broll fade mid-point is a true blend (red+blue, not a hard cut or black)", `R=${brollFadeMidR} B=${brollFadeMidB}`);
+checkOk(brollFadeFullB > 200, "broll fade settles to full blue after the dissolve", `B=${brollFadeFullB}`);
+
+// Content timing (the fade bug's root cause): the window must show
+// the clip from ITS start, not from the insert time — scenes-source
+// is red 0-5s then blue 5-10s, so a [2,6) window shows local [0,4),
+// all red. Before the setpts fix the overlay consumed the clip from
+// main t=0 and t=5.5 came out blue (local 3.5s too late).
+const brollTimingRes = await client.callTool({
+  name: "broll",
+  arguments: {
+    input: path.join(root, "test/broll-main.mp4"),
+    clips: [{ file: path.join(root, "test/scenes-source.mp4"), at: 2, duration: 4 }],
+    output: path.join(root, "outputs/mcp-broll-timing.mp4"),
+  },
+});
+const brollTimingR = await planeMean(path.join(root, "outputs/mcp-broll-timing.mp4"), "640:360:320:180", "r", 5.5);
+const brollTimingB = await planeMean(path.join(root, "outputs/mcp-broll-timing.mp4"), "640:360:320:180", "b", 5.5);
+checkOk(brollTimingR > 200 && brollTimingB < 20, "broll window shows the clip from its own start (t=5.5 is still red, local 3.5s)", `R=${brollTimingR} B=${brollTimingB}`);
+
+// Clamp + rejects: a window past the end is clamped and reported;
+// overlapping windows and unknown positions are refused.
+const brollClampRes = await client.callTool({
+  name: "broll",
+  arguments: {
+    input: path.join(root, "test/broll-main.mp4"),
+    clips: [{ file: path.join(root, "test/broll-blue.mp4"), at: 8, duration: 6 }],
+    output: path.join(root, "outputs/mcp-broll-clamp.mp4"),
+  },
+});
+const brollClampJson = JSON.parse(brollClampRes.content[0].text);
+checkOk(brollClampJson.clips[0].clamped === true && brollClampJson.clips[0].duration_seconds === 2 && brollClampJson.clips[0].end_seconds === 10, "broll clamps a window past the end (8+6 -> 2s, ends 10) and reports it", JSON.stringify(brollClampJson.clips));
+const brollOverlapText = await callExpectThrow("broll", {
+  input: path.join(root, "test/broll-main.mp4"),
+  clips: [
+    { file: path.join(root, "test/broll-blue.mp4"), at: 2, duration: 3 },
+    { file: path.join(root, "test/broll-blue.mp4"), at: 4, duration: 2 },
+  ],
+  output: path.join(root, "outputs/mcp-broll-overlap.mp4"),
+});
+checkOk(/overlap/.test(brollOverlapText), "broll refuses overlapping windows", brollOverlapText.slice(0, 160));
+const brollBadPosText = await callExpectThrow("broll", {
+  input: path.join(root, "test/broll-main.mp4"),
+  clips: [{ file: path.join(root, "test/broll-blue.mp4"), at: 2, duration: 2, position: "middle" }],
+  output: path.join(root, "outputs/mcp-broll-badpos.mp4"),
+});
+// MCP validates the enum before core runs, so the refusal is the
+// zod error, not core's "position must be" — the core message is
+// covered by the CLI assert below instead.
+checkOk(/Invalid enum value/.test(brollBadPosText), "broll refuses an unknown position (MCP enum validation)", brollBadPosText.slice(0, 160));
+const brollBadPosCliErr = await runCliExpectError(["broll", path.join(root, "test/broll-main.mp4"), "--clip", `${path.join(root, "test/broll-blue.mp4")}@2@2`, "--position", "middle", "-o", path.join(root, "outputs/mcp-broll-badpos-cli.mp4")]);
+checkOk(brollBadPosCliErr !== null && /position must be/.test(brollBadPosCliErr), "CLI broll refuses an unknown position with core's message", (brollBadPosCliErr ?? "").slice(0, 160));
+
+// Audio: audio=broll with a silent clip mutes the window (the main
+// tone is gone inside, present outside) and says so; audio=mix
+// keeps the main tone under the same silent clip.
+const brollAudioRes = await client.callTool({
+  name: "broll",
+  arguments: {
+    input: path.join(root, "test/broll-main.mp4"),
+    clips: [{ file: path.join(root, "test/broll-blue-noaudio.mp4"), at: 2, duration: 3 }],
+    output: path.join(root, "outputs/mcp-broll-audio.mp4"),
+    audio: "broll",
+  },
+});
+const brollAudioJson = JSON.parse(brollAudioRes.content[0].text);
+const brollAudioInVol = await meanVolume(path.join(root, "outputs/mcp-broll-audio.mp4"), 2.5, 1);
+const brollAudioOutVol = await meanVolume(path.join(root, "outputs/mcp-broll-audio.mp4"), 0.5, 1);
+console.log("broll audio=broll: in-window vol =", brollAudioInVol, "| outside =", brollAudioOutVol, "| notes =", JSON.stringify(brollAudioJson.audio_notes));
+checkOk((brollAudioInVol === null || brollAudioInVol < -60) && brollAudioOutVol !== null && brollAudioOutVol > -40, "broll audio=broll silences the window whose clip has no audio, main tone continues outside", `in=${brollAudioInVol} out=${brollAudioOutVol}`);
+checkOk(Array.isArray(brollAudioJson.audio_notes) && /goes silent/.test(brollAudioJson.audio_notes.join(" ")), "broll reports the silent window in audio_notes", JSON.stringify(brollAudioJson.audio_notes));
+const brollMixRes = await client.callTool({
+  name: "broll",
+  arguments: {
+    input: path.join(root, "test/broll-main.mp4"),
+    clips: [{ file: path.join(root, "test/broll-blue-noaudio.mp4"), at: 2, duration: 3 }],
+    output: path.join(root, "outputs/mcp-broll-mix.mp4"),
+    audio: "mix",
+  },
+});
+const brollMixInVol = await meanVolume(path.join(root, "outputs/mcp-broll-mix.mp4"), 2.5, 1);
+checkOk(brollMixInVol !== null && brollMixInVol > -40, "broll audio=mix keeps the main tone inside the window", `vol=${brollMixInVol}`);
+
+// CLI: --clip file@at@duration renders; missing --clip exits 2.
+const brollCli = await runCli(["broll", path.join(root, "test/broll-main.mp4"), "--clip", `${path.join(root, "test/broll-blue.mp4")}@2@3`, "-o", path.join(root, "outputs/mcp-broll-cli.mp4")]);
+let brollCliJson = null;
+try { brollCliJson = JSON.parse(brollCli.out); } catch { /* not JSON */ }
+checkOk(brollCli.code === 0 && near(brollCliJson?.duration_seconds, 10, 0.05) && brollCliJson?.clips?.[0]?.at === 2, "CLI broll --clip file@at@duration renders 10s", brollCli.out.slice(0, 200));
+const brollCliNoClipErr = await runCliExpectError(["broll", path.join(root, "test/broll-main.mp4"), "-o", path.join(root, "outputs/mcp-broll-noclip.mp4")]);
+checkOk(brollCliNoClipErr !== null && /--clip/.test(brollCliNoClipErr), "CLI broll without --clip exits 2 naming --clip", (brollCliNoClipErr ?? "").slice(0, 160));
+
+// Manifest: broll as a pipeline step (clip file hashed into the
+// cache key like slideshow images), plus a bad-clips refusal.
+const brollManifestPath = path.join(root, "outputs/mcp-manifest-broll.json");
+await writeFile(brollManifestPath, JSON.stringify({ version: 1, input: path.join(root, "test/broll-main.mp4"), output: path.join(root, "outputs/mcp-manifest-broll.mp4"), steps: [{ tool: "broll", args: { clips: [{ file: path.join(root, "test/broll-blue.mp4"), at: 2, duration: 3 }], audio: "main" } }] }), "utf8");
+const brollManifestRes = await client.callTool({ name: "manifest", arguments: { manifest_path: brollManifestPath } });
+const brollManifestJson = JSON.parse(brollManifestRes.content[0].text);
+checkOk(brollManifestJson.steps?.[0]?.status === "ok" && near(brollManifestJson.final?.duration_seconds, 10, 0.05), "manifest broll step runs ok, final 10s", JSON.stringify(brollManifestJson.steps?.map((s) => s.status)));
+const brollManifestInB = await planeMean(path.join(root, "outputs/mcp-manifest-broll.mp4"), "640:360:320:180", "b", 3);
+checkOk(brollManifestInB > 200, "manifest broll output is blue inside the window", `B=${brollManifestInB}`);
+const brollManifestBadPath = path.join(root, "outputs/mcp-manifest-broll-bad.json");
+await writeFile(brollManifestBadPath, JSON.stringify({ version: 1, input: path.join(root, "test/broll-main.mp4"), output: path.join(root, "outputs/mcp-manifest-broll-bad.mp4"), steps: [{ tool: "broll", args: { clips: [{ file: path.join(root, "test/broll-blue.mp4") }] } }] }), "utf8");
+const brollManifestBadText = await callExpectThrow("manifest", { manifest_path: brollManifestBadPath });
+checkOk(/clips\[0\]\.at/.test(brollManifestBadText), "manifest refuses a broll step whose clip has no at, before rendering", brollManifestBadText.slice(0, 200));
+
 // Pixel-verify a horizontal band of two frames: extract the frame at
 // time t from each file, crop the band, and return the PSNR between
 // them (Infinity when identical). Low PSNR = the band differs a lot.
@@ -5099,7 +5266,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 70 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 70 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 71 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 71 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -7017,7 +7184,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 70 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 71 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -7077,11 +7244,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 70, "GET /mcp reports name/version/transport and 70 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 71, "GET /mcp reports name/version/transport and 71 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 70 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 70 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 71 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 71 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -7105,7 +7272,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 70, "JSON-RPC tools/list returns the same 70 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 71, "JSON-RPC tools/list returns the same 71 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

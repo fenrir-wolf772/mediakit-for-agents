@@ -125,6 +125,17 @@ buttons and caption bar on phones).
 - If the clip has no audio track, that's fine — platforms add music.
   Don't invent an audio track the user didn't ask for.
 
+### Step 5b — B-roll (optional)
+- Cutaways go in with `broll`, not by hand-cutting the main timeline:
+  `mediakit broll main.mp4 --clip cutaway.mp4@12@3 -o out.mp4 --audio broll`
+  drops the cutaway over 12–15s (fullscreen) and swaps the audio to it
+  for that window; `--position bottom-right --scale 0.5` keeps it as a
+  PiP instead. The output is exactly the main duration — the main track
+  is never re-timed. `--fade 0.5` dissolves in/out; windows must not
+  overlap; a window past the end is clamped, not refused. With
+  `--audio main` (default) the main audio plays straight through the
+  cutaway; with `--audio mix` both play together.
+
 ### Step 6 — Verify before you call it done
 1. `probe` the final file: 1080×1920, duration as expected.
 2. `extract_frame` at 3 timestamps (start, middle, end): captions visible

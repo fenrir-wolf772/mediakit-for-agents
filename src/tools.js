@@ -1080,6 +1080,33 @@ export const TOOL_DEFS = [
 
 
   {
+    name: "broll",
+    description: "Insert B-roll clips into a main video at timestamps (misbahsy/video-audio-mcp's add_b_roll idea, one filter graph instead of their temp-file two-pass). The main timeline is never cut: each clip is trimmed to its window, scaled, and overlaid with enable=between(t,at,end), so the output duration is exactly the main duration. position fullscreen covers the whole frame (the main video underneath is hidden); the 9 PiP positions place it as a corner/edge/center overlay sized by width or scale (default 0.5 of the main width). fade dissolves the clip in/out over the main video (true alpha dissolve, not a dip to black). A window longer than its clip loops the clip. Clips must not overlap; a window running past the end of the main clip is clamped and reported. Audio: main (default, main audio copied untouched), broll (main audio muted inside each window, B-roll audio takes over — a window whose clip has no audio goes silent), mix (main + delayed B-roll audio, levels kept).",
+    schema: {
+    input: pathSchema,
+    clips: z.array(z.object({
+      file: pathSchema.describe("B-roll video file"),
+      at: z.number().min(0).describe("Insert at this time in the main video, seconds"),
+      duration: z.number().min(0).optional().describe("Window length in seconds (default: the clip's own duration, clamped to the end of the main video)"),
+      position: z.enum(["fullscreen", "top-left", "top-center", "top-right", "center-left", "center", "center-right", "bottom-left", "bottom-center", "bottom-right"]).default("fullscreen").describe("fullscreen covers the frame; the 9 others place it as a PiP overlay"),
+      scale: z.number().min(0.05).max(0.9).optional().describe("PiP width as a fraction of the main video width (default 0.5; ignored for fullscreen)"),
+      width: z.number().int().min(2).optional().describe("PiP width in pixels (keeps aspect; overrides scale; ignored for fullscreen)"),
+      margin: z.number().int().min(0).default(24).describe("PiP margin from the edge in pixels"),
+      fade: z.number().min(0).max(2).default(0).describe("Dissolve in/out at both edges of the window, seconds (at most half the window)"),
+    })).min(1).max(8).describe("1-8 B-roll clips, in any order (sorted by at); windows must not overlap"),
+    output: pathSchema,
+    audio: z.enum(["main", "broll", "mix"]).default("main").describe("Which audio to keep: main (default), broll (B-roll audio replaces the main track inside each window), or mix (both)"),
+  },
+    handler: async (a) => safe(() => core.insertBroll({
+    input: a.input,
+    clips: a.clips,
+    output: a.output,
+    audio: a.audio,
+  })),
+  },
+
+
+  {
     name: "scenes",
     description: "Detect scene changes / hard cuts in a video (probe-only, writes no file). Returns the cut timestamps plus the segments between them — trim on these boundaries instead of guessing. detector ffmpeg (default) is ffmpeg's scene metric; detector content scores each frame change in hue/sat/luma separately (PySceneDetect ContentDetector idea) and catches hue-only cuts the ffmpeg metric misses, with min_scene_len merging too-short scenes and a flash filter dropping 1-frame blips. fades=true adds fade in/out detection (dark core + measured ramp). Lower threshold = more sensitive; defaults differ per detector (ffmpeg 0.3, content 0.05).",
     schema: {

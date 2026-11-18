@@ -8172,6 +8172,10 @@ const TOOL_REQUIREMENTS = {
   keyframes: {},
   fit: { filters: ["setpts", "atempo", "fps"], encoders: ["libx264", "aac"] },
   pip: { filters: ["overlay", "format", "scale", "colorchannelmixer", "amix"], encoders: ["libx264"] },
+  // broll overlays like pip (plus trim/setpts/fade on each clip)
+  // and mutes the main track inside windows with volume:enable
+  // (broll audio mode) or mixes delayed B-roll tracks in (mix).
+  broll: { filters: ["overlay", "format", "scale", "trim", "setpts", "fade", "volume", "atrim", "asetpts", "adelay", "amix"], encoders: ["libx264"] },
   titlecard: { filters: ["drawtext", "geq"] },
   intro: { filters: ["color", "drawtext"], encoders: ["libx264"] },
   social: { filters: ["crop", "scale", "pad", "gblur", "overlay", "loudnorm"], encoders: ["libx264"] },
@@ -9237,6 +9241,235 @@ export async function pictureInPicture({
     ...info,
     dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
     duration_seconds: out.duration_seconds,
+  };
+}
+
+// ---------------------------------------------------------------- broll
+// Insert B-roll clips into a main video at timestamps
+// (misbahsy/video-audio-mcp's add_b_roll idea, re-implemented the
+// MediaKit way): one filter graph, no intermediate files — their
+// version renders each clip to a temp file first, then overlays it
+// in a second pass. Here the main timeline is never cut: every clip
+// is trimmed, scaled and overlaid with enable=between(t,at,end), so
+// the output duration is exactly the main duration and a fullscreen
+// clip simply covers the frame (opaque overlay) while a corner clip
+// is a PiP. A fade on a clip is a true dissolve (alpha fade over the
+// main underneath), not a dip to black. The B-roll input loops
+// (-stream_loop -1), so a window longer than its clip repeats it
+// instead of freezing on the last frame.
+// Audio: main (default — main audio copied untouched), broll (main
+// audio muted inside each window, B-roll audio takes over — a
+// window whose clip has no audio goes silent, reported per clip),
+// mix (main + delayed B-roll audio, levels kept).
+// Clips must not overlap; a window running past the end of the main
+// clip is clamped and reported, never silently trimmed.
+
+const BROLL_MAX_CLIPS = 8;
+const BROLL_POSITIONS = ["fullscreen", ...PIP_POSITIONS];
+
+export async function insertBroll({ input, clips, output, audio = "main" }) {
+  const inPath = await requireInput(input);
+  if (!Array.isArray(clips) || clips.length < 1 || clips.length > BROLL_MAX_CLIPS) {
+    throw new MediaKitError(`broll needs 1-${BROLL_MAX_CLIPS} clips, got: ${Array.isArray(clips) ? clips.length : typeof clips}`, "INVALID_ARG");
+  }
+  if (!["main", "broll", "mix"].includes(audio)) {
+    throw new MediaKitError(`broll audio must be main|broll|mix, got: ${audio}`, "INVALID_ARG");
+  }
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("broll needs a video input", "INVALID_ARG");
+  if (meta.duration_seconds === null || meta.duration_seconds === undefined) {
+    throw new MediaKitError("broll needs an input with a measurable duration", "INVALID_ARG");
+  }
+  const duration = meta.duration_seconds;
+  const disp = displayDims(meta);
+  const sw = disp.width;
+  const sh = disp.height;
+  const fmt = (n) => String(Math.round(n * 1000) / 1000);
+
+  // Validate + normalize every clip first: a bad clip fails before
+  // any ffmpeg runs, and overlap is checked on the clamped windows
+  // (a clamp can only shrink a window, so checking after clamping
+  // is the honest order).
+  const normalized = [];
+  for (let i = 0; i < clips.length; i++) {
+    const c = clips[i];
+    if (!c || typeof c !== "object" || Array.isArray(c)) {
+      throw new MediaKitError(`broll clips[${i}] must be an object {file, at, ...}`, "INVALID_ARG");
+    }
+    for (const k of Object.keys(c)) {
+      if (!["file", "at", "duration", "position", "scale", "width", "margin", "fade"].includes(k)) {
+        throw new MediaKitError(`broll clips[${i}] does not take "${k}" (only file, at, duration, position, scale, width, margin, fade)`, "INVALID_ARG");
+      }
+    }
+    if (typeof c.file !== "string" || !c.file.trim()) {
+      throw new MediaKitError(`broll clips[${i}] needs a file path`, "INVALID_ARG");
+    }
+    const file = await requireInput(c.file, `broll clip ${i + 1}`);
+    const at = parseTime(c.at, `clips[${i}].at`);
+    if (at >= duration) {
+      throw new MediaKitError(`broll clips[${i}].at (${at}) is past the end of the main video (${duration}s)`, "INVALID_ARG");
+    }
+    const position = c.position ?? "fullscreen";
+    if (!BROLL_POSITIONS.includes(position)) {
+      throw new MediaKitError(`broll clips[${i}] position must be one of ${BROLL_POSITIONS.join(", ")}, got: ${position}`, "INVALID_ARG");
+    }
+    if (position === "fullscreen" && (c.width !== undefined && c.width !== null || c.scale !== undefined && c.scale !== null)) {
+      throw new MediaKitError(`broll clips[${i}] is fullscreen — width/scale only apply to PiP positions`, "INVALID_ARG");
+    }
+    const clipMeta = await probe(file);
+    if (!clipMeta.video) throw new MediaKitError(`broll clips[${i}] file must be a video`, "INVALID_ARG");
+    let d = c.duration === undefined || c.duration === null
+      ? clipMeta.duration_seconds
+      : parseTime(c.duration, `clips[${i}].duration`);
+    if (d === null || d === undefined || !(d > 0)) {
+      throw new MediaKitError(`broll clips[${i}] needs a positive duration (clip has no measurable duration and none was given)`, "INVALID_ARG");
+    }
+    let clamped = false;
+    if (at + d > duration) { d = duration - at; clamped = true; }
+    const fade = num(c.fade ?? 0, `clips[${i}].fade`, { min: 0, max: 2 });
+    if (fade > d / 2) {
+      throw new MediaKitError(`broll clips[${i}].fade (${fade}) must be at most half the window (${(d / 2).toFixed(3)}s)`, "INVALID_ARG");
+    }
+    const margin = num(c.margin ?? 24, `clips[${i}].margin`, { min: 0, integer: true });
+    // Geometry, same math as pip (display frame, even dims): a
+    // fullscreen clip covers the whole display frame; a PiP clip is
+    // sized from its own display aspect.
+    const clipDisp = displayDims(clipMeta);
+    let w, h, x, y;
+    if (position === "fullscreen") {
+      w = sw; h = sh; x = 0; y = 0;
+    } else {
+      const pwRaw = c.width === null || c.width === undefined
+        ? Math.round(sw * num(c.scale ?? 0.5, `clips[${i}].scale`, { min: 0.05, max: 0.9 }))
+        : num(c.width, `clips[${i}].width`, { min: 2, integer: true });
+      const pw = Math.max(2, pwRaw - (pwRaw % 2));
+      const phRaw = (clipDisp.height * pw) / clipDisp.width;
+      const ph = Math.max(2, 2 * Math.round(phRaw / 2));
+      if (pw + 2 * margin > sw || ph + 2 * margin > sh) {
+        throw new MediaKitError(`broll clips[${i}] ${pw}x${ph} with margin ${margin}px does not fit display ${sw}x${sh} — use a smaller width/scale or margin`, "INVALID_ARG");
+      }
+      w = pw; h = ph;
+      x = position.endsWith("left") ? margin
+        : position.endsWith("right") ? sw - pw - margin
+        : Math.floor((sw - pw) / 2);
+      y = position.startsWith("top") ? margin
+        : position.startsWith("bottom") ? sh - ph - margin
+        : Math.floor((sh - ph) / 2);
+    }
+    normalized.push({
+      file, at, duration: d, end: at + d, position, width: w, height: h,
+      x, y, margin, fade, hasAudio: Boolean(clipMeta.audio), clamped,
+    });
+  }
+  normalized.sort((a, b) => a.at - b.at);
+  for (let i = 1; i < normalized.length; i++) {
+    if (normalized[i].at < normalized[i - 1].end) {
+      throw new MediaKitError(`broll clips overlap: clip at ${normalized[i].at}s starts before the previous window ends at ${normalized[i - 1].end}s`, "INVALID_ARG");
+    }
+  }
+  // Output is prepared only after every clip validates — and the
+  // clip files join the guard list, so the output cannot overwrite
+  // a B-roll source the same way it cannot overwrite the main input.
+  const outPath = await prepareOutput(output, [inPath, ...normalized.map((c) => c.file)]);
+
+  // One filter graph: each clip trimmed to its window (looped input
+  // so a short clip repeats), scaled, alpha-faded at both edges,
+  // then overlaid in timeline order with enable=between.
+  // The last setpts is the load-bearing one: overlay syncs its
+  // second input by TIMESTAMP, consuming B-roll frames from main
+  // t=0 — without the +at shift the window [at, at+d) shows the
+  // clip's [at, at+d) seconds (its first `at` seconds are skipped)
+  // and the fades land `at` seconds early (measured 2026-11-18:
+  // fade-out ran during main [3,4] instead of [5,6], fade-in was
+  // already done when the window opened). Shifting the chain to
+  // [at, at+d) makes the overlay pick local 0 at main `at`, so the
+  // fade (applied on local time, before the shift) lands exactly.
+  const videoChains = [];
+  const overlaySteps = [];
+  let cur = "[0:v]";
+  normalized.forEach((c, i) => {
+    const fadeFilters = c.fade > 0
+      ? `,fade=t=in:st=0:d=${fmt(c.fade)}:alpha=1,fade=t=out:st=${fmt(c.duration - c.fade)}:d=${fmt(c.fade)}:alpha=1`
+      : "";
+    videoChains.push(`[${i + 1}:v]trim=0:${fmt(c.duration)},setpts=PTS-STARTPTS,scale=${c.width}:${c.height},format=rgba${fadeFilters},setpts=PTS+${fmt(c.at)}/TB[bv${i}]`);
+    overlaySteps.push(`${cur}[bv${i}]overlay=${c.x}:${c.y}:enable=between(t\\,${fmt(c.at)}\\,${fmt(c.end)})[v${i}]`);
+    cur = `[v${i}]`;
+  });
+  const graph = [...videoChains, ...overlaySteps].join(";");
+
+  // Audio: main copies the main track; broll mutes the main track
+  // inside each window (volume enable, one expression per window
+  // joined with +) and mixes in the delayed B-roll tracks; mix
+  // keeps the main track and adds the delayed B-roll tracks.
+  const mainAudio = Boolean(meta.audio);
+  const audioNotes = [];
+  let audioArgs = [];
+  let audioFilter = null;
+  if (audio === "main") {
+    audioArgs = ["-map", "0:a?", "-c:a", "copy"];
+  } else {
+    const branches = [];
+    if (mainAudio) {
+      if (audio === "broll") {
+        const windows = normalized.map((c) => `between(t\\,${fmt(c.at)}\\,${fmt(c.end)})`).join("+");
+        audioFilter = `[0:a]volume=0:enable=${windows}[amain]`;
+        branches.push("[amain]");
+      } else {
+        branches.push("[0:a]");
+      }
+    }
+    normalized.forEach((c, i) => {
+      if (!c.hasAudio) {
+        if (audio === "broll") audioNotes.push(`window at ${fmt(c.at)}s has no B-roll audio — it goes silent`);
+        return;
+      }
+      audioFilter = (audioFilter ? `${audioFilter};` : "") + `[${i + 1}:a]atrim=0:${fmt(c.duration)},asetpts=PTS-STARTPTS,adelay=${Math.round(c.at * 1000)}:all=1[ba${i}]`;
+      branches.push(`[ba${i}]`);
+    });
+    if (branches.length === 0) {
+      audioArgs = [];
+      audioNotes.push("no audio in the main video or any B-roll clip — output has no audio track");
+    } else if (branches.length === 1) {
+      // A raw input stream maps as 0:a (no brackets — "[0:a]" is
+      // only a label inside a filter graph, and -map rejects it
+      // once a filter_complex exists); a filtered branch maps by
+      // its filter label.
+      const mapTarget = branches[0] === "[0:a]" ? "0:a" : branches[0];
+      audioArgs = ["-map", mapTarget, "-c:a", "aac", "-b:a", "192k"];
+    } else {
+      audioFilter = `${audioFilter ? `${audioFilter};` : ""}${branches.join("")}amix=inputs=${branches.length}:normalize=0[aout]`;
+      audioArgs = ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k"];
+    }
+  }
+  const filterComplex = audioFilter ? `${graph};${audioFilter}` : graph;
+  const args = ["-y", "-i", inPath];
+  normalized.forEach((c) => { args.push("-stream_loop", "-1", "-i", c.file); });
+  args.push(
+    "-filter_complex", filterComplex, "-map", cur,
+    ...audioArgs,
+    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "medium",
+    "-movflags", "+faststart", "-t", String(duration), outPath,
+  );
+  await run(FFMPEG, args);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  return {
+    operation: "broll",
+    input: inPath, output: outPath,
+    audio,
+    ...(audioNotes.length ? { audio_notes: audioNotes } : {}),
+    clips: normalized.map((c) => ({
+      file: c.file, at: c.at, duration_seconds: +c.duration.toFixed(3),
+      end_seconds: +c.end.toFixed(3), position: c.position,
+      x: c.x, y: c.y, size: `${c.width}x${c.height}`,
+      fade_seconds: c.fade, has_audio: c.hasAudio, clamped: c.clamped,
+    })),
+    source_dimensions: `${sw}x${sh}`,
+    source_rotation: disp.rotation,
+    ...info,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+    duration_seconds: out.duration_seconds,
+    has_audio: Boolean(out.audio),
   };
 }
 
@@ -11239,6 +11472,15 @@ export const MANIFEST_STEPS = {
     args: ["color", "similarity", "blend", "background", "crf"],
     run: (input, output, a) => chromaKey({ input, output, color: a.color ?? "00FF00", similarity: a.similarity ?? 0.1, blend: a.blend ?? 0.0, background: a.background ?? null, crf: a.crf ?? 23 }),
   },
+  // broll inserts clips at timestamps (fullscreen cover or PiP) —
+  // clips is an array of {file, at, duration?, position?, ...} like
+  // the MCP shape, so it needs the same array exemption as
+  // slideshow images (see validateBrollManifestArgs + the resolver
+  // and cache hash below).
+  broll: {
+    args: ["clips", "audio"],
+    run: (input, output, a) => insertBroll({ input, output, clips: a.clips, audio: a.audio ?? "main" }),
+  },
   // Manifest overrides the batch shape: a manifest is one input, so
   // the step takes one words file, not a words directory.
   cut_words: {
@@ -11319,6 +11561,31 @@ function validateSlideshowManifestArgs(step, args, label) {
   }
 }
 
+function validateBrollManifestArgs(step, args, label) {
+  if (!Array.isArray(args.clips) || args.clips.length < 1 || args.clips.length > BROLL_MAX_CLIPS) {
+    throw new MediaKitError(`${label} (broll) clips must be an array of 1-${BROLL_MAX_CLIPS} {file, at, ...} objects, got: ${Array.isArray(args.clips) ? `${args.clips.length} entries` : typeof args.clips}`, "INVALID_ARG");
+  }
+  args.clips.forEach((c, j) => {
+    if (!c || typeof c !== "object" || Array.isArray(c)) {
+      throw new MediaKitError(`${label} (broll) clips[${j}] must be an object {file, at, ...}`, "INVALID_ARG");
+    }
+    if (typeof c.file !== "string" || !c.file.trim()) {
+      throw new MediaKitError(`${label} (broll) clips[${j}] needs a file path`, "INVALID_ARG");
+    }
+    if ((typeof c.at !== "number" && typeof c.at !== "string") || (typeof c.at === "number" && !(c.at >= 0))) {
+      throw new MediaKitError(`${label} (broll) clips[${j}].at must be seconds or MM:SS >= 0`, "INVALID_ARG");
+    }
+    for (const k of Object.keys(c)) {
+      if (!["file", "at", "duration", "position", "scale", "width", "margin", "fade"].includes(k)) {
+        throw new MediaKitError(`${label} (broll) clips[${j}] does not take "${k}" (only file, at, duration, position, scale, width, margin, fade)`, "INVALID_ARG");
+      }
+    }
+  });
+  if (args.audio !== undefined && args.audio !== null && !["main", "broll", "mix"].includes(args.audio)) {
+    throw new MediaKitError(`${label} (broll) audio must be main|broll|mix, got: ${args.audio}`, "INVALID_ARG");
+  }
+}
+
 const isHexColorArg = (v) => typeof v === "string" && (/^#?[0-9A-Fa-f]{6}$/.test(v.trim()) || /^0x[0-9A-Fa-f]{6}$/.test(v.trim()));
 
 export async function manifest({ manifestPath, output = null, cache = true, dryRun = false, keepIntermediates = false }) {
@@ -11386,6 +11653,7 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
       throw new MediaKitError(`${label}: slideshow must be the first step — it builds a video from images in args, it does not transform the previous step's output`, "INVALID_ARG");
     }
     if (step.tool === "slideshow") validateSlideshowManifestArgs(step, args, label);
+    if (step.tool === "broll") validateBrollManifestArgs(step, args, label);
     // download fetches from a URL — same rule as slideshow, and the
     // URL is checked at lint time, not after step 1 starts.
     if (step.tool === "download" && i > 0) {
@@ -11400,6 +11668,7 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
       }
       const v = args[k];
       if (step.tool === "slideshow" && (k === "images" || k === "durations")) continue; // arrays, validated above
+      if (step.tool === "broll" && k === "clips") continue; // array of {file, at, ...}, validated above
       if (v !== null && typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") {
         throw new MediaKitError(`${label} (${step.tool}): argument "${k}" must be a string, number or boolean`, "INVALID_ARG");
       }
@@ -11410,6 +11679,11 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
     for (const k of MANIFEST_FILE_ARGS) {
       if (typeof resolved[k] === "string" && resolved[k].trim()) {
         if (k === "background" && isHexColorArg(resolved[k])) continue;
+        // A broll step's `audio` is the main|broll|mix enum, not the
+        // slideshow music-bed file MANIFEST_FILE_ARGS was written
+        // for — resolving "main" relative to the manifest turned it
+        // into a bogus path (measured 2026-11-18: ".../outputs/main").
+        if (step.tool === "broll" && k === "audio") continue;
         resolved[k] = resolveRel(resolved[k]);
       }
     }
@@ -11417,6 +11691,11 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
     // a {file, duration} object whose file resolves).
     if (step.tool === "slideshow" && Array.isArray(resolved.images)) {
       resolved.images = resolved.images.map((s) => (typeof s === "string" ? resolveRel(s) : { ...s, file: resolveRel(s.file) }));
+    }
+    // B-roll clips resolve the same way (each {file, ...} object's
+    // file resolves relative to the manifest).
+    if (step.tool === "broll" && Array.isArray(resolved.clips)) {
+      resolved.clips = resolved.clips.map((c) => ({ ...c, file: resolveRel(c.file) }));
     }
     return { index: i, tool: step.tool, spec, args, resolved };
   });
@@ -11501,6 +11780,7 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
       for (const k of MANIFEST_FILE_ARGS) {
         if (typeof s.resolved[k] === "string") {
           if (k === "background" && isHexColorArg(s.resolved[k])) continue;
+          if (s.tool === "broll" && k === "audio") continue; // enum, not a file (see the resolver above)
           try { extraHash = await hashFile(s.resolved[k]); } catch { extraHash = null; }
         }
       }
@@ -11513,6 +11793,20 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
         if (slideFiles.length) {
           const hashes = [];
           for (const f of slideFiles) {
+            try { hashes.push(await hashFile(f)); } catch { hashes.push(null); }
+          }
+          if (extraHash) hashes.push(extraHash);
+          extraHash = createHash("sha256").update(hashes.join(":")).digest("hex");
+        }
+      }
+      // B-roll: the clips ARE part of the input — hash every clip
+      // file so editing one re-runs the step instead of serving
+      // the old B-roll from cache (same pattern as slideshow).
+      if (s.tool === "broll") {
+        const clipFiles = (s.resolved.clips ?? []).map((c) => c.file).filter((f) => typeof f === "string");
+        if (clipFiles.length) {
+          const hashes = [];
+          for (const f of clipFiles) {
             try { hashes.push(await hashFile(f)); } catch { hashes.push(null); }
           }
           if (extraHash) hashes.push(extraHash);
