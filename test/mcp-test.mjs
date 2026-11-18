@@ -1531,7 +1531,14 @@ checkOk(doctorJson.tools.reverse?.available === true, "doctor: reverse is availa
 checkOk(doctorJson.tools.interpolate?.available === true, "doctor: interpolate is available (minterpolate filter present)");
 checkOk(doctorJson.tools.denoise?.available === true, "doctor: denoise is available (hqdn3d/nlmeans filters present)");
 checkOk(doctorJson.tools.segment?.available === true, "doctor: segment is available (HLS muxer is built-in)");
-checkOk(doctorJson.filters?.ssim === true && doctorJson.filters?.psnr === true && doctorJson.filters?.libvmaf === false, "doctor: ssim/psnr filters present, libvmaf absent (so the compress quality proof is SSIM-only)", JSON.stringify({ ssim: doctorJson.filters?.ssim, psnr: doctorJson.filters?.psnr, libvmaf: doctorJson.filters?.libvmaf }));
+// libvmaf is build-dependent: the Ubuntu apt ffmpeg on CI ships
+// it, the local 8.1.2 build does not (CI run 1 of lượt 101 failed
+// here on `libvmaf === false`). Assert presence as a boolean and
+// let the compress proof below follow the same branch — the proof
+// must report a real VMAF score when the build has it, not claim
+// VMAF is missing.
+checkOk(doctorJson.filters?.ssim === true && doctorJson.filters?.psnr === true && typeof doctorJson.filters?.libvmaf === "boolean", "doctor: ssim/psnr filters present, libvmaf reported as a boolean (present on some ffmpeg builds, absent on others)", JSON.stringify({ ssim: doctorJson.filters?.ssim, psnr: doctorJson.filters?.psnr, libvmaf: doctorJson.filters?.libvmaf }));
+const hasLibvmaf = doctorJson.filters?.libvmaf === true;
 checkOk(typeof doctorJson.gpu?.available === "boolean" && Array.isArray(doctorJson.gpu?.encoders) && "working_encoder" in (doctorJson.gpu ?? {}), "doctor: gpu section reports available + listed encoders + working encoder", JSON.stringify(doctorJson.gpu));
 checkOk(doctorJson.gpu.available === (doctorJson.gpu.working_encoder !== null), "doctor: gpu available is true exactly when a probe encode worked", JSON.stringify(doctorJson.gpu));
 console.log("doctor gpu:", JSON.stringify(doctorJson.gpu));
@@ -1765,9 +1772,20 @@ if (typeof fadeJoin === "number" && fadePcm) {
   const jump = maxSampleJump(fadePcm, fadeJoin - 0.005, fadeJoin + 0.005);
   const toneJump = maxSampleJump(fadePcm, fadeJoin + 0.1, fadeJoin + 0.11);
   console.log(`join fade: last 10ms ${last10?.toFixed(1)} dBFS (steady ${steadyBefore?.toFixed(1)}), first 10ms ${first10?.toFixed(1)} dBFS (steady ${steadyAfter?.toFixed(1)}), max jump at join ${jump.toFixed(3)} vs in-tone ${toneJump.toFixed(3)}`);
-  checkOk(last10 !== null && steadyBefore !== null && last10 < steadyBefore - 8, "silence join: 12ms fade-out pulls the last 10ms >=8 dB under the steady tone", `last10=${last10} steady=${steadyBefore}`);
+  // The fade-out drop is build-sensitive: the AAC encoder's
+  // windowing smears the 12ms fade differently per build — local
+  // 8.1.2 measures 12.5 dB, the CI apt ffmpeg 6.7 dB (CI run 1 of
+  // lượt 101 failed the old 8 dB line; a linear 12ms fade is ~6.4 dB
+  // in theory, so 8 dB was above the floor a correct fade can give).
+  // 4 dB still separates a real fade (≥6.4 in theory) from no fade
+  // at all (~0 dB) and from a halved fade (~2 dB), so the assert
+  // keeps its meaning while tolerating the encoder.
+  checkOk(last10 !== null && steadyBefore !== null && last10 < steadyBefore - 4, "silence join: 12ms fade-out pulls the last 10ms >=4 dB under the steady tone", `last10=${last10} steady=${steadyBefore}`);
   checkOk(first10 !== null && steadyAfter !== null && first10 < steadyAfter - 4, "silence join: 15ms fade-in pulls the first 10ms >=4 dB under the steady tone", `first10=${first10} steady=${steadyAfter}`);
-  checkOk(jump < 0.02 && jump < toneJump * 0.5, "silence join: max sample jump at the join is under 0.02 and under half the in-tone jump (no click)", `jump=${jump.toFixed(3)} tone=${toneJump.toFixed(3)}`);
+  // Same story for the jump cap: local 0.010, CI exactly 0.020 on
+  // the old <0.02 line. 0.03 stays below half the in-tone jump, so
+  // a real click (tone-scale) still fails both caps.
+  checkOk(jump < 0.03 && jump < toneJump * 0.5, "silence join: max sample jump at the join is under 0.03 and under half the in-tone jump (no click)", `jump=${jump.toFixed(3)} tone=${toneJump.toFixed(3)}`);
 }
 
 const cropdetectRes = await client.callTool({
@@ -2777,14 +2795,21 @@ const beatManifestRes = await client.callTool({
 });
 const beatManifestJson = JSON.parse(beatManifestRes.content[0].text);
 console.log("manifest beat_grid:", JSON.stringify(beatManifestJson.steps.map((s) => ({ tool: s.tool, status: s.status, output: s.output, count: s.result?.beat_count ?? s.result?.duration_seconds }))), "| final", beatManifestJson.final?.duration_seconds);
-checkOk(beatManifestJson.steps_run === 2 && beatManifestJson.steps.every((s) => s.status === "ok") && beatManifestJson.steps[0].tool === "beat_grid" && beatManifestJson.steps[0].result.beat_count === 24 && near(beatManifestJson.final.duration_seconds, snapBeatEnd - snapBeatStart, 0.1), "manifest beat_grid step records the 24-beat grid, then trim snap_to_beat cuts on it (the mp4 decodes one beat more than the wav: 24, same phase)", JSON.stringify(beatManifestJson.steps.map((s) => s.result?.beat_count ?? s.result?.duration_seconds)));
+// The mp4 decodes 24 beats locally but 23 on the CI apt ffmpeg —
+// the 24th beat sits at 11.991s, 9ms before the file end, so the
+// AAC decode tail decides whether the last onset is detected (CI
+// run 1 of lượt 101 failed the old `=== 24`). Assert the grid
+// itself instead of the count: 23 or 24 beats, first beat on the
+// 0.488s phase, 0.5s spacing — a broken detector fails all three.
+const beatGridStep = beatManifestJson.steps[0].result;
+checkOk(beatManifestJson.steps_run === 2 && beatManifestJson.steps.every((s) => s.status === "ok") && beatManifestJson.steps[0].tool === "beat_grid" && (beatGridStep.beat_count === 23 || beatGridStep.beat_count === 24) && beatGridStep.beats?.length === beatGridStep.beat_count && near(beatGridStep.first_beat_seconds, 0.488, 0.05) && near(beatGridStep.beats[1] - beatGridStep.beats[0], 0.5, 0.02) && near(beatManifestJson.final.duration_seconds, snapBeatEnd - snapBeatStart, 0.1), "manifest beat_grid step records the 23/24-beat grid (mp4 tail beat varies by build), then trim snap_to_beat cuts on it", JSON.stringify(beatManifestJson.steps.map((s) => s.result?.beat_count ?? s.result?.duration_seconds)));
 checkOk(beatManifestJson.steps[0].output === beatManifestJson.input && beatManifestJson.steps[1].output !== beatManifestJson.steps[0].output, "manifest beat_grid step passes the chain file through (its output is the input it analyzed)", beatManifestJson.steps[0].output);
 const beatManifestCacheRes = await client.callTool({
   name: "manifest",
   arguments: { manifest_path: path.join(root, "test/manifest-beatgrid.json") },
 });
 const beatManifestCacheJson = JSON.parse(beatManifestCacheRes.content[0].text);
-checkOk(beatManifestCacheJson.cache_hits === 2 && beatManifestCacheJson.steps.every((s) => s.status === "cached") && beatManifestCacheJson.steps[0].result.beat_count === 24, "manifest beat_grid re-run serves both steps from cache (grid result cached, trim file cached)", JSON.stringify(beatManifestCacheJson.steps.map((s) => s.status)));
+checkOk(beatManifestCacheJson.cache_hits === 2 && beatManifestCacheJson.steps.every((s) => s.status === "cached") && (beatManifestCacheJson.steps[0].result.beat_count === 23 || beatManifestCacheJson.steps[0].result.beat_count === 24), "manifest beat_grid re-run serves both steps from cache (grid result cached, trim file cached)", JSON.stringify(beatManifestCacheJson.steps.map((s) => s.status)));
 
 // batch + manifest with the DP method (lượt 88): the method arg
 // flows through the shared BATCH_OPERATIONS table, so batch rows
@@ -4794,7 +4819,15 @@ checkOk(compressT5Json.dimensions === "1280x720" && compressT5Json.resolution_la
 const proofT1 = compressTJson.quality_proof;
 checkOk(proofT1?.available === true && Array.isArray(proofT1.sample_points) && proofT1.sample_points.length === 3 && proofT1.sample_points.every((p) => typeof p.ssim_all === "number"), "compress target-size 1MB returns a quality proof with 3 SSIM sample points", JSON.stringify(proofT1?.sample_points));
 checkOk(proofT1.ssim_mean > 0.99 && proofT1.ssim_min > 0.99 && proofT1.verdict === "indistinguishable" && typeof proofT1.psnr_y_db === "number" && proofT1.psnr_y_db > 50, "compress target-size 1MB proof: SSIM mean >0.99, verdict indistinguishable, PSNR-Y >50 dB on smooth content", JSON.stringify({ mean: proofT1.ssim_mean, psnr: proofT1.psnr_y_db, verdict: proofT1.verdict }));
-checkOk(proofT1.vmaf === null && /libvmaf/.test(proofT1.vmaf_note ?? ""), "compress quality proof says VMAF is unavailable (no libvmaf in this ffmpeg build)", proofT1.vmaf_note ?? "");
+// The proof follows the build (lượt 103): a libvmaf build measures
+// a real VMAF score at the mid point, a build without it reports
+// null + a note that says so. Either branch must be honest — the
+// old assert demanded null on every build, which failed on CI.
+if (hasLibvmaf) {
+  checkOk(typeof proofT1.vmaf === "number" && proofT1.vmaf >= 0 && proofT1.vmaf <= 100 && proofT1.vmaf_model === "vmaf_v0.6.1", "compress quality proof measures a real VMAF score on this build (libvmaf present)", JSON.stringify({ vmaf: proofT1.vmaf, model: proofT1.vmaf_model }));
+} else {
+  checkOk(proofT1.vmaf === null && /libvmaf/.test(proofT1.vmaf_note ?? ""), "compress quality proof says VMAF is unavailable (no libvmaf in this ffmpeg build)", proofT1.vmaf_note ?? "");
+}
 // The proof discriminates on hard content: test/noisy-source.mp4
 // (640x360, static noise — detail that actually costs bits).
 // Measured 2026-11-17: 1 MB -> SSIM 0.970 (looks_the_same),
@@ -5731,7 +5764,13 @@ const batchRes = await client.callTool({
 const batchJson = JSON.parse(batchRes.content[0].text);
 console.log("batch loudness:", batchJson.succeeded, "ok /", batchJson.failed, "failed /", batchJson.cached, "cached /", batchJson.elapsed_seconds + "s");
 checkOk(batchJson.succeeded === 3 && batchJson.failed === 0 && batchJson.cached === 0, "batch loudness succeeds on all 3 files", JSON.stringify(batchJson.results.map((r) => r.status)));
-checkOk(batchJson.results.every((r) => r.status === "ok" && r.result?.output_lufs === -16), "batch loudness reports -16 LUFS per file", JSON.stringify(batchJson.results.map((r) => r.result?.output_lufs)));
+// loudnorm single-pass lands within a few tenths of the target,
+// and the exact tenth varies by build — CI reported -15.9 where
+// local reports -16.0 (CI run 1 of lượt 101 failed the old
+// `=== -16`). ±0.5 LUFS still catches a loudness that did not run
+// (the input is -21.8 LUFS, far outside the band), and matches the
+// ±0.5 the manifest loudness assert already uses.
+checkOk(batchJson.results.every((r) => r.status === "ok" && near(r.result?.output_lufs, -16, 0.5)), "batch loudness reports -16 LUFS per file (±0.5 — loudnorm lands on a different tenth per ffmpeg build)", JSON.stringify(batchJson.results.map((r) => r.result?.output_lufs)));
 checkOk(existsSync(path.join(root, "outputs/mcp-batch-out/sub/deep-clip-loudness.mp4")), "batch mirrors the nested input tree in the output dir", "sub/deep-clip-loudness.mp4 missing");
 const batchLufs = await measureLufs(path.join(root, "outputs/mcp-batch-out/source-loudness.mp4"));
 checkOk(near(batchLufs, -16, 1), "batch loudness output measures -16 LUFS independently", `got ${batchLufs}`);
@@ -6237,7 +6276,19 @@ checkOk(near(manRunJson.final.duration_seconds, 6.1, 0.2) && manRunJson.final.di
 checkOk(manRunJson.steps[0].result?.duration_actual === 6, "manifest trim step reports 6s on disk", JSON.stringify(manRunJson.steps[0].result?.duration_actual));
 const manifestLufs = await measureLufs(path.join(root, "outputs/mcp-manifest.mp4"));
 checkOk(near(manifestLufs, -14, 0.5), "manifest loudness step measures -14 LUFS independently", `got ${manifestLufs}`);
-checkOk(manRunJson.qa_result?.verdict === "warn" && qaOf(manRunJson.qa_result, "loudness")?.status === "pass" && qaOf(manRunJson.qa_result, "pacing")?.status === "warn", "manifest qa gate: warn on pacing only, loudness passes", JSON.stringify(manRunJson.qa_result?.checks.map((c) => `${c.check}:${c.status}`)));
+// Pacing is a knife-edge here by construction: the manifest film
+// is 6.1s in a single shot, and the rule warns when the average
+// shot exceeds 6s — so one spurious scene cut on another build
+// (the CI apt ffmpeg found one; local 8.1.2 finds none) flips the
+// check from warn to pass, and the verdict with it (CI run 1 of
+// lượt 101 failed the old `pacing === "warn"`). Assert the RULE,
+// not the detector count: the pacing status must match the average
+// shot length its own detail reports, loudness must pass, nothing
+// may fail, and the verdict must be the worst check status.
+const pacingCheck = qaOf(manRunJson.qa_result, "pacing");
+const pacingDetail = /average shot ([0-9.]+)s over (\d+) shot/.exec(pacingCheck?.detail ?? "");
+const pacingAvg = pacingDetail ? Number(pacingDetail[1]) : null;
+checkOk(manRunJson.qa_result && ["warn", "pass"].includes(manRunJson.qa_result.verdict) && qaOf(manRunJson.qa_result, "loudness")?.status === "pass" && ["warn", "pass"].includes(pacingCheck?.status ?? "") && pacingAvg !== null && pacingCheck.status === (pacingAvg <= 6 ? "pass" : "warn") && manRunJson.qa_result.checks.every((c) => c.status !== "fail") && manRunJson.qa_result.verdict === (manRunJson.qa_result.checks.some((c) => c.status === "warn") ? "warn" : "pass"), "manifest qa gate: loudness passes, pacing status matches its measured average shot length, verdict is the worst check status", JSON.stringify(manRunJson.qa_result?.checks.map((c) => `${c.check}:${c.status}`)));
 const manifestHashBefore = await sha256File(path.join(root, "outputs/mcp-manifest.mp4"));
 const manifestCachedRes = await client.callTool({
   name: "manifest",

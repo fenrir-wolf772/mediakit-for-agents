@@ -7548,8 +7548,9 @@ const LADDER_HEIGHTS = [1080, 720, 480, 360, 240];
 // Quality proof for compress --target-size (halfsize's idea: SSIM at
 // 3 sample points + VMAF mid-clip + a verdict in words, so the caller
 // sees what the size actually cost instead of trusting the bitrate).
-// VMAF is NOT in this ffmpeg build (no libvmaf filter — doctor
-// reports it), so the verdict is SSIM-only and says so. SSIM is
+// VMAF is measured at the mid point when the build has libvmaf
+// (default vmaf_v0.6.1 model); on a build without it the proof is
+// SSIM-only and says so. SSIM is
 // measured against the source scaled to the OUTPUT size, so it rates
 // encode fidelity at the delivered resolution — it does NOT penalize
 // the resolution ladder: a smaller frame is easier to encode, so on
@@ -7571,12 +7572,29 @@ const QUALITY_PROOF_VERDICTS = [
   { min: -Infinity, verdict: "clearly_degraded", detail: "clearly worse than the source — raise the target or accept the loss" },
 ];
 
+// Parse the pooled VMAF score out of a libvmaf run's stderr.
+// ffmpeg prints it through the logging system, e.g.
+//   [libvmaf @ 0x7fcfa3403980] VMAF score: 76.668905
+// (Netflix/vmaf resource/doc/ffmpeg.md). Pure — unit-tested on a
+// canned log line, since no libvmaf build is available locally to
+// run the filter against.
+export function parseVmafScore(stderr) {
+  if (typeof stderr !== "string") return null;
+  const m = stderr.match(/VMAF score: ([0-9]+(?:\.[0-9]+)?)/);
+  if (!m) return null;
+  const v = Number(m[1]);
+  return Number.isFinite(v) && v >= 0 && v <= 100 ? v : null;
+}
+
 // Measure a compressed file against its source: SSIM at 3 sample
 // points (10% / 50% / 90% of duration, 1s windows) plus PSNR-Y at
 // the middle point, in one ffmpeg run per point (the mid run chains
-// ssim -> psnr on the same frames). Input seeking (-ss before -i)
-// on both inputs lands the first compared frame at the same
-// timestamp — verified by identity: source vs itself reads SSIM
+// ssim -> psnr on the same frames). VMAF is measured at the mid
+// point too, but only when this ffmpeg build has libvmaf — otherwise
+// the proof is SSIM-only and says so (a build without libvmaf must
+// not claim a VMAF number, and a build with it must not claim VMAF
+// is missing). Input seeking (-ss before -i) on both inputs lands
+// the first compared frame at the same timestamp — verified by identity: source vs itself reads SSIM
 // All 1.000000 at all three points. Returns { available: false,
 // reason } when there is nothing to measure (no video, clip too
 // short, ssim filter missing); never throws, so a proof failure
@@ -7621,6 +7639,32 @@ async function measureQualityProof({ source, compressed, duration }) {
   const mean = points.reduce((a, p) => a + p.ssim_all, 0) / points.length;
   const min = Math.min(...points.map((p) => p.ssim_all));
   const band = QUALITY_PROOF_VERDICTS.find((b) => mean >= b.min);
+  // VMAF at the mid point, only when this ffmpeg build has libvmaf
+  // (default vmaf_v0.6.1 model; first input is the distorted file,
+  // second the reference — ffmpeg-filters §libvmaf + Netflix/vmaf
+  // ffmpeg.md, which also wants both inputs PTS-synced, hence
+  // setpts=PTS-STARTPTS on both). A VMAF failure never fails the
+  // proof or the compress: it falls back to SSIM-only with a note
+  // that says which branch was taken, so the proof never claims a
+  // VMAF number it did not measure — or claims VMAF is missing on a
+  // build that has it.
+  let vmaf = null;
+  let vmafNote = "VMAF (libvmaf) is not in this ffmpeg build — SSIM is the measured proxy";
+  if (/\blibvmaf\b/.test(filtersOut)) {
+    try {
+      const midT = String(points[1].t_seconds);
+      const { stderr } = await run(FFMPEG, ["-v", "info", "-ss", midT, "-t", String(win), "-i", source, "-ss", midT, "-t", String(win), "-i", compressed, "-filter_complex", `[0:v]scale=${w}:${h},setpts=PTS-STARTPTS[ref];[1:v]setpts=PTS-STARTPTS[dis];[dis][ref]libvmaf`, "-an", "-f", "null", "-"]);
+      const score = parseVmafScore(stderr);
+      if (score !== null) {
+        vmaf = score;
+        vmafNote = "VMAF measured at the mid sample point (libvmaf, default vmaf_v0.6.1 model)";
+      } else {
+        vmafNote = "libvmaf is in this ffmpeg build but no VMAF score could be parsed from the ffmpeg log — SSIM is the measured proxy";
+      }
+    } catch (e) {
+      vmafNote = `libvmaf is in this ffmpeg build but the VMAF run failed (${e?.message ?? e}) — SSIM is the measured proxy`;
+    }
+  }
   return {
     available: true,
     method: "ssim",
@@ -7628,8 +7672,9 @@ async function measureQualityProof({ source, compressed, duration }) {
     ssim_mean: +mean.toFixed(6),
     ssim_min: +min.toFixed(6),
     ...(points[1].psnr_y_db !== undefined ? { psnr_y_db: points[1].psnr_y_db } : {}),
-    vmaf: null,
-    vmaf_note: "VMAF (libvmaf) is not in this ffmpeg build — SSIM is the measured proxy",
+    vmaf,
+    ...(vmaf !== null ? { vmaf_model: "vmaf_v0.6.1" } : {}),
+    vmaf_note: vmafNote,
     verdict: band.verdict,
     verdict_detail: band.detail,
     resolution_note: "SSIM is measured against the source scaled to the output size, so it rates encode fidelity at the delivered resolution — it does not penalize the resolution ladder; compare dimensions and bpp_after for that tradeoff",
