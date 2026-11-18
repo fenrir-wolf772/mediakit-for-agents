@@ -10,11 +10,13 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { copyFile, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
+import { createCanvas } from "canvas";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { compareDeterminismRuns, estimateDecodedWork, estimateTempo, findQuietSnap, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, parseFfmpegProgress, runFfmpegWithProgress, spectralFluxOnset, trackBeatsDP, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
+import bounceTpl from "../src/canvas-scene-lib/templates/bounce.cjs";
 
 const execFileAsync = promisify(execFile);
 // Independent loudness measurement: run ffmpeg's loudnorm analysis
@@ -4864,6 +4866,7 @@ const whisperJson = JSON.parse(whisperRes.content[0].text);
 console.log("extract_audio whisper:", JSON.stringify(whisperJson));
 checkOk(whisperJson.output.endsWith("mcp-whisper.wav") && whisperJson.format === "wav" && whisperJson.whisper_preset === true, "extract_audio --whisper renames output to .wav and reports it", JSON.stringify(whisperJson));
 checkOk(whisperJson.sample_rate_hz === 16000 && whisperJson.channels === 1, "extract_audio --whisper is 16 kHz mono", JSON.stringify(whisperJson));
+checkOk(whisperJson.output_codec === "pcm_s16le" && whisperJson.codec_verified === true, "extract_audio --whisper verifies the probed output codec is really pcm_s16le (not a mislabelled container)", JSON.stringify({ output_codec: whisperJson.output_codec, codec_verified: whisperJson.codec_verified }));
 checkOk(near(whisperJson.duration_seconds, 10, 0.1), "extract_audio --whisper keeps 10s", `got ${whisperJson.duration_seconds}`);
 // Independent check: ffprobe the file on disk, not just the tool's claim.
 const { stdout: whisperProbeOut } = await execFileAsync("ffprobe", ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name,sample_rate,channels", "-of", "json", path.join(root, "outputs/mcp-whisper.wav")]);
@@ -6666,6 +6669,26 @@ const diagTextRes = await client.callTool({ name: "diagnose", arguments: { manif
 const diagTextJson = JSON.parse(diagTextRes.content[0].text);
 checkOk(diagTextJson.checks?.some((c) => c.id === "text_layer" && c.severity === "warn" && /caption band/.test(c.message)), "diagnose warns on a bottom text layer sitting in the burned-caption band", JSON.stringify(diagTextJson.checks?.filter((c) => c.id === "text_layer")));
 checkOk(diagTextJson.verdict === "warn" && diagTextJson.warnings === 4, "the bottom-text film still warns overall (3 upscale + 1 text layer)", JSON.stringify({ verdict: diagTextJson.verdict, warnings: diagTextJson.warnings }));
+// Bounce apex vs top text layer (turn 102): the default apex
+// 0.12H puts the ball top at 0.075H, inside a 1-line top title
+// band (drawtext y=0.08H, 90px → ends 0.127H) — diagnose warns
+// with the numbers; apex 0.35 lifts the ball top to 0.305H, clear
+// of the band, and the film passes.
+const diagBounceStage = await stageAssembleManifest("assemble-template.json");
+const diagBounceDoc = JSON.parse(await readFile(diagBounceStage.manifestPath, "utf8"));
+diagBounceDoc.shots[0].text = [{ text: "BOUNCE TITLE", position: "top" }];
+await writeFile(diagBounceStage.manifestPath, JSON.stringify(diagBounceDoc), "utf8");
+const diagBounceRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagBounceStage.manifestPath } });
+const diagBounceJson = JSON.parse(diagBounceRes.content[0].text);
+checkOk(diagBounceJson.verdict === "warn" && diagBounceJson.warnings === 1 && diagBounceJson.checks?.some((c) => c.id === "text_layer" && c.severity === "warn" && /bounce apex 0.12 reaches 0.075H/.test(c.message) && /ends 0.127H/.test(c.message)), "diagnose warns when the default bounce apex reaches into a top text band (0.075H vs band ends 0.127H)", JSON.stringify(diagBounceJson.checks?.filter((c) => c.id === "text_layer")));
+const diagBounceApexStage = await stageAssembleManifest("assemble-template.json");
+const diagBounceApexDoc = JSON.parse(await readFile(diagBounceApexStage.manifestPath, "utf8"));
+diagBounceApexDoc.shots[0].text = [{ text: "BOUNCE TITLE", position: "top" }];
+diagBounceApexDoc.shots[0].params.apex = 0.35;
+await writeFile(diagBounceApexStage.manifestPath, JSON.stringify(diagBounceApexDoc), "utf8");
+const diagBounceApexRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagBounceApexStage.manifestPath } });
+const diagBounceApexJson = JSON.parse(diagBounceApexRes.content[0].text);
+checkOk(diagBounceApexJson.verdict === "pass" && diagBounceApexJson.warnings === 0 && !diagBounceApexJson.checks?.some((c) => c.id === "text_layer" && c.severity === "warn"), "diagnose passes the same film with bounce apex 0.35 (ball clears the top text band)", JSON.stringify({ verdict: diagBounceApexJson.verdict, warnings: diagBounceApexJson.warnings }));
 const diagDoctorRes = await client.callTool({ name: "doctor", arguments: {} });
 const diagDoctorJson = JSON.parse(diagDoctorRes.content[0].text);
 checkOk(diagDoctorJson.tools?.diagnose?.available === true, "doctor reports diagnose as available", JSON.stringify(diagDoctorJson.tools?.diagnose));
@@ -7001,20 +7024,24 @@ checkOk(assembleCanvasRender2Json.cache_hits === 1, "assemble second canvas rend
 // Fixture: test/assemble-template.json (4s film: bounce 2s with
 // color + bounces overridden, title-card 2s with text overridden;
 // preset vertical). Validate must echo the template id and the
-// params merged with defaults; bad ids / template+scene / unknown
-// params fail; the render must show real motion (bounce frames
-// 0.5s apart differ) and the title-card text band must be bright.
+// params merged with defaults (bounce has an `apex` param now —
+// default 0.12H — and an out-of-range apex fails); bad ids /
+// template+scene / unknown params fail; the render must show real
+// motion (bounce frames 0.5s apart differ) and the title-card
+// text band must be bright.
 const assembleTemplateStage = await stageAssembleManifest("assemble-template.json");
 const assembleTemplateOut = path.join(assembleTemplateStage.dir, "out");
 const assembleTemplateValidateRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleTemplateStage.manifestPath, mode: "validate" } });
 const assembleTemplateValidateJson = JSON.parse(assembleTemplateValidateRes.content[0].text);
-checkOk(assembleTemplateValidateJson.total_seconds === 4 && assembleTemplateValidateJson.total_frames === 120 && assembleTemplateValidateJson.shots?.length === 2 && assembleTemplateValidateJson.shots[0]?.template === "bounce" && assembleTemplateValidateJson.shots[0]?.params?.color === "#EF4444" && assembleTemplateValidateJson.shots[0]?.params?.bounces === 2 && assembleTemplateValidateJson.shots[0]?.params?.bg === "#0F172A" && assembleTemplateValidateJson.shots[0]?.params?.radius === 0.08 && assembleTemplateValidateJson.shots[1]?.template === "title-card" && assembleTemplateValidateJson.shots[1]?.params?.text === "TEMPLATES" && assembleTemplateValidateJson.shots[1]?.params?.fg === "#FFFFFF", "assemble validate echoes template ids + params merged with defaults (bounce color/bounces overridden, bg/radius defaulted)", JSON.stringify(assembleTemplateValidateJson.shots));
+checkOk(assembleTemplateValidateJson.total_seconds === 4 && assembleTemplateValidateJson.total_frames === 120 && assembleTemplateValidateJson.shots?.length === 2 && assembleTemplateValidateJson.shots[0]?.template === "bounce" && assembleTemplateValidateJson.shots[0]?.params?.color === "#EF4444" && assembleTemplateValidateJson.shots[0]?.params?.bounces === 2 && assembleTemplateValidateJson.shots[0]?.params?.bg === "#0F172A" && assembleTemplateValidateJson.shots[0]?.params?.radius === 0.08 && assembleTemplateValidateJson.shots[0]?.params?.apex === 0.12 && assembleTemplateValidateJson.shots[1]?.template === "title-card" && assembleTemplateValidateJson.shots[1]?.params?.text === "TEMPLATES" && assembleTemplateValidateJson.shots[1]?.params?.fg === "#FFFFFF", "assemble validate echoes template ids + params merged with defaults (bounce color/bounces overridden, bg/radius/apex defaulted)", JSON.stringify(assembleTemplateValidateJson.shots));
 const assembleBadTemplateText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-template.json"), mode: "validate" });
 checkOk(/must be one of title-card, bounce, slide-in, rings/.test(assembleBadTemplateText ?? ""), "assemble validate refuses an unknown scene template id", assembleBadTemplateText ?? "");
 const assembleBadTemplateSceneText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-template-scene.json"), mode: "validate" });
 checkOk(/either scene or template, not both/.test(assembleBadTemplateSceneText ?? ""), "assemble validate refuses a canvas_scene shot with both scene and template", assembleBadTemplateSceneText ?? "");
 const assembleBadTemplateParamText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-template-param.json"), mode: "validate" });
-checkOk(/unknown param/.test(assembleBadTemplateParamText ?? "") && /allowed: bg, bounces, color, radius/.test(assembleBadTemplateParamText ?? ""), "assemble validate refuses an unknown template param (with the allowed list)", assembleBadTemplateParamText ?? "");
+checkOk(/unknown param/.test(assembleBadTemplateParamText ?? "") && /allowed: apex, bg, bounces, color, radius/.test(assembleBadTemplateParamText ?? ""), "assemble validate refuses an unknown template param (with the allowed list)", assembleBadTemplateParamText ?? "");
+const assembleBadApexText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-template-apex.json"), mode: "validate" });
+checkOk(/apex/.test(assembleBadApexText ?? "") && /must be <= 0.5/.test(assembleBadApexText ?? ""), "assemble validate refuses bounce apex 0.6 (above max 0.5)", assembleBadApexText.slice(0, 200));
 const assembleTemplateRenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleTemplateStage.manifestPath, mode: "render", output_dir: assembleTemplateOut, force: true } }, undefined, { timeout: 300000 });
 const assembleTemplateRenderJson = JSON.parse(assembleTemplateRenderRes.content[0].text);
 const assembleTemplateFinalPath = path.join(assembleTemplateOut, "final.mp4");
@@ -7036,6 +7063,33 @@ const assembleTemplateBouncePsnr = await framePsnr(assembleTemplateEarlyPng, ass
 checkOk(assembleTemplateBouncePsnr !== null && assembleTemplateBouncePsnr < 28, "assemble bounce template really moves: frames 0.5s apart differ (PSNR < 28 dB)", `PSNR=${assembleTemplateBouncePsnr}`);
 const assembleTemplateTitleBandR = await planeMean(assembleTemplateTitlePng, "1080:300:0:810", "r");
 checkOk(assembleTemplateTitleBandR !== null && assembleTemplateTitleBandR > 35, "assemble title-card template draws the white title in the middle band", `band R=${assembleTemplateTitleBandR}`);
+// Bounce apex (turn 102): render the template module directly on a
+// 540x960 canvas at mid-bounce (t = cycle/2, ball at the apex) and
+// scan the center column for the red ball — the topmost red row
+// must sit at apex*H − radius. Default apex 0.12 → row 72; apex
+// 0.35 → row 293; a big radius (0.4) + high apex (0.5) is clamped
+// so the ball still rises instead of flattening onto the floor.
+async function bounceTopRow(apex, radius) {
+  const W = 540, H = 960;
+  const cv = createCanvas(W, H);
+  const ctx = cv.getContext("2d");
+  await bounceTpl.draw(ctx, 0.5, W, H, {}, { params: { bg: "#0F172A", color: "#EF4444", radius, bounces: 2, apex }, duration: 2 });
+  const img = ctx.getImageData(0, 0, W, H).data;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      if (img[i] > 200 && img[i + 1] < 100 && img[i + 2] < 100) return y;
+    }
+  }
+  return null;
+}
+const bounceTopDefault = await bounceTopRow(0.12, 0.08);
+const bounceTopHigh = await bounceTopRow(0.35, 0.08);
+const bounceTopClamped = await bounceTopRow(0.5, 0.4);
+console.log("bounce apex tops: default", bounceTopDefault, "| high", bounceTopHigh, "| clamped", bounceTopClamped);
+checkOk(bounceTopDefault !== null && Math.abs(bounceTopDefault - 72) <= 3, "bounce apex 0.12 puts the ball top at row 72 (0.12H minus radius)", `got ${bounceTopDefault}`);
+checkOk(bounceTopHigh !== null && Math.abs(bounceTopHigh - 293) <= 3, "bounce apex 0.35 puts the ball top at row 293", `got ${bounceTopHigh}`);
+checkOk(bounceTopClamped !== null && Math.abs(bounceTopClamped - 109) <= 3, "bounce apex 0.5 + radius 0.4 clamps the apex so the ball still rises (top row 109)", `got ${bounceTopClamped}`);
 // Preview captions must scale too: the style's locked burn values
 // (60px/500px, tuned for 1080x1920) were passed to burnCaptions
 // unscaled, so on a 540x960 preview the subtitles rendered 2x too

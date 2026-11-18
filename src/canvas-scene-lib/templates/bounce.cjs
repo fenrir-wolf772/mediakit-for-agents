@@ -8,12 +8,15 @@ module.exports.draw = async (ctx, t, W, H, assets, M) => {
   ctx.fillStyle = p.bg;
   ctx.fillRect(0, 0, W, H);
   const r = p.radius * Math.min(W, H);
-  // Floor at 0.62H, apex at 0.12H: the whole bounce stays above
-  // the burned-caption band (~0.69H), so the ball is never hidden
-  // behind subtitles — same rule as the chase scene's run line.
+  // Floor at 0.62H, apex at p.apex (default 0.12H): the whole
+  // bounce stays above the burned-caption band (~0.69H), so the
+  // ball is never hidden behind subtitles — same rule as the chase
+  // scene's run line. The apex is clamped so the ball still rises
+  // at least r/4 above the floor even with a big radius + high
+  // apex (a 0.4 radius on a vertical frame eats 0.22H).
   const floorY = H * 0.62;
   const restY = floorY - r; // ball center at rest (touching floor)
-  const apexY = H * 0.12;
+  const apexY = Math.min(H * p.apex, restY - r * 0.25);
   const cycle = M.duration / p.bounces;
   const phase = (t % cycle) / cycle; // 0..1 within one bounce
   // Parabola: 0 at the cycle ends (floor), 1 at mid-cycle (apex).

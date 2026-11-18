@@ -273,7 +273,11 @@ registry fails loudly instead of resolving to different motion.
   `title-card` (gradient + big sliding title + accent bar;
   `text`, `bg1`, `bg2`, `fg`, `accent`), `bounce` (ball on a
   floor line with squash + shadow; `color`, `bg`, `radius`,
-  `bounces`), `slide-in` (rounded card slides in from the left,
+  `bounces`, `apex` — ball height as a fraction of frame height,
+  default 0.12; raise it when the shot carries a top text layer,
+  because the ball top at the default apex reaches 0.075H, inside
+  the title band — `diagnose` warns with the exact numbers when
+  they overlap), `slide-in` (rounded card slides in from the left,
   text fades in; `text`, `bg`, `card`, `fg`), `rings`
   (concentric rings expand and fade; `color`, `bg`, `count`,
   `speed`).

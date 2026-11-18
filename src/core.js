@@ -1454,9 +1454,21 @@ export async function extractAudio({ input, output, format = null, whisper = fal
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
+  // The container lies if you let it: one ffmpeg-mcp server
+  // hardcodes `-acodec mp3` while naming the file .wav, so the
+  // caller gets MP3 bytes in a WAV skin. Verify the probed codec
+  // is the one the extension asked for — a mismatch fails loudly
+  // instead of shipping a mislabelled file.
+  const AUDIO_CODEC_NAMES = { libmp3lame: "mp3", aac: "aac", pcm_s16le: "pcm_s16le", libvorbis: "vorbis", libopus: "opus", flac: "flac" };
+  const outputCodec = out.audio ? out.audio.codec : null;
+  const codecVerified = outputCodec === AUDIO_CODEC_NAMES[codec];
+  if (!codecVerified) {
+    throw new MediaKitError(`extract_audio wrote ${outputCodec ?? "no audio"} but .${ext} needs ${AUDIO_CODEC_NAMES[codec]} — the output codec does not match the requested format`, "VERIFY_FAILED");
+  }
   return {
     operation: "extract_audio", input: inPath, output: outPath, format: ext, codec, ...info,
     duration_seconds: out.duration_seconds,
+    output_codec: outputCodec, codec_verified: true,
     sample_rate_hz: out.audio ? out.audio.sample_rate : null,
     channels: out.audio ? out.audio.channels : null,
     ...(whisper ? { whisper_preset: true } : {}),
@@ -15274,12 +15286,27 @@ export async function diagnoseFilm({ manifestPath }) {
     // Text layers: a block taller than 4 wrapped lines crowds the
     // frame, and a bottom layer sits exactly where the burned
     // captions live (~500px from the bottom — the bounce floor was
-    // moved to 0.62H for the same reason).
+    // moved to 0.62H for the same reason). A bounce shot's ball also
+    // reaches into the top text band: the ball top at the apex is
+    // apex*H − radius, and the top band starts at 0.08H (drawtext
+    // y=h*0.08) and runs lines*size down — with the default apex
+    // 0.12H the ball top (0.075H) overlaps a 1-line 90px title
+    // (band ends 0.127H). Warn with the numbers, so the director
+    // either raises the shot's apex param or moves the text.
     const textIssues = [];
     for (const s of plan.shots) {
       for (const [j, layer] of (s.textLayers ?? []).entries()) {
         if (layer.lines.length > 4) textIssues.push(`shot ${s.id} text[${j}] wraps to ${layer.lines.length} lines — shorten the copy or shrink the size`);
         if (layer.position === "bottom" && plan.captions) textIssues.push(`shot ${s.id} text[${j}] sits at the bottom, in the burned-caption band — move it to top or center`);
+        if (s.template === "bounce" && layer.position === "top") {
+          const apex = s.params?.apex ?? 0.12;
+          const radius = s.params?.radius ?? 0.08;
+          const ballTop = apex * plan.height - radius * Math.min(plan.width, plan.height);
+          const bandBottom = 0.08 * plan.height + layer.lines.length * layer.size;
+          if (ballTop < bandBottom) {
+            textIssues.push(`shot ${s.id} bounce apex ${apex} reaches ${(ballTop / plan.height).toFixed(3)}H, inside the top text band (ends ${(bandBottom / plan.height).toFixed(3)}H) — the ball will cross text[${j}]; raise the shot's apex param or move the text to center`);
+          }
+        }
       }
     }
     if (textIssues.length) {
