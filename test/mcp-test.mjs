@@ -13,7 +13,7 @@ import { createServer } from "node:http";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { compareDeterminismRuns, estimateDecodedWork, estimateTempo, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, parseFfmpegProgress, runFfmpegWithProgress, spectralFluxOnset, trackBeatsDP, SHORTS_STYLE_IDS } from "../src/core.js";
+import { compareDeterminismRuns, estimateDecodedWork, estimateTempo, findQuietSnap, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, parseFfmpegProgress, runFfmpegWithProgress, spectralFluxOnset, trackBeatsDP, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 
 const execFileAsync = promisify(execFile);
@@ -2096,21 +2096,27 @@ checkOk(motionHighThJson.verdict === "static" && motionHighThJson.still_interval
 const motionAudioOnly = await callExpectThrow("motion", { input: path.join(root, "test/mix-voice.mp3") });
 checkOk(/needs a video input/.test(motionAudioOnly), "motion refuses audio-only input", motionAudioOnly.slice(0, 120));
 
-// hook: best opening window from measured energy + speech + cuts.
-// Fixture test/hook-source.mp4 is 30s: quiet red [0,15) then loud
-// blue [15,30) with the cut at 15s, so the 10s hook must open on
-// the cut — [15,25) scores ~0.94 while a quiet window scores ~0.20.
-// The energy curve must also show the step: loud bins ~20 dB above
-// the quiet ones (checked independently with volumedetect below).
+// hook: best opening window from measured energy + speech + cuts +
+// motion. Fixture test/hook-source.mp4 is 30s: quiet red [0,15) then
+// loud blue [15,30) with the cut at 15s, so the 10s hook must open on
+// the cut — [15,25) scores ~0.75 while a quiet window scores ~0.14.
+// Score is 0.35*energy + 0.25*speech + 0.2*cut + 0.2*motion (audio
+// 0.6 / video 0.4); the clip is static, so motion is only the
+// one-frame cut spike (0.05 mean over the window). The energy curve
+// must also show the step: loud bins ~20 dB above the quiet ones
+// (checked independently with volumedetect below). The trim is NOT
+// snapped on this fixture: the window is uniformly loud, so there is
+// no quiet moment in its last 5s.
 const hookRes = await client.callTool({
   name: "hook",
   arguments: { input: path.join(root, "test/hook-source.mp4"), duration: 10, step: 0.5, top: 3 },
 });
 const hookJson = JSON.parse(hookRes.content[0].text);
 console.log("hook call:", JSON.stringify(hookJson.hook), "| candidates", hookJson.candidates.map((c) => `${c.start}-${c.end}:${c.score}`).join(" "), "| pacing", hookJson.pacing);
-checkOk(hookJson.hook.start === 15 && hookJson.hook.end === 25 && hookJson.hook.starts_near_cut === true && hookJson.hook.cuts_inside === 1 && near(hookJson.hook.score, 0.943, 0.01), "hook opens on the loud cut at 15s (score ~0.94)", JSON.stringify(hookJson.hook));
+checkOk(hookJson.hook.start === 15 && hookJson.hook.end === 25 && hookJson.hook.starts_near_cut === true && hookJson.hook.cuts_inside === 1 && near(hookJson.hook.score, 0.754, 0.01) && near(hookJson.hook.motion, 0.05, 0.01), "hook opens on the loud cut at 15s (score ~0.75, motion 0.05 = the cut-frame spike only)", JSON.stringify(hookJson.hook));
 checkOk(hookJson.candidates.length === 3 && hookJson.candidates[0].score > hookJson.candidates[1].score && hookJson.candidates[1].score > hookJson.candidates[2].score && hookJson.candidates[2].score < 0.25, "hook ranks 3 non-overlapping windows, quiet last (<0.25)", JSON.stringify(hookJson.candidates.map((c) => c.score)));
 checkOk(near(hookJson.speech_coverage, 0.5, 0.02) && hookJson.pacing === "slow" && hookJson.cuts_per_minute === 2 && hookJson.energy_curve.length === 61, "hook reports speech 0.5, pacing slow (2 cuts/min), 61 curve bins", `speech=${hookJson.speech_coverage} pacing=${hookJson.pacing} bins=${hookJson.energy_curve.length}`);
+checkOk(hookJson.trim.start === 15 && hookJson.trim.end === 25 && hookJson.trim.snapped === false && /no quiet moment/.test(hookJson.trim.reason ?? ""), "hook keeps the raw end on a uniformly loud window (trim not snapped, reason recorded)", JSON.stringify(hookJson.trim));
 checkOk(typeof hookJson.suggested_trim === "string" && hookJson.suggested_trim.includes("--start 15 --end 25"), "hook suggests a trim command for the winning window", hookJson.suggested_trim);
 // Independent check of the energy step: the winning window really
 // is ~20 dB louder than the quiet half (not just the tool's word).
@@ -2125,14 +2131,17 @@ const hookAudioRes = await client.callTool({
 });
 const hookAudioJson = JSON.parse(hookAudioRes.content[0].text);
 console.log("hook audio-only:", JSON.stringify(hookAudioJson.hook), "| speech_cov", hookAudioJson.speech_coverage);
-checkOk((hookAudioJson.hook.start === 4 || hookAudioJson.hook.start === 4.5) && hookAudioJson.hook.speech >= 0.7 && hookAudioJson.hook.score > 0.5 && near(hookAudioJson.speech_coverage, 0.667, 0.02) && hookAudioJson.pacing === null, "hook on audio-only lands on the densest 4s (start 4/4.5, speech 0.667)", JSON.stringify(hookAudioJson.hook));
-// Video-only: no audio to score — cuts only, warning says so.
+checkOk((hookAudioJson.hook.start === 4 || hookAudioJson.hook.start === 4.5) && hookAudioJson.hook.speech >= 0.7 && hookAudioJson.hook.score > 0.4 && near(hookAudioJson.speech_coverage, 0.667, 0.02) && hookAudioJson.pacing === null, "hook on audio-only lands on the densest 4s (start 4/4.5, speech 0.667)", JSON.stringify(hookAudioJson.hook));
+checkOk(hookAudioJson.trim.snapped === false && /below 4s/.test(hookAudioJson.trim.reason ?? ""), "hook refuses to snap a 4s window below its 4s floor (the silence at 6-7s stays uncut)", JSON.stringify(hookAudioJson.trim));
+// Video-only: no audio to score — cuts + motion only, warning says
+// so. Fixture test/content-video-only.mp4 is moving testsrc, so the
+// score is 0.2 * motion (~1.0) with energy/speech 0, not the old 0.
 const hookVideoRes = await client.callTool({
   name: "hook",
   arguments: { input: path.join(root, "test/content-video-only.mp4"), duration: 4 },
 });
 const hookVideoJson = JSON.parse(hookVideoRes.content[0].text);
-checkOk(hookVideoJson.warnings.some((w) => /no audio stream/.test(w)) && hookVideoJson.hook.score === 0 && hookVideoJson.energy_curve.every((b) => b.energy === 0), "hook on video-only scores 0 and warns about no audio", JSON.stringify(hookVideoJson.warnings));
+checkOk(hookVideoJson.warnings.some((w) => /no audio stream/.test(w)) && near(hookVideoJson.hook.score, 0.2, 0.01) && hookVideoJson.hook.motion > 0.9 && hookVideoJson.energy_curve.every((b) => b.energy === 0), "hook on video-only scores on motion (0.2, motion ~1.0) and warns about no audio", JSON.stringify(hookVideoJson.warnings));
 // Short file: duration longer than the file -> whole file, warning.
 const hookShortRes = await client.callTool({
   name: "hook",
@@ -2140,6 +2149,7 @@ const hookShortRes = await client.callTool({
 });
 const hookShortJson = JSON.parse(hookShortRes.content[0].text);
 checkOk(hookShortJson.hook.start === 0 && hookShortJson.hook.end === 9 && hookShortJson.warnings.some((w) => /shorter than --duration/.test(w)), "hook on a file shorter than --duration returns the whole file + warning", JSON.stringify(hookShortJson.hook));
+checkOk(hookShortJson.trim.start === 0 && hookShortJson.trim.end === 9 && hookShortJson.trim.snapped === false && /whole file is the hook/.test(hookShortJson.trim.reason ?? ""), "a whole-file hook is never snapped (trim keeps the full 9s)", JSON.stringify(hookShortJson.trim));
 const hookBadText = await callExpectThrow("hook", { input: path.join(root, "test/mix-voice.mp3"), duration: 25 });
 checkOk(/less than or equal to 20/.test(hookBadText), "hook refuses --duration over 20", hookBadText.slice(0, 120));
 // hook clip history (podcli's clip-history idea): record the winner
@@ -2164,7 +2174,7 @@ const hookRecJson = JSON.parse(hookRecRes.content[0].text);
 checkOk(hookRecJson.history.recorded === true && hookRecJson.history.records_checked === 0 && hookRecJson.history.records_total === 1 && hookRecJson.hook.duplicate === false, "hook --record creates the history file with the winner [15,25)", JSON.stringify(hookRecJson.history));
 const hookHistDoc = JSON.parse(await readFile(hookHistPath, "utf8"));
 const hookSrcSha = createHash("sha256").update(await readFile(path.join(root, "test/hook-source.mp4"))).digest("hex");
-checkOk(hookHistDoc.version === 1 && hookHistDoc.records.length === 1 && hookHistDoc.records[0].source_sha256 === hookSrcSha && hookHistDoc.records[0].start === 15 && hookHistDoc.records[0].end === 25 && hookHistDoc.records[0].score === 0.943 && typeof hookHistDoc.records[0].recorded_at === "string", "history file on disk: version 1, one record, sha/start/end/score match the winner", JSON.stringify(hookHistDoc.records[0]));
+checkOk(hookHistDoc.version === 1 && hookHistDoc.records.length === 1 && hookHistDoc.records[0].source_sha256 === hookSrcSha && hookHistDoc.records[0].start === 15 && hookHistDoc.records[0].end === 25 && hookHistDoc.records[0].score === 0.754 && typeof hookHistDoc.records[0].recorded_at === "string", "history file on disk: version 1, one record, sha/start/end/score match the winner", JSON.stringify(hookHistDoc.records[0]));
 // Same file again: the winner is a duplicate, and --record does not
 // append it a second time.
 const hookDupRes = await client.callTool({
@@ -2210,6 +2220,69 @@ const hookBadShape = await callExpectThrow("hook", { input: path.join(root, "tes
 checkOk(/wrong shape/.test(hookBadShape), "hook refuses a history file with the wrong shape", hookBadShape.slice(0, 120));
 
 
+// findQuietSnap is pure (no ffmpeg): the snap rules, unit-tested
+// directly — dip found, no dip, all-quiet, floor guard, window.
+const snapBins = (quietByT) => Object.entries(quietByT).map(([t, quiet]) => ({ t: +t, quiet })).sort((a, b) => a.t - b.t);
+const snapDipBins = snapBins({ 0: 0.5, 0.5: 0.5, 1: 0.5, 1.5: 0.5, 2: 0.5, 2.5: 0.5, 3: 0.5, 3.5: 0.5, 4: 0.5, 4.5: 0.5, 5: 0.5, 5.5: 0.5, 6: 0.5, 6.5: 0.5, 7: 0, 7.5: 0, 8: 0, 8.5: 0, 9: 0, 9.5: 0 });
+const snapDip = findQuietSnap({ bins: snapDipBins, start: 0, end: 10, snapWindowSeconds: 5, minDurationSeconds: 5 });
+checkOk(snapDip.snapped === true && snapDip.end === 7 && snapDip.quietScore === 0, "findQuietSnap: snaps to the START of the quiet run (7, not the end of the silence)", JSON.stringify(snapDip));
+const snapFlat = findQuietSnap({ bins: snapBins({ 0: 0.5, 0.5: 0.5, 1: 0.5, 1.5: 0.5, 2: 0.5, 2.5: 0.5, 3: 0.5, 3.5: 0.5, 4: 0.5, 4.5: 0.5, 5: 0.5, 5.5: 0.5, 6: 0.5, 6.5: 0.5, 7: 0.5, 7.5: 0.5, 8: 0.5, 8.5: 0.5, 9: 0.5, 9.5: 0.5 }), start: 0, end: 10, snapWindowSeconds: 5, minDurationSeconds: 5 });
+checkOk(snapFlat.snapped === false && snapFlat.end === 10 && /no quiet moment/.test(snapFlat.reason ?? ""), "findQuietSnap: a uniformly busy window keeps its raw end", JSON.stringify(snapFlat));
+const snapAllQuiet = findQuietSnap({ bins: snapBins({ 0: 0, 0.5: 0, 1: 0, 1.5: 0, 2: 0, 2.5: 0, 3: 0, 3.5: 0, 4: 0, 4.5: 0, 5: 0, 5.5: 0, 6: 0, 6.5: 0, 7: 0, 7.5: 0, 8: 0, 8.5: 0, 9: 0, 9.5: 0 }), start: 0, end: 10, snapWindowSeconds: 5, minDurationSeconds: 5 });
+checkOk(snapAllQuiet.snapped === false && /whole window is quiet/.test(snapAllQuiet.reason ?? ""), "findQuietSnap: an all-quiet window has no dip to snap to", JSON.stringify(snapAllQuiet));
+const snapFloor = findQuietSnap({ bins: snapDipBins, start: 0, end: 10, snapWindowSeconds: 5, minDurationSeconds: 8 });
+checkOk(snapFloor.snapped === false && /below 8s/.test(snapFloor.reason ?? ""), "findQuietSnap: refuses to shorten the hook below the duration floor", JSON.stringify(snapFloor));
+const snapOutOfWindow = findQuietSnap({ bins: snapBins({ 0: 0, 0.5: 0, 1: 0, 1.5: 0, 2: 0.5, 2.5: 0.5, 3: 0.5, 3.5: 0.5, 4: 0.5, 4.5: 0.5, 5: 0.5, 5.5: 0.5, 6: 0.5, 6.5: 0.5, 7: 0.5, 7.5: 0.5, 8: 0.5, 8.5: 0.5, 9: 0.5, 9.5: 0.5 }), start: 0, end: 10, snapWindowSeconds: 5, minDurationSeconds: 5 });
+checkOk(snapOutOfWindow.snapped === false && /no quiet moment/.test(snapOutOfWindow.reason ?? ""), "findQuietSnap: a dip outside the search window does not snap", JSON.stringify(snapOutOfWindow));
+
+// hook motion (shorts-maker-gpu's combined audio/video scoring):
+// fixture test/hook-motion-source.mp4 is 30s, loud + static red
+// [0,15) then quieter + moving testsrc2 [15,30), joined by a 1s
+// crossfade so no scene cut fires at the join. The loud half is only
+// slightly louder (energy 0.91 vs 1.0), so under the old weights the
+// static half wins — with motion the winner must move into the
+// moving half, with motion ~1.0 on the curve there and 0 before it.
+const hookMotionRes = await client.callTool({
+  name: "hook",
+  arguments: { input: path.join(root, "test/hook-motion-source.mp4"), duration: 10, step: 0.5, top: 3 },
+});
+const hookMotionJson = JSON.parse(hookMotionRes.content[0].text);
+console.log("hook motion fixture:", JSON.stringify(hookMotionJson.hook), "| candidates", hookMotionJson.candidates.map((c) => `${c.start}-${c.end}:${c.score}`).join(" "));
+const hookMotionCurve = hookMotionJson.energy_curve;
+const hookMotionStatic = hookMotionCurve.filter((b) => b.t < 13).reduce((a, b) => a + b.motion, 0) / hookMotionCurve.filter((b) => b.t < 13).length;
+const hookMotionMoving = hookMotionCurve.filter((b) => b.t >= 16).reduce((a, b) => a + b.motion, 0) / hookMotionCurve.filter((b) => b.t >= 16).length;
+checkOk(hookMotionJson.hook.start >= 13.5 && hookMotionJson.hook.start <= 15.5 && hookMotionJson.hook.motion > 0.5 && hookMotionJson.hook.score > 0.6, "hook with motion wins in the moving half (start 13.5-15.5, motion > 0.5)", JSON.stringify(hookMotionJson.hook));
+checkOk(hookMotionStatic < 0.05 && hookMotionMoving > 0.9, "hook motion curve shows the step: static half ~0, moving half ~1.0", `static=${hookMotionStatic.toFixed(3)} moving=${hookMotionMoving.toFixed(3)}`);
+// The same measured bins under the OLD weights (0.5*energy +
+// 0.3*speech + 0.2*cut, no motion): the loud static window [0,10)
+// scores 0.8, the moving winner scores ~0.75 — the flip is the
+// motion term, not a re-measurement. No cuts in the file, so the cut
+// term is 0 on both sides.
+const hookMotionMeanOver = (key, a, b) => { const v = hookMotionCurve.filter((x) => x.t >= a && x.t < b); return v.reduce((s, x) => s + x[key], 0) / v.length; };
+const hookMotionOldStatic = 0.5 * hookMotionMeanOver("energy", 0, 10) + 0.3 * hookMotionMeanOver("speech", 0, 10);
+const hookMotionOldWinner = 0.5 * hookMotionJson.hook.energy + 0.3 * hookMotionJson.hook.speech;
+checkOk(hookMotionJson.cuts_per_minute === 0 && hookMotionOldStatic > hookMotionOldWinner, "old weights on the same bins score the static window higher (0.8 vs ~0.75) — the flip is motion", `old static=${hookMotionOldStatic.toFixed(3)} old winner=${hookMotionOldWinner.toFixed(3)}`);
+// hook quiet snap (shorts-maker-gpu's find_smart_end_point):
+// fixture test/hook-snap-source.mp4 is 30s, loud blue [15,22) then
+// silence [22,30). The winning window is [14.5,24.5) but its tail
+// is dead air — the trim must end at 22, where the quiet starts.
+const hookSnapRes = await client.callTool({
+  name: "hook",
+  arguments: { input: path.join(root, "test/hook-snap-source.mp4"), duration: 10, step: 0.5, top: 3 },
+});
+const hookSnapJson = JSON.parse(hookSnapRes.content[0].text);
+console.log("hook snap fixture:", JSON.stringify(hookSnapJson.hook), "| trim", JSON.stringify(hookSnapJson.trim));
+checkOk(hookSnapJson.hook.start === 14.5 && hookSnapJson.hook.end === 24.5 && hookSnapJson.trim.start === 14.5 && hookSnapJson.trim.end === 22 && hookSnapJson.trim.snapped === true && hookSnapJson.trim.quiet_score_at_snap === 0, "hook snaps the trim end 24.5 -> 22, where the silence starts", JSON.stringify(hookSnapJson.trim));
+checkOk(hookSnapJson.suggested_trim.includes("--start 14.5 --end 22"), "suggested_trim uses the snapped end", hookSnapJson.suggested_trim);
+// --no-snap-quiet keeps the raw window end on the same fixture.
+const hookNoSnapRes = await client.callTool({
+  name: "hook",
+  arguments: { input: path.join(root, "test/hook-snap-source.mp4"), duration: 10, step: 0.5, top: 1, snap_quiet: false },
+});
+const hookNoSnapJson = JSON.parse(hookNoSnapRes.content[0].text);
+checkOk(hookNoSnapJson.trim.snapped === false && hookNoSnapJson.trim.end === 24.5 && /snap disabled/.test(hookNoSnapJson.trim.reason ?? ""), "hook snap_quiet:false keeps the raw window end (24.5)", JSON.stringify(hookNoSnapJson.trim));
+
+
 // hook in batch + manifest (lượt 69): hook is the first probe-only
 // operation — no file is written, so a batch row's output is null
 // and the ranked windows come back in the row's result; a manifest
@@ -2219,6 +2292,7 @@ await rm(path.join(root, "outputs/mcp-batch-hook-in"), { recursive: true, force:
 await rm(path.join(root, "outputs/mcp-batch-hook-out"), { recursive: true, force: true });
 await mkdir(path.join(root, "outputs/mcp-batch-hook-in"), { recursive: true });
 await copyFile(path.join(root, "test/hook-source.mp4"), path.join(root, "outputs/mcp-batch-hook-in/hook-source.mp4"));
+await copyFile(path.join(root, "test/hook-snap-source.mp4"), path.join(root, "outputs/mcp-batch-hook-in/hook-snap-source.mp4"));
 await copyFile(path.join(root, "test/source.mp4"), path.join(root, "outputs/mcp-batch-hook-in/source.mp4"));
 const hookBatchRes = await client.callTool({
   name: "batch",
@@ -2226,14 +2300,16 @@ const hookBatchRes = await client.callTool({
 });
 const hookBatchJson = JSON.parse(hookBatchRes.content[0].text);
 console.log("batch hook:", JSON.stringify(hookBatchJson.results.map((r) => ({ status: r.status, output: r.output, hook: r.result?.hook }))), "| suffix", hookBatchJson.output_suffix);
-checkOk(hookBatchJson.succeeded === 2 && hookBatchJson.failed === 0 && hookBatchJson.output_suffix === null && hookBatchJson.results.every((r) => r.status === "ok" && r.output === null), "batch hook succeeds on both files with no output file (output null, suffix null)", JSON.stringify(hookBatchJson.results.map((r) => r.output)));
-checkOk(hookBatchJson.results[0].result.hook.start === 15 && near(hookBatchJson.results[0].result.hook.score, 0.943, 0.01) && hookBatchJson.results[1].result.hook.start === 0 && hookBatchJson.results[1].result.hook.end === 10, "batch hook rows carry the ranked windows (hook-source 15-25 @0.94, source whole 10s file)", JSON.stringify(hookBatchJson.results.map((r) => r.result?.hook)));
+const hookBatchRow = (name) => hookBatchJson.results.find((r) => r.input.endsWith(`/${name}`));
+checkOk(hookBatchJson.succeeded === 3 && hookBatchJson.failed === 0 && hookBatchJson.output_suffix === null && hookBatchJson.results.every((r) => r.status === "ok" && r.output === null), "batch hook succeeds on all three files with no output file (output null, suffix null)", JSON.stringify(hookBatchJson.results.map((r) => r.output)));
+checkOk(hookBatchRow("hook-source.mp4").result.hook.start === 15 && near(hookBatchRow("hook-source.mp4").result.hook.score, 0.754, 0.01) && hookBatchRow("source.mp4").result.hook.start === 0 && hookBatchRow("source.mp4").result.hook.end === 10, "batch hook rows carry the ranked windows (hook-source 15-25 @0.75, source whole 10s file)", JSON.stringify(hookBatchJson.results.map((r) => r.result?.hook)));
+checkOk(hookBatchRow("hook-snap-source.mp4").result.hook.start === 14.5 && hookBatchRow("hook-snap-source.mp4").result.trim.end === 22 && hookBatchRow("hook-snap-source.mp4").result.trim.snapped === true, "batch hook passes the snap through (snap fixture trims to 22)", JSON.stringify(hookBatchRow("hook-snap-source.mp4").result.trim));
 const hookBatchCacheRes = await client.callTool({
   name: "batch",
   arguments: { operation: "hook", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-hook-in"), output_dir: path.join(root, "outputs/mcp-batch-hook-out"), args: { duration: 10 }, jobs: 2 },
 });
 const hookBatchCacheJson = JSON.parse(hookBatchCacheRes.content[0].text);
-checkOk(hookBatchCacheJson.cached === 2 && hookBatchCacheJson.succeeded === 0 && hookBatchCacheJson.results.every((r) => r.status === "cached" && r.result.hook.start !== undefined), "batch hook second run serves both rows from the result cache (no file to verify, key covers input bytes)", JSON.stringify(hookBatchCacheJson.results.map((r) => r.status)));
+checkOk(hookBatchCacheJson.cached === 3 && hookBatchCacheJson.succeeded === 0 && hookBatchCacheJson.results.every((r) => r.status === "cached" && r.result.hook.start !== undefined), "batch hook second run serves all three rows from the result cache (no file to verify, key covers input bytes)", JSON.stringify(hookBatchCacheJson.results.map((r) => r.status)));
 const hookBatchDryRes = await client.callTool({
   name: "batch",
   arguments: { operation: "hook", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-hook-in"), output_dir: path.join(root, "outputs/mcp-batch-hook-out"), args: { duration: 10 }, dry_run: true },
@@ -2262,6 +2338,17 @@ const hookManifestDryRes = await client.callTool({
 });
 const hookManifestDryJson = JSON.parse(hookManifestDryRes.content[0].text);
 checkOk(hookManifestDryJson.dry_run === true && hookManifestDryJson.steps[0].output === hookManifestDryJson.input && hookManifestDryJson.steps[1].input === hookManifestDryJson.input, "manifest hook dry-run plans the hook step as a pass-through (output = input)", JSON.stringify(hookManifestDryJson.steps.map((s) => s.output)));
+// The manifest validator takes the new snap args too (same args
+// list as batch): a dry-run manifest with snap_quiet:false validates
+// without rendering anything.
+const hookManifestSnapPath = path.join(root, "outputs", "manifest-hook-snap.json");
+await writeFile(hookManifestSnapPath, JSON.stringify({ version: 1, input: path.join(root, "test/hook-snap-source.mp4"), output: path.join(root, "outputs/mcp-manifest-hook-snap.mp4"), steps: [{ tool: "hook", args: { duration: 10, snap_window_seconds: 5, snap_quiet: false } }] }), "utf8");
+const hookManifestSnapDryRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: hookManifestSnapPath, dry_run: true },
+});
+const hookManifestSnapDryJson = JSON.parse(hookManifestSnapDryRes.content[0].text);
+checkOk(hookManifestSnapDryJson.dry_run === true && hookManifestSnapDryJson.steps[0].tool === "hook" && hookManifestSnapDryJson.steps[0].status === "planned", "manifest dry-run accepts a hook step with snap_window_seconds + snap_quiet", JSON.stringify(hookManifestSnapDryJson.steps.map((s) => s.tool)));
 
 // hook clip history in batch + manifest: the same history file is
 // shared across files, the cache key hashes its bytes (so a recorded
@@ -2274,23 +2361,23 @@ const hookBatchHistRes = await client.callTool({
   arguments: { operation: "hook", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-hook-in"), output_dir: path.join(root, "outputs/mcp-batch-hook-out"), args: { duration: 10, history_file: hookHistBatchPath, record: true }, jobs: 2 },
 });
 const hookBatchHistJson = JSON.parse(hookBatchHistRes.content[0].text);
-checkOk(hookBatchHistJson.succeeded === 2 && hookBatchHistJson.results.every((r) => r.status === "ok" && r.result.history.recorded === true && r.result.history.duplicates_found === 0), "batch hook --record records both winners into one shared history file", JSON.stringify(hookBatchHistJson.results.map((r) => r.result?.history)));
+checkOk(hookBatchHistJson.succeeded === 3 && hookBatchHistJson.results.every((r) => r.status === "ok" && r.result.history.recorded === true && r.result.history.duplicates_found === 0), "batch hook --record records all three winners into one shared history file", JSON.stringify(hookBatchHistJson.results.map((r) => r.result?.history)));
 const hookHistBatchDoc = JSON.parse(await readFile(hookHistBatchPath, "utf8"));
-checkOk(hookHistBatchDoc.records.length === 2 && new Set(hookHistBatchDoc.records.map((r) => r.source_sha256)).size === 2, "batch history file has exactly 2 records, one per source (no lost update under jobs: 2)", JSON.stringify(hookHistBatchDoc.records.map((r) => `${r.source}:${r.start}-${r.end}`)));
+checkOk(hookHistBatchDoc.records.length === 3 && new Set(hookHistBatchDoc.records.map((r) => r.source_sha256)).size === 3, "batch history file has exactly 3 records, one per source (no lost update under jobs: 2)", JSON.stringify(hookHistBatchDoc.records.map((r) => `${r.source}:${r.start}-${r.end}`)));
 const hookBatchHist2Res = await client.callTool({
   name: "batch",
   arguments: { operation: "hook", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-hook-in"), output_dir: path.join(root, "outputs/mcp-batch-hook-out"), args: { duration: 10, history_file: hookHistBatchPath, record: true }, jobs: 2 },
 });
 const hookBatchHist2Json = JSON.parse(hookBatchHist2Res.content[0].text);
-checkOk(hookBatchHist2Json.succeeded === 2 && hookBatchHist2Json.cached === 0 && hookBatchHist2Json.results.every((r) => r.status === "ok" && r.result.history.duplicates_found === 1 && r.result.history.recorded === false), "batch hook second run re-runs (history bytes changed the cache key) and flags both winners duplicates", JSON.stringify(hookBatchHist2Json.results.map((r) => r.result?.history)));
+checkOk(hookBatchHist2Json.succeeded === 3 && hookBatchHist2Json.cached === 0 && hookBatchHist2Json.results.every((r) => r.status === "ok" && r.result.history.duplicates_found === 1 && r.result.history.recorded === false), "batch hook second run re-runs (history bytes changed the cache key) and flags all three winners duplicates", JSON.stringify(hookBatchHist2Json.results.map((r) => r.result?.history)));
 const hookBatchHist3Res = await client.callTool({
   name: "batch",
   arguments: { operation: "hook", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-hook-in"), output_dir: path.join(root, "outputs/mcp-batch-hook-out"), args: { duration: 10, history_file: hookHistBatchPath, record: true }, jobs: 2 },
 });
 const hookBatchHist3Json = JSON.parse(hookBatchHist3Res.content[0].text);
-checkOk(hookBatchHist3Json.cached === 2 && hookBatchHist3Json.results.every((r) => r.status === "cached"), "batch hook third run serves both rows from cache (history unchanged since run 2)", JSON.stringify(hookBatchHist3Json.results.map((r) => r.status)));
+checkOk(hookBatchHist3Json.cached === 3 && hookBatchHist3Json.results.every((r) => r.status === "cached"), "batch hook third run serves all three rows from cache (history unchanged since run 2)", JSON.stringify(hookBatchHist3Json.results.map((r) => r.status)));
 const hookHistBatchDoc3 = JSON.parse(await readFile(hookHistBatchPath, "utf8"));
-checkOk(hookHistBatchDoc3.records.length === 2, "batch history file still has exactly 2 records after the duplicate runs", `records=${hookHistBatchDoc3.records.length}`);
+checkOk(hookHistBatchDoc3.records.length === 3, "batch history file still has exactly 3 records after the duplicate runs", `records=${hookHistBatchDoc3.records.length}`);
 // Manifest: the hook step records through the manifest-relative path,
 // and the history file is hashed into the step cache key.
 await rm(path.join(root, "outputs/mcp-manifest-hook-history.mp4"), { force: true });
@@ -4451,7 +4538,7 @@ const findSourceRes = await client.callTool({
   arguments: { directory: path.join(root, "test"), name: "source" },
 });
 const findSourceJson = JSON.parse(findSourceRes.content[0].text);
-checkOk(findSourceJson.total_matches === 12, "find 'source' matches 12 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source, hook-source, sharpness-source, rotate-source, noisy-source, beat-trim-source)", `got ${findSourceJson.total_matches}`);
+checkOk(findSourceJson.total_matches === 14, "find 'source' matches 14 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source, hook-source, hook-motion-source, hook-snap-source, sharpness-source, rotate-source, noisy-source, beat-trim-source)", `got ${findSourceJson.total_matches}`);
 
 const findMp3Res = await client.callTool({
   name: "find",

@@ -1413,22 +1413,36 @@ comparable with adjacent-frame energy of the same clip.
 ### 55. Pick the opening shot by measurement — `hook` finds where the clip gets loud
 A Short lives or dies in its first seconds, and the loudest moment
 is rarely at 0:00. `hook <clip> [--duration 15]` slides a window of
-that length across the file and scores each candidate on three
+that length across the file and scores each candidate on four
 measured signals — mean audio energy (astats RMS per frame, binned
 and normalized against the clip's own loudest bin), speech coverage
 (the silencedetect complement: a window full of talk beats one full
-of dead air), and scene cuts (a window that opens on a cut scores
-higher, plus cuts inside it). The score is 0.5×energy + 0.3×speech
-+ 0.2×cut with fixed weights, so two runs rank the same way, and the
-top windows are greedy non-overlapping — alternatives, not the same
-window shifted one step. The result carries the ranked candidates
-with the score breakdown, the per-step energy curve, pacing from
-real cuts (slow/medium/fast-cut), and a `suggested_trim` command
-that cuts the winning window. Run it on raw footage before cutting
-the opening of a Short, then trim the winner and check it with
-`motion` — a loud window that is also a still is a title card, not
-a hook. Video-only input scores on cuts alone (energy/speech 0, and
-the warnings say so); audio-only on energy+speech. Files over 20
+of dead air), scene cuts (a window that opens on a cut scores
+higher, plus cuts inside it), and real motion (the `motion` tool's
+per-frame pixel-diff curve, binned on the same step grid, normalized
+against a fixed 0.06 reference — testsrc-level motion is 1.0 — with
+a 0.001 noise floor and a 0.005 file-level gate, so a static clip
+never scores motion from encoder noise). The score is 0.35×energy +
+0.25×speech + 0.2×cut + 0.2×motion — audio 0.6 / video 0.4, the
+shorts-maker-gpu split — with fixed weights, so two runs rank the
+same way, and the top windows are greedy non-overlapping —
+alternatives, not the same window shifted one step. The result
+carries the ranked candidates with the score breakdown, the per-step
+energy curve (each bin also carries `motion` + `motion_fraction`),
+pacing from real cuts (slow/medium/fast-cut), a `trim` object, and a
+`suggested_trim` command. The trim end snaps to the nearest quiet
+moment in the window's last 5 seconds (`--snap-window N`, 1–10):
+quiet is (energy + motion) / 2 per bin, a bin only qualifies when it
+is at most half as busy as the window's own mean, earliest wins a
+tie so the cut lands where the quiet starts, and the snap never
+shortens the hook below max(4s, half the window); `--no-snap-quiet`
+keeps the raw window end. A uniformly loud window has no dip to snap
+to, and a whole-file hook is never snapped — both report
+`trim.snapped: false` with a reason. Run it on raw footage before
+cutting the opening of a Short, then trim the winner — the trim in
+the result already ends on the quiet moment, so cut that, not the
+raw window. Video-only input scores on cuts+motion (energy/speech 0,
+and the warnings say so); audio-only on energy+speech. Files over 20
 minutes are refused: the astats log behind the curve would exceed
 the capture buffer, so trim a section first.
 

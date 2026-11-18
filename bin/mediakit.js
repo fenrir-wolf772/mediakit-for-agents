@@ -702,8 +702,8 @@ const COMMANDS = {
     ],
   },
   hook: {
-    usage: "mediakit hook <input> [--duration 15] [--step 0.5] [--top 3] [--threshold-db -40] [--history-file <path>] [--record] [--history-overlap 0.5]",
-    desc: "Find the best hook window in a clip: slide a --duration window across the file and score each candidate on measured audio energy (astats RMS), speech coverage (silencedetect) and scene cuts (a window opening on a cut scores higher). Returns the ranked top windows with the score breakdown, the per-step energy curve, pacing from real cuts, and a suggested trim command for the winner. Probe-only, writes no file. The director's opening-shot picker. Clip history: --history-file <path> checks every candidate against moments already cut (JSON {version: 1, records: [{source_sha256, start, end, score, recorded_at}]}); a candidate from the same source file overlapping a recorded window by >= --history-overlap (default 0.5) of the shorter window is flagged duplicate with duplicate_of. --record appends the winning window to the history file (only the winner — the alternatives were never cut); a missing history file is an empty history, a corrupt one fails loudly.",
+    usage: "mediakit hook <input> [--duration 15] [--step 0.5] [--top 3] [--threshold-db -40] [--history-file <path>] [--record] [--history-overlap 0.5] [--snap-window 5] [--no-snap-quiet]",
+    desc: "Find the best hook window in a clip: slide a --duration window across the file and score each candidate on measured audio energy (astats RMS), speech coverage (silencedetect), scene cuts (a window opening on a cut scores higher) and real motion (per-frame pixel-diff, same step grid). Score is 0.35*energy + 0.25*speech + 0.2*cut + 0.2*motion (audio 0.6 / video 0.4). Returns the ranked top windows with the score breakdown, the per-step energy curve (each bin also carries motion), pacing from real cuts, a trim object, and a suggested trim command for the winner. The trim end snaps to the nearest quiet moment in the last --snap-window seconds (default 5) — quiet is (energy + motion) / 2, a bin only qualifies at most half as busy as the window mean, and the snap never shortens the hook below max(4s, half the window); --no-snap-quiet keeps the raw window end. Probe-only, writes no file. The director's opening-shot picker. Clip history: --history-file <path> checks every candidate against moments already cut (JSON {version: 1, records: [{source_sha256, start, end, score, recorded_at}]}); a candidate from the same source file overlapping a recorded window by >= --history-overlap (default 0.5) of the shorter window is flagged duplicate with duplicate_of. --record appends the winning window to the history file (only the winner — the alternatives were never cut); a missing history file is an empty history, a corrupt one fails loudly.",
     args: [{ name: "input", required: true }],
     options: [
       ["--duration", "Hook window length in seconds, 4-20 (default 15)"],
@@ -713,6 +713,8 @@ const COMMANDS = {
       ["--history-file", "JSON clip-history file to check candidates against (missing = empty history)"],
       ["--record", "Append the winning window to --history-file after the run (needs --history-file)"],
       ["--history-overlap", "Overlap fraction of the shorter window that marks a duplicate, 0.05-1 (default 0.5)"],
+      ["--snap-window", "Seconds back from the window end to search for a quiet moment to snap the trim to, 1-10 (default 5)"],
+      ["--no-snap-quiet", "Keep the raw window end instead of snapping the trim to the nearest quiet moment"],
     ],
   },
   bpm: {
@@ -1801,6 +1803,8 @@ async function main() {
           historyFile: opts.history_file ?? null,
           record: opts.record === true,
           historyOverlap: numOpt(opts, "history_overlap") ?? 0.5,
+          snapQuiet: opts.snap_quiet !== false,
+          snapWindowSeconds: numOpt(opts, "snap_window") ?? 5,
         });
         break;
       case "bpm":

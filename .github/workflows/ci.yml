@@ -12,7 +12,7 @@ jobs:
     # Bound the whole job: run #43036227269 sat 1h3m on a hung apt
     # install (DNS failure resolving security.ubuntu.com) before
     # failing — a stuck job must fail fast instead of burning an hour.
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

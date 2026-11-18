@@ -368,6 +368,33 @@ export async function prepareOutputDir(dir) {
   return abs;
 }
 
+// Remove a temp dir, retrying once after a short delay, and REPORT the
+// outcome instead of swallowing it: a recursive rm can lose a race
+// with a child process still closing a file inside the tree (measured
+// lượt 101: the determinism work dir survived a full-suite run twice,
+// and the manifest tmp dir inside it too, while the same code cleans
+// up fine standalone / in-process / via a fresh MCP server — both rm
+// calls swallowed their error with `catch {}`, so the cause was
+// unrecorded). Returns null when the dir is gone, else a short
+// message naming the error or the leftover. Never throws.
+async function removeTempDir(dir, { retries = 1, delayMs = 250 } = {}) {
+  let lastError = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      await rm(dir, { recursive: true, force: true });
+    } catch (e) {
+      lastError = e;
+    }
+    try {
+      await access(dir);
+    } catch {
+      return null; // gone
+    }
+    if (attempt < retries) await new Promise((r) => setTimeout(r, delayMs));
+  }
+  return lastError ? `cleanup failed: ${lastError.message ?? lastError}` : "cleanup failed: directory still exists after retry";
+}
+
 // Write + delete a throwaway file in `dirAbs`: proves the directory
 // is writable right now. Used by prepareOutput / prepareOutputDir so
 // every tool fails fast on a read-only output directory instead of
@@ -8472,7 +8499,7 @@ const TOOL_REQUIREMENTS = {
   mix: { filters: ["sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay"], encoders: ["aac", "libmp3lame"] },
   overlay: { filters: ["overlay", "format", "scale", "colorchannelmixer"], encoders: ["libx264"] },
   scenes: { filters: ["select", "signalstats"] },
-  hook: { filters: ["astats", "ametadata", "silencedetect", "select"] },
+  hook: { filters: ["astats", "ametadata", "silencedetect", "select", "tblend", "geq", "signalstats", "scale"] },
   // bpm decodes to raw PCM with -ac/-ar (the resampler, not a filter)
   // and does the analysis in pure Node — no ffmpeg capability needed.
   bpm: {},
@@ -10071,23 +10098,92 @@ export async function detectScenes({
 // Find the best hook window in a clip (sonic-match-mcp's hook_window
 // idea, measured from the footage instead of a script): slide a
 // window of --duration across the file and score each candidate on
-// three measured signals — mean audio energy (astats RMS per frame,
+// FOUR measured signals — mean audio energy (astats RMS per frame,
 // binned and normalized against the file's own loudest bin), speech
-// coverage (silencedetect complement), and scene cuts (a window that
-// opens on a cut, plus cuts inside it, reads as a new beat). The
-// score is 0.5*energy + 0.3*speech + 0.2*cut; the weights are fixed
-// so two runs on the same file rank the same way. Top candidates are
-// greedy non-overlapping (overlap under half the hook length), so
-// the list is alternatives, not the same window shifted by one step.
+// coverage (silencedetect complement), scene cuts (a window that
+// opens on a cut, plus cuts inside it, reads as a new beat), and real
+// MOTION (the motion tool's per-frame pixel-diff curve, binned on the
+// same step grid, normalized against a FIXED reference of 0.06 — the
+// measured fraction for testsrc, the motion tool's "clearly moving"
+// anchor — so motion 1.0 means "as busy as testsrc" on every file.
+// File-max normalization was tried first and rejected: one spike bin
+// (a crossfade blends every pixel, raw fraction ~0.9) compresses all
+// real motion to ~0.2, so the ranking stops seeing the moving half
+// at all. A fixed reference keeps the within-file contrast that the
+// ranking actually needs.
+// The score is 0.35*energy + 0.25*speech + 0.2*cut + 0.2*motion —
+// audio 0.6 / video 0.4, the same split shorts-maker-gpu uses for its
+// combined action score (0.6 audio RMS+flux / 0.4 video frame-diff),
+// so a loud-but-dead frame no longer beats a slightly quieter frame
+// where something actually moves. The weights are fixed so two runs
+// on the same file rank the same way. Top candidates are greedy
+// non-overlapping (overlap under half the hook length), so the list
+// is alternatives, not the same window shifted by one step.
+// Motion normalization has a noise floor, borrowed from the motion
+// tool's own calibration: a per-bin fraction under 0.001 (0.1% of
+// pixels) is encoder noise, not movement, and a file whose busiest
+// bin stays under 0.005 (the measured gap between light grain 0.0013
+// and the slowest real motion 0.00695) scores motion 0 everywhere.
+// One honest exception: a hard cut reads as a one-frame motion spike
+// (red->blue = 0.067 in the 0.5s bin that holds it), so a static clip
+// with cuts still shows a small motion bump exactly on the cut — that
+// bin also earns the cut score, and the double-count is ~0.01 per
+// window, not a ranking factor.
+// The suggested trim does NOT end on the raw window end: it snaps to
+// the nearest QUIET moment (shorts-maker-gpu's find_smart_end_point
+// idea — search backwards from the max end for a local minimum of
+// the action score, so the clip never cuts mid-action). Quiet here
+// is (energy + motion) / 2 per bin, and a bin only qualifies when it
+// is at most half as busy as the window's own mean — a uniformly loud
+// window has no dip to snap to, so it keeps its raw end. The snap
+// searches the last --snap-window seconds (default 5), picks the
+// quietest bin (earliest wins a tie, so the cut lands where the
+// quiet STARTS, not at the end of a long silence), and refuses to
+// shorten the hook below max(4s, half the window). The window start
+// is never snapped: the start IS the action peak by construction.
 // Probe-only: no file is written. The suggested_trim is a real
-// command that cuts the winning window. Video-only input scores on
-// cuts alone (energy/speech 0, noted in warnings); audio-only scores
-// on energy+speech (cuts 0). astats prints ~2 log lines per audio
-// frame (~11 KB/s), and run() caps stderr at 16 MB, so files over
-// 20 minutes are refused with a clear error instead of dying on a
-// buffer limit — hook is a short-form tool anyway.
+// command that cuts the snapped window. Video-only input scores on
+// cuts+motion (energy/speech 0, noted in warnings); audio-only
+// scores on energy+speech (motion 0). astats prints ~2 log lines
+// per audio frame (~11 KB/s), and run() caps stderr at 16 MB, so
+// files over 20 minutes are refused with a clear error instead of
+// dying on a buffer limit — hook is a short-form tool anyway.
 const HOOK_ENERGY_FLOOR_DB = -60;
 const HOOK_MAX_DURATION_SECONDS = 1200;
+const HOOK_MOTION_FLOOR_FRACTION = 0.001;
+const HOOK_MOTION_MIN_MAX_FRACTION = 0.005;
+const HOOK_MOTION_REFERENCE_FRACTION = 0.06;
+const HOOK_SNAP_WINDOW_DEFAULT_SECONDS = 5;
+
+// Snap a hook window's end to the nearest quiet moment (pure: no
+// ffmpeg, unit-tested directly). bins are [{t, quiet}] sorted by t,
+// quiet 0-1 with low = quiet. The search covers the last
+// snapWindowSeconds before end; a bin qualifies only when it is at
+// most half as busy as the window's own mean, so a uniformly loud
+// window keeps its raw end. The quietest bin wins, earliest on a
+// tie — the cut lands where the quiet starts. The snap refuses to
+// shorten the window below minDurationSeconds.
+export function findQuietSnap({ bins, start, end, snapWindowSeconds = HOOK_SNAP_WINDOW_DEFAULT_SECONDS, minDurationSeconds = 4 }) {
+  const win = num(snapWindowSeconds, "snap_window_seconds", { min: 1, max: 10 });
+  const minDur = num(minDurationSeconds, "min_duration_seconds", { min: 1 });
+  const searchStart = Math.max(start, end - win);
+  const inWindow = bins.filter((b) => b.t >= start - 0.001 && b.t < end - 0.001);
+  const inSearch = bins.filter((b) => b.t >= searchStart - 0.001 && b.t < end - 0.001);
+  if (!inSearch.length) return { end, snapped: false, quietScore: null, reason: "no bins in the snap search window" };
+  const meanQ = inWindow.reduce((a, b) => a + b.quiet, 0) / Math.max(1, inWindow.length);
+  if (meanQ <= 0.001) return { end, snapped: false, quietScore: +meanQ.toFixed(3), reason: "the whole window is quiet — no dip to snap to" };
+  const qualifying = inSearch.filter((b) => b.quiet <= 0.5 * meanQ);
+  if (!qualifying.length) {
+    const quietest = inSearch.reduce((m, b) => (b.quiet < m.quiet ? b : m), inSearch[0]);
+    return { end, snapped: false, quietScore: +quietest.quiet.toFixed(3), reason: `no quiet moment in the last ${win}s (quietest bin ${+quietest.quiet.toFixed(3)} vs window mean ${+meanQ.toFixed(3)})` };
+  }
+  let best = qualifying[0];
+  for (const b of qualifying) if (b.quiet < best.quiet - 1e-9) best = b;
+  if (best.t - start < minDur) {
+    return { end, snapped: false, quietScore: +best.quiet.toFixed(3), reason: `snapping to ${best.t}s would cut the hook below ${minDur}s` };
+  }
+  return { end: best.t, snapped: true, quietScore: +best.quiet.toFixed(3), reason: null };
+}
 
 async function energyCurveDb(input, step) {
   const { stderr } = await run(FFMPEG, [
@@ -10216,13 +10312,15 @@ async function appendHookHistory(historyFile, record) {
   }
 }
 
-export async function findHook({ input, duration = 15, step = 0.5, top = 3, thresholdDb = -40, historyFile = null, record = false, historyOverlap = 0.5 }) {
+export async function findHook({ input, duration = 15, step = 0.5, top = 3, thresholdDb = -40, historyFile = null, record = false, historyOverlap = 0.5, snapQuiet = true, snapWindowSeconds = HOOK_SNAP_WINDOW_DEFAULT_SECONDS }) {
   const inPath = await requireInput(input);
   const hookDur = num(duration, "duration", { min: 4, max: 20 });
   const stepSec = num(step, "step", { min: 0.25, max: 2 });
   const topN = num(top, "top", { min: 1, max: 5, integer: true });
   const threshold = num(thresholdDb, "threshold_db", { min: -90, max: 0 });
   const overlapThreshold = num(historyOverlap, "history_overlap", { min: 0.05, max: 1 });
+  const snapWindow = num(snapWindowSeconds, "snap_window_seconds", { min: 1, max: 10 });
+  if (snapQuiet !== true && snapQuiet !== false) throw new MediaKitError(`snap_quiet must be true or false, got: ${snapQuiet}`, "INVALID_ARG");
   if (record !== false && record !== true) throw new MediaKitError(`record must be true or false, got: ${record}`, "INVALID_ARG");
   const historyAbs = historyFile === null || historyFile === undefined ? null : path.resolve(String(historyFile));
   if (record && !historyAbs) throw new MediaKitError("hook --record needs --history-file: there is nowhere to record the window", "INVALID_ARG");
@@ -10244,19 +10342,33 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
     silences = det.silences;
     speechSeconds = total - silences.reduce((a, s) => a + (s.end - s.start), 0);
   } else {
-    warnings.push("no audio stream — scored on scene cuts only (energy/speech 0)");
+    warnings.push("no audio stream — scored on scene cuts and motion only (energy/speech 0)");
   }
-  // Scene cuts (video only).
+  // Scene cuts (video only) + real motion on the same step grid.
   let cuts = [];
+  let motionFractions = [];
   if (meta.video) {
     cuts = (await detectScenes({ input: inPath })).scene_changes;
+    motionFractions = (await measureMotion({ input: inPath, windowSeconds: stepSec })).motion_curve;
   } else {
-    warnings.push("no video stream — no scene cuts to score");
+    warnings.push("no video stream — no scene cuts or motion to score");
   }
   const maxDb = energyBins.length ? Math.max(...energyBins.map((b) => b.energy_db)) : null;
   // All-silent file: maxDb sits on the floor, span is 0 — every bin
   // is 0 energy, not NaN (caught in review before any test ran).
   const energySpan = maxDb === null ? 0 : maxDb - HOOK_ENERGY_FLOOR_DB;
+  // Motion is normalized against the fixed 0.06 reference (see the
+  // header comment), with the noise floor subtracted first — and a
+  // file whose busiest bin never clears 0.005 scores motion 0
+  // everywhere, so grain-level noise never reads as movement.
+  const maxMotionFraction = motionFractions.length ? Math.max(...motionFractions.map((b) => b.motion_fraction)) : 0;
+  const motionLive = maxMotionFraction >= HOOK_MOTION_MIN_MAX_FRACTION;
+  const motionAt = (t) => {
+    if (!motionLive) return 0;
+    const found = motionFractions.find((b) => Math.abs(b.start_seconds - t) < 0.001);
+    if (!found) return 0;
+    return +Math.min(1, Math.max(0, (found.motion_fraction - HOOK_MOTION_FLOOR_FRACTION) / (HOOK_MOTION_REFERENCE_FRACTION - HOOK_MOTION_FLOOR_FRACTION))).toFixed(3);
+  };
   const binCount = Math.max(1, Math.ceil(total / stepSec));
   const curve = [];
   for (let i = 0; i < binCount; i++) {
@@ -10268,7 +10380,8 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
       : +Math.min(1, Math.max(0, (db - HOOK_ENERGY_FLOOR_DB) / energySpan)).toFixed(3);
     const silenceOverlap = silences.reduce((a, s) => a + Math.max(0, Math.min(s.end, binEnd) - Math.max(s.start, t)), 0);
     const speech = meta.audio ? +Math.min(1, Math.max(0, 1 - silenceOverlap / (binEnd - t))).toFixed(3) : 0;
-    curve.push({ t, energy_db: db, energy, speech });
+    const motionFraction = motionFractions.find((b) => Math.abs(b.start_seconds - t) < 0.001)?.motion_fraction ?? 0;
+    curve.push({ t, energy_db: db, energy, speech, motion: motionAt(t), motion_fraction: motionFraction });
   }
   const binAt = (t) => curve[Math.min(curve.length - 1, Math.floor(t / stepSec))];
   const meanOver = (start, end, key) => {
@@ -10288,15 +10401,17 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
   for (const w of scored) {
     const energy = +meanOver(w.start, w.end, "energy").toFixed(3);
     const speech = +meanOver(w.start, w.end, "speech").toFixed(3);
+    const motion = +meanOver(w.start, w.end, "motion").toFixed(3);
     const cutsInside = cuts.filter((c) => c > w.start && c < w.end).length;
     const startsNearCut = cuts.some((c) => Math.abs(c - w.start) <= 0.75);
     const cutScore = +(0.6 * (startsNearCut ? 1 : 0) + 0.4 * (Math.min(cutsInside, 3) / 3)).toFixed(3);
     w.energy = energy;
     w.speech = speech;
+    w.motion = motion;
     w.cuts_inside = cutsInside;
     w.starts_near_cut = startsNearCut;
     w.cut_score = cutScore;
-    w.score = +(0.5 * energy + 0.3 * speech + 0.2 * cutScore).toFixed(3);
+    w.score = +(0.35 * energy + 0.25 * speech + 0.2 * cutScore + 0.2 * motion).toFixed(3);
   }
   scored.sort((a, b) => b.score - a.score || a.start - b.start);
   const candidates = [];
@@ -10342,6 +10457,32 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
   } else {
     for (const w of candidates) { w.duplicate = false; w.duplicate_of = null; }
   }
+  // Quiet snap (shorts-maker-gpu's find_smart_end_point): the trim
+  // ends on the quietest bin of the window's tail, not mid-action.
+  // The start is never snapped — it IS the action peak. A whole-file
+  // hook has nothing to snap: trimming its tail would drop content
+  // the director asked for.
+  const wholeFile = effDur >= total - 0.001;
+  let trim = {
+    start: best.start,
+    end: best.end,
+    window_start: best.start,
+    window_end: best.end,
+    snapped: false,
+    snap_window_seconds: snapWindow,
+    quiet_score_at_snap: null,
+    reason: wholeFile ? "the whole file is the hook — nothing to snap" : (snapQuiet ? null : "snap disabled (--no-snap-quiet)"),
+  };
+  if (snapQuiet && !wholeFile) {
+    const snap = findQuietSnap({
+      bins: curve.map((b) => ({ t: b.t, quiet: +((b.energy + b.motion) / 2).toFixed(3) })),
+      start: best.start,
+      end: best.end,
+      snapWindowSeconds: snapWindow,
+      minDurationSeconds: Math.max(4, effDur * 0.5),
+    });
+    trim = { ...trim, end: snap.end, snapped: snap.snapped, quiet_score_at_snap: snap.quietScore, reason: snap.reason };
+  }
   return {
     operation: "hook",
     input: inPath,
@@ -10354,7 +10495,8 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
     pacing,
     candidates,
     hook: best,
-    suggested_trim: `mediakit trim ${inPath} -o hook.mp4 --start ${best.start} --end ${best.end}`,
+    trim,
+    suggested_trim: `mediakit trim ${inPath} -o hook.mp4 --start ${trim.start} --end ${trim.end}`,
     history,
     warnings,
   };
@@ -11382,8 +11524,8 @@ export const BATCH_OPERATIONS = {
   // output_suffix null.
   hook: {
     probeOnly: true,
-    args: ["duration", "step", "top", "threshold_db", "history_file", "record", "history_overlap"],
-    run: (input, output, a) => findHook({ input, duration: a.duration ?? 15, step: a.step ?? 0.5, top: a.top ?? 3, thresholdDb: a.threshold_db ?? -40, historyFile: a.history_file ?? null, record: a.record ?? false, historyOverlap: a.history_overlap ?? 0.5 }),
+    args: ["duration", "step", "top", "threshold_db", "history_file", "record", "history_overlap", "snap_window_seconds", "snap_quiet"],
+    run: (input, output, a) => findHook({ input, duration: a.duration ?? 15, step: a.step ?? 0.5, top: a.top ?? 3, thresholdDb: a.threshold_db ?? -40, historyFile: a.history_file ?? null, record: a.record ?? false, historyOverlap: a.history_overlap ?? 0.5, snapQuiet: a.snap_quiet ?? true, snapWindowSeconds: a.snap_window_seconds ?? 5 }),
     // The history file is a sidecar like cut_words' words file: hash
     // its bytes into the cache key, so a recorded window invalidates
     // the cached duplicate flags instead of serving stale ones.
@@ -12281,6 +12423,7 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
   const startedAt = Date.now();
   const stepResults = [];
   let cacheHits = 0;
+  let tmpCleanupWarning = null;
   let curInput = inputAbs;
   try {
     for (const s of steps) {
@@ -12401,7 +12544,7 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
   let qaResult = null;
   if (doc.qa) qaResult = await qaReport({ input: finalOutputAbs, target: doc.qa });
   if (!keepIntermediates) {
-    try { await rm(tmpDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+    tmpCleanupWarning = await removeTempDir(tmpDir);
   }
   return {
     operation: "manifest", manifest: manifestAbs, input: inputAbs, output: finalOutputAbs,
@@ -12418,6 +12561,7 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
     },
     qa_result: qaResult,
     ...(keepIntermediates ? { intermediates_dir: tmpDir } : {}),
+    ...(tmpCleanupWarning ? { intermediates_cleanup_warning: tmpCleanupWarning } : {}),
   };
 }
 
@@ -12658,6 +12802,7 @@ export async function checkManifestDeterminism({ manifestPath, runs = 2, keepOut
   const startedAt = Date.now();
   const runRows = [];
   let failed = false;
+  let cleanupWarning = null;
   try {
     for (let i = 0; i < n; i++) {
       const runOut = path.join(workDir, `run-${i}`, "final.mp4");
@@ -12688,9 +12833,11 @@ export async function checkManifestDeterminism({ manifestPath, runs = 2, keepOut
   } finally {
     // A failed run keeps its outputs for inspection (the error
     // names the directory); a successful run removes them unless
-    // the caller asked to keep them.
+    // the caller asked to keep them. A failed cleanup is reported
+    // in the result (not swallowed) so the next leftover is
+    // diagnosable instead of a bare FAIL in the suite.
     if (!keepOutputs && !failed) {
-      try { await rm(workDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+      cleanupWarning = await removeTempDir(workDir);
     }
   }
   const comparison = compareDeterminismRuns(runRows);
@@ -12702,6 +12849,7 @@ export async function checkManifestDeterminism({ manifestPath, runs = 2, keepOut
     ffmpeg_version: await ffmpegVersionString(),
     elapsed_seconds: +((Date.now() - startedAt) / 1000).toFixed(1),
     ...(keepOutputs ? { outputs_dir: workDir } : {}),
+    ...(cleanupWarning ? { cleanup_warning: cleanupWarning } : {}),
     runs_detail: runRows,
   };
 }
