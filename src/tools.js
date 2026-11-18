@@ -312,7 +312,7 @@ export const TOOL_DEFS = [
 
   {
     name: "check",
-    description: "Verify a finished file against a platform delivery spec (tiktok, reels, shorts, youtube): dimensions, codecs, fps, duration limit, audio channels and measured loudness, plus a file-size limit where the platform has one. Video bitrate is checked as a warning only (platforms publish recommendations, not gates) and the result also reports the platform's text-safe zone. expected_duration fails the check when the measured duration is more than 0.5s off the brief (same tolerance as qa_report). With content=true, one extra decode pass scans for black frames, frozen frames, silence and audio peaks (0.1s windows above peak_threshold_db, default -1 dBFS; >= 0 dBFS is clipping) and folds them into the same pass/fail list with position-aware rules (a short black stretch at the very start/end is a warning — likely a fade — the same stretch mid-file fails). content_start/content_end (seconds) scan only that time range, reported on the file's own timeline. Returns pass/fail per rule with fix hints. Run this before publishing.",
+    description: "Verify a finished file against a platform delivery spec (tiktok, reels, shorts, youtube): dimensions, codecs, fps, duration limit, audio channels and measured loudness, plus a file-size limit where the platform has one. Video bitrate is checked as a warning only (platforms publish recommendations, not gates) and the result also reports the platform's text-safe zone. expected_duration fails the check when the measured duration is more than 0.5s off the brief (same tolerance as qa_report). With content=true, one extra decode pass scans for black frames, frozen frames, silence and audio peaks (0.1s windows above peak_threshold_db, default -1 dBFS; >= 0 dBFS is clipping) and folds them into the same pass/fail list with position-aware rules (a short black stretch at the very start/end is a warning — likely a fade — the same stretch mid-file fails). content_start/content_end (seconds) scan only that time range, reported on the file's own timeline. With decoded_work=true, the decoded work is estimated from the probe (video pixel-frames + audio sample-channels) and warned when over the ceiling (250B pixel-frames / 6B sample-channels, plus per-stream limits: 3600s, 8192px, 120fps, 8ch, 192kHz) — a heavy input can OOM the machine before any tool reports progress. Returns pass/fail per rule with fix hints. Run this before publishing.",
     schema: {
     input: pathSchema,
     platform: z.enum(["tiktok", "reels", "shorts", "youtube", "instagram-feed", "instagram-story", "linkedin"]).default("tiktok"),
@@ -322,6 +322,7 @@ export const TOOL_DEFS = [
     content_end: z.number().min(0).optional().describe("Scan only up to this time (seconds); needs content=true"),
     peak_threshold_db: z.number().min(-60).max(12).default(-1).describe("Audio peak threshold in dBFS for the content_peaks rule (windows above it are reported; >= 0 dBFS is clipping; float audio can peak above 0)"),
     faststart: z.boolean().default(false).describe("Also check MP4 faststart (moov before mdat, measured by a pure-Node box walk) — fails when the file is not an MP4 or its moov box comes after mdat; re-mux with -movflags +faststart to fix"),
+    decoded_work: z.boolean().default(false).describe("Also estimate the decoded work from the probe (video pixel-frames + audio sample-channels) and warn when it is over the ceiling (250B pixel-frames / 6B sample-channels, plus per-stream limits: 3600s, 8192px, 120fps, 8ch, 192kHz) — a heavy input can OOM the machine before any tool reports progress"),
   },
     handler: async (a) => safe(() => core.check({
     input: a.input,
@@ -332,6 +333,7 @@ export const TOOL_DEFS = [
     contentEnd: a.content_end ?? null,
     peakThresholdDb: a.peak_threshold_db,
     faststart: a.faststart,
+    decodedWork: a.decoded_work,
   })),
   },
 
@@ -1376,6 +1378,31 @@ export const TOOL_DEFS = [
     cache: a.cache,
     dryRun: a.dry_run,
     keepIntermediates: a.keep_intermediates,
+  })),
+  },
+
+
+  {
+    name: "patch_manifest",
+    description: "Edit a manifest JSON file under a revision guard (AH64-dll/OpenEdit's revision-guard idea: a write against a stale revision is refused instead of silently overwriting newer work). A manifest carries an optional top-level `revision` (absent = 0); the call requires `expected_revision` to match the file's current revision, applies 1-32 ops, proves the patched manifest still lints and plans (a real manifest --dry-run on a temp copy), then writes atomically (.partial + rename) with revision + 1. A revision mismatch, a bad op, or a patched manifest that no longer validates all refuse with an error code (REVISION_MISMATCH / INVALID_ARG) and leave the file byte-identical — nothing is written. Ops: set {path: input|output|qa|steps.N.tool|steps.N.args.KEY, value: scalar} (version/revision are managed, not settable); add_step {step: {tool, args?}, index?} (append, or insert at index); remove_step {index} (never the last step); replace_step {index, step: {tool, args?}}. Ops apply in order — each op addresses the step list as the previous ops left it (JSON Patch semantics). Returns revision_before/after, a human-readable changes list, and the dry-run validation (steps + planned output).",
+    schema: {
+    manifest_path: pathSchema.describe("Path to the manifest JSON file to patch"),
+    expected_revision: z.number().int().min(0).describe("The revision the caller last read from the file (absent = 0). Must match the file's current revision or the call is refused with REVISION_MISMATCH and nothing is written"),
+    patch: z.array(z.union([
+      z.object({ op: z.literal("set"), path: z.string().min(1), value: z.union([z.string(), z.number(), z.boolean(), z.null()]) }).strict(),
+      z.object({ op: z.literal("add_step"), step: z.object({ tool: z.string().min(1), args: z.record(z.any()).optional() }).passthrough(), index: z.number().int().min(0).optional() }).strict(),
+      z.object({ op: z.literal("remove_step"), index: z.number().int().min(0) }).strict(),
+      z.object({ op: z.literal("replace_step"), index: z.number().int().min(0), step: z.object({ tool: z.string().min(1), args: z.record(z.any()).optional() }).passthrough() }).strict(),
+      // Catch-all so an unknown op name reaches core instead of dying
+      // in zod with a bare "Invalid input" — core names the op
+      // (unknown op "move_step") and the supported list.
+      z.object({ op: z.string() }).passthrough(),
+    ])).min(1).max(32).describe("1-32 patch operations, applied in order — each op addresses the list as the previous ops left it"),
+  },
+    handler: async (a) => safe(() => core.patchManifest({
+    manifestPath: a.manifest_path,
+    patch: a.patch,
+    expectedRevision: a.expected_revision,
   })),
   },
 

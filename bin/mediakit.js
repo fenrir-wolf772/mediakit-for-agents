@@ -239,8 +239,8 @@ const COMMANDS = {
     ],
   },
   check: {
-    usage: "mediakit check <input> [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin] [--expected-duration <s|MM:SS>] [--content] [--start <s|MM:SS>] [--end <s|MM:SS>] [--peak-threshold <dB>] [--faststart]",
-    desc: "Verify a file against a platform delivery spec (dimensions, codecs, duration, loudness). --expected-duration fails when the measured duration is more than 0.5s off the brief. --content also scans for black/frozen frames, silence and audio peaks; --start/--end scan only that time range.",
+    usage: "mediakit check <input> [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin] [--expected-duration <s|MM:SS>] [--content] [--start <s|MM:SS>] [--end <s|MM:SS>] [--peak-threshold <dB>] [--faststart] [--decoded-work]",
+    desc: "Verify a file against a platform delivery spec (dimensions, codecs, duration, loudness). --expected-duration fails when the measured duration is more than 0.5s off the brief. --content also scans for black/frozen frames, silence and audio peaks; --start/--end scan only that time range. --decoded-work also estimates the decode load and warns when it is over the ceiling.",
     args: [{ name: "input", required: true }],
     options: [
       ["--platform", "Delivery platform (default tiktok)"],
@@ -250,6 +250,7 @@ const COMMANDS = {
       ["--end", "Scan only up to this time, seconds or MM:SS (needs --content)"],
       ["--peak-threshold", "Audio peak threshold in dBFS for the peaks rule (default -1; >= 0 dBFS is clipping; needs --content)"],
       ["--faststart", "Also check MP4 faststart (moov before mdat) — fails when the file is not an MP4 or its moov box comes after mdat"],
+      ["--decoded-work", "Also estimate the decoded work (video pixel-frames + audio sample-channels) and warn when it is over the ceiling (250B pixel-frames / 6B sample-channels, plus 3600s, 8192px, 120fps, 8ch, 192kHz)"],
     ],
   },
   "qa-report": {
@@ -875,6 +876,15 @@ const COMMANDS = {
       ["-o, --output", "Output file (overrides the manifest's output; extension is adjusted to the step chain's final format when needed)"],
     ],
   },
+  "patch-manifest": {
+    usage: "mediakit patch-manifest <manifest.json> --expected-revision <n> --patch-file <patch.json>",
+    desc: "Edit a manifest JSON file under a revision guard (OpenEdit's revision-guard idea): the call is refused when --expected-revision does not match the file's current revision (absent = 0), so a stale edit never overwrites newer work. --patch-file holds a JSON array of 1-32 ops: {op: 'set', path: 'output'|'input'|'qa'|'steps.N.tool'|'steps.N.args.KEY', value} / {op: 'add_step', step: {tool, args?}, index?} / {op: 'remove_step', index} / {op: 'replace_step', index, step: {tool, args?}}. Ops apply in order — each op addresses the step list as the previous ops left it. The patched manifest is validated with a real manifest --dry-run before anything is written, then written atomically (.partial + rename) with revision + 1. A mismatch, a bad op, or a patched manifest that no longer validates all refuse and leave the file byte-identical.",
+    args: [{ name: "manifest", required: true }],
+    options: [
+      ["--expected-revision", "The revision last read from the file (required; absent = 0) — must match the file's current revision"],
+      ["--patch-file", "JSON file holding the patch operations array (required)"],
+    ],
+  },
   determinism: {
     usage: "mediakit determinism <manifest.json> [--runs 2] [--keep-outputs]",
     desc: "Check whether a linear pipeline manifest reproduces byte-identically: run the same manifest N times (default 2, max 5) with the cache OFF, then compare byte sha256, decoded-frame digest (framemd5), and measured properties (duration/frames/dimensions) across runs. Verdict byte_identical means the pipeline reproduces exactly; content_identical means the frames match but container bytes differ, with the differing format tags named; differs means the pipeline itself is nondeterministic, with the first differing run pair named. A download-first manifest re-fetches its URL on every run. --keep-outputs keeps the per-run outputs under .mediakit-determinism-<pid> next to the manifest (removed by default; always kept when a run fails).",
@@ -906,7 +916,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 72 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 73 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -1320,6 +1330,7 @@ async function main() {
           contentEnd: opts.end ?? null,
           peakThresholdDb: numOpt(opts, "peak_threshold") ?? -1,
           faststart: opts.faststart === true,
+          decodedWork: opts.decoded_work === true,
         });
         break;
       }
@@ -1966,6 +1977,24 @@ async function main() {
           cache: opts.cache !== false,
           dryRun: opts.dry_run === true,
           keepIntermediates: opts.keep_intermediates === true,
+        });
+        break;
+      }
+      case "patch-manifest": {
+        if (!positional[0]) fail("missing manifest file: mediakit patch-manifest <manifest.json> --expected-revision <n> --patch-file <patch.json>");
+        if (opts.expected_revision === undefined) fail("missing required option: --expected-revision <n> (the revision last read from the file; absent = 0)");
+        if (!opts.patch_file) fail("missing required option: --patch-file <patch.json> (JSON array of patch operations)");
+        const { readFile } = await import("node:fs/promises");
+        let patch;
+        try {
+          patch = JSON.parse(await readFile(opts.patch_file, "utf8"));
+        } catch (e) {
+          fail(`could not read patch JSON ${opts.patch_file}: ${e.message}`);
+        }
+        result = await core.patchManifest({
+          manifestPath: positional[0],
+          patch,
+          expectedRevision: numOpt(opts, "expected_revision"),
         });
         break;
       }

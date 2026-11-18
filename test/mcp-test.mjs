@@ -13,7 +13,7 @@ import { createServer } from "node:http";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { compareDeterminismRuns, estimateTempo, fixForMissing, groupWords, localTempoCurve, parseFfmpegProgress, runFfmpegWithProgress, spectralFluxOnset, trackBeatsDP, SHORTS_STYLE_IDS } from "../src/core.js";
+import { compareDeterminismRuns, estimateDecodedWork, estimateTempo, fixForMissing, groupWords, localTempoCurve, parseFfmpegProgress, runFfmpegWithProgress, spectralFluxOnset, trackBeatsDP, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 
 const execFileAsync = promisify(execFile);
@@ -181,10 +181,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 72 tools present");
-checkOk(missing.length === 0, "tools/list has all 72 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 73 tools present");
+checkOk(missing.length === 0, "tools/list has all 73 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -794,6 +794,60 @@ const ffManifestBadPath = path.join(root, "outputs/mcp-manifest-fastforward-bad.
 await writeFile(ffManifestBadPath, JSON.stringify({ version: 1, input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-manifest-fastforward-bad.mp4"), steps: [{ tool: "fastforward", args: { segments: [{ start: 2, end: 6 }] } }] }), "utf8");
 const ffManifestBadText = await callExpectThrow("manifest", { manifest_path: ffManifestBadPath });
 checkOk(/segments\[0\]\.speed/.test(ffManifestBadText), "manifest refuses a fastforward step whose segment has no speed, before rendering", ffManifestBadText.slice(0, 200));
+
+// patch_manifest (lượt 97): revision-guarded manifest patch
+// (AH64-dll/OpenEdit's revision-guard idea). The scratch manifest
+// is written into outputs/ with an absolute input path (the dry-run
+// validation inside patch_manifest must find the input file) —
+// patching the repo's own test/manifest.json would mutate a shared
+// fixture.
+const pmPath = path.join(root, "outputs/mcp-manifest-patch.json");
+await writeFile(pmPath, JSON.stringify({ version: 1, input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-manifest-patch-out.mp4"), steps: [{ tool: "trim", args: { start: 2, end: 8 } }, { tool: "reframe", args: { mode: "blur", width: 1080, height: 1920 } }, { tool: "loudness", args: { target_lufs: -14 } }], qa: "tiktok" }, null, 2), "utf8");
+const pmRes = await client.callTool({ name: "patch_manifest", arguments: { manifest_path: pmPath, expected_revision: 0, patch: [{ op: "set", path: "steps.2.args.target_lufs", value: -16 }, { op: "add_step", step: { tool: "trim", args: { start: 0, end: 2 } } }] } });
+const pmJson = JSON.parse(pmRes.content[0].text);
+checkOk(pmJson.revision_before === 0 && pmJson.revision_after === 1 && pmJson.ops_applied === 2 && pmJson.validated?.dry_run === true && pmJson.validated?.steps === 4, "patch_manifest applies set + add_step, revision 0 -> 1, dry-run validates 4 steps", JSON.stringify(pmJson));
+const pmDoc = JSON.parse(await readFile(pmPath, "utf8"));
+checkOk(pmDoc.revision === 1 && pmDoc.steps.length === 4 && pmDoc.steps[2].args.target_lufs === -16 && pmDoc.steps[3].tool === "trim", "patched file on disk carries revision 1, the new loudness target and the appended trim step", JSON.stringify(pmDoc.steps.map((s) => s.tool)));
+// The patched manifest still plans: a dry-run lists 4 steps.
+const pmRunRes = await client.callTool({ name: "manifest", arguments: { manifest_path: pmPath, dry_run: true } });
+const pmRunJson = JSON.parse(pmRunRes.content[0].text);
+checkOk(pmRunJson.dry_run === true && pmRunJson.steps.length === 4, "patched manifest dry-runs 4 steps", JSON.stringify(pmRunJson.steps?.length));
+// Revision mismatch: refused, file byte-identical.
+const pmBefore = await readFile(pmPath, "utf8");
+const pmMismatchText = await callExpectThrow("patch_manifest", { manifest_path: pmPath, expected_revision: 0, patch: [{ op: "set", path: "output", value: "x.mp4" }] });
+checkOk(/REVISION_MISMATCH/.test(pmMismatchText) && /revision is 1, expected 0/.test(pmMismatchText), "patch_manifest refuses a stale expected_revision with REVISION_MISMATCH", pmMismatchText.slice(0, 200));
+checkOk((await readFile(pmPath, "utf8")) === pmBefore, "stale revision leaves the file byte-identical", "");
+// Bad patch (unknown tool in replace_step): the dry-run validation
+// fails, file byte-identical, revision still 1.
+const pmBadText = await callExpectThrow("patch_manifest", { manifest_path: pmPath, expected_revision: 1, patch: [{ op: "replace_step", index: 0, step: { tool: "nope", args: {} } }] });
+checkOk(/unknown tool \\?"nope\\?"/.test(pmBadText), "patch_manifest refuses a patch that would leave an unknown tool, naming it", pmBadText.slice(0, 200));
+checkOk((await readFile(pmPath, "utf8")) === pmBefore, "rejected patch leaves the file byte-identical", "");
+// Batch: remove + replace + set in one call — indices address the
+// list as read (rev 1 -> 2, 4 steps -> 3).
+const pmBatchRes = await client.callTool({ name: "patch_manifest", arguments: { manifest_path: pmPath, expected_revision: 1, patch: [{ op: "remove_step", index: 3 }, { op: "replace_step", index: 0, step: { tool: "trim", args: { start: 0, end: 5 } } }, { op: "set", path: "output", value: path.join(root, "outputs/mcp-manifest-patch-out2.mp4") }] } });
+const pmBatchJson = JSON.parse(pmBatchRes.content[0].text);
+checkOk(pmBatchJson.revision_after === 2 && pmBatchJson.ops_applied === 3 && pmBatchJson.validated?.steps === 3, "patch_manifest batch remove + replace + set: revision 1 -> 2, 3 steps left", JSON.stringify(pmBatchJson));
+const pmDoc2 = JSON.parse(await readFile(pmPath, "utf8"));
+checkOk(pmDoc2.steps.length === 3 && pmDoc2.steps[0].tool === "trim" && pmDoc2.steps[0].args.end === 5 && pmDoc2.output.endsWith("mcp-manifest-patch-out2.mp4"), "batch patch on disk: first step replaced, appended trim removed, output set", JSON.stringify(pmDoc2.steps.map((s) => s.tool)));
+// Refusals: set revision directly, unknown op, remove the last step.
+const pmVerText = await callExpectThrow("patch_manifest", { manifest_path: pmPath, expected_revision: 2, patch: [{ op: "set", path: "revision", value: 99 }] });
+checkOk(/cannot set \\?"revision\\?"/.test(pmVerText), "patch_manifest refuses to set revision directly (it is managed)", pmVerText.slice(0, 200));
+const pmOpText = await callExpectThrow("patch_manifest", { manifest_path: pmPath, expected_revision: 2, patch: [{ op: "move_step", index: 0 }] });
+checkOk(/unknown op \\?"move_step\\?"/.test(pmOpText), "patch_manifest refuses an unknown op name", pmOpText.slice(0, 200));
+const pmOnePath = path.join(root, "outputs/mcp-manifest-patch-one.json");
+await writeFile(pmOnePath, JSON.stringify({ version: 1, input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-manifest-patch-one-out.mp4"), steps: [{ tool: "trim", args: { start: 2, end: 8 } }] }, null, 2), "utf8");
+const pmLastText = await callExpectThrow("patch_manifest", { manifest_path: pmOnePath, expected_revision: 0, patch: [{ op: "remove_step", index: 0 }] });
+checkOk(/cannot remove the last remaining step/.test(pmLastText), "patch_manifest refuses removing the last remaining step", pmLastText.slice(0, 200));
+checkOk(JSON.parse(await readFile(pmOnePath, "utf8")).steps.length === 1, "refused remove leaves the one-step manifest untouched", "");
+// CLI: patch-manifest with --patch-file; stale revision exits 2.
+const pmCliPatch = path.join(root, "outputs/mcp-manifest-patch-cli.json");
+await writeFile(pmCliPatch, JSON.stringify([{ op: "set", path: "qa", value: "any" }]), "utf8");
+const pmCli = await runCli(["patch-manifest", pmPath, "--expected-revision", "2", "--patch-file", pmCliPatch]);
+let pmCliJson = null;
+try { pmCliJson = JSON.parse(pmCli.out); } catch { /* not JSON */ }
+checkOk(pmCli.code === 0 && pmCliJson?.revision_after === 3 && JSON.parse(await readFile(pmPath, "utf8")).qa === "any", "CLI patch-manifest applies the patch file, revision 2 -> 3", pmCli.out.slice(0, 200));
+const pmCliStaleErr = await runCliExpectError(["patch-manifest", pmPath, "--expected-revision", "2", "--patch-file", pmCliPatch]);
+checkOk(pmCliStaleErr !== null && /REVISION_MISMATCH/.test(pmCliStaleErr), "CLI patch-manifest with a stale revision exits 2 naming REVISION_MISMATCH", (pmCliStaleErr ?? "").slice(0, 200));
 
 // boomerang: forward + reverse ping-pong. Fixture
 // test/scenes-source.mp4 is red 5s + blue 5s (10.039s, 300 frames
@@ -1578,6 +1632,35 @@ const fsOffRes = await client.callTool({ name: "check", arguments: { input: path
 checkOk(!JSON.parse(fsOffRes.content[0].text).checks.some((c) => c.name === "faststart"), "check without faststart adds no faststart rule", "");
 const fsCli = await runCliJson(["check", path.join(root, "outputs/mcp-faststart.mp4"), "--platform", "tiktok", "--faststart"]);
 checkOk(fsCli.checks.find((c) => c.name === "faststart")?.pass === true, "CLI check --faststart passes on the +faststart file", "");
+
+// Turn 98: check --decoded-work — decoded-work ceiling (MADPANDA
+// media_limits idea + EncodeX safety envelope: estimate the work
+// before committing to it). Unit tests use synthetic probe-shaped
+// metas — a real over-ceiling file (4K60 1h) cannot be a fixture.
+const dwUnitOk = estimateDecodedWork({ duration_seconds: 10, video: { display_width: 1280, display_height: 720, width: 1280, height: 720, fps: 30 }, audio: { channels: 1, sample_rate: 44100 } });
+checkOk(dwUnitOk.video_pixel_frames === 276480000 && dwUnitOk.audio_sample_channels === 441000 && dwUnitOk.over_ceiling === false && dwUnitOk.violations.length === 0, "estimateDecodedWork: 720p30 10s = 276.48M pixel-frames, no violations", JSON.stringify(dwUnitOk));
+const dwUnitBig = estimateDecodedWork({ duration_seconds: 3600, video: { display_width: 3840, display_height: 2160, width: 3840, height: 2160, fps: 60 }, audio: { channels: 2, sample_rate: 48000 } });
+checkOk(dwUnitBig.video_pixel_frames === 1791590400000 && dwUnitBig.over_ceiling === true && dwUnitBig.violations.length === 1 && /pixel-frames 1.79T exceeds 250.00B/.test(dwUnitBig.violations[0]), "estimateDecodedWork: 4K60 1h = 1.79T pixel-frames, over ceiling with one violation", JSON.stringify(dwUnitBig.violations));
+const dwUnitLimits = estimateDecodedWork({ duration_seconds: 10, video: { display_width: 9000, display_height: 100, width: 9000, height: 100, fps: 240 }, audio: { channels: 16, sample_rate: 384000 } });
+checkOk(dwUnitLimits.over_ceiling === true && dwUnitLimits.violations.length === 4 && dwUnitLimits.violations.some((v) => /geometry 9000x100/.test(v)) && dwUnitLimits.violations.some((v) => /fps 240/.test(v)) && dwUnitLimits.violations.some((v) => /channels 16/.test(v)) && dwUnitLimits.violations.some((v) => /sample rate 384000/.test(v)), "estimateDecodedWork: per-stream limits each report their own violation (geometry/fps/channels/sample-rate)", JSON.stringify(dwUnitLimits.violations));
+const dwUnitDuration = estimateDecodedWork({ duration_seconds: 7200, video: { display_width: 1280, display_height: 720, width: 1280, height: 720, fps: 30 }, audio: { channels: 2, sample_rate: 48000 } });
+checkOk(dwUnitDuration.over_ceiling === true && dwUnitDuration.violations.length === 1 && /duration 7200s exceeds 3600s/.test(dwUnitDuration.violations[0]), "estimateDecodedWork: a 2h clip violates only the duration limit (199B pixel-frames stays under)", JSON.stringify(dwUnitDuration.violations));
+const dwUnitAudio = estimateDecodedWork({ duration_seconds: 10, video: null, audio: { channels: 2, sample_rate: 48000 } });
+checkOk(dwUnitAudio.video_pixel_frames === null && dwUnitAudio.audio_sample_channels === 960000 && dwUnitAudio.over_ceiling === false, "estimateDecodedWork: audio-only file has null video work and 960K sample-channels", JSON.stringify(dwUnitAudio));
+// MCP: the real fixture measures the same numbers as the unit case.
+const dwMcpRes = await client.callTool({ name: "check", arguments: { input: path.join(root, "test/source.mp4"), platform: "tiktok", decoded_work: true } });
+const dwMcpJson = JSON.parse(dwMcpRes.content[0].text);
+const dwMcpRule = dwMcpJson.checks.find((c) => c.name === "decoded_work");
+checkOk(dwMcpRule?.pass === true && dwMcpRule?.severity === "warn" && /276.48M pixel-frames/.test(dwMcpRule.actual) && dwMcpJson.decoded_work?.video_pixel_frames === 276480000 && dwMcpJson.decoded_work?.over_ceiling === false, "check decoded_work:true passes on the 720p30 fixture (276.48M pixel-frames, warn severity)", JSON.stringify(dwMcpRule));
+checkOk(!dwMcpJson.warnings?.some((w) => w.startsWith("decoded_work")), "a passing decoded_work rule does not appear in warnings", JSON.stringify(dwMcpJson.warnings));
+const dwOffRes = await client.callTool({ name: "check", arguments: { input: path.join(root, "test/source.mp4"), platform: "tiktok" } });
+const dwOffJson = JSON.parse(dwOffRes.content[0].text);
+checkOk(!dwOffJson.checks.some((c) => c.name === "decoded_work") && !("decoded_work" in dwOffJson), "check without decoded_work adds no rule and no detail", "");
+const dwCli = await runCliJson(["check", path.join(root, "test/source.mp4"), "--platform", "tiktok", "--decoded-work"]);
+checkOk(dwCli.checks.find((c) => c.name === "decoded_work")?.pass === true && dwCli.decoded_work?.audio_sample_channels === 441000, "CLI check --decoded-work passes on the fixture with the same numbers", "");
+const dwDocRes = await client.callTool({ name: "doctor", arguments: {} });
+const dwDocJson = JSON.parse(dwDocRes.content[0].text);
+checkOk(dwDocJson.decoded_work_limits?.max_video_pixel_frames === 250000000000 && dwDocJson.decoded_work_limits?.max_audio_sample_channels === 6000000000 && dwDocJson.decoded_work_limits?.max_duration_seconds === 3600, "doctor reports the decoded-work ceilings", JSON.stringify(dwDocJson.decoded_work_limits));
 
 // Turn 94: writability pre-check — /proc is read-only even for
 // root, so a probe write there fails on any Linux box with /proc
@@ -5375,7 +5458,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 72 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 72 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 73 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 73 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -7293,7 +7376,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 72 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 73 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -7353,11 +7436,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 72, "GET /mcp reports name/version/transport and 72 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 73, "GET /mcp reports name/version/transport and 73 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 72 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 72 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 73 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 73 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -7381,7 +7464,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 72, "JSON-RPC tools/list returns the same 72 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 73, "JSON-RPC tools/list returns the same 73 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

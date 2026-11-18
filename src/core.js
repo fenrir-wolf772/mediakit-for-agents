@@ -4540,7 +4540,90 @@ export async function probeFaststart(input) {
   }
 }
 
-export async function check({ input, platform = "tiktok", content = false, contentStart = null, contentEnd = null, peakThresholdDb = -1, expectedDuration = null, faststart = false }) {
+// ---------------------------------------------------------------- decoded work
+// Decoded-work ceiling (MADPANDA3D/FFMPEG-MCP's media_limits.py idea,
+// EncodeX's safety-envelope idea: estimate the work before committing
+// to it). A decode-heavy input — 8K, 120fps, an hour long — can OOM
+// this machine long before any tool reports progress, so `check` can
+// estimate the decoded work from the probe and warn when it is over
+// the ceiling. Pure function, unit-testable; the estimate uses the
+// first video/audio stream only (probe keeps one of each), display
+// dims (what ffmpeg's filters actually decode), and the container
+// duration. Ceilings are MADPANDA's numbers: duration 3600s,
+// geometry 8192px per side, fps 120, 250B decoded video pixel-frames,
+// 8 audio channels, 192kHz, 6B audio sample-channels.
+export const DECODED_WORK_LIMITS = {
+  max_duration_seconds: 3600,
+  max_geometry_px: 8192,
+  max_fps: 120,
+  max_video_pixel_frames: 250e9,
+  max_audio_channels: 8,
+  max_audio_sample_rate_hz: 192000,
+  max_audio_sample_channels: 6e9,
+};
+
+function formatLarge(n) {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "?";
+  const abs = Math.abs(n);
+  if (abs >= 1e12) return `${(n / 1e12).toFixed(2)}T`;
+  if (abs >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
+  if (abs >= 1e6) return `${(n / 1e6).toFixed(2)}M`;
+  if (abs >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
+  return String(Math.round(n));
+}
+
+export function estimateDecodedWork(meta) {
+  const v = meta?.video ?? null;
+  const a = meta?.audio ?? null;
+  const dur = meta?.duration_seconds ?? null;
+  const violations = [];
+  let videoPixelFrames = null;
+  if (v) {
+    const w = v.display_width ?? v.width;
+    const h = v.display_height ?? v.height;
+    if (w !== null && w !== undefined && h !== null && h !== undefined) {
+      if (w > DECODED_WORK_LIMITS.max_geometry_px || h > DECODED_WORK_LIMITS.max_geometry_px) {
+        violations.push(`geometry ${w}x${h} exceeds ${DECODED_WORK_LIMITS.max_geometry_px}px per side`);
+      }
+    }
+    if (v.fps !== null && v.fps !== undefined && v.fps > DECODED_WORK_LIMITS.max_fps) {
+      violations.push(`fps ${v.fps} exceeds ${DECODED_WORK_LIMITS.max_fps}`);
+    }
+    if (w && h && v.fps && dur) {
+      videoPixelFrames = w * h * v.fps * dur;
+      if (videoPixelFrames > DECODED_WORK_LIMITS.max_video_pixel_frames) {
+        violations.push(`video pixel-frames ${formatLarge(videoPixelFrames)} exceeds ${formatLarge(DECODED_WORK_LIMITS.max_video_pixel_frames)}`);
+      }
+    }
+  }
+  let audioSampleChannels = null;
+  if (a) {
+    if (a.channels !== null && a.channels !== undefined && a.channels > DECODED_WORK_LIMITS.max_audio_channels) {
+      violations.push(`audio channels ${a.channels} exceeds ${DECODED_WORK_LIMITS.max_audio_channels}`);
+    }
+    if (a.sample_rate !== null && a.sample_rate !== undefined && a.sample_rate > DECODED_WORK_LIMITS.max_audio_sample_rate_hz) {
+      violations.push(`audio sample rate ${a.sample_rate} Hz exceeds ${DECODED_WORK_LIMITS.max_audio_sample_rate_hz} Hz`);
+    }
+    if (a.channels && a.sample_rate && dur) {
+      audioSampleChannels = a.channels * a.sample_rate * dur;
+      if (audioSampleChannels > DECODED_WORK_LIMITS.max_audio_sample_channels) {
+        violations.push(`audio sample-channels ${formatLarge(audioSampleChannels)} exceeds ${formatLarge(DECODED_WORK_LIMITS.max_audio_sample_channels)}`);
+      }
+    }
+  }
+  if (dur !== null && dur !== undefined && dur > DECODED_WORK_LIMITS.max_duration_seconds) {
+    violations.push(`duration ${dur}s exceeds ${DECODED_WORK_LIMITS.max_duration_seconds}s`);
+  }
+  return {
+    video_pixel_frames: videoPixelFrames === null ? null : Math.round(videoPixelFrames),
+    audio_sample_channels: audioSampleChannels === null ? null : Math.round(audioSampleChannels),
+    limits: { ...DECODED_WORK_LIMITS },
+    violations,
+    over_ceiling: violations.length > 0,
+  };
+}
+
+export async function check({ input, platform = "tiktok", content = false, contentStart = null, contentEnd = null, peakThresholdDb = -1, expectedDuration = null, faststart = false, decodedWork = false }) {
   const inPath = await requireInput(input);
   const spec = PLATFORMS[platform];
   if (!spec) throw new MediaKitError(`unknown platform: ${platform} (supported: ${Object.keys(PLATFORMS).join(", ")})`, "INVALID_ARG");
@@ -4642,6 +4725,25 @@ export async function check({ input, platform = "tiktok", content = false, conte
       }
     }
   }
+  // Decoded-work ceiling (opt-in): estimate the decode load from the
+  // probe and warn when it is over the ceiling. Warn, not fail: the
+  // file may still be a valid platform delivery — the warning says
+  // the machine may OOM decoding it, so re-encode smaller/shorter
+  // first (or split the job) before running a heavy tool on it.
+  let decodedWorkResult = null;
+  if (decodedWork) {
+    decodedWorkResult = estimateDecodedWork(meta);
+    const parts = [];
+    if (decodedWorkResult.video_pixel_frames !== null) parts.push(`${formatLarge(decodedWorkResult.video_pixel_frames)} pixel-frames`);
+    if (decodedWorkResult.audio_sample_channels !== null) parts.push(`${formatLarge(decodedWorkResult.audio_sample_channels)} sample-channels`);
+    const actual = parts.length ? parts.join(" + ") : "no decodable streams";
+    add("decoded_work",
+      `<= ${formatLarge(DECODED_WORK_LIMITS.max_video_pixel_frames)} pixel-frames, <= ${formatLarge(DECODED_WORK_LIMITS.max_audio_sample_channels)} sample-channels`,
+      decodedWorkResult.over_ceiling ? `${actual} — ${decodedWorkResult.violations.join("; ")}` : actual,
+      !decodedWorkResult.over_ceiling,
+      "re-encode smaller/shorter first, or split the job — this input may OOM the machine",
+      "warn");
+  }
   if (meta.audio) {
     add("audio_codec", spec.audioCodecs.join(" or "), meta.audio.codec,
       spec.audioCodecs.includes(meta.audio.codec));
@@ -4690,6 +4792,7 @@ export async function check({ input, platform = "tiktok", content = false, conte
     pass: failed.length === 0,
     checks,
     safe_zone: spec.safeZone,
+    ...(decodedWorkResult ? { decoded_work: decodedWorkResult } : {}),
     ...(contentResult ? { content: contentResult } : {}),
     ...(failed.length ? { issues: failed.map((c) => `${c.name}: ${c.actual} (want ${c.expected})${c.hint ? ` — ${c.hint}` : ""}`) } : {}),
     ...(warnings.length ? { warnings: warnings.map((c) => `${c.name}: ${c.actual} (want ${c.expected})${c.hint ? ` — ${c.hint}` : ""}`) } : {}),
@@ -8368,6 +8471,9 @@ const TOOL_REQUIREMENTS = {
   // transitions is a pure data lookup over the catalog — no ffmpeg
   // capability needed either.
   transitions: {},
+  // patch_manifest is pure JSON + a manifest --dry-run validation —
+  // no ffmpeg capability needed either.
+  patch_manifest: {},
   // chapters only needs silencedetect, and only in input mode — the
   // words-file mode is pure JSON and needs no ffmpeg capability.
   chapters: { filters: ["silencedetect"] },
@@ -8626,6 +8732,7 @@ export async function doctor({ smoke = false } = {}) {
     sandbox,
     brands_file: brandsFile,
     license_policy: licensePolicy,
+    decoded_work_limits: DECODED_WORK_LIMITS,
     audit,
     gpu,
     filters,
@@ -11847,6 +11954,12 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
   if (doc.version !== 1) {
     throw new MediaKitError(`manifest version must be 1, got: ${doc.version}`, "INVALID_ARG");
   }
+  // Revision is managed by patch_manifest (absent = 0); a hand-edited
+  // manifest with a non-integer revision fails lint here, not at
+  // patch time with a confusing mismatch.
+  if (doc.revision !== undefined && doc.revision !== null && (!Number.isInteger(doc.revision) || doc.revision < 0)) {
+    throw new MediaKitError(`manifest revision must be a non-negative integer, got: ${doc.revision}`, "INVALID_ARG");
+  }
   // A download-first manifest has no local input file: the URL in
   // step 1 IS the input, so `input` may be omitted (any other
   // manifest still needs one).
@@ -12145,6 +12258,208 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
     },
     qa_result: qaResult,
     ...(keepIntermediates ? { intermediates_dir: tmpDir } : {}),
+  };
+}
+
+// ---------------------------------------------------------------- patch_manifest
+// Revision-guarded manifest patch (AH64-dll/OpenEdit's revision guard
+// idea: a write against a stale revision is refused instead of
+// silently overwriting newer work — and MADPANDA3D/FFMPEG-MCP's
+// atomic-reservation philosophy: concurrent writers must not clobber
+// each other). A manifest carries an optional top-level `revision`
+// (absent = 0); patching requires the caller's `expected_revision`
+// to match the file's current revision, applies 1-32 ops to a clone,
+// proves the patched manifest still lints + plans (manifest
+// --dry-run on a temp copy), then writes atomically (.partial +
+// rename) with revision + 1. Any failure before the rename leaves
+// the original file byte-identical: a revision mismatch, a bad op,
+// or a patched manifest that no longer validates all refuse without
+// touching the file.
+//
+// Ops:
+//   {op: "set", path: "output", value: "final2.mp4"}   — top-level
+//     input/output/qa, or steps.N.tool / steps.N.args.KEY (scalar
+//     values only; version/revision are managed, not settable)
+//   {op: "add_step", step: {tool, args?}, index?}      — append, or
+//     insert at index
+//   {op: "remove_step", index}                         — never the
+//     last remaining step
+//   {op: "replace_step", index, step: {tool, args?}}
+export async function patchManifest({ manifestPath, patch, expectedRevision }) {
+  const manifestAbs = await requireInput(manifestPath, "manifest");
+  const expected = num(expectedRevision, "expected_revision", { min: 0, integer: true });
+  if (!Array.isArray(patch) || patch.length < 1 || patch.length > 32) {
+    throw new MediaKitError(`patch must be an array of 1-32 operations, got: ${Array.isArray(patch) ? `${patch.length} operations` : typeof patch}`, "INVALID_ARG");
+  }
+  let raw;
+  try {
+    raw = await readFile(manifestAbs, "utf8");
+  } catch (e) {
+    throw new MediaKitError(`cannot read manifest ${manifestPath}: ${e.message}`, "INVALID_INPUT");
+  }
+  let doc;
+  try {
+    doc = JSON.parse(raw);
+  } catch (e) {
+    throw new MediaKitError(`manifest is not valid JSON: ${e.message}`, "INVALID_ARG");
+  }
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
+    throw new MediaKitError("manifest must be a JSON object {version, input, steps}", "INVALID_ARG");
+  }
+  const currentRevision = doc.revision ?? 0;
+  if (!Number.isInteger(currentRevision) || currentRevision < 0) {
+    throw new MediaKitError(`manifest revision must be a non-negative integer, got: ${doc.revision}`, "INVALID_ARG");
+  }
+  if (expected !== currentRevision) {
+    throw new MediaKitError(`manifest revision is ${currentRevision}, expected ${expected} — re-read the manifest and retry with the current revision (nothing was written)`, "REVISION_MISMATCH");
+  }
+
+  // Validate every op structurally BEFORE touching the doc, so a bad
+  // op list fails as a whole instead of half-applying. Ops apply in
+  // order, each addressing the list as the previous ops left it
+  // (JSON Patch semantics) — so the bounds below simulate the
+  // running step count: an add grows it, a remove shrinks it, and a
+  // batch that would empty the list is refused at the remove that
+  // would take the last step, not after the fact.
+  const steps = doc.steps;
+  if (!Array.isArray(steps) || !steps.length) {
+    throw new MediaKitError("manifest has no steps to patch", "INVALID_ARG");
+  }
+  let simLen = steps.length;
+  const stepIndex = (v, label) => {
+    if (!Number.isInteger(v) || v < 0 || v >= simLen) {
+      throw new MediaKitError(`${label} must be a step index 0-${simLen - 1}, got: ${v}`, "INVALID_ARG");
+    }
+    return v;
+  };
+  const checkStepShape = (s, label) => {
+    if (!s || typeof s !== "object" || Array.isArray(s) || typeof s.tool !== "string" || !s.tool.trim()) {
+      throw new MediaKitError(`${label} must be an object {tool, args?} with a tool name`, "INVALID_ARG");
+    }
+    if (s.args !== undefined && s.args !== null && (typeof s.args !== "object" || Array.isArray(s.args))) {
+      throw new MediaKitError(`${label}.args must be an object`, "INVALID_ARG");
+    }
+    for (const k of Object.keys(s)) {
+      if (k !== "tool" && k !== "args") throw new MediaKitError(`${label} does not take "${k}" (only tool, args)`, "INVALID_ARG");
+    }
+  };
+  for (let i = 0; i < patch.length; i++) {
+    const op = patch[i];
+    const label = `patch[${i}]`;
+    if (!op || typeof op !== "object" || Array.isArray(op) || typeof op.op !== "string") {
+      throw new MediaKitError(`${label} must be an object with an "op"`, "INVALID_ARG");
+    }
+    if (op.op === "set") {
+      if (typeof op.path !== "string" || !op.path.trim()) throw new MediaKitError(`${label} (set) needs a path`, "INVALID_ARG");
+      if (op.value !== null && typeof op.value !== "string" && typeof op.value !== "number" && typeof op.value !== "boolean") {
+        throw new MediaKitError(`${label} (set) value must be a string, number, boolean or null`, "INVALID_ARG");
+      }
+      const parts = op.path.split(".");
+      if (["version", "revision"].includes(parts[0]) || (parts[0] === "steps" && parts.length < 3) || parts.length > 4) {
+        throw new MediaKitError(`${label} (set) cannot set "${op.path}" — version/revision are managed, whole steps change via add/remove/replace_step`, "INVALID_ARG");
+      }
+      if (parts[0] === "steps") {
+        const idx = stepIndex(Number(parts[1]), `${label} (set)`);
+        if (parts.length !== 3 && parts.length !== 4) throw new MediaKitError(`${label} (set) path must be steps.N.tool or steps.N.args.KEY, got: ${op.path}`, "INVALID_ARG");
+        if (parts[2] === "tool" && parts.length !== 3) throw new MediaKitError(`${label} (set) path must be steps.N.tool or steps.N.args.KEY, got: ${op.path}`, "INVALID_ARG");
+        if (parts[2] === "args" && parts.length !== 4) throw new MediaKitError(`${label} (set) path must be steps.N.tool or steps.N.args.KEY, got: ${op.path}`, "INVALID_ARG");
+        if (parts[2] !== "tool" && parts[2] !== "args") throw new MediaKitError(`${label} (set) path must be steps.N.tool or steps.N.args.KEY, got: ${op.path}`, "INVALID_ARG");
+        if (parts[2] === "tool" && (typeof op.value !== "string" || !op.value.trim())) throw new MediaKitError(`${label} (set) steps.${idx}.tool needs a tool name`, "INVALID_ARG");
+      } else if (!["input", "output", "qa"].includes(parts[0]) || parts.length !== 1) {
+        throw new MediaKitError(`${label} (set) path must be input, output, qa, steps.N.tool or steps.N.args.KEY, got: ${op.path}`, "INVALID_ARG");
+      }
+    } else if (op.op === "add_step") {
+      checkStepShape(op.step, `${label} (add_step).step`);
+      if (op.index !== undefined && op.index !== null && (!Number.isInteger(op.index) || op.index < 0 || op.index > simLen)) {
+        throw new MediaKitError(`${label} (add_step) index must be 0-${simLen} (append), got: ${op.index}`, "INVALID_ARG");
+      }
+      simLen += 1;
+    } else if (op.op === "remove_step") {
+      stepIndex(op.index, `${label} (remove_step) index`);
+      if (simLen === 1) throw new MediaKitError(`${label} (remove_step) cannot remove the last remaining step`, "INVALID_ARG");
+      simLen -= 1;
+    } else if (op.op === "replace_step") {
+      stepIndex(op.index, `${label} (replace_step) index`);
+      checkStepShape(op.step, `${label} (replace_step).step`);
+    } else {
+      throw new MediaKitError(`${label}: unknown op "${op.op}" (supported: set, add_step, remove_step, replace_step)`, "INVALID_ARG");
+    }
+  }
+
+  // Apply to a clone, in order — each op addresses the list as the
+  // previous ops left it, exactly as the simulation above checked.
+  const next = JSON.parse(JSON.stringify(doc));
+  const changes = [];
+  for (const op of patch) {
+    if (op.op === "set") {
+      const parts = op.path.split(".");
+      if (parts[0] === "steps") {
+        const idx = Number(parts[1]);
+        if (parts[2] === "tool") {
+          const old = next.steps[idx].tool;
+          next.steps[idx].tool = op.value;
+          changes.push(`set steps.${parts[1]}.tool = ${JSON.stringify(op.value)} (was ${JSON.stringify(old)})`);
+        } else {
+          next.steps[idx].args = next.steps[idx].args ?? {};
+          const old = next.steps[idx].args[parts[3]];
+          next.steps[idx].args[parts[3]] = op.value;
+          changes.push(`set steps.${parts[1]}.args.${parts[3]} = ${JSON.stringify(op.value)} (was ${JSON.stringify(old ?? null)})`);
+        }
+      } else {
+        const old = next[parts[0]];
+        next[parts[0]] = op.value;
+        changes.push(`set ${parts[0]} = ${JSON.stringify(op.value)} (was ${JSON.stringify(old ?? null)})`);
+      }
+    } else if (op.op === "add_step") {
+      const at = op.index ?? next.steps.length;
+      const entry = { tool: op.step.tool, args: op.step.args ?? {} };
+      next.steps.splice(at, 0, entry);
+      changes.push(`add step ${at} (${op.step.tool})`);
+    } else if (op.op === "remove_step") {
+      const removed = next.steps.splice(op.index, 1)[0];
+      changes.push(`remove step ${op.index} (${removed.tool})`);
+    } else if (op.op === "replace_step") {
+      const old = next.steps[op.index].tool;
+      next.steps[op.index] = { tool: op.step.tool, args: op.step.args ?? {} };
+      changes.push(`replace step ${op.index} (${old} -> ${op.step.tool})`);
+    }
+  }
+  next.revision = currentRevision + 1;
+
+  // Prove the patched manifest still lints + plans before writing
+  // it: run the real validator (manifest --dry-run) on a temp copy
+  // in the same directory, so relative paths resolve identically.
+  // A failure here leaves the original file untouched.
+  const tmpValidate = path.join(path.dirname(manifestAbs), `.mediakit-patch-validate-${process.pid}-${randomBytes(4).toString("hex")}.json`);
+  let planned;
+  try {
+    await writeFile(tmpValidate, JSON.stringify(next, null, 2), "utf8");
+    planned = await manifest({ manifestPath: tmpValidate, dryRun: true });
+  } catch (e) {
+    throw new MediaKitError(`patched manifest fails validation: ${e.message}`, e.code ?? "INVALID_ARG");
+  } finally {
+    await rm(tmpValidate, { force: true }).catch(() => {});
+  }
+
+  // Atomic write: .partial + rename, after the writability pre-check
+  // fails fast on a read-only directory instead of after the work.
+  await prepareOutput(manifestAbs, []);
+  const partial = `${manifestAbs}.partial-${process.pid}-${randomBytes(4).toString("hex")}`;
+  try {
+    await writeFile(partial, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+    await rename(partial, manifestAbs);
+  } catch (e) {
+    await rm(partial, { force: true }).catch(() => {});
+    throw e;
+  }
+  return {
+    operation: "patch_manifest",
+    manifest: manifestAbs,
+    revision_before: currentRevision,
+    revision_after: currentRevision + 1,
+    ops_applied: patch.length,
+    changes,
+    validated: { dry_run: true, steps: planned.steps.length, output: planned.output },
   };
 }
 

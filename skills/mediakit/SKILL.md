@@ -97,6 +97,13 @@ silence. Position matters — a 1s black stretch at the very start warns
 (likely a fade in), a 3s black stretch mid-file or at the end fails;
 3s of mid-file silence warns (run `silence` to remove it), 5s+ fails.
 A stream that does not exist reports `unavailable`, never zero.
+Add `--decoded-work` (`decoded_work: true` over MCP) before running a
+heavy tool on a big input: it estimates the decode load from the probe
+(video pixel-frames + audio sample-channels) and warns when it is over
+the ceiling — 250B pixel-frames / 6B sample-channels, plus per-stream
+limits (3600s, 8192px, 120fps, 8ch, 192kHz). A 4K60 hour is 1.79T
+pixel-frames and will warn; re-encode smaller/shorter first, or split
+the job, instead of OOMing mid-render. `doctor` reports the ceilings.
 
 ### 5. Even dimensions
 H.264 (yuv420p) needs even width/height. `resize` with `keep_aspect`
@@ -997,6 +1004,31 @@ by default (`--keep-outputs` keeps them; a failed run always keeps
 them). This is the linear-manifest sibling of `verify --rerender`,
 which does the same for an assemble film — use `verify` for films,
 `determinism` for pipelines.
+
+### 40b. Patch a manifest, never rewrite it blind — the revision guard
+When a manifest needs a small change (a trim end, a loudness target,
+one more step), patch it with `patch_manifest` instead of rewriting
+the whole file by hand: a hand rewrite can silently drop a step or a
+sidecar path, and two agents editing the same file can silently
+overwrite each other. A manifest carries an optional top-level
+`revision` (absent = 0); the patch call requires
+`expected_revision` to match the file's current revision, or it is
+refused with `REVISION_MISMATCH` and nothing is written — re-read
+the file and retry with the current revision. Ops (1–32, applied in
+order — each op addresses the list as the previous ops left it): `set` a scalar at
+`input` / `output` / `qa` / `steps.N.tool` / `steps.N.args.KEY`
+(`version`/`revision` are managed, not settable); `add_step`
+(append, or insert at `index`); `remove_step` (never the last
+step); `replace_step`. Before anything is written the patched
+manifest is validated with a real `manifest --dry-run`, so a patch
+that names an unknown tool or arg key fails and leaves the file
+byte-identical; the write itself is atomic (`.partial` + rename)
+and bumps `revision` by 1. The result lists every change in words
+(`set steps.2.args.target_lufs = -16 (was -14)`) plus the dry-run
+validation — read it before running the manifest. Note the
+validation runs the manifest's dry-run, so the manifest's input
+file must exist (a download-first manifest has no input, so it
+validates without one).
 
 ### 41. One style id for the whole video — don't retype hex values
 Pick the style once (`clean-bold`, `minimal-line` or `warm-story`,
