@@ -21,6 +21,20 @@ export const MEDIAKIT_VERSION = "0.1.0";
 export const FFMPEG = process.env.MEDIAKIT_FFMPEG || "ffmpeg";
 export const FFPROBE = process.env.MEDIAKIT_FFPROBE || "ffprobe";
 
+// ffmpeg wall-clock timeout (lượt 98: a 1080x1920 burn-captions pass
+// under load took >300s and died on the default cap). Env override
+// MEDIAKIT_FFMPEG_TIMEOUT_MS, 60s–1h, default 300s — the default stays
+// 300s so a hung ffmpeg still fails fast; raise it only when the
+// machine is busy or the render is long. Read on every call, so the
+// env can change without a restart.
+export function ffmpegTimeoutMs() {
+  const raw = process.env.MEDIAKIT_FFMPEG_TIMEOUT_MS;
+  if (raw === undefined || raw === "") return 300_000;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 300_000;
+  return Math.min(3_600_000, Math.max(60_000, Math.floor(n)));
+}
+
 // ---------------------------------------------------------------- sandbox
 // Workspace sandbox (opt-in). Idea from alanveloper-epam/ffmpeg-mcp-server
 // (FFMPEG_MCP_WORKDIR) and the sandboxing in
@@ -88,7 +102,7 @@ export class MediaKitError extends Error {
   }
 }
 
-function runCapture(cmd, args, { timeoutMs = 300_000 } = {}) {
+function runCapture(cmd, args, { timeoutMs = ffmpegTimeoutMs() } = {}) {
   // Like run(), but for non-ffmpeg helpers (the ASR python script):
   // same timeout/buffer discipline, a neutral error code, and the
   // helper's own stderr instead of an ffmpeg-labelled message.
@@ -104,7 +118,7 @@ function runCapture(cmd, args, { timeoutMs = 300_000 } = {}) {
   });
 }
 
-function run(cmd, args, { timeoutMs = 300_000 } = {}) {
+function run(cmd, args, { timeoutMs = ffmpegTimeoutMs() } = {}) {
   return new Promise((resolve, reject) => {
     execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
@@ -187,7 +201,7 @@ export function parseFfmpegProgress(text) {
 // with out_time == total). Without totalSeconds or onProgress this is
 // just run() — same args, same error shape — so callers can pass the
 // options through unconditionally.
-export async function runFfmpegWithProgress(args, { totalSeconds = null, onProgress = null, timeoutMs = 300_000 } = {}) {
+export async function runFfmpegWithProgress(args, { totalSeconds = null, onProgress = null, timeoutMs = ffmpegTimeoutMs() } = {}) {
   if (!(totalSeconds > 0) || typeof onProgress !== "function") {
     return run(FFMPEG, args, { timeoutMs });
   }
@@ -8733,6 +8747,8 @@ export async function doctor({ smoke = false } = {}) {
     brands_file: brandsFile,
     license_policy: licensePolicy,
     decoded_work_limits: DECODED_WORK_LIMITS,
+    job_admission_limits: jobAdmissionLimits(),
+    ffmpeg_timeout_ms: ffmpegTimeoutMs(),
     audit,
     gpu,
     filters,
@@ -15130,6 +15146,75 @@ export async function updateJobProgress(jobId, jobDir, progress) {
   } catch { /* progress is advisory */ }
 }
 
+// ---------------------------------------------------------------- job admission
+// Admission cap for async renders (MADPANDA3D/FFMPEG-MCP media_limits
+// idea + EncodeX MAX_BATCH_FILES, lượt 97-98: decoded-work got a
+// ceiling in lượt 98, but nothing stopped N renders from starting at
+// once — each spawns its own ffmpeg and they OOM/starve each other on
+// a small machine). Two durable limits, counted from the job store on
+// disk (so every process — stdio, HTTP, CLI — sees the same numbers):
+// at most N jobs queued-or-running, and at most M job starts in the
+// last 60 seconds. Defaults: 2 active / 10 starts per minute (this
+// box has 1.5 shared CPUs; 2 concurrent renders already saturate it).
+// Env overrides MEDIAKIT_MAX_JOBS (1–8) /
+// MEDIAKIT_MAX_JOB_STARTS_PER_MINUTE (1–60), read on every check so a
+// restart is not needed to retune. A refused start creates NO job
+// record and spawns NO worker — the caller gets JOB_ADMISSION_LIMIT
+// (HTTP 429) with the retry delay in the message.
+function jobAdmissionEnvInt(name, fallback, min, max) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(n)));
+}
+
+export function jobAdmissionLimits() {
+  return {
+    max_active_jobs: jobAdmissionEnvInt("MEDIAKIT_MAX_JOBS", 2, 1, 8),
+    max_starts_per_minute: jobAdmissionEnvInt("MEDIAKIT_MAX_JOB_STARTS_PER_MINUTE", 10, 1, 60),
+  };
+}
+
+export async function getJobAdmission() {
+  const limits = jobAdmissionLimits();
+  const { jobs } = await listJobs({ limit: 200 });
+  const now = Date.now();
+  const activeJobs = jobs.filter((j) => j.status === "queued" || j.status === "running").length;
+  const recentStarts = jobs.filter((j) => {
+    const t = Date.parse(j.created_at ?? "");
+    return Number.isFinite(t) && now - t < 60_000;
+  });
+  const startsLastMinute = recentStarts.length;
+  let admitted = true;
+  let reason = null;
+  let retryAfterSeconds = null;
+  if (activeJobs >= limits.max_active_jobs) {
+    admitted = false;
+    reason = `too many active render jobs: ${activeJobs} already queued or running (max ${limits.max_active_jobs})`;
+    retryAfterSeconds = 30;
+  } else if (startsLastMinute >= limits.max_starts_per_minute) {
+    admitted = false;
+    const oldest = Math.min(...recentStarts.map((j) => Date.parse(j.created_at)));
+    retryAfterSeconds = Math.max(1, Math.ceil((60_000 - (now - oldest)) / 1000));
+    reason = `too many job starts: ${startsLastMinute} in the last minute (max ${limits.max_starts_per_minute})`;
+  }
+  return {
+    admitted,
+    active_jobs: activeJobs,
+    starts_last_minute: startsLastMinute,
+    limits: { ...limits },
+    reason,
+    retry_after_seconds: retryAfterSeconds,
+  };
+}
+
+export async function checkJobAdmission() {
+  const a = await getJobAdmission();
+  if (a.admitted) return a;
+  throw new MediaKitError(`job admission limit: ${a.reason} — retry in ~${a.retry_after_seconds}s`, "JOB_ADMISSION_LIMIT");
+}
+
 export async function startAssembleJob({ manifestPath, outputDir, force = false }) {
   // Fail fast, before spawning anything: the manifest must validate
   // and the approval gate must pass — a job that is born dead hides
@@ -15149,6 +15234,9 @@ export async function startAssembleJob({ manifestPath, outputDir, force = false 
   }
   const plan = await validateAssembleManifest(doc, manifestAbs);
   const approvalStatus = await requireAssembleApproval(plan, force);
+  // Admission gate: refuse before creating a record or spawning a
+  // worker, so a refused start leaves nothing behind to poll or cancel.
+  await checkJobAdmission();
   if (typeof outputDir !== "string" || !outputDir.trim()) {
     throw new MediaKitError("assemble --mode render needs an output directory", "INVALID_ARG");
   }

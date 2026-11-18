@@ -1661,6 +1661,10 @@ checkOk(dwCli.checks.find((c) => c.name === "decoded_work")?.pass === true && dw
 const dwDocRes = await client.callTool({ name: "doctor", arguments: {} });
 const dwDocJson = JSON.parse(dwDocRes.content[0].text);
 checkOk(dwDocJson.decoded_work_limits?.max_video_pixel_frames === 250000000000 && dwDocJson.decoded_work_limits?.max_audio_sample_channels === 6000000000 && dwDocJson.decoded_work_limits?.max_duration_seconds === 3600, "doctor reports the decoded-work ceilings", JSON.stringify(dwDocJson.decoded_work_limits));
+// Lượt 99: admission gate + ffmpeg timeout are doctor-visible too
+// (defaults 2 active / 10 starts per minute, 300000 ms — the suite
+// sets neither env, so the defaults are what the asserts pin).
+checkOk(dwDocJson.job_admission_limits?.max_active_jobs === 2 && dwDocJson.job_admission_limits?.max_starts_per_minute === 10 && dwDocJson.ffmpeg_timeout_ms === 300_000, "doctor reports the job admission limits + ffmpeg timeout", JSON.stringify({ job_admission_limits: dwDocJson.job_admission_limits, ffmpeg_timeout_ms: dwDocJson.ffmpeg_timeout_ms }));
 
 // Turn 94: writability pre-check — /proc is read-only even for
 // root, so a probe write there fails on any Linux box with /proc
@@ -6180,7 +6184,12 @@ checkOk(/must be the first step/.test(manifestSlideStep2Text), "manifest refuses
 // cache_hits assert failed in each run. Staging makes every run
 // hermetic by construction.
 async function stageAssembleManifest(name) {
-  const dir = path.join(root, `outputs/mcp-assemble-stage-${process.pid}-${name.replace(/\.json$/, "")}`);
+  // Lượt 99: a per-call counter, so two stagings of the same fixture
+  // never share a directory — the old name-only dir meant staging B
+  // rm -rf'd A's manifest while A's async worker was still about to
+  // read it, and the worker failed with "cannot read manifest".
+  stageAssembleManifest.counter = (stageAssembleManifest.counter ?? 0) + 1;
+  const dir = path.join(root, `outputs/mcp-assemble-stage-${process.pid}-${name.replace(/\.json$/, "")}-${stageAssembleManifest.counter}`);
   await rm(dir, { recursive: true, force: true });
   await mkdir(dir, { recursive: true });
   const doc = JSON.parse(await readFile(path.join(root, "test", name), "utf8"));
@@ -7043,6 +7052,33 @@ checkOk(assembleCancelRecheckJson.status === "cancelled" && !existsSync(path.joi
 // Unknown job id.
 const jobUnknownText = await callExpectThrow("job", { job_id: "job-20000101-000000-deadbeef", action: "status" });
 checkOk(/unknown job/.test(jobUnknownText ?? ""), "job status refuses an unknown job id", jobUnknownText ?? "");
+
+// Lượt 99: job admission gate, end to end. The hermetic jobs dir
+// holds only done/cancelled jobs at this point, so the gate starts
+// open; two async renders started back-to-back are still queued or
+// running when the third start is attempted (each start returns in
+// <1s, each render takes tens of seconds), so the third must be
+// refused with JOB_ADMISSION_LIMIT — and must leave no job behind.
+// Cancelling both re-opens the gate: a fourth start is admitted.
+const admRes = await client.callTool({ name: "job", arguments: { action: "admission" } });
+const admJson = JSON.parse(admRes.content[0].text);
+checkOk(admJson.admitted === true && typeof admJson.active_jobs === "number" && admJson.limits?.max_active_jobs === 2 && admJson.limits?.max_starts_per_minute === 10 && admJson.retry_after_seconds === null, "job admission reports the open gate (admitted, limits 2/10)", JSON.stringify(admJson));
+const admStageA = await stageAssembleManifest("assemble-async.json");
+const admStageB = await stageAssembleManifest("assemble-async.json");
+const admJobA = JSON.parse((await client.callTool({ name: "assemble", arguments: { manifest_path: admStageA.manifestPath, mode: "render", output_dir: path.join(admStageA.dir, "out"), force: true, async: true } })).content[0].text);
+const admJobB = JSON.parse((await client.callTool({ name: "assemble", arguments: { manifest_path: admStageB.manifestPath, mode: "render", output_dir: path.join(admStageB.dir, "out"), force: true, async: true } })).content[0].text);
+checkOk(typeof admJobA.job_id === "string" && typeof admJobB.job_id === "string" && admJobA.job_id !== admJobB.job_id, "two async renders start while the gate is open", `${admJobA.job_id} / ${admJobB.job_id}`);
+const admStageC = await stageAssembleManifest("assemble-async.json");
+const admRefusedText = await callExpectThrow("assemble", { manifest_path: admStageC.manifestPath, mode: "render", output_dir: path.join(admStageC.dir, "out"), force: true, async: true });
+checkOk(/job admission limit/.test(admRefusedText ?? "") && /max 2/.test(admRefusedText ?? "") && /retry in ~30s/.test(admRefusedText ?? ""), "third async render is refused at the admission gate (2 active, max 2)", admRefusedText ?? "");
+const admAfterRefusal = JSON.parse((await client.callTool({ name: "job", arguments: { action: "list" } })).content[0].text);
+checkOk(admAfterRefusal.jobs.filter((j) => j.status === "queued" || j.status === "running").length === 2 && !admAfterRefusal.jobs.some((j) => j.manifest === admStageC.manifestPath), "a refused start creates no job record (still 2 active, refused manifest absent)", `count=${admAfterRefusal.count}`);
+const admCancel = async (id) => { try { await client.callTool({ name: "job", arguments: { job_id: id, action: "cancel" } }); } catch { /* already done — the gate still re-opens */ } };
+await admCancel(admJobA.job_id);
+await admCancel(admJobB.job_id);
+const admJobD = JSON.parse((await client.callTool({ name: "assemble", arguments: { manifest_path: admStageC.manifestPath, mode: "render", output_dir: path.join(admStageC.dir, "out"), force: true, async: true } })).content[0].text);
+checkOk(typeof admJobD.job_id === "string", "cancelling both jobs re-opens the gate (fourth start admitted)", admJobD.job_id ?? "");
+await admCancel(admJobD.job_id);
 
 // download: a local HTTP server stands in for the internet, so the
 // suite never depends on the network — every guard (redirect, size

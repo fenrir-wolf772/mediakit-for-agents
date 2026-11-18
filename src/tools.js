@@ -1486,13 +1486,14 @@ export const TOOL_DEFS = [
 // (kills the worker's whole process group, ffmpeg children included).
   {
     name: "job",
-    description: "Inspect a durable async render job (started by assemble async:true): status shows progress (stage + percent) and the terminal result or error; list shows all jobs newest-first; cancel stops a queued or running job. Status also carries progress_history — every distinct percent the worker reported, so in-stage movement is provable without polling luck (list omits it). Jobs live under MEDIAKIT_JOBS_DIR or <workdir>/.mediakit-jobs.",
+    description: "Inspect a durable async render job (started by assemble async:true): status shows progress (stage + percent) and the terminal result or error; list shows all jobs newest-first; cancel stops a queued or running job. Status also carries progress_history — every distinct percent the worker reported, so in-stage movement is provable without polling luck (list omits it). admission reports the render-job admission gate (max 2 active jobs / 10 starts per minute by default, env MEDIAKIT_MAX_JOBS / MEDIAKIT_MAX_JOB_STARTS_PER_MINUTE) — check it before starting a render so a refused start does not surprise you. Jobs live under MEDIAKIT_JOBS_DIR or <workdir>/.mediakit-jobs.",
     schema: {
     job_id: z.string().optional().describe("Job id (e.g. job-20261114-005800-a1b2c3d4) — required for status/cancel"),
-    action: z.enum(["status", "list", "cancel"]).default("status").describe("status: read one job; list: all jobs; cancel: stop a queued/running job"),
+    action: z.enum(["status", "list", "cancel", "admission"]).default("status").describe("status: read one job; list: all jobs; cancel: stop a queued/running job; admission: the job-start gate (no job_id needed)"),
   },
     handler: async (a) => safe(async () => {
     if (a.action === "list") return core.listJobs({});
+    if (a.action === "admission") return core.getJobAdmission();
     if (!a.job_id) throw new core.MediaKitError("job needs a job_id for status/cancel", "INVALID_ARG");
     return a.action === "cancel" ? core.cancelJob(a.job_id) : core.getJob(a.job_id);
   }),

@@ -820,12 +820,13 @@ const COMMANDS = {
     ],
   },
   job: {
-    usage: "mediakit job <job-id> | mediakit job --list | mediakit job --cancel <job-id>",
-    desc: "Inspect a durable async render job (started by `assemble --async`): status (default) shows progress + the terminal result or error; --list shows all jobs, newest first; --cancel stops a queued or running job (kills the worker's whole process group). Jobs live under MEDIAKIT_JOBS_DIR or <workdir>/.mediakit-jobs.",
+    usage: "mediakit job <job-id> | mediakit job --list | mediakit job --cancel <job-id> | mediakit job --admission",
+    desc: "Inspect a durable async render job (started by `assemble --async`): status (default) shows progress + the terminal result or error; --list shows all jobs, newest first; --cancel stops a queued or running job (kills the worker's whole process group). --admission reports the render-job gate (max 2 active jobs / 10 starts per minute by default, env MEDIAKIT_MAX_JOBS / MEDIAKIT_MAX_JOB_STARTS_PER_MINUTE) — a start past the gate is refused with JOB_ADMISSION_LIMIT and creates no job. Jobs live under MEDIAKIT_JOBS_DIR or <workdir>/.mediakit-jobs.",
     args: [{ name: "job-id", required: false }],
     options: [
       ["--list", "List jobs (newest first)"],
       ["--cancel", "Cancel a queued or running job (give the job id)"],
+      ["--admission", "Report the job-start admission gate (active jobs, starts in the last minute, limits)"],
     ],
   },
   verify: {
@@ -1933,6 +1934,7 @@ async function main() {
       }
       case "job": {
         if (opts.list === true) { result = await core.listJobs({}); break; }
+        if (opts.admission === true) { result = await core.getJobAdmission(); break; }
         if (typeof opts.cancel === "string") { result = await core.cancelJob(opts.cancel); break; }
         if (!positional[0]) fail("missing job id: mediakit job <job-id> [--list] [--cancel <job-id>]");
         result = await core.getJob(positional[0]);
