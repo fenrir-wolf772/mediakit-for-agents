@@ -431,31 +431,34 @@ export const TOOL_DEFS = [
 
   {
     name: "make_loopable",
-    description: "Make a clip loop seamlessly: crossfade the tail into the head (tail-to-head crossfade, moviepy MakeLoopable idea), so the end flows back into the start with no visible jump or audio click. The output is the overlap shorter (a 10s clip with 0.5s overlap becomes 9.5s) and re-encodes (libx264, crf 23 default). Works on audio-only input too (acrossfade only). The result measures the loop on disk: seam_before vs seam_after (mean abs gray difference between the last and first frames) plus normal_step (two neighbouring mid frames) as the baseline — a good seam lands at the normal step, not at zero.",
+    description: "Make a clip loop seamlessly: crossfade the tail into the head (tail-to-head crossfade, moviepy MakeLoopable idea), so the end flows back into the start with no visible jump or audio click. The output is the overlap shorter (a 10s clip with 0.5s overlap becomes 9.5s) and re-encodes (libx264, crf 23 default). Works on audio-only input too (acrossfade only). The result measures the loop on disk: seam_before vs seam_after (mean abs gray difference between the last and first frames) plus normal_step (two neighbouring mid frames) as the baseline — a good seam lands at the normal step, not at zero. Set dry_run=true to print the exact ffmpeg command and write no file (seam_before is measured on the input, so it is exact; seam_after/normal_step/duration report null — measured on the real output).",
     schema: {
     input: pathSchema,
     output: pathSchema,
     overlap: z.number().min(0.1).max(3600).default(0.5).describe("Crossfade length in seconds (default 0.5; 0.3-0.5s is enough for slow motion, 1s for very different start/end poses). Must be under half the clip duration so a middle section remains"),
     crf: z.number().int().min(0).max(51).default(23),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
     handler: async (a) => safe(() => core.makeLoopable({
     input: a.input,
     output: a.output,
     overlap: a.overlap,
     crf: a.crf,
+    dryRun: a.dry_run,
   })),
   },
 
 
   {
     name: "freeze",
-    description: "Hold one frame still for N seconds: insert a frozen-frame segment at time `at` (default the end of the clip — hold the last frame, the end-card use), so the clip grows by exactly the hold and the tail keeps its place in the timeline (moviepy Freeze idea). The frozen frame is the frame starting at or before `at`. Audio in the hold is silence (not the original audio continuing — that would leave the video longer than the audio and force trailing silence); the audio timeline is [0,at] + silence(hold) + [at,end]. Re-encodes video (libx264, crf 23 default), AAC pinned 192k. The result measures the freeze on disk: frozen_frame_diff (input frame vs output frame mid-hold, ~0 when truly frozen) and post_frame_diff (input frame after the freeze point vs the same frame in the output tail, ~0 when the tail kept its place; null when the hold sits on the last frame).",
+    description: "Hold one frame still for N seconds: insert a frozen-frame segment at time `at` (default the end of the clip — hold the last frame, the end-card use), so the clip grows by exactly the hold and the tail keeps its place in the timeline (moviepy Freeze idea). The frozen frame is the frame starting at or before `at`. Audio in the hold is silence (not the original audio continuing — that would leave the video longer than the audio and force trailing silence); the audio timeline is [0,at] + silence(hold) + [at,end]. Re-encodes video (libx264, crf 23 default), AAC pinned 192k. The result measures the freeze on disk: frozen_frame_diff (input frame vs output frame mid-hold, ~0 when truly frozen) and post_frame_diff (input frame after the freeze point vs the same frame in the output tail, ~0 when the tail kept its place; null when the hold sits on the last frame). Set dry_run=true to print the exact ffmpeg command and write no file (frame_index/frame_seconds are computed from the input's frame count, so they are exact; the diffs and the duration report null — measured on the real output).",
     schema: {
     input: pathSchema,
     output: pathSchema,
     at: z.union([z.number().min(0), z.string()]).optional().describe("Time to freeze, in seconds or MM:SS (default: the end of the clip, i.e. hold the last frame). Must not be past the end of the clip"),
     hold: z.number().min(0.1).max(30).default(2).describe("Hold length in seconds (default 2; 0.1-30)"),
     crf: z.number().int().min(0).max(51).default(23),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
     handler: async (a) => safe(() => core.freezeFrame({
     input: a.input,
@@ -463,6 +466,7 @@ export const TOOL_DEFS = [
     at: a.at ?? null,
     hold: a.hold,
     crf: a.crf,
+    dryRun: a.dry_run,
   })),
   },
 
@@ -539,18 +543,20 @@ export const TOOL_DEFS = [
 
   {
     name: "boomerang",
-    description: "Play a clip forward then backwards — the ping-pong loop (moviepy TimeSymmetrize/TimeMirror idea): the clip followed by its own reverse, so a bounce, swing or wave returns to where it started with no cut. The peak frame is NOT played twice: the reversed half drops its first frame (moviepy v2.2.1's TimeMirror clipping fix) and the reversed audio drops one video-frame of audio at the same point, so the output is 2D - 1/fps (audio-only input has no video frame to pivot on, so it plays forward + reversed whole, 2D). Re-encodes video (libx264, crf 23 default), AAC pinned 192k. The result measures the seam on disk: seam_diff (output frame just before the seam vs just after it) against normal_step (two neighbouring mid-forward frames) — a good seam lands at the normal step; the frame count (2N-1) is the honest proof the pivot frame was dropped.",
+    description: "Play a clip forward then backwards — the ping-pong loop (moviepy TimeSymmetrize/TimeMirror idea): the clip followed by its own reverse, so a bounce, swing or wave returns to where it started with no cut. The peak frame is NOT played twice: the reversed half drops its first frame (moviepy v2.2.1's TimeMirror clipping fix) and the reversed audio drops one video-frame of audio at the same point, so the output is 2D - 1/fps (audio-only input has no video frame to pivot on, so it plays forward + reversed whole, 2D). Re-encodes video (libx264, crf 23 default), AAC pinned 192k. The result measures the seam on disk: seam_diff (output frame just before the seam vs just after it) against normal_step (two neighbouring mid-forward frames) — a good seam lands at the normal step; the frame count (2N-1) is the honest proof the pivot frame was dropped. Set dry_run=true to print the exact ffmpeg command and write no file (pivot/expected duration are computed from the input, so they are exact; seam_diff/normal_step/duration report null — measured on the real output).",
     schema: {
     input: pathSchema,
     output: pathSchema,
     audio: z.boolean().default(true).describe("Reverse the audio too (default true); false copies the audio forward under the ping-pong video"),
     crf: z.number().int().min(0).max(51).default(23),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
     handler: async (a) => safe(() => core.boomerangClip({
     input: a.input,
     output: a.output,
     audio: a.audio,
     crf: a.crf,
+    dryRun: a.dry_run,
   })),
   },
 
@@ -583,7 +589,7 @@ export const TOOL_DEFS = [
 
   {
     name: "zoom_pan",
-    description: "Ken Burns effect: turn a still image into a moving clip (zoompan filter). Zooms linearly from zoom_from to zoom_to while the focus point moves from (focus_x, focus_y) to (focus_end_x, focus_end_y) — all 0-1 fractions of the frame, 0.5 is center. The input is pre-scaled 1.25x before zooming (avoids the integer-crop jitter zoompan is known for). Input must be a still image, not a video. The result counts frames on the output file, so duration and fps are measured, not assumed.",
+    description: "Ken Burns effect: turn a still image into a moving clip (zoompan filter). Zooms linearly from zoom_from to zoom_to while the focus point moves from (focus_x, focus_y) to (focus_end_x, focus_end_y) — all 0-1 fractions of the frame, 0.5 is center. The input is pre-scaled 1.25x before zooming (avoids the integer-crop jitter zoompan is known for). Input must be a still image, not a video. The result counts frames on the output file, so duration and fps are measured, not assumed. Set dry_run=true to print the exact ffmpeg command and write no file (zoom/focus expressions are computed from the arguments, so they are exact; duration/frames report null — measured on the real output).",
     schema: {
     input: pathSchema.describe("Still image file (PNG/JPG/WebP)"),
     output: pathSchema,
@@ -598,6 +604,7 @@ export const TOOL_DEFS = [
     width: z.number().int().min(2).max(7680).default(1280).describe("Output width in pixels, even (default 1280)"),
     height: z.number().int().min(2).max(4320).default(720).describe("Output height in pixels, even (default 720)"),
     crf: z.number().int().min(0).max(51).default(23),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
     handler: async (a) => safe(() => core.zoomPan({
     input: a.input,
@@ -613,13 +620,14 @@ export const TOOL_DEFS = [
     width: a.width,
     height: a.height,
     crf: a.crf,
+    dryRun: a.dry_run,
   })),
   },
 
 
   {
     name: "image_to_video",
-    description: "Turn one still image into a fixed-duration video that holds still (no motion — use zoom_pan for Ken Burns). Use it for a podcast still, a song cover, or a title card held over audio. Dimensions default to the image itself; width/height fit the image inside the box and pad black to the exact size. audio loops an audio file to the same duration (a short bed loops, a long one is trimmed). Output .mp4 (H.264) or .webm (VP9). The result counts frames on the output file, so the duration is measured, not assumed.",
+    description: "Turn one still image into a fixed-duration video that holds still (no motion — use zoom_pan for Ken Burns). Use it for a podcast still, a song cover, or a title card held over audio. Dimensions default to the image itself; width/height fit the image inside the box and pad black to the exact size. audio loops an audio file to the same duration (a short bed loops, a long one is trimmed). Output .mp4 (H.264) or .webm (VP9). The result counts frames on the output file, so the duration is measured, not assumed. Set dry_run=true to print the exact ffmpeg command and write no file (dimensions/fps/duration are computed from the arguments, so they are exact; frames report null — measured on the real output).",
     schema: {
     input: pathSchema.describe("Still image file (PNG/JPG/WebP)"),
     output: pathSchema,
@@ -629,6 +637,7 @@ export const TOOL_DEFS = [
     height: z.number().int().min(2).max(4320).optional().describe("Output height in pixels, rounded down to even (default = image height)"),
     audio: pathSchema.optional().describe("Audio file to loop under the still (optional)"),
     crf: z.number().int().min(0).max(51).default(23),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
     handler: async (a) => safe(() => core.imageToVideo({
     input: a.input,
@@ -639,13 +648,14 @@ export const TOOL_DEFS = [
     height: a.height ?? null,
     audio: a.audio ?? null,
     crf: a.crf,
+    dryRun: a.dry_run,
   })),
   },
 
 
   {
     name: "slideshow",
-    description: "Turn 2-32 still images into one video with an xfade transition between every pair. Each image is visible for its own duration — the transition eats a handle, not slide time — so the total is exactly the sum of the durations. One transition type for all pairs (transition/transition_duration), or a different one per join: transitions (one xfade name per join, n-1 entries) and transition_durations (one length per join, each shorter than both slides it joins). Images are rendered to clips in parallel first, then joined with the concat xfade chain. audio loops a bed under the whole slideshow. Output .mp4 only in v1. The result counts frames on the output file, so the duration is measured, not assumed.",
+    description: "Turn 2-32 still images into one video with an xfade transition between every pair. Each image is visible for its own duration — the transition eats a handle, not slide time — so the total is exactly the sum of the durations. One transition type for all pairs (transition/transition_duration), or a different one per join: transitions (one xfade name per join, n-1 entries) and transition_durations (one length per join, each shorter than both slides it joins). Images are rendered to clips in parallel first, then joined with the concat xfade chain. audio loops a bed under the whole slideshow. Output .mp4 only in v1. The result counts frames on the output file, so the duration is measured, not assumed. Set dry_run=true to print the plan and write no file (one exact command per slide clip, the join as a plan — concat has no dry-run yet — and the exact audio command when a bed is given; duration/frames report null — measured on the real output).",
     schema: {
     images: z.array(z.union([
       z.string().describe("Image file path"),
@@ -666,6 +676,7 @@ export const TOOL_DEFS = [
     height: z.number().int().min(2).max(4320).default(720).describe("Output height in pixels (default 720)"),
     audio: pathSchema.optional().describe("Audio file to loop under the whole slideshow (optional)"),
     crf: z.number().int().min(0).max(51).default(23),
+    dry_run: z.boolean().default(false).describe("Print the plan (one exact command per slide clip, the join as a plan, the exact audio command when a bed is given) and write no file"),
   },
     handler: async (a) => safe(() => core.slideshow({
     images: a.images,
@@ -681,6 +692,7 @@ export const TOOL_DEFS = [
     height: a.height,
     audio: a.audio ?? null,
     crf: a.crf,
+    dryRun: a.dry_run,
   })),
   },
 
@@ -787,7 +799,7 @@ export const TOOL_DEFS = [
 
   {
     name: "compress",
-    description: "Shrink a file with one named quality preset instead of guessing CRF numbers: low (CRF 32), medium (CRF 26), high (CRF 20) or email-25mb (targets 18 MB so the file still fits a 25 MB email attachment after base64 inflation), each with its own x264 preset and audio bitrate. Optional max_width scales the video down first. Set target_size_mb to hit an exact size instead (e.g. 10 for a Discord upload): two-pass ABR encoding from the size + duration budget, with a 10% safety margin; reports target_met measured on disk. In target-size mode a resolution ladder steps the frame down (1080→720→480→360→240) when the bitrate buys less than 0.045 bits per pixel per frame, so a starved encode stays watchable instead of mush; set resolution_ladder=false to keep the source frame. Target-size mode also returns a quality_proof: SSIM measured against the source at 3 sample points plus PSNR mid-clip and a verdict in words (indistinguishable / looks_the_same / slight_softening / visible_loss / clearly_degraded) — VMAF is measured at the mid point when the ffmpeg build has libvmaf (default vmaf_v0.6.1 model); otherwise SSIM is the measured proxy and the proof says so, and the proof rates encode fidelity at the delivered resolution (it does not penalize the ladder's resolution drop; compare dimensions and bpp_after for that tradeoff). Set quality_proof=false to skip the measurement. target_size_mb ignores quality and cannot be combined with crf. Returns the size before/after and the reduction percent actually measured on disk, so the agent can check the tradeoff worked.",
+    description: "Shrink a file with one named quality preset instead of guessing CRF numbers: low (CRF 32), medium (CRF 26), high (CRF 20) or email-25mb (targets 18 MB so the file still fits a 25 MB email attachment after base64 inflation), each with its own x264 preset and audio bitrate. Optional max_width scales the video down first. Set target_size_mb to hit an exact size instead (e.g. 10 for a Discord upload): two-pass ABR encoding from the size + duration budget, with a 10% safety margin; reports target_met measured on disk. In target-size mode a resolution ladder steps the frame down (1080→720→480→360→240) when the bitrate buys less than 0.045 bits per pixel per frame, so a starved encode stays watchable instead of mush; set resolution_ladder=false to keep the source frame. Target-size mode also returns a quality_proof: SSIM measured against the source at 3 sample points plus PSNR mid-clip and a verdict in words (indistinguishable / looks_the_same / slight_softening / visible_loss / clearly_degraded) — VMAF is measured at the mid point when the ffmpeg build has libvmaf (default vmaf_v0.6.1 model); otherwise SSIM is the measured proxy and the proof says so, and the proof rates encode fidelity at the delivered resolution (it does not penalize the ladder's resolution drop; compare dimensions and bpp_after for that tradeoff). Set quality_proof=false to skip the measurement. target_size_mb ignores quality and cannot be combined with crf. Returns the size before/after and the reduction percent actually measured on disk, so the agent can check the tradeoff worked. Set dry_run=true to print the exact ffmpeg command(s) — two passes in target-size video mode — and write no file (bitrate/ladder are computed from the input, so they are exact; size_after/target_met/reduction/quality_proof report null — measured on the real output).",
     schema: {
     input: pathSchema,
     output: pathSchema.describe("Output file path"),
@@ -798,6 +810,7 @@ export const TOOL_DEFS = [
     target_size_mb: z.number().min(0.05).max(10000).optional().describe("Target size in decimal MB (1 MB = 1,000,000 bytes): two-pass encode to fit under it"),
     resolution_ladder: z.boolean().default(true).describe("In target-size mode, step the frame down when the bitrate buys less than 0.045 bits per pixel per frame (default true; false keeps the source frame)"),
     quality_proof: z.boolean().default(true).describe("In target-size mode, measure the output against the source (SSIM at 3 sample points + PSNR mid-clip) and report a verdict in words; false skips the measurement"),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command(s) that would run and write no file"),
   },
     handler: async (a) => safe(() => core.compress({
     input: a.input,
@@ -809,6 +822,7 @@ export const TOOL_DEFS = [
     targetSizeMb: a.target_size_mb ?? null,
     resolutionLadder: a.resolution_ladder ?? true,
     qualityProof: a.quality_proof ?? true,
+    dryRun: a.dry_run,
   })),
   },
 
@@ -1262,7 +1276,7 @@ export const TOOL_DEFS = [
 
   {
     name: "export_gif",
-    description: "Export a clip (or segment) as an animated GIF with a two-pass palette (palettegen + paletteuse from the actual frames). Fits under max_size_mb (default 10 MB, the GitHub README limit; Slack only auto-plays GIFs under ~2 MB) by stepping down fps, then width, then palette colours — each attempt is measured on disk, and size_budget_met says honestly whether the budget was met.",
+    description: "Export a clip (or segment) as an animated GIF with a two-pass palette (palettegen + paletteuse from the actual frames). Fits under max_size_mb (default 10 MB, the GitHub README limit; Slack only auto-plays GIFs under ~2 MB) by stepping down fps, then width, then palette colours — each attempt is measured on disk, and size_budget_met says honestly whether the budget was met. Set dry_run=true to print the first ladder step's command and write no file (the ladder plan is listed; later steps only run when the budget needs them; size/duration/frames report null — measured on the real output).",
     schema: {
     input: pathSchema,
     output: pathSchema.describe("Output file path, must end in .gif"),
@@ -1271,6 +1285,7 @@ export const TOOL_DEFS = [
     fps: z.number().int().min(1).max(30).optional().describe("Frames per second (default 15; stepped down if the size budget needs it)"),
     width: z.number().int().min(16).max(4096).optional().describe("GIF width in pixels (default 640; stepped down if the size budget needs it)"),
     max_size_mb: z.number().min(0.01).max(10000).default(10).describe("Size budget in decimal MB (default 10)"),
+    dry_run: z.boolean().default(false).describe("Print the first ladder step's command and write no file"),
   },
     handler: async (a) => safe(() => core.exportGif({
     input: a.input,
@@ -1280,6 +1295,7 @@ export const TOOL_DEFS = [
     fps: a.fps ?? null,
     width: a.width ?? null,
     maxSizeMb: a.max_size_mb,
+    dryRun: a.dry_run,
   })),
   },
 
@@ -1296,7 +1312,7 @@ export const TOOL_DEFS = [
 
   {
     name: "titlecard",
-    description: "Render a title card PNG: a big bold hook (3-6 words) on a coloured box, on a transparent canvas so it overlays onto any frame. Text wraps to short lines; the block sits centred in the safe zone (~55% down the frame). Default: yellow text on an orange box, ~120px type at 1080 wide. Pass style: clean-bold | minimal-line | warm-story to use that style's locked palette from skills/shorts-video/styles.json instead; pass brand: amber-teal | warm-story | minimal-line to paint it in the channel look from skills/shorts-video/brands.json (primary = box, on_primary = text, same registry as assemble; set MEDIAKIT_BRANDS to a JSON file of your own to add more brand ids); an explicit text_color/box_color/font_size overrides just that one locked value for this call. Resolution: explicit > brand > style > default; the brand never sets the font size.",
+    description: "Render a title card PNG: a big bold hook (3-6 words) on a coloured box, on a transparent canvas so it overlays onto any frame. Text wraps to short lines; the block sits centred in the safe zone (~55% down the frame). Default: yellow text on an orange box, ~120px type at 1080 wide. Pass style: clean-bold | minimal-line | warm-story to use that style's locked palette from skills/shorts-video/styles.json instead; pass brand: amber-teal | warm-story | minimal-line to paint it in the channel look from skills/shorts-video/brands.json (primary = box, on_primary = text, same registry as assemble; set MEDIAKIT_BRANDS to a JSON file of your own to add more brand ids); an explicit text_color/box_color/font_size overrides just that one locked value for this call. Resolution: explicit > brand > style > default; the brand never sets the font size. Set dry_run=true to print the exact ffmpeg command and write no output file (the drawtext text file is written next to the output and kept, so the printed command runs as-is; font_size/colors are computed, so they are exact; size reports null).",
     schema: {
     text: z.string().min(1).describe("The hook text, 3-6 words (e.g. 'The Moon Is Leaving Us')"),
     output: pathSchema,
@@ -1307,6 +1323,7 @@ export const TOOL_DEFS = [
     box_color: z.string().optional().describe("Box color: name or hex, default F97316 (orange); with style, the style's locked box color; with brand, the brand's primary"),
     style: z.string().optional().describe("Named style id (clean-bold | minimal-line | warm-story): use that style's locked text/box/font palette"),
     brand: z.string().optional().describe("Brand id (amber-teal | warm-story | minimal-line): paint the card in the channel look — primary is the box, on_primary the text"),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no output file"),
   },
     handler: async (a) => safe(() => core.titlecard({
     text: a.text,
@@ -1318,13 +1335,14 @@ export const TOOL_DEFS = [
     boxColor: a.box_color ?? null,
     style: a.style ?? null,
     brand: a.brand ?? null,
+    dryRun: a.dry_run,
   })),
   },
 
 
   {
     name: "intro",
-    description: "Render a short intro clip: a title on a solid-colour background that fades in and out. Silent video (no audio); use it as the opening card, then concat it in front of the main clip. Text wraps to short lines, centred on the frame. Pass style: clean-bold | minimal-line | warm-story to use that style's locked palette (its box colour becomes the background, its text colour the text) from skills/shorts-video/styles.json; pass brand: amber-teal | warm-story | minimal-line to paint it in the channel look from skills/shorts-video/brands.json (background = background, text = text, same registry as assemble; set MEDIAKIT_BRANDS to a JSON file of your own to add more brand ids); an explicit bg_color/text_color/font_size overrides just that one locked value for this call. Resolution: explicit > brand > style > default; the brand never sets the font size.",
+    description: "Render a short intro clip: a title on a solid-colour background that fades in and out. Silent video (no audio); use it as the opening card, then concat it in front of the main clip. Text wraps to short lines, centred on the frame. Pass style: clean-bold | minimal-line | warm-story to use that style's locked palette (its box colour becomes the background, its text colour the text) from skills/shorts-video/styles.json; pass brand: amber-teal | warm-story | minimal-line to paint it in the channel look from skills/shorts-video/brands.json (background = background, text = text, same registry as assemble; set MEDIAKIT_BRANDS to a JSON file of your own to add more brand ids); an explicit bg_color/text_color/font_size overrides just that one locked value for this call. Resolution: explicit > brand > style > default; the brand never sets the font size. Set dry_run=true to print the exact ffmpeg command and write no output file (the drawtext text file is written next to the output and kept, so the printed command runs as-is; font_size/colors are computed, so they are exact; size/duration report null — measured on the real output).",
     schema: {
     text: z.string().min(1).describe("The intro title, e.g. 'Welcome Back'"),
     output: pathSchema,
@@ -1338,6 +1356,7 @@ export const TOOL_DEFS = [
     fade_out: z.number().min(0).max(30).default(0.5).describe("Text fade-out length in seconds (0 = no fade-out)"),
     style: z.string().optional().describe("Named style id (clean-bold | minimal-line | warm-story): use that style's locked palette"),
     brand: z.string().optional().describe("Brand id (amber-teal | warm-story | minimal-line): paint the intro in the channel look — background is the background, text the text"),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no output file"),
   },
     handler: async (a) => safe(() => core.intro({
     text: a.text,
@@ -1352,6 +1371,7 @@ export const TOOL_DEFS = [
     fadeOut: a.fade_out,
     style: a.style ?? null,
     brand: a.brand ?? null,
+    dryRun: a.dry_run,
   })),
   },
 

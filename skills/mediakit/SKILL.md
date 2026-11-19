@@ -791,7 +791,23 @@ command with the exact computed font/margin. `cut_words --dry-run`
 prints the cut plan instead of a command. The plan is computed from real probes
 (the keyframe list for `--snap`, the GOP for `--gop`), so a dry-run
 that prints the wrong cut is a bug, not a guess — read the command
-before you run it.
+before you run it. Batch 5 (lượt 116) completes the mutative set:
+`make_loopable`/`freeze`/`boomerang`/`zoom_pan`/`image_to_video`/
+`slideshow`/`compress`/`export_gif`/`titlecard`/`intro` all take it.
+`make_loopable`/`freeze`/`boomerang` print one exact command each with
+the overlap/pivot/frame-index computed from real probes (seam scores
+after the cut stay null — they are measured on the real output).
+`compress` prints one command in quality mode and both passes in
+target-size video mode (pass 1 analyses to null, pass 2 encodes at
+the computed bitrate — the passlog path it names is removed, because
+a dry-run writes nothing). `export_gif` prints only the first ladder
+step's command and lists the whole 8-step ladder — later steps only
+run when the budget needs them. `slideshow` prints one exact command
+per slide clip plus the exact audio command when a bed is given, and
+reports the join as a plan (`{tool: "concat", command: null}`) because
+`concat` has no dry-run yet. `titlecard`/`intro` print the exact
+command and keep the drawtext text file next to the output (so the
+printed command runs as-is) but write no output file.
 
 ### 33f. Diagnose the film before you render it — validate is format, diagnose is judgement
 `assemble --mode validate` is the format gate: it throws on the first

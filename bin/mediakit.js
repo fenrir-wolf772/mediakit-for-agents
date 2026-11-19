@@ -169,8 +169,8 @@ const COMMANDS = {
     ],
   },
   "export-gif": {
-    usage: "mediakit export-gif <input> -o <output.gif> [--start <s|MM:SS>] [--end <s|MM:SS>] [--fps 15] [--width 640] [--max-size-mb 10]",
-    desc: "Export a clip (or segment) as an animated GIF with a two-pass palette. Fits under --max-size-mb (default 10 MB, the GitHub README limit; Slack auto-plays only under ~2 MB) by stepping down fps, then width, then palette colours; reports size_budget_met measured on disk.",
+    usage: "mediakit export-gif <input> -o <output.gif> [--start <s|MM:SS>] [--end <s|MM:SS>] [--fps 15] [--width 640] [--max-size-mb 10] [--dry-run]",
+    desc: "Export a clip (or segment) as an animated GIF with a two-pass palette. Fits under --max-size-mb (default 10 MB, the GitHub README limit; Slack auto-plays only under ~2 MB) by stepping down fps, then width, then palette colours; reports size_budget_met measured on disk. --dry-run prints the first ladder step's command and writes no file (the ladder plan is listed; later steps only run when the budget needs them).",
     args: [{ name: "input", required: true }],
     options: [
       ["--start", "Segment start in seconds or MM:SS (default 0)"],
@@ -178,6 +178,7 @@ const COMMANDS = {
       ["--fps", "Frames per second (default 15)"],
       ["--width", "GIF width in pixels (default 640)"],
       ["--max-size-mb", "Size budget in decimal MB (default 10)"],
+      ["--dry-run", "Print the first ladder step's command and write no file"],
       ["-o, --output", "Output .gif file (required)"],
     ],
   },
@@ -214,8 +215,8 @@ const COMMANDS = {
     ],
   },
   titlecard: {
-    usage: "mediakit titlecard \"<hook text>\" -o <output.png> [--width 1080] [--height 1920] [--font-size <n>] [--text-color <hex>] [--box-color <hex>] [--style clean-bold|minimal-line|warm-story] [--brand amber-teal|warm-story|minimal-line]",
-    desc: "Render a title card PNG: big bold hook on a coloured box, transparent background (overlay it with the overlay tool). --style picks a named locked palette from skills/shorts-video/styles.json; --brand paints it in the channel look (primary = box, on_primary = text) from skills/shorts-video/brands.json; an explicit colour/font overrides just that one locked value. Resolution: explicit > brand > style > default.",
+    usage: "mediakit titlecard \"<hook text>\" -o <output.png> [--width 1080] [--height 1920] [--font-size <n>] [--text-color <hex>] [--box-color <hex>] [--style clean-bold|minimal-line|warm-story] [--brand amber-teal|warm-story|minimal-line] [--dry-run]",
+    desc: "Render a title card PNG: big bold hook on a coloured box, transparent background (overlay it with the overlay tool). --style picks a named locked palette from skills/shorts-video/styles.json; --brand paints it in the channel look (primary = box, on_primary = text) from skills/shorts-video/brands.json; an explicit colour/font overrides just that one locked value. Resolution: explicit > brand > style > default. --dry-run prints the exact ffmpeg command and writes no output file (the drawtext text file is written next to the output and kept, so the printed command runs as-is).",
     args: [{ name: "text", required: true }],
     options: [
       ["--width", "Canvas width in pixels (default 1080, must be even)"],
@@ -225,12 +226,13 @@ const COMMANDS = {
       ["--box-color", "Box color name or hex (default F97316 orange; with --style, the style's locked box color; with --brand, the brand's primary)"],
       ["--style", "Named style id: clean-bold | minimal-line | warm-story (locked palette from skills/shorts-video/styles.json)"],
       ["--brand", "Brand id: amber-teal | warm-story | minimal-line (palette from skills/shorts-video/brands.json; same registry as assemble)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no output file"],
       ["-o, --output", "Output PNG file (required)"],
     ],
   },
   intro: {
-    usage: "mediakit intro \"<title>\" -o <output.mp4> [--width 1280] [--height 720] [--duration 3] [--bg-color 0F172A] [--text-color FFFFFF] [--font-size <n>] [--fade-in 0.5] [--fade-out 0.5] [--style clean-bold|minimal-line|warm-story] [--brand amber-teal|warm-story|minimal-line]",
-    desc: "Render a short intro clip: a title on a solid-colour background, fading in and out (silent video). --style picks a named locked palette (box colour becomes the background); --brand paints it in the channel look (background = background, text = text); an explicit colour/font overrides just that one locked value. Resolution: explicit > brand > style > default.",
+    usage: "mediakit intro \"<title>\" -o <output.mp4> [--width 1280] [--height 720] [--duration 3] [--bg-color 0F172A] [--text-color FFFFFF] [--font-size <n>] [--fade-in 0.5] [--fade-out 0.5] [--style clean-bold|minimal-line|warm-story] [--brand amber-teal|warm-story|minimal-line] [--dry-run]",
+    desc: "Render a short intro clip: a title on a solid-colour background, fading in and out (silent video). --style picks a named locked palette (box colour becomes the background); --brand paints it in the channel look (background = background, text = text); an explicit colour/font overrides just that one locked value. Resolution: explicit > brand > style > default. --dry-run prints the exact ffmpeg command and writes no output file (the drawtext text file is written next to the output and kept, so the printed command runs as-is).",
     args: [{ name: "text", required: true }],
     options: [
       ["--width", "Canvas width in pixels (default 1280, must be even)"],
@@ -243,6 +245,7 @@ const COMMANDS = {
       ["--fade-out", "Text fade-out in seconds (default 0.5, 0 = none)"],
       ["--style", "Named style id: clean-bold | minimal-line | warm-story (locked palette from skills/shorts-video/styles.json)"],
       ["--brand", "Brand id: amber-teal | warm-story | minimal-line (palette from skills/shorts-video/brands.json; same registry as assemble)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no output file"],
       ["-o, --output", "Output MP4 file (required)"],
     ],
   },
@@ -299,23 +302,25 @@ const COMMANDS = {
     ],
   },
   "make-loopable": {
-    usage: "mediakit make-loopable <input> -o <output> [--overlap 0.5] [--crf 23]",
-    desc: "Make a clip loop seamlessly: crossfade the tail into the head, so the end flows back into the start with no jump or audio click. Output is the overlap shorter (10s + 0.5s overlap = 9.5s). Reports seam_before vs seam_after (mean abs gray difference between last and first frames) plus normal_step as the baseline. Works on audio-only input too.",
+    usage: "mediakit make-loopable <input> -o <output> [--overlap 0.5] [--crf 23] [--dry-run]",
+    desc: "Make a clip loop seamlessly: crossfade the tail into the head, so the end flows back into the start with no jump or audio click. Output is the overlap shorter (10s + 0.5s overlap = 9.5s). Reports seam_before vs seam_after (mean abs gray difference between last and first frames) plus normal_step as the baseline. Works on audio-only input too. --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--overlap", "Crossfade length in seconds (default 0.5; 0.3-0.5s for slow motion, 1s for very different start/end poses; must be under half the clip)"],
       ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
   freeze: {
-    usage: "mediakit freeze <input> -o <output> [--at 5] [--hold 2] [--crf 23]",
-    desc: "Hold one frame still for N seconds: insert a frozen-frame segment at time --at (default the end of the clip — hold the last frame). The clip grows by exactly the hold and the tail keeps its place; audio in the hold is silence. Reports frozen_frame_diff (input frame vs output frame mid-hold, ~0 when truly frozen) and post_frame_diff (tail kept its place).",
+    usage: "mediakit freeze <input> -o <output> [--at 5] [--hold 2] [--crf 23] [--dry-run]",
+    desc: "Hold one frame still for N seconds: insert a frozen-frame segment at time --at (default the end of the clip — hold the last frame). The clip grows by exactly the hold and the tail keeps its place; audio in the hold is silence. Reports frozen_frame_diff (input frame vs output frame mid-hold, ~0 when truly frozen) and post_frame_diff (tail kept its place). --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--at", "Time to freeze, seconds or MM:SS (default: end of clip, hold the last frame)"],
       ["--hold", "Hold length in seconds (default 2; 0.1-30)"],
       ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -355,12 +360,13 @@ const COMMANDS = {
     ],
   },
   boomerang: {
-    usage: "mediakit boomerang <input> -o <output> [--no-audio] [--crf 23]",
-    desc: "Play a clip forward then backwards — the ping-pong loop. The peak frame is not played twice: the reversed half drops its first frame (moviepy TimeMirror fix) and the reversed audio drops one video-frame of audio, so the output is 2D - 1/fps (audio-only input plays forward + reversed whole, 2D). Reports seam_diff vs normal_step measured on disk. Works on audio-only input too.",
+    usage: "mediakit boomerang <input> -o <output> [--no-audio] [--crf 23] [--dry-run]",
+    desc: "Play a clip forward then backwards — the ping-pong loop. The peak frame is not played twice: the reversed half drops its first frame (moviepy TimeMirror fix) and the reversed audio drops one video-frame of audio, so the output is 2D - 1/fps (audio-only input plays forward + reversed whole, 2D). Reports seam_diff vs normal_step measured on disk. Works on audio-only input too. --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--no-audio", "Keep the audio playing forward under the ping-pong video (reverses nothing on audio-only input)"],
       ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -379,8 +385,8 @@ const COMMANDS = {
     ],
   },
   "zoom-pan": {
-    usage: "mediakit zoom-pan <image> -o <output.mp4> [--duration 5] [--fps 30] [--zoom-from 1] [--zoom-to 1.5] [--focus-x 0.5] [--focus-y 0.5] [--focus-end-x 0.5] [--focus-end-y 0.5] [--width 1280] [--height 720] [--crf 23]",
-    desc: "Ken Burns effect: turn a still image into a moving clip. Zooms linearly from --zoom-from to --zoom-to while the focus point moves from (--focus-x, --focus-y) to (--focus-end-x, --focus-end-y), 0-1 fractions of the frame (0.5 is center). The input is pre-scaled 1.25x before zooming to avoid zoompan's integer-crop jitter. Input must be a still image, not a video.",
+    usage: "mediakit zoom-pan <image> -o <output.mp4> [--duration 5] [--fps 30] [--zoom-from 1] [--zoom-to 1.5] [--focus-x 0.5] [--focus-y 0.5] [--focus-end-x 0.5] [--focus-end-y 0.5] [--width 1280] [--height 720] [--crf 23] [--dry-run]",
+    desc: "Ken Burns effect: turn a still image into a moving clip. Zooms linearly from --zoom-from to --zoom-to while the focus point moves from (--focus-x, --focus-y) to (--focus-end-x, --focus-end-y), 0-1 fractions of the frame (0.5 is center). The input is pre-scaled 1.25x before zooming to avoid zoompan's integer-crop jitter. Input must be a still image, not a video. --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--duration", "Clip length in seconds (default 5)"],
@@ -394,6 +400,7 @@ const COMMANDS = {
       ["--width", "Output width in pixels, even (default 1280)"],
       ["--height", "Output height in pixels, even (default 720)"],
       ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -414,8 +421,8 @@ const COMMANDS = {
     ],
   },
   "image-to-video": {
-    usage: "mediakit image-to-video <image> -o <output.mp4> [--duration 5] [--fps 30] [--width 1280] [--height 720] [--audio <file>] [--crf 23]",
-    desc: "Turn one still image into a fixed-duration video that holds still (no motion — use zoom-pan for Ken Burns). Dimensions default to the image itself; --width/--height fit the image inside the box and pad black to the exact size (widths are rounded down to even). --audio loops an audio file to the same duration (a short bed loops, a long one is trimmed). Output .mp4 (H.264) or .webm (VP9). Reports frame count measured on the output file — exactly round(duration*fps).",
+    usage: "mediakit image-to-video <image> -o <output.mp4> [--duration 5] [--fps 30] [--width 1280] [--height 720] [--audio <file>] [--crf 23] [--dry-run]",
+    desc: "Turn one still image into a fixed-duration video that holds still (no motion — use zoom-pan for Ken Burns). Dimensions default to the image itself; --width/--height fit the image inside the box and pad black to the exact size (widths are rounded down to even). --audio loops an audio file to the same duration (a short bed loops, a long one is trimmed). Output .mp4 (H.264) or .webm (VP9). Reports frame count measured on the output file — exactly round(duration*fps). --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--duration", "Clip length in seconds (default 5)"],
@@ -424,12 +431,13 @@ const COMMANDS = {
       ["--height", "Output height in pixels, rounded down to even (default = image height)"],
       ["--audio", "Audio file to loop under the still (optional)"],
       ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file, .mp4 or .webm (required)"],
     ],
   },
   slideshow: {
-    usage: "mediakit slideshow <img1> <img2> [img3...] -o <output.mp4> [--duration 3] [--durations 3,5,2] [--transition fade] [--transition-duration 1] [--transitions fade,wipeleft] [--transition-durations 1,0.5] [--fps 30] [--width 1280] [--height 720] [--audio <file>] [--crf 23]",
-    desc: "Turn 2-32 still images into one video with an xfade transition between every pair. Each image is visible for its own duration (total = sum of durations); the transition eats a handle, not slide time. --transitions/--transition-durations give a different transition per join (n-1 comma entries); otherwise one type applies to all pairs. --audio loops a bed under the whole slideshow. Output .mp4 only in v1.",
+    usage: "mediakit slideshow <img1> <img2> [img3...] -o <output.mp4> [--duration 3] [--durations 3,5,2] [--transition fade] [--transition-duration 1] [--transitions fade,wipeleft] [--transition-durations 1,0.5] [--fps 30] [--width 1280] [--height 720] [--audio <file>] [--crf 23] [--dry-run]",
+    desc: "Turn 2-32 still images into one video with an xfade transition between every pair. Each image is visible for its own duration (total = sum of durations); the transition eats a handle, not slide time. --transitions/--transition-durations give a different transition per join (n-1 comma entries); otherwise one type applies to all pairs. --audio loops a bed under the whole slideshow. Output .mp4 only in v1. --dry-run prints the plan and writes no file (one exact command per slide clip, the join as a plan — concat has no dry-run yet — and the exact audio command when a bed is given).",
     args: [{ name: "images", required: true, variadic: true }],
     options: [
       ["--duration", "Visible seconds per image (default 3)"],
@@ -443,6 +451,7 @@ const COMMANDS = {
       ["--height", "Output height in pixels (default 720)"],
       ["--audio", "Audio file to loop under the slideshow (optional)"],
       ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["--dry-run", "Print the plan and write no file"],
       ["-o, --output", "Output file, .mp4 (required)"],
     ],
   },
@@ -533,8 +542,8 @@ const COMMANDS = {
     ],
   },
   compress: {
-    usage: "mediakit compress <input> -o <output> [--quality low|medium|high|email-25mb] [--max-width <px>] [--crf <n>] [--preset <p>] [--target-size <MB>] [--no-resolution-ladder] [--no-quality-proof]",
-    desc: "Shrink a file with one named quality preset (low/medium/high, or email-25mb = target 18 MB so it still fits a 25 MB email attachment after base64). Reports the size before/after and the reduction actually achieved. --target-size <MB> encodes to fit under an exact size instead (two-pass ABR, e.g. 10 for Discord); it ignores --quality and cannot combine with --crf. In target-size mode a resolution ladder steps the frame down when the bitrate buys less than 0.045 bits per pixel per frame, so a starved encode stays watchable instead of mush; --no-resolution-ladder keeps the source frame. Target-size mode also prints a quality proof: SSIM against the source at 3 sample points + PSNR mid-clip and a verdict in words (VMAF is measured at the mid point when the ffmpeg build has libvmaf; otherwise SSIM is the measured proxy and the proof says so); --no-quality-proof skips the measurement.",
+    usage: "mediakit compress <input> -o <output> [--quality low|medium|high|email-25mb] [--max-width <px>] [--crf <n>] [--preset <p>] [--target-size <MB>] [--no-resolution-ladder] [--no-quality-proof] [--dry-run]",
+    desc: "Shrink a file with one named quality preset (low/medium/high, or email-25mb = target 18 MB so it still fits a 25 MB email attachment after base64). Reports the size before/after and the reduction actually achieved. --target-size <MB> encodes to fit under an exact size instead (two-pass ABR, e.g. 10 for Discord); it ignores --quality and cannot combine with --crf. In target-size mode a resolution ladder steps the frame down when the bitrate buys less than 0.045 bits per pixel per frame, so a starved encode stays watchable instead of mush; --no-resolution-ladder keeps the source frame. Target-size mode also prints a quality proof: SSIM against the source at 3 sample points + PSNR mid-clip and a verdict in words (VMAF is measured at the mid point when the ffmpeg build has libvmaf; otherwise SSIM is the measured proxy and the proof says so); --no-quality-proof skips the measurement. --dry-run prints the exact ffmpeg command(s) — two passes in target-size video mode — and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--quality", "low | medium | high | email-25mb (default medium; ignored with --target-size)"],
@@ -544,6 +553,7 @@ const COMMANDS = {
       ["--target-size", "Target size in decimal MB (1 MB = 1,000,000 bytes); two-pass encode to fit under it"],
       ["--no-resolution-ladder", "In target-size mode, keep the source frame even when the bitrate is starved"],
       ["--no-quality-proof", "In target-size mode, skip the SSIM quality proof"],
+      ["--dry-run", "Print the exact ffmpeg command(s) and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -1358,6 +1368,7 @@ async function main() {
           fps: numOpt(opts, "fps") ?? null,
           width: numOpt(opts, "width") ?? null,
           maxSizeMb: numOpt(opts, "max_size_mb") ?? 10,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "burn-captions": {
@@ -1444,6 +1455,7 @@ async function main() {
           input: needInput(), output: needOutput(opts),
           overlap: numOpt(opts, "overlap") ?? 0.5,
           crf: numOpt(opts, "crf") ?? 23,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "freeze":
@@ -1452,6 +1464,7 @@ async function main() {
           at: opts.at ?? null,
           hold: numOpt(opts, "hold") ?? 2,
           crf: numOpt(opts, "crf") ?? 23,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "fastforward": {
@@ -1489,6 +1502,7 @@ async function main() {
           input: needInput(), output: needOutput(opts),
           audio: opts.audio !== false,
           crf: numOpt(opts, "crf") ?? 23,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "chroma-key":
@@ -1516,6 +1530,7 @@ async function main() {
           width: numOpt(opts, "width") ?? 1280,
           height: numOpt(opts, "height") ?? 720,
           crf: numOpt(opts, "crf") ?? 23,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "download":
@@ -1541,6 +1556,7 @@ async function main() {
           height: numOpt(opts, "height") ?? null,
           audio: opts.audio ?? null,
           crf: numOpt(opts, "crf") ?? 23,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "slideshow": {
@@ -1573,6 +1589,7 @@ async function main() {
           height: numOpt(opts, "height") ?? 720,
           audio: opts.audio ?? null,
           crf: numOpt(opts, "crf") ?? 23,
+          dryRun: opts.dry_run === true,
         });
         break;
       }
@@ -1642,6 +1659,7 @@ async function main() {
           targetSizeMb: numOpt(opts, "target_size") ?? null,
           resolutionLadder: opts.resolution_ladder === false ? false : true,
           qualityProof: opts.quality_proof === false ? false : true,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "receipt":
@@ -1816,6 +1834,7 @@ async function main() {
           boxColor: opts.box_color ?? null,
           style: opts.style ?? null,
           brand: opts.brand ?? null,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "intro":
@@ -1831,6 +1850,7 @@ async function main() {
           fadeOut: numOpt(opts, "fade_out") ?? 0.5,
           style: opts.style ?? null,
           brand: opts.brand ?? null,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "social": {

@@ -1977,7 +1977,7 @@ export async function extractFramesSequence({ input, outputDir, format = "png", 
 // TMHSDigital/screencast-mcp's export_gif, which lowers fps/width/
 // quality until the budget fits.)
 
-export async function exportGif({ input, output, start = null, end = null, fps = null, width = null, maxSizeMb = 10 }) {
+export async function exportGif({ input, output, start = null, end = null, fps = null, width = null, maxSizeMb = 10, dryRun = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   if (!/\.gif$/i.test(outPath)) {
@@ -2014,6 +2014,28 @@ export async function exportGif({ input, output, start = null, end = null, fps =
   for (const nc of [128, 64]) push(f, w, nc);
 
   const before = await fileInfo(inPath);
+  if (dryRun) {
+    // Only the first ladder step's command is printed: the real run
+    // tries steps in order until the size budget is met, so later
+    // steps may never run — printing all of them would over-promise.
+    const first = ladder[0];
+    const vf = `fps=${first.fps},scale=${first.width}:-2:flags=lanczos,split[a][b];[a]palettegen=max_colors=${first.colors}[p];[b][p]paletteuse`;
+    const args = ["-y", "-ss", String(s), "-i", inPath, "-t", String(clipLen), "-vf", vf, "-an", outPath];
+    return {
+      operation: "export_gif", dry_run: true, input: inPath, output: outPath,
+      start_seconds: s, end_seconds: clipEnd, duration_seconds: null,
+      width: first.width, height: null,
+      fps: first.fps, frames: null,
+      size_bytes: null, size_human: null,
+      size_before_bytes: before.size_bytes,
+      size_budget_mb: budgetMb, size_budget_bytes: budgetBytes,
+      size_budget_met: null, attempts_tried: null, attempts: null,
+      first_step: first,
+      ladder,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. The first ladder step is printed; the real run steps fps, then width, then palette colours down until the size budget is met. Size/duration/frames are measured on the real output, so they report null.",
+    };
+  }
   const attempts = [];
   let chosen = null;
   for (const step of ladder) {
@@ -4094,7 +4116,7 @@ function normalizeColor(c, name) {
   return v;
 }
 
-export async function titlecard({ text, output, width = 1080, height = 1920, fontSize = null, textColor = null, boxColor = null, style = null, brand = null }) {
+export async function titlecard({ text, output, width = 1080, height = 1920, fontSize = null, textColor = null, boxColor = null, style = null, brand = null, dryRun = false }) {
   if (!text || !String(text).trim()) throw new MediaKitError("titlecard needs text", "INVALID_ARG");
   const outPath = await prepareOutput(output, []);
   const w = num(width, "width", { min: 2, integer: true });
@@ -4139,16 +4161,28 @@ export async function titlecard({ text, output, width = 1080, height = 1920, fon
   const tmpFile = path.join(path.dirname(outPath), `.titlecard-${process.pid}.txt`);
   await writeFile(tmpFile, lines.join("\n"), "utf8");
   const esc = tmpFile.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
+  const args = [
+    "-y", "-f", "lavfi", "-i", `nullsrc=s=${w}x${h}:r=30:d=0.1`,
+    "-vf", `format=rgba,geq=r='0':g='0':b='0':a='0',drawtext=fontfile=${TITLECARD_FONT}:textfile=${esc}:fontsize=${size}:fontcolor=0x${fg}:borderw=6:bordercolor=black:box=1:boxcolor=0x${bg}:boxborderw=${Math.round(size * 0.25)}:x=(w-text_w)/2:y=(h-text_h)*0.55`,
+    "-frames:v", "1", outPath,
+  ];
+  if (dryRun) {
+    return {
+      operation: "titlecard", dry_run: true, output: outPath, text: String(text).trim(), lines,
+      font_size: size, text_color: fg, box_color: bg,
+      style: style ?? null, brand: brand ?? null,
+      brand_applied: brandApplied, brand_overrides: brandOverrides, style_overrides: overrides,
+      size_bytes: null, size_human: null, dimensions: `${w}x${h}`,
+      commands: [formatCommand(args)],
+      note: "Dry run: no output file written. The drawtext text file IS written next to the output and kept, so the printed command runs as-is (same rule as fastforward's badge labels).",
+    };
+  }
   try {
     // nullsrc + geq clears the whole canvas first (all channels to 0,
     // including alpha): lavfi color sources ignore alpha (always
     // opaque), so the canvas must be made transparent explicitly
     // before drawtext paints the opaque box+text.
-    await run(FFMPEG, [
-      "-y", "-f", "lavfi", "-i", `nullsrc=s=${w}x${h}:r=30:d=0.1`,
-      "-vf", `format=rgba,geq=r='0':g='0':b='0':a='0',drawtext=fontfile=${TITLECARD_FONT}:textfile=${esc}:fontsize=${size}:fontcolor=0x${fg}:borderw=6:bordercolor=black:box=1:boxcolor=0x${bg}:boxborderw=${Math.round(size * 0.25)}:x=(w-text_w)/2:y=(h-text_h)*0.55`,
-      "-frames:v", "1", outPath,
-    ]);
+    await run(FFMPEG, args);
   } finally {
     const { unlink } = await import("node:fs/promises");
     await unlink(tmpFile).catch(() => {});
@@ -4164,7 +4198,7 @@ export async function titlecard({ text, output, width = 1080, height = 1920, fon
 // rebuilt on ffmpeg directly). Text goes through a textfile like
 // titlecard, so quoting can never break the filter. Silent video.
 
-export async function intro({ text, output, width = 1280, height = 720, duration = 3, bgColor = null, textColor = null, fontSize = null, fadeIn = 0.5, fadeOut = 0.5, style = null, brand = null }) {
+export async function intro({ text, output, width = 1280, height = 720, duration = 3, bgColor = null, textColor = null, fontSize = null, fadeIn = 0.5, fadeOut = 0.5, style = null, brand = null, dryRun = false }) {
   if (!text || !String(text).trim()) throw new MediaKitError("intro needs text", "INVALID_ARG");
   const outPath = await prepareOutput(output, []);
   const w = num(width, "width", { min: 2, integer: true });
@@ -4216,13 +4250,26 @@ export async function intro({ text, output, width = 1280, height = 720, duration
   if (fi > 0 && fo > 0) alpha = `if(lt(t,${fi}),t/${fi},if(gt(t,${d - fo}),(${d}-t)/${fo},1))`;
   else if (fi > 0) alpha = `if(lt(t,${fi}),t/${fi},1)`;
   else if (fo > 0) alpha = `if(gt(t,${d - fo}),(${d}-t)/${fo},1)`;
+  const args = [
+    "-y", "-f", "lavfi", "-i", `color=c=0x${bg}:s=${w}x${h}:r=30:d=${d}`,
+    "-vf", `drawtext=fontfile=${TITLECARD_FONT}:textfile=${esc}:fontsize=${size}:fontcolor=0x${fg}:alpha='${alpha}':x=(w-text_w)/2:y=(h-text_h)/2`,
+    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-preset", "veryfast",
+    "-movflags", "+faststart", outPath,
+  ];
+  if (dryRun) {
+    return {
+      operation: "intro", dry_run: true, output: outPath, text: String(text).trim(), lines,
+      font_size: size, bg_color: bg, text_color: fg, fade_in: fi, fade_out: fo,
+      style: style ?? null, brand: brand ?? null,
+      brand_applied: brandApplied, brand_overrides: brandOverrides, style_overrides: overrides,
+      size_bytes: null, size_human: null, dimensions: `${w}x${h}`, duration_seconds: null,
+      expected_duration_seconds: d,
+      commands: [formatCommand(args)],
+      note: "Dry run: no output file written. The drawtext text file IS written next to the output and kept, so the printed command runs as-is (same rule as fastforward's badge labels).",
+    };
+  }
   try {
-    await run(FFMPEG, [
-      "-y", "-f", "lavfi", "-i", `color=c=0x${bg}:s=${w}x${h}:r=30:d=${d}`,
-      "-vf", `drawtext=fontfile=${TITLECARD_FONT}:textfile=${esc}:fontsize=${size}:fontcolor=0x${fg}:alpha='${alpha}':x=(w-text_w)/2:y=(h-text_h)/2`,
-      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-preset", "veryfast",
-      "-movflags", "+faststart", outPath,
-    ]);
+    await run(FFMPEG, args);
   } finally {
     await unlink(tmpFile).catch(() => {});
   }
@@ -5791,7 +5838,7 @@ async function seamScores(file) {
   return { seam_score: seam, normal_step: normal };
 }
 
-export async function makeLoopable({ input, output, overlap = 0.5, crf = 23 }) {
+export async function makeLoopable({ input, output, overlap = 0.5, crf = 23, dryRun = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const F = num(overlap, "overlap", { min: 0.1, max: 3600 });
@@ -5838,6 +5885,24 @@ export async function makeLoopable({ input, output, overlap = 0.5, crf = 23 }) {
   if (meta.video) args.push("-map", "[v]", "-c:v", "libx264", "-crf", String(c), "-preset", "medium");
   if (meta.audio) args.push("-map", "[aout]", "-c:a", audioCodec, ...audioBitrateArgs(audioCodec));
   args.push(outPath);
+  if (dryRun) {
+    return {
+      operation: "make_loopable", dry_run: true, input: inPath, output: outPath,
+      overlap_seconds: F,
+      duration_before_seconds: D,
+      duration_seconds: null,
+      expected_duration_seconds: body,
+      duration_error_seconds: null,
+      seam_before: before.seam_score,
+      seam_after: null,
+      normal_step: null,
+      has_audio: !!meta.audio,
+      dimensions: meta.video ? `${meta.video.width}x${meta.video.height}` : null,
+      size_bytes: null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. seam_before is measured on the input (read-only); seam_after/normal_step/duration are measured on the real output, so they report null.",
+    };
+  }
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
@@ -5899,7 +5964,7 @@ async function countFrames(file) {
 // post_frame_diff (input frame fs+step vs output frame fs+hold+step,
 // ~0 when the tail kept its place — null when the hold sits on the
 // last frame and there is no second post frame to compare).
-export async function freezeFrame({ input, output, at = null, hold = 2, crf = 23 }) {
+export async function freezeFrame({ input, output, at = null, hold = 2, crf = 23, dryRun = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const H = num(hold, "hold", { min: 0.1, max: 30 });
@@ -5980,6 +6045,27 @@ export async function freezeFrame({ input, output, at = null, hold = 2, crf = 23
   args.push("-map", "[v]", "-c:v", "libx264", "-crf", String(c), "-preset", "medium");
   if (meta.audio) args.push("-map", "[aout]", "-c:a", audioCodec, ...audioBitrateArgs(audioCodec));
   args.push(outPath);
+  if (dryRun) {
+    return {
+      operation: "freeze", dry_run: true, input: inPath, output: outPath,
+      at_seconds: atSec,
+      frame_seconds: +fs.toFixed(3),
+      frame_index: frameIdx,
+      hold_seconds: H,
+      duration_before_seconds: D,
+      duration_seconds: null,
+      expected_duration_seconds: +(D + H).toFixed(3),
+      duration_error_seconds: null,
+      frozen_frame_diff: null,
+      post_frame_diff: null,
+      hold_audio: meta.audio ? "silence" : null,
+      has_audio: !!meta.audio,
+      dimensions: `${meta.video.width}x${meta.video.height}`,
+      size_bytes: null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. frame_index/frame_seconds are computed from the input's frame count (read-only); the frozen/post diffs and the duration are measured on the real output, so they report null.",
+    };
+  }
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
@@ -6265,7 +6351,7 @@ export async function fastForwardClip({ input, segments, output, badge = true, l
 // the normal step, and the frame count (2N-1) is the honest
 // proof the pivot frame was really dropped, since duration alone
 // cannot tell a duplicated frame from an adjacent one.
-export async function boomerangClip({ input, output, audio = true, crf = 23 }) {
+export async function boomerangClip({ input, output, audio = true, crf = 23, dryRun = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const c = num(crf, "crf", { min: 0, max: 51, integer: true });
@@ -6313,6 +6399,26 @@ export async function boomerangClip({ input, output, audio = true, crf = 23 }) {
     else args.push("-c:a", "copy");
   }
   args.push(outPath);
+  if (dryRun) {
+    return {
+      operation: "boomerang", dry_run: true, input: inPath, output: outPath,
+      duration_before_seconds: D,
+      duration_seconds: null,
+      expected_duration_seconds: +expected.toFixed(3),
+      duration_error_seconds: null,
+      pivot_seconds: +pivot.toFixed(4),
+      seam_diff: null,
+      normal_step: null,
+      video_reversed: !!meta.video,
+      audio_reversed: reverseAudio,
+      audio_codec: reverseAudio ? audioCodec : (meta.audio ? "copy" : null),
+      has_audio: !!meta.audio,
+      dimensions: meta.video ? `${meta.video.width}x${meta.video.height}` : null,
+      size_bytes: null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. pivot/expected duration are computed from the input (read-only); the seam diffs and the duration are measured on the real output, so they report null.",
+    };
+  }
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
@@ -6515,7 +6621,7 @@ export async function chromaKey({ input, output, color = "00FF00", similarity = 
 // Frame 0 is exactly the full image (zoom z0, focus start) and the
 // last frame is exactly the zoomed window (zoom z1, focus end) —
 // the test suite verifies both against crops computed independently.
-export async function zoomPan({ input, output, duration = 5, fps = 30, zoomFrom = 1, zoomTo = 1.5, focusX = 0.5, focusY = 0.5, focusEndX = null, focusEndY = null, width = 1280, height = 720, crf = 23, onProgress = null }) {
+export async function zoomPan({ input, output, duration = 5, fps = 30, zoomFrom = 1, zoomTo = 1.5, focusX = 0.5, focusY = 0.5, focusEndX = null, focusEndY = null, width = 1280, height = 720, crf = 23, onProgress = null, dryRun = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const dur = num(duration, "duration", { min: 0.5, max: 600 });
@@ -6547,11 +6653,26 @@ export async function zoomPan({ input, output, duration = 5, fps = 30, zoomFrom 
   const xExpr = `min(max(${fxExpr}*iw-(iw/zoom)/2,0),iw-iw/zoom)`;
   const yExpr = `min(max(${fyExpr}*ih-(ih/zoom)/2,0),ih-ih/zoom)`;
   const vf = `scale=${preW}:${preH}:force_original_aspect_ratio=increase,crop=${preW}:${preH},zoompan=z='${zExpr}':x='${xExpr}':y='${yExpr}':d=${n}:s=${w}x${h}:fps=${f}`;
-  await runFfmpegWithProgress([
+  const args = [
     "-y", "-loop", "1", "-i", inPath, "-vf", vf,
     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", String(c), "-preset", "medium",
     "-t", String(dur), outPath,
-  ], { totalSeconds: dur, onProgress });
+  ];
+  if (dryRun) {
+    return {
+      operation: "zoom_pan", dry_run: true, input: inPath, output: outPath,
+      duration_seconds: null,
+      expected_duration_seconds: dur,
+      dimensions: `${w}x${h}`,
+      fps: f, frames: null,
+      zoom_from: z0, zoom_to: z1,
+      focus_start: [fx0, fy0], focus_end: [fx1, fy1],
+      size_bytes: null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. The zoompan window count and the zoom/focus expressions are computed from the arguments, so they are exact; duration/frames are measured on the real output, so they report null.",
+    };
+  }
+  await runFfmpegWithProgress(args, { totalSeconds: dur, onProgress });
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
   const frames = await countVideoFrames(outPath);
@@ -6582,7 +6703,7 @@ export async function zoomPan({ input, output, duration = 5, fps = 30, zoomFrom 
 // or .webm (VP9); a video input is refused — extract a frame first.
 function evenDown(n) { return n % 2 ? n - 1 : n; }
 
-export async function imageToVideo({ input, output, duration = 5, fps = 30, width = null, height = null, audio = null, crf = 23 }) {
+export async function imageToVideo({ input, output, duration = 5, fps = 30, width = null, height = null, audio = null, crf = 23, dryRun = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const dur = num(duration, "duration", { min: 0.5, max: 600 });
@@ -6623,6 +6744,19 @@ export async function imageToVideo({ input, output, duration = 5, fps = 30, widt
   args.push("-vf", vf, "-c:v", videoCodec, "-crf", String(c), "-preset", "medium");
   if (audioPath) args.push("-c:a", ext === "webm" ? "libopus" : "aac", "-b:a", "128k");
   args.push("-t", String(dur), outPath);
+  if (dryRun) {
+    return {
+      operation: "image_to_video", dry_run: true, input: inPath, output: outPath,
+      duration_seconds: null,
+      expected_duration_seconds: dur,
+      dimensions: `${w}x${h}`,
+      fps: f, frames: null,
+      audio: !!audioPath,
+      size_bytes: null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. Dimensions/fps/duration are computed from the arguments, so they are exact; the frame count is measured on the real output, so it reports null.",
+    };
+  }
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
@@ -7406,7 +7540,7 @@ async function runPool(items, limit, fn) {
   return results;
 }
 
-export async function slideshow({ images, output, duration = 3, durations = null, transition = "fade", transitionDuration = 1, transitions = null, transitionDurations = null, fps = 30, width = 1280, height = 720, audio = null, crf = 23 }) {
+export async function slideshow({ images, output, duration = 3, durations = null, transition = "fade", transitionDuration = 1, transitions = null, transitionDurations = null, fps = 30, width = 1280, height = 720, audio = null, crf = 23, dryRun = false }) {
   if (!Array.isArray(images) || images.length < 2) {
     throw new MediaKitError("slideshow needs at least 2 images", "INVALID_ARG");
   }
@@ -7483,6 +7617,46 @@ export async function slideshow({ images, output, duration = 3, durations = null
   const total = +durs.reduce((a, b) => a + b, 0).toFixed(3);
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-slideshow-"));
   try {
+    if (dryRun) {
+      // Stage 1 commands come from image_to_video's own dry-run (exact,
+      // one per slide, into the same temp clip paths the real run uses);
+      // stage 2 is the concat xfade join, and concat has no dry-run
+      // yet, so the join is reported as a plan, not a command — see the
+      // backlog note in mediakit-progress.md. Stage 3 is one exact
+      // command when a bed is looped under the join.
+      const stageCommands = [];
+      for (let i = 0; i < inPaths.length; i++) {
+        const clipPath = path.join(tmpDir, `slide-${String(i).padStart(3, "0")}.mp4`);
+        const r = await imageToVideo({ input: inPaths[i], output: clipPath, duration: clipDurs[i], fps: f, width: w, height: h, crf: c, dryRun: true });
+        stageCommands.push(...(r.commands ?? []));
+      }
+      const joinPath = path.join(tmpDir, "joined.mp4");
+      const audioCommand = audioPath
+        ? formatCommand(["-y", "-stream_loop", "-1", "-i", audioPath, "-i", joinPath, "-map", "1:v:0", "-map", "0:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-t", String(total), outPath])
+        : null;
+      return {
+        operation: "slideshow", dry_run: true, images: inPaths, output: outPath,
+        slides: durs.map((d, i) => ({ file: inPaths[i], duration_seconds: d })),
+        transition: ts.every((x) => x === ts[0]) ? ts[0] : null,
+        transition_duration: tNums.every((x) => x === tNums[0]) ? tNums[0] : null,
+        transitions: ts,
+        transition_durations: tNums,
+        expected_duration_seconds: total,
+        duration_seconds: null,
+        dimensions: `${w}x${h}`,
+        fps: f, frames: null,
+        audio: !!audioPath,
+        size_bytes: null,
+        stage_commands: stageCommands,
+        join: {
+          tool: "concat", transitions: ts, transition_durations: tNums,
+          expected_duration_seconds: total, command: null,
+          note: "concat has no dry-run yet — the join command is not printed; the join is the concat xfade chain over the stage-1 clips, in order.",
+        },
+        ...(audioCommand ? { audio_command: audioCommand } : {}),
+        note: "Dry run: no file written. The stage-1 clip commands and the stage-3 audio command are exact; the stage-2 join is a plan (see join.note). The temp clip paths name a temp directory the real run creates fresh each time.",
+      };
+    }
     // Stage 1: one still clip per image, up to 4 at a time
     // (ffmpeg-slideshow-py runs these in parallel for the same reason:
     // image -> video is the slow, serial part).
@@ -8135,7 +8309,7 @@ async function measureQualityProof({ source, compressed, duration }) {
   };
 }
 
-export async function compress({ input, output, quality = "medium", maxWidth = null, crf = null, preset = null, targetSizeMb = null, resolutionLadder = true, qualityProof = true }) {
+export async function compress({ input, output, quality = "medium", maxWidth = null, crf = null, preset = null, targetSizeMb = null, resolutionLadder = true, qualityProof = true, dryRun = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const emailPreset = quality === "email-25mb";
@@ -8251,6 +8425,27 @@ export async function compress({ input, output, quality = "medium", maxWidth = n
       }
     }
     let passes = 1;
+    // Dry-run plan for the target-size mode, shared by the video
+    // (two-pass) and audio-only (one-pass) branches below.
+    const dryTargetBase = {
+      operation: "compress", dry_run: true, input: inPath, output: outPath, mode: "target_size",
+      target_size_mb: effectiveTargetMb, target_size_bytes: targetBytes,
+      video_bitrate_kbps: videoKbps, audio_bitrate_kbps: audioKbps,
+      ...(meta.video ? {
+        resolution_ladder_applied: ladderApplied,
+        bpp_before: bppBefore, bpp_after: bppAfter, bpp_threshold: LADDER_MIN_BPP,
+      } : {}),
+      ...(emailPreset ? { quality: "email-25mb" } : {}),
+      ...(scaledTo ? { scaled_to: scaledTo } : {}),
+      size_before_bytes: before.size_bytes, size_before_human: before.size_human,
+      size_after_bytes: null, size_after_human: null,
+      target_met: null,
+      reduction_percent: null,
+      duration_seconds: null,
+      dimensions: meta.video ? (scaledTo ?? `${meta.video.width}x${meta.video.height}`) : null,
+      quality_proof: null,
+      note: "Dry run: no file written. Bitrate, ladder and size budget are computed from the input (read-only); the passlog path names a temp directory the real run creates fresh each time. size_after/target_met/reduction/quality_proof are measured on the real output, so they report null.",
+    };
     if (meta.video) {
       // Two-pass libx264: pass 1 analyses (no output file), pass 2
       // encodes to the bitrate budget. The passlog lives in a temp
@@ -8265,18 +8460,27 @@ export async function compress({ input, output, quality = "medium", maxWidth = n
         const vf = scaleFilter ? ["-vf", scaleFilter] : [];
         const vArgs = ["-c:v", "libx264", "-b:v", `${videoKbps}k`, "-maxrate", `${videoKbps * 2}k`, "-bufsize", `${videoKbps * 4}k`, "-preset", p];
         const aArgs = meta.audio ? ["-c:a", "aac", "-b:a", `${audioKbps}k`] : ["-an"];
-        await run(FFMPEG, ["-y", "-i", inPath, ...vf, ...vArgs, "-pass", "1", "-passlogfile", passlog, ...aArgs, "-f", "null", "-"]);
+        const pass1 = ["-y", "-i", inPath, ...vf, ...vArgs, "-pass", "1", "-passlogfile", passlog, ...aArgs, "-f", "null", "-"];
         const pass2 = ["-y", "-i", inPath, ...vf, ...vArgs, "-pass", "2", "-passlogfile", passlog];
         if (meta.audio) pass2.push("-c:a", "aac", "-b:a", `${audioKbps}k`);
         else pass2.push("-an");
         pass2.push(outPath);
+        if (dryRun) {
+          await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+          return { ...dryTargetBase, passes: 2, commands: [formatCommand(pass1), formatCommand(pass2)] };
+        }
+        await run(FFMPEG, pass1);
         await run(FFMPEG, pass2);
         passes = 2;
       } finally {
         await rm(tmpDir, { recursive: true, force: true });
       }
     } else {
-      await run(FFMPEG, ["-y", "-i", inPath, "-vn", "-c:a", "aac", "-b:a", `${audioKbps}k`, outPath]);
+      const audioArgs = ["-y", "-i", inPath, "-vn", "-c:a", "aac", "-b:a", `${audioKbps}k`, outPath];
+      if (dryRun) {
+        return { ...dryTargetBase, passes: 1, commands: [formatCommand(audioArgs)] };
+      }
+      await run(FFMPEG, audioArgs);
     }
     const after = await fileInfo(outPath);
     const out = await probe(outPath);
@@ -8331,6 +8535,20 @@ export async function compress({ input, output, quality = "medium", maxWidth = n
     throw new MediaKitError("compress needs a video or audio stream", "INVALID_ARG");
   }
   args.push(outPath);
+  if (dryRun) {
+    return {
+      operation: "compress", dry_run: true, input: inPath, output: outPath, mode: "quality",
+      quality, crf: c, preset: p,
+      ...(scaledTo ? { scaled_to: scaledTo } : {}),
+      size_before_bytes: before.size_bytes, size_before_human: before.size_human,
+      size_after_bytes: null, size_after_human: null,
+      reduction_percent: null,
+      duration_seconds: null,
+      dimensions: meta.video ? (scaledTo ?? `${meta.video.width}x${meta.video.height}`) : null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. CRF/preset/scale are computed from the input (read-only); size_after/reduction are measured on the real output, so they report null.",
+    };
+  }
   await run(FFMPEG, args);
   const after = await fileInfo(outPath);
   const out = await probe(outPath);

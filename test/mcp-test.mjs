@@ -668,6 +668,15 @@ const loopBigText = await callExpectThrow("make_loopable", { input: path.join(ro
 checkOk(/must be under half/.test(loopBigText), "make_loopable refuses overlap >= half the clip", loopBigText.slice(0, 200));
 const loopZeroText = await callExpectThrow("make_loopable", { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-loopable-bad2.mp4"), overlap: 0 });
 checkOk(/overlap/.test(loopZeroText), "make_loopable refuses overlap below 0.1s", loopZeroText.slice(0, 200));
+// make_loopable dry-run (lượt 116, batch 5): exact command, seam_before
+// measured on the input, seam_after/duration null, no file written.
+const loopDryRes = await client.callTool({
+  name: "make_loopable",
+  arguments: { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-loopable-dry.mp4"), overlap: 1, dry_run: true },
+});
+const loopDryJson = JSON.parse(loopDryRes.content[0].text);
+checkOk(loopDryJson.dry_run === true && loopDryJson.overlap_seconds === 1 && near(loopDryJson.expected_duration_seconds, 9.039, 0.05) && loopDryJson.duration_seconds === null && loopDryJson.seam_before !== null && loopDryJson.seam_before > 30 && loopDryJson.seam_after === null && loopDryJson.normal_step === null && !existsSync(path.join(root, "outputs/mcp-loopable-dry.mp4")), "make_loopable dry-run reports overlap 1 + expected 9.039s + measured seam_before, nulls after, writes nothing", JSON.stringify({ seam_before: loopDryJson.seam_before, expected: loopDryJson.expected_duration_seconds }));
+checkOk(loopDryJson.commands?.length === 1 && loopDryJson.commands[0].includes("acrossfade=d=1") && loopDryJson.commands[0].includes("fade=t=in:st=0:d=1:alpha=1"), "make_loopable dry-run command carries the 1s tail-to-head crossfade (video fade + audio acrossfade)", loopDryJson.commands?.[0] ?? "");
 // Batch + manifest pass-through: make_loopable is a per-file batch
 // op and a manifest step like trim/reverse.
 await rm(path.join(root, "outputs/mcp-batch-loop-in"), { recursive: true, force: true });
@@ -763,6 +772,16 @@ const freezeManifestRes = await client.callTool({
 });
 const freezeManifestJson = JSON.parse(freezeManifestRes.content[0].text);
 checkOk(freezeManifestJson.steps_run === 1 && freezeManifestJson.steps.every((s) => s.status === "ok") && near(freezeManifestJson.final.duration_seconds, 12.039, 0.05), "manifest freeze step runs and final is 12.039s", JSON.stringify(freezeManifestJson.final?.duration_seconds));
+// freeze dry-run (lượt 116, batch 5): frame picked by index, exact.
+const freezeDryRes = await client.callTool({
+  name: "freeze",
+  arguments: { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-freeze-dry.mp4"), at: 5, hold: 2, dry_run: true },
+});
+const freezeDryJson = JSON.parse(freezeDryRes.content[0].text);
+checkOk(freezeDryJson.dry_run === true && freezeDryJson.frame_index === 150 && freezeDryJson.frame_seconds === 5 && near(freezeDryJson.expected_duration_seconds, 12.039, 0.05) && freezeDryJson.duration_seconds === null && freezeDryJson.frozen_frame_diff === null && freezeDryJson.post_frame_diff === null && !existsSync(path.join(root, "outputs/mcp-freeze-dry.mp4")), "freeze dry-run picks frame 150 at 5s, expects 12.039s, diffs null, writes nothing", JSON.stringify({ frame: freezeDryJson.frame_index, expected: freezeDryJson.expected_duration_seconds }));
+checkOk(freezeDryJson.commands?.length === 1 && freezeDryJson.commands[0].includes("eq(n,150)") && freezeDryJson.commands[0].includes("loop=loop=59"), "freeze dry-run command selects frame 150 and loops it 60 frames (2s at 30fps)", freezeDryJson.commands?.[0] ?? "");
+const freezeDryCli = await runCliJson(["freeze", path.join(root, "test/scenes-source.mp4"), "-o", path.join(root, "outputs/mcp-freeze-cli-dry.mp4"), "--at", "5", "--hold", "2", "--dry-run"]);
+checkOk(freezeDryCli.dry_run === true && freezeDryCli.frame_index === 150 && freezeDryCli.commands?.[0]?.includes("eq(n,150)") && !existsSync(path.join(root, "outputs/mcp-freeze-cli-dry.mp4")), "CLI freeze --dry-run prints the command and writes no file", JSON.stringify(freezeDryCli.commands));
 
 // fastforward (lượt 96): speed up marked spans with a badge
 // (khang-nyb/demo-recorder's render() idea — their tool
@@ -999,6 +1018,15 @@ const boomManifestRes = await client.callTool({
 });
 const boomManifestJson = JSON.parse(boomManifestRes.content[0].text);
 checkOk(boomManifestJson.steps_run === 1 && boomManifestJson.steps.every((s) => s.status === "ok") && near(boomManifestJson.final.duration_seconds, 20.045, 0.05), "manifest boomerang step runs and final is 20.045s", JSON.stringify(boomManifestJson.final?.duration_seconds));
+// boomerang dry-run (lượt 116, batch 5): pivot + expected duration exact,
+// seam scores null, no file written.
+const boomDryRes = await client.callTool({
+  name: "boomerang",
+  arguments: { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-boomerang-dry.mp4"), dry_run: true },
+});
+const boomDryJson = JSON.parse(boomDryRes.content[0].text);
+checkOk(boomDryJson.dry_run === true && near(boomDryJson.expected_duration_seconds, 20.045, 0.05) && near(boomDryJson.pivot_seconds, 0.0333, 0.001) && boomDryJson.duration_seconds === null && boomDryJson.seam_diff === null && boomDryJson.normal_step === null && !existsSync(path.join(root, "outputs/mcp-boomerang-dry.mp4")), "boomerang dry-run reports pivot 0.0333 + expected 20.045s, seam scores null, writes nothing", JSON.stringify({ pivot: boomDryJson.pivot_seconds, expected: boomDryJson.expected_duration_seconds }));
+checkOk(boomDryJson.commands?.length === 1 && boomDryJson.commands[0].includes("reverse,trim=start_frame=1") && boomDryJson.commands[0].includes("concat=n=2:v=1:a=0"), "boomerang dry-run command reverses then drops the pivot frame and concats forward + reverse", boomDryJson.commands?.[0] ?? "");
 
 // rotate: turn or mirror a clip. Fixture test/rotate-source.mp4 is
 // 640x360, 5s, left half red / right half blue (spatial halves, so a
@@ -1343,6 +1371,15 @@ checkOk(panF0Psnr !== null && panF0Psnr > 25, "zoom_pan pan starts at the left w
 checkOk(panF89EndPsnr !== null && panF89EndPsnr > 25 && panF89StartPsnr !== null && panF89EndPsnr > panF89StartPsnr + 10, "zoom_pan pan ends at the right window (not the left one)", `right ${panF89EndPsnr} vs left ${panF89StartPsnr}`);
 const zoomVideo = await callExpectThrow("zoom_pan", { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-zoompan-bad.mp4") });
 checkOk(/still image/.test(zoomVideo), "zoom_pan refuses a video input", zoomVideo.slice(0, 200));
+// zoom_pan dry-run (lượt 116, batch 5): zoom/focus expressions exact,
+// duration/frames null, no file written.
+const zoomDryRes = await client.callTool({
+  name: "zoom_pan",
+  arguments: { input: path.join(root, "test/kenburns.png"), output: path.join(root, "outputs/mcp-zoompan-dry.mp4"), duration: 3, fps: 30, zoom_from: 1, zoom_to: 2, width: 640, height: 360, dry_run: true },
+});
+const zoomDryJson = JSON.parse(zoomDryRes.content[0].text);
+checkOk(zoomDryJson.dry_run === true && zoomDryJson.dimensions === "640x360" && zoomDryJson.fps === 30 && zoomDryJson.frames === null && zoomDryJson.duration_seconds === null && zoomDryJson.expected_duration_seconds === 3 && zoomDryJson.zoom_from === 1 && zoomDryJson.zoom_to === 2 && !existsSync(path.join(root, "outputs/mcp-zoompan-dry.mp4")), "zoom_pan dry-run reports 640x360/30fps/expected 3s, frames/duration null, writes nothing", JSON.stringify(zoomDryJson));
+checkOk(zoomDryJson.commands?.length === 1 && zoomDryJson.commands[0].includes("zoompan=z=") && zoomDryJson.commands[0].includes("d=90") && zoomDryJson.commands[0].includes("s=640x360"), "zoom_pan dry-run command carries the zoompan filter for 90 frames at 640x360", zoomDryJson.commands?.[0] ?? "");
 const zoomBad = await callExpectThrow("zoom_pan", { input: path.join(root, "test/kenburns.png"), output: path.join(root, "outputs/mcp-zoompan-bad2.mp4"), zoom_to: 0 });
 checkOk(/zoom_to/.test(zoomBad), "zoom_pan refuses zoom_to below 1", zoomBad.slice(0, 200));
 
@@ -1398,6 +1435,15 @@ const img2vidExt = await callExpectThrow("image_to_video", { input: path.join(ro
 checkOk(/webm/.test(img2vidExt), "image_to_video refuses a .mov output (mp4 or webm only)", img2vidExt.slice(0, 200));
 const img2vidNoAudio = await callExpectThrow("image_to_video", { input: path.join(root, "test/kenburns.png"), output: path.join(root, "outputs/mcp-img2vid-bad4.mp4"), audio: path.join(root, "test/logo.png") });
 checkOk(/no audio stream/.test(img2vidNoAudio), "image_to_video refuses an --audio file with no audio stream", img2vidNoAudio.slice(0, 200));
+// image_to_video dry-run (lượt 116, batch 5): dimensions/fps/duration
+// computed, frames null, no file written.
+const img2vidDryRes = await client.callTool({
+  name: "image_to_video",
+  arguments: { input: path.join(root, "test/kenburns.png"), output: path.join(root, "outputs/mcp-img2vid-dry.mp4"), duration: 3, fps: 30, width: 640, height: 360, dry_run: true },
+});
+const img2vidDryJson = JSON.parse(img2vidDryRes.content[0].text);
+checkOk(img2vidDryJson.dry_run === true && img2vidDryJson.dimensions === "640x360" && img2vidDryJson.fps === 30 && img2vidDryJson.frames === null && img2vidDryJson.duration_seconds === null && img2vidDryJson.expected_duration_seconds === 3 && !existsSync(path.join(root, "outputs/mcp-img2vid-dry.mp4")), "image_to_video dry-run reports 640x360/30fps/expected 3s, frames null, writes nothing", JSON.stringify(img2vidDryJson));
+checkOk(img2vidDryJson.commands?.length === 1 && img2vidDryJson.commands[0].includes("-loop 1") && img2vidDryJson.commands[0].includes("scale=640:360") && img2vidDryJson.commands[0].includes("-t 3"), "image_to_video dry-run command loops the still at 30fps for 3s", img2vidDryJson.commands?.[0] ?? "");
 
 // slideshow: 3 still images -> one 9s video, fade 1s between pairs.
 // Each image is visible for its own 3s (total = 9s exactly), the
@@ -1488,6 +1534,17 @@ const slidePairsBadDurLen = await callExpectThrow("slideshow", { images: [path.j
 checkOk(/one entry per join/.test(slidePairsBadDurLen), "slideshow refuses a transition_durations list with the wrong length", slidePairsBadDurLen.slice(0, 200));
 const slidePairsBadDur = await callExpectThrow("slideshow", { images: [path.join(root, "test/kenburns.png"), path.join(root, "test/logo.png"), path.join(root, "outputs/mcp-slideshow-green.png")], output: path.join(root, "outputs/mcp-slideshow-bad9.mp4"), transitions: ["fade", "wipeleft"], transition_durations: [1, 3] });
 checkOk(/shorter than the slides it joins/.test(slidePairsBadDur), "slideshow refuses a per-join duration longer than its slides", slidePairsBadDur.slice(0, 200));
+// slideshow dry-run (lượt 116, batch 5): one exact command per slide
+// clip, the join as a plan (concat has no dry-run yet), the audio
+// command exact when a bed is given; duration/frames null, no file.
+const slideDryRes = await client.callTool({
+  name: "slideshow",
+  arguments: { images: [path.join(root, "test/kenburns.png"), path.join(root, "test/logo.png"), path.join(root, "outputs/mcp-slideshow-green.png")], output: path.join(root, "outputs/mcp-slideshow-dry.mp4"), durations: [3, 3, 3], transition: "fade", transition_duration: 1, fps: 30, width: 640, height: 360, audio: path.join(root, "test/mix-voice.mp3"), dry_run: true },
+});
+const slideDryJson = JSON.parse(slideDryRes.content[0].text);
+checkOk(slideDryJson.dry_run === true && near(slideDryJson.expected_duration_seconds, 9, 0.01) && slideDryJson.duration_seconds === null && slideDryJson.frames === null && slideDryJson.audio === true && slideDryJson.stage_commands?.length === 3 && slideDryJson.join?.tool === "concat" && slideDryJson.join?.command === null && JSON.stringify(slideDryJson.join?.transitions) === '["fade","fade"]' && !existsSync(path.join(root, "outputs/mcp-slideshow-dry.mp4")), "slideshow dry-run plans 3 slide clips + a concat join plan + audio, duration/frames null, writes nothing", JSON.stringify({ stages: slideDryJson.stage_commands?.length, join: slideDryJson.join?.tool }));
+checkOk(slideDryJson.stage_commands.every((c) => c.includes("-loop 1") && c.includes("scale=640:360")) && slideDryJson.stage_commands[0].includes("-t 4") && slideDryJson.stage_commands[2].includes("-t 3"), "slideshow dry-run stage commands are image_to_video clips (first two carry the 1s xfade handle, last is exactly 3s)", slideDryJson.stage_commands?.[0] ?? "");
+checkOk(typeof slideDryJson.audio_command === "string" && slideDryJson.audio_command.includes("-stream_loop -1") && slideDryJson.audio_command.includes("-c:v copy") && slideDryJson.audio_command.includes("-t 9"), "slideshow dry-run audio command loops the bed under the 9s join", slideDryJson.audio_command ?? "");
 
 // interpolate: 30fps -> 60fps with blend (fast mode). The frame count
 // is asserted on the output file, not just r_frame_rate.
@@ -4186,6 +4243,15 @@ checkOk(titleBandB !== null && titleBandB < 20, "titlecard band is warm, not blu
 checkOk(titleBandA !== null && titleBandA > 50, "titlecard band is opaque (the box is there)", `got A=${titleBandA}`);
 checkOk(titleCornerA !== null && titleCornerA < 5, "titlecard corner is fully transparent", `got A=${titleCornerA}`);
 checkOk(titleCornerR !== null && titleCornerR < 5, "titlecard corner is dark (nothing drawn there)", `got R=${titleCornerR}`);
+// titlecard dry-run (lượt 116, batch 5): font/colors computed, exact
+// command, no output file (the drawtext text file is kept by design).
+const titleDryRes = await client.callTool({
+  name: "titlecard",
+  arguments: { text: "Dry Run Test", output: path.join(root, "outputs/mcp-titlecard-dry.png"), dry_run: true },
+});
+const titleDryJson = JSON.parse(titleDryRes.content[0].text);
+checkOk(titleDryJson.dry_run === true && titleDryJson.font_size === 119 && titleDryJson.text_color === "FFD60A" && titleDryJson.box_color === "F97316" && titleDryJson.dimensions === "1080x1920" && titleDryJson.size_bytes === null && !existsSync(path.join(root, "outputs/mcp-titlecard-dry.png")), "titlecard dry-run reports 119px yellow-on-orange at 1080x1920, size null, writes no output file", JSON.stringify(titleDryJson));
+checkOk(titleDryJson.commands?.length === 1 && titleDryJson.commands[0].includes("nullsrc=s=1080x1920") && titleDryJson.commands[0].includes("drawtext=") && titleDryJson.commands[0].includes("fontsize=119"), "titlecard dry-run command renders the card from a transparent nullsrc canvas", titleDryJson.commands?.[0] ?? "");
 
 // titlecard --style: all three locked ids resolve to the styles.json
 // palette (this also proves the loader's id cross-check passes), a
@@ -4803,6 +4869,15 @@ const introBrandOvRes = await client.callTool({
 const introBrandOvJson = JSON.parse(introBrandOvRes.content[0].text);
 checkOk(introBrandOvJson.bg_color === "000000" && introBrandOvJson.text_color === "FFF7ED" && JSON.stringify(introBrandOvJson.brand_overrides) === JSON.stringify(["bg_color"]),
   "intro explicit bg_color beats the brand, text stays brand", JSON.stringify({ bg_color: introBrandOvJson.bg_color, text_color: introBrandOvJson.text_color, overrides: introBrandOvJson.brand_overrides }));
+// intro dry-run (lượt 116, batch 5): font/colors computed, exact
+// command, no output file (the drawtext text file is kept by design).
+const introDryRes = await client.callTool({
+  name: "intro",
+  arguments: { text: "Hello World", output: path.join(root, "outputs/mcp-intro-dry.mp4"), dry_run: true },
+});
+const introDryJson = JSON.parse(introDryRes.content[0].text);
+checkOk(introDryJson.dry_run === true && introDryJson.font_size === 102 && introDryJson.bg_color === "0F172A" && introDryJson.text_color === "FFFFFF" && introDryJson.dimensions === "1280x720" && introDryJson.duration_seconds === null && introDryJson.expected_duration_seconds === 3 && introDryJson.size_bytes === null && !existsSync(path.join(root, "outputs/mcp-intro-dry.mp4")), "intro dry-run reports 102px white-on-navy at 1280x720, expected 3s, duration/size null, writes no output file", JSON.stringify(introDryJson));
+checkOk(introDryJson.commands?.length === 1 && introDryJson.commands[0].includes("color=c=0x0F172A:s=1280x720") && introDryJson.commands[0].includes("drawtext=") && introDryJson.commands[0].includes("fontsize=102"), "intro dry-run command renders the title on the navy color source", introDryJson.commands?.[0] ?? "");
 
 // social: one call exports tiktok + shorts + instagram-feed from the
 // 1280x720 10s source. Each output must be the platform size, ~10s,
@@ -5117,6 +5192,24 @@ const compressBadRes = await client.callTool({
 });
 const compressBadText = compressBadRes.content?.[0]?.text ?? "";
 checkOk(/quality/.test(compressBadText) && /tiny/.test(compressBadText), "compress errors on an unknown quality", compressBadText.slice(0, 200));
+// compress dry-run (lượt 116, batch 5): quality mode prints one command,
+// target-size mode prints both passes; measured fields null, no file.
+const compressDryRes = await client.callTool({
+  name: "compress",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-compress-dry.mp4"), quality: "medium", dry_run: true },
+});
+const compressDryJson = JSON.parse(compressDryRes.content[0].text);
+checkOk(compressDryJson.dry_run === true && compressDryJson.mode === "quality" && compressDryJson.crf === 26 && compressDryJson.dimensions === "1280x720" && compressDryJson.size_before_bytes === 243932 && compressDryJson.size_after_bytes === null && compressDryJson.reduction_percent === null && !existsSync(path.join(root, "outputs/mcp-compress-dry.mp4")), "compress quality dry-run reports CRF 26 + source size/dims, size_after null, writes nothing", JSON.stringify(compressDryJson));
+checkOk(compressDryJson.commands?.length === 1 && compressDryJson.commands[0].includes("-crf 26") && compressDryJson.commands[0].includes("-preset medium"), "compress quality dry-run command is the medium preset encode", compressDryJson.commands?.[0] ?? "");
+const compressTDryRes = await client.callTool({
+  name: "compress",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-compress-target-dry.mp4"), target_size_mb: 1, dry_run: true },
+});
+const compressTDryJson = JSON.parse(compressTDryRes.content[0].text);
+checkOk(compressTDryJson.dry_run === true && compressTDryJson.mode === "target_size" && compressTDryJson.passes === 2 && compressTDryJson.video_bitrate_kbps === 592 && compressTDryJson.audio_bitrate_kbps === 128 && compressTDryJson.scaled_to === "854x480" && near(compressTDryJson.bpp_before, 0.0214, 0.001) && compressTDryJson.size_after_bytes === null && compressTDryJson.target_met === null && compressTDryJson.quality_proof === null && !existsSync(path.join(root, "outputs/mcp-compress-target-dry.mp4")), "compress target-size dry-run budgets 592k + ladder to 854x480, measured fields null, writes nothing", JSON.stringify(compressTDryJson));
+checkOk(compressTDryJson.commands?.length === 2 && compressTDryJson.commands[0].includes("-pass 1") && compressTDryJson.commands[0].includes("-f null") && compressTDryJson.commands[1].includes("-pass 2") && compressTDryJson.commands[1].includes("-b:v 592k"), "compress target-size dry-run prints pass 1 (analyse to null) then pass 2 at 592k", compressTDryJson.commands?.[1] ?? "");
+const compressTDryCli = await runCliJson(["compress", path.join(root, "test/source.mp4"), "-o", path.join(root, "outputs/mcp-compress-target-cli-dry.mp4"), "--target-size", "1", "--dry-run"]);
+checkOk(compressTDryCli.dry_run === true && compressTDryCli.commands?.length === 2 && !existsSync(path.join(root, "outputs/mcp-compress-target-cli-dry.mp4")), "CLI compress --target-size --dry-run prints both passes and writes no file", JSON.stringify(compressTDryCli.commands?.length));
 
 // compress --target-size: two-pass ABR to an exact size. The fixture
 // source is only 243,932 bytes, so a 1 MB target makes the file
@@ -5538,6 +5631,15 @@ const gifBadRangeRes = await client.callTool({
 });
 const gifBadRangeJson = JSON.parse(gifBadRangeRes.content[0].text);
 checkOk(gifBadRangeRes.isError === true && /after start/.test(gifBadRangeJson.error ?? ""), "export_gif refuses end <= start", JSON.stringify(gifBadRangeJson));
+// export_gif dry-run (lượt 116, batch 5): first ladder step only, the
+// ladder plan listed, measured fields null, no file written.
+const gifDryRes = await client.callTool({
+  name: "export_gif",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-demo-dry.gif"), dry_run: true },
+});
+const gifDryJson = JSON.parse(gifDryRes.content[0].text);
+checkOk(gifDryJson.dry_run === true && gifDryJson.first_step?.fps === 15 && gifDryJson.first_step?.width === 640 && gifDryJson.first_step?.colors === 256 && gifDryJson.ladder?.length === 8 && gifDryJson.size_budget_met === null && gifDryJson.size_bytes === null && gifDryJson.frames === null && !existsSync(path.join(root, "outputs/mcp-demo-dry.gif")), "export_gif dry-run reports the first ladder step (15fps/640px/256 colors) + 8-step ladder, measured fields null, writes nothing", JSON.stringify({ first: gifDryJson.first_step, ladder: gifDryJson.ladder?.length }));
+checkOk(gifDryJson.commands?.length === 1 && gifDryJson.commands[0].includes("fps=15") && gifDryJson.commands[0].includes("palettegen=max_colors=256") && gifDryJson.commands[0].includes("paletteuse"), "export_gif dry-run command is the first-step two-pass palette encode", gifDryJson.commands?.[0] ?? "");
 
 // Errors carry the exact retry call (kinocut eyes-free law).
 const retryRes = await client.callTool({
