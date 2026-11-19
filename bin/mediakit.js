@@ -817,6 +817,14 @@ const COMMANDS = {
       ["-o, --output", "Output directory (required for preview/approve/render)"],
     ],
   },
+  "export-timeline": {
+    usage: "mediakit export-timeline <film.json> -o <film.otio>",
+    desc: "Export an assemble film manifest to an OpenTimelineIO timeline (.otio) — the director's EDL for a real editor (DaVinci / Premiere / any OTIO adapter): the same cuts, transitions, chapters and audio the ffmpeg render produces, with media linked by absolute file:// URL. One Video track (a Clip per image/video shot, a Gap per color/canvas_scene shot), plus Audio tracks for Voice (lead + voice + tail), Music (looped to the film length) and SFX (each at its timestamp); chapters become Marker.2 markers on the video track. Transitions map the xfade join exactly (in_offset/out_offset split the transition frames); fade-family names become SMPTE_Dissolve, the rest Custom_Transition. Frame math is rational — every boundary is a whole number of frames at the film fps, with the snap error reported per shot. A file that vanished after validation is linked with available_range null and listed in media.missing instead of failing the export. The writer self-checks the document (every track sums to exactly total_frames) and refuses to write a bad one.",
+    args: [{ name: "manifest", required: true }],
+    options: [
+      ["-o, --output", "Output .otio path (required)"],
+    ],
+  },
   init: {
     usage: "mediakit init <dir> [--title <name>] [--preset vertical|horizontal|square|cinematic|vertical-60] [--brand <id>] [--force]",
     desc: "Scaffold a new assemble video project: a film.json that already validates (preset vertical by default, two template shots, 4s total), a placeholder voice (440 Hz tone WAV, 3s — replace it with the real narration before delivery), placeholder captions, an assets/ layout (shots/, music/) and a CLAUDE.md with the project lifecycle (validate → diagnose → preview → approve → render → verify). Refuses when film.json or CLAUDE.md already exists unless --force.",
@@ -926,7 +934,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 73 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 74 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -1936,6 +1944,15 @@ async function main() {
           onProgress: jobId ? async (p) => { await core.updateJobProgress(jobId, jobDir, p); } : null,
           jobId,
           jobDir,
+        });
+        break;
+      }
+      case "export-timeline": {
+        if (!positional[0]) fail("missing manifest file: mediakit export-timeline <film.json> -o <film.otio>");
+        if (!opts.output) fail("missing required option: -o <film.otio> (output .otio path)");
+        result = await core.exportTimeline({
+          manifestPath: positional[0],
+          output: opts.output,
         });
         break;
       }

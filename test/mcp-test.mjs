@@ -14,7 +14,7 @@ import { createCanvas } from "canvas";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { compareDeterminismRuns, estimateDecodedWork, estimateTempo, findQuietSnap, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, parseFfmpegProgress, runFfmpegWithProgress, spectralFluxOnset, trackBeatsDP, SHORTS_STYLE_IDS } from "../src/core.js";
+import { compareDeterminismRuns, estimateDecodedWork, estimateTempo, findQuietSnap, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, parseFfmpegProgress, runFfmpegWithProgress, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import bounceTpl from "../src/canvas-scene-lib/templates/bounce.cjs";
 
@@ -183,10 +183,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 73 tools present");
-checkOk(missing.length === 0, "tools/list has all 73 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 74 tools present");
+checkOk(missing.length === 0, "tools/list has all 74 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -5877,7 +5877,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 73 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 73 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 74 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 74 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -6661,6 +6661,70 @@ const assembleStyleText = await callExpectThrow("assemble", { manifest_path: pat
 checkOk(/must be one of clean-bold, minimal-line, warm-story/.test(assembleStyleText ?? ""), "assemble validate refuses an unknown style id", assembleStyleText ?? "");
 const assembleMissingText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-missing.json"), mode: "validate" });
 checkOk(/nope\.png/.test(assembleMissingText ?? ""), "assemble validate refuses a missing shot asset", assembleMissingText ?? "");
+// Turn 107: export_timeline — film manifest -> OpenTimelineIO .otio.
+// Fixture test/assemble-film-transitions.json (10s / 300 frames @30fps;
+// image 4s + video 4s (start 2s) + image 1s + color 1s; transitions
+// fade 1.0s into s2, dissolve 0.5s into s3, fade 0.5s into s4; voice
+// 9s + lead/tail 0.5s; music 9s looped; one sfx at 2s, 0.5s).
+const exportStage = await stageAssembleManifest("assemble-film-transitions.json");
+const exportOut = path.join(exportStage.dir, "film.otio");
+const exportRes = await client.callTool({ name: "export_timeline", arguments: { manifest_path: exportStage.manifestPath, output: exportOut } });
+const exportJson = JSON.parse(exportRes.content[0].text);
+checkOk(exportJson.operation === "export_timeline" && exportJson.timeline?.total_frames === 300 && exportJson.timeline?.rate === 30 && JSON.stringify(exportJson.timeline?.tracks) === JSON.stringify(["Video", "Voice", "Music", "SFX"]) && exportJson.timeline?.clips === 3 && exportJson.timeline?.gaps === 1 && exportJson.timeline?.transitions === 3 && exportJson.timeline?.markers === 0 && exportJson.frame_math?.frame_exact === true && exportJson.frame_math?.snap?.length === 0 && exportJson.self_check?.ok === true && exportJson.media?.missing?.length === 0 && existsSync(exportOut), "export_timeline exports the transitions film: 300 frames / 4 tracks / 3 clips + 1 gap + 3 transitions, frame-exact, self-check ok", JSON.stringify(exportJson.timeline));
+// The .otio on disk, walked in-process: every track sums to exactly
+// 300 frames (transitions add 0), transition offsets split the
+// transition frames (fade 30f -> 15/15, dissolve 15f -> 8/7), and the
+// video clip's source_range is the nominal window in its own rate.
+const exportDoc = JSON.parse(await readFile(exportOut, "utf8"));
+const videoTrack = exportDoc.tracks.children.find((t) => t.name === "Video");
+const trackFrames = (track) => track.children.reduce((sum, c) => sum + (c.OTIO_SCHEMA === "Transition.1" ? 0 : (c.source_range.duration.value * 30) / c.source_range.duration.rate), 0);
+checkOk(exportDoc.OTIO_SCHEMA === "Timeline.1" && exportDoc.global_start_time?.value === 0 && exportDoc.tracks.children.every((t) => trackFrames(t) === 300), "exported .otio: Timeline.1, global start 0, every track sums to exactly 300 frames", JSON.stringify(exportDoc.tracks.children.map((t) => `${t.name}:${trackFrames(t)}`)));
+const exportTransitions = videoTrack.children.filter((c) => c.OTIO_SCHEMA === "Transition.1");
+checkOk(exportTransitions.length === 3 && exportTransitions[0].in_offset.value === 15 && exportTransitions[0].out_offset.value === 15 && exportTransitions[0].transition_type === "SMPTE_Dissolve" && exportTransitions[1].in_offset.value === 8 && exportTransitions[1].out_offset.value === 7 && exportTransitions[2].in_offset.value === 8 && exportTransitions[2].out_offset.value === 7, "exported transitions split frames as hAfter/hBefore (15/15, 8/7, 8/7) and dissolve maps to SMPTE_Dissolve", JSON.stringify(exportTransitions.map((t) => `${t.in_offset.value}/${t.out_offset.value}`)));
+// Transition ranges sit where the ffmpeg blend starts: cut - in_offset.
+let exportCut = 0;
+const transitionStarts = [];
+for (const c of videoTrack.children) {
+  if (c.OTIO_SCHEMA === "Transition.1") transitionStarts.push(exportCut - c.in_offset.value);
+  else exportCut += (c.source_range.duration.value * 30) / c.source_range.duration.rate;
+}
+checkOk(JSON.stringify(transitionStarts) === JSON.stringify([105, 232, 262]), "exported transitions start at cut - in_offset (105, 232, 262) — where the ffmpeg xfade blend starts", JSON.stringify(transitionStarts));
+const s2Clip = videoTrack.children.find((c) => c.name === "s2");
+checkOk(s2Clip?.media_reference?.target_url?.startsWith("file://") && s2Clip?.media_reference?.target_url?.endsWith("source.mp4") && s2Clip?.source_range?.start_time?.value === 60 && s2Clip?.source_range?.duration?.value === 120 && s2Clip?.source_range?.start_time?.rate === 30 && s2Clip?.media_reference?.available_range?.duration?.value === 300 && s2Clip?.metadata?.mediakit?.ffmpeg_build?.start_seconds === 1.5 && s2Clip?.metadata?.mediakit?.ffmpeg_build?.handle_in_frames === 15 && s2Clip?.metadata?.mediakit?.ffmpeg_build?.handle_out_frames === 7, "video clip s2: file:// URL, source_range [60,120) frames at 30fps, build range + handles in metadata", JSON.stringify(s2Clip?.source_range));
+const s1Clip = videoTrack.children.find((c) => c.name === "s1");
+checkOk(s1Clip?.media_reference?.available_range?.duration?.value === 1 && s1Clip?.source_range?.duration?.value === 120 && s1Clip?.metadata?.mediakit?.still === true, "image clip s1: 1-frame available_range, 120-frame hold, still flagged", JSON.stringify(s1Clip?.source_range));
+const voiceTrack = exportDoc.tracks.children.find((t) => t.name === "Voice");
+checkOk(voiceTrack.children.length === 3 && voiceTrack.children[0].source_range.duration.value === 15 && voiceTrack.children[1].name === "voice" && voiceTrack.children[1].source_range.duration.value === 270 && voiceTrack.children[2].source_range.duration.value === 15, "voice track: 15-frame lead gap + 270-frame voice + 15-frame tail gap", JSON.stringify(voiceTrack.children.map((c) => `${c.name}:${c.source_range.duration.value}`)));
+// Chapters become Marker.2 markers on the video track (Marker.1 does
+// not decode under OTIO 0.18 — verified against the real library).
+const chaptersStage = await stageAssembleManifest("assemble-chapters.json");
+const chaptersOut = path.join(chaptersStage.dir, "film.otio");
+const chaptersRes = await client.callTool({ name: "export_timeline", arguments: { manifest_path: chaptersStage.manifestPath, output: chaptersOut } });
+const chaptersJson = JSON.parse(chaptersRes.content[0].text);
+const chaptersDoc = JSON.parse(await readFile(chaptersOut, "utf8"));
+const chapterMarkers = chaptersDoc.tracks.children.find((t) => t.name === "Video").markers;
+checkOk(chaptersJson.timeline?.markers === 3 && chapterMarkers.length === 3 && chapterMarkers.every((m) => m.OTIO_SCHEMA === "Marker.2") && JSON.stringify(chapterMarkers.map((m) => m.name)) === JSON.stringify(["Intro", "The turn", "The payoff"]) && JSON.stringify(chapterMarkers.map((m) => m.marked_range.start_time.value)) === JSON.stringify([0, 105, 210]), "chapters export as 3 Marker.2 markers at frames 0/105/210 with the chapter titles", JSON.stringify(chapterMarkers.map((m) => `${m.name}@${m.marked_range.start_time.value}`)));
+// CLI: the same film through `mediakit export-timeline`, plus the two
+// refusals (no -o, non-.otio output).
+const cliOut = path.join(chaptersStage.dir, "cli.otio");
+const cliExport = await runCliJson(["export-timeline", chaptersStage.manifestPath, "-o", cliOut]);
+checkOk(cliExport.operation === "export_timeline" && cliExport.timeline?.total_frames === 300 && existsSync(cliOut), "CLI export-timeline writes the .otio", JSON.stringify(cliExport.timeline));
+const cliNoOut = await runCli(["export-timeline", chaptersStage.manifestPath], {});
+checkOk(cliNoOut.code !== 0 && /-o <film\.otio>/.test(cliNoOut.out), "CLI export-timeline refuses without -o", cliNoOut.out.slice(0, 160));
+const cliBadExt = await runCli(["export-timeline", chaptersStage.manifestPath, "-o", path.join(chaptersStage.dir, "film.txt")], {});
+checkOk(cliBadExt.code !== 0 && /must end in \.otio/.test(cliBadExt.out), "CLI export-timeline refuses a non-.otio output", cliBadExt.out.slice(0, 160));
+// A broken film fails export with the assemble error, nothing written.
+const exportBadText = await callExpectThrow("export_timeline", { manifest_path: path.join(root, "test/assemble-bad-gap.json"), output: path.join(root, "outputs/mcp-export-bad.otio") });
+checkOk(/short by 15 frames/.test(exportBadText ?? "") && !existsSync(path.join(root, "outputs/mcp-export-bad.otio")), "export_timeline refuses a film 15 frames short of the voice timeline and writes nothing", exportBadText ?? "");
+// Pure frame math: 26.575s at 30fps snaps to 797 frames (-0.25), the
+// 797.25-frame rounding case from the backlog — never 797.25 frames.
+checkOk(secondsToFrames(26.575, 30).frames === 797 && secondsToFrames(26.575, 30).error_frames === -0.25 && secondsToFrames(21.35, 30).frames === 641 && secondsToFrames(21.35, 30).error_frames === 0.5 && secondsToFrames(4, 30).error_frames === 0, "secondsToFrames snaps to whole frames with the error reported (797.25 -> 797, -0.25)", JSON.stringify(secondsToFrames(26.575, 30)));
+// The structural validator catches a tampered timeline: drop the last
+// shot and the video track no longer sums to 300.
+const tamperedDoc = JSON.parse(JSON.stringify(exportDoc));
+tamperedDoc.tracks.children.find((t) => t.name === "Video").children.pop();
+const tamperedCheck = validateOtioTimeline(tamperedDoc, { total_frames: 300, rate: 30 });
+checkOk(tamperedCheck.ok === false && tamperedCheck.issues.some((i) => /sums to 270/.test(i)) && validateOtioTimeline(exportDoc, { total_frames: 300, rate: 30 }).ok === true, "validateOtioTimeline passes the real export and fails a tampered one (track sums to 270)", JSON.stringify(tamperedCheck.issues));
 // assemble presets: one named id picks width/height/fps/style.
 // Fixture test/assemble-preset.json is assemble-film.json with the
 // four fields replaced by "preset": "vertical".
@@ -7896,7 +7960,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 73 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 74 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -7956,11 +8020,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 73, "GET /mcp reports name/version/transport and 73 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 74, "GET /mcp reports name/version/transport and 74 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 73 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 73 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 74 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 74 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -7984,7 +8048,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 73, "JSON-RPC tools/list returns the same 73 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 74, "JSON-RPC tools/list returns the same 74 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

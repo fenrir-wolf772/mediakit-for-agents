@@ -12,7 +12,7 @@ import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { auditStatus } from "./audit.js";
 
@@ -8717,6 +8717,10 @@ const TOOL_REQUIREMENTS = {
   // patch_manifest is pure JSON + a manifest --dry-run validation —
   // no ffmpeg capability needed either.
   patch_manifest: {},
+  // export_timeline is pure JSON + ffprobe (validateAssembleManifest
+  // probes every asset) — ffprobe presence is the global doctor gate,
+  // like probe: {}.
+  export_timeline: {},
   // chapters only needs silencedetect, and only in input mode — the
   // words-file mode is pure JSON and needs no ffmpeg capability.
   chapters: { filters: ["silencedetect"] },
@@ -15641,6 +15645,530 @@ export async function diagnoseFilm({ manifestPath }) {
 // cancelling kills the ffmpeg children too — not just the wrapper.
 const JOB_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const JOB_TERMINAL = new Set(["done", "failed", "cancelled"]);
+
+// ---------------------------------------------------------------- OTIO export
+// Export a film manifest to an OpenTimelineIO timeline (.otio) — the
+// director's EDL: an editor (DaVinci / Premiere / any OTIO adapter)
+// opens the .otio and sees the same cuts, transitions, chapters and
+// audio the ffmpeg render produces, with media linked by absolute
+// file:// URL. The format was read from the real thing, not assumed:
+// OTIO's own sample files (simple_cut.otio, transition.otio,
+// multitrack.otio, fetched from AcademySoftwareFoundation/
+// OpenTimelineIO) plus the readthedocs Timeline Structure / Time
+// Ranges tutorials, then checked empirically against OTIO 0.18.1:
+//   - a track's duration is the sum of its clip durations; a
+//     Transition adds 0 — it overlaps in_offset frames of the
+//     outgoing clip and out_offset of the incoming one, sitting at
+//     [cut - in_offset, cut + out_offset) in track time.
+//   - a clip's source_range may extend past its media_reference
+//     available_range, and available_range may be null (unknown
+//     media) — both are used below, for still images and for media
+//     that vanished after validation.
+//   - Marker.1 does NOT decode under OTIO 0.18.1 (marked_range type
+//     mismatch) — chapters are written as Marker.2, the version the
+//     current library writes and reads.
+//   - TransitionType has exactly two serialized values:
+//     SMPTE_Dissolve and Custom_Transition.
+// Frame math is rational, never float seconds: every boundary is an
+// integer number of frames at the film fps (the edit rate). A duration
+// that does not land on a frame is snapped and the snap error is
+// reported per shot — this kills the 640.5 / 797.25-frame rounding
+// family from the backlog: the timeline total is always exactly
+// total_frames, never a rounded float.
+// Transition mapping: MediaKit's xfade join starts at
+// cutFrames - hAfter (deriveAssembleJoins), so the OTIO transition
+// needs in_offset = hAfter and out_offset = hBefore
+// (hBefore = floor(t/2), hAfter = t - hBefore) — then the OTIO
+// transition starts exactly where the ffmpeg blend starts.
+// One honest difference, recorded on the timeline and in the result:
+// the ffmpeg xfade render extends each clip by handles during a
+// dissolve (up to half the transition on each side), so its blend
+// shows frames just past the nominal cut; this timeline represents
+// the same dissolve inside the nominal frames (standard OTIO/NLE
+// semantics) — an NLE re-render blends the nominal frames at the
+// cut. Each clip's metadata records the exact ffmpeg build range
+// (mediakit.ffmpeg_build) for a frame-exact rebuild.
+// The media linker resolves every asset to an absolute file:// URL;
+// a file that passed validation and then vanished is linked with
+// available_range null and listed in media.missing instead of
+// failing the whole export (the backlog's "resolve assets/ instead
+// of failing hard").
+
+const OTIO_FADE_TYPES = new Set(["fade", "fadeblack", "fadewhite", "fadegrays", "fadefast", "fadeslow", "dissolve", "distance"]);
+
+function otioRationalTime(value, rate) {
+  return { OTIO_SCHEMA: "RationalTime.1", rate, value };
+}
+
+function otioTimeRange(start, duration, rate) {
+  return { OTIO_SCHEMA: "TimeRange.1", start_time: otioRationalTime(start, rate), duration: otioRationalTime(duration, rate) };
+}
+
+// Seconds -> whole frames at a rate, with the snap error in frames
+// (fractional, in [-0.5, 0.5]). Pure — unit-tested directly: 26.575s
+// at 30fps is 797 frames with a -0.25-frame snap, not 797.25 frames.
+export function secondsToFrames(seconds, rate) {
+  const exact = seconds * rate;
+  const frames = Math.round(exact);
+  return { frames, error_frames: +(frames - exact).toFixed(6) };
+}
+
+function otioClip({ name, mediaName, targetUrl, availableRange, sourceRange, metadata }) {
+  return {
+    OTIO_SCHEMA: "Clip.1",
+    metadata: metadata ?? {},
+    name,
+    source_range: sourceRange,
+    effects: [],
+    markers: [],
+    enabled: true,
+    media_reference: {
+      OTIO_SCHEMA: "ExternalReference.1",
+      metadata: {},
+      name: mediaName,
+      available_range: availableRange,
+      target_url: targetUrl,
+    },
+  };
+}
+
+function otioGap({ name, frames, rate, metadata }) {
+  return {
+    OTIO_SCHEMA: "Gap.1",
+    metadata: metadata ?? {},
+    name,
+    source_range: otioTimeRange(0, frames, rate),
+    effects: [],
+    markers: [],
+    enabled: true,
+  };
+}
+
+// The media-linker rule: a file that passed validation and then
+// vanished is still linked (URL + intended range in the caller's
+// metadata) with available_range null, never a hard failure.
+async function otioMediaAvailable(absPath) {
+  try {
+    await access(absPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Structural self-check for a built .otio document: whole frames at
+// the edit rate, every track summing to exactly total_frames,
+// transitions sitting inside their neighbours, video source ranges
+// inside their available ranges (still images exempt — their
+// source_range intentionally extends past a 1-frame available_range).
+// Pure — the export refuses to write a document that fails it, and
+// the suite asserts it against the fixture films.
+export function validateOtioTimeline(doc, { total_frames, rate }) {
+  const issues = [];
+  const rescale = (value, fromRate) => (value * rate) / fromRate;
+  // A rescaled duration is whole only up to half a source frame:
+  // same-rate items must be exact, mixed-rate items within
+  // 0.5 * rate / sourceRate (the snap the writer already reports).
+  const checkWhole = (rescaled, fromRate, what) => {
+    const tol = fromRate === rate ? 1e-9 : 0.5 * (rate / fromRate) + 1e-9;
+    if (Math.abs(rescaled - Math.round(rescaled)) > tol) issues.push(`${what} is ${rescaled} frames at rate ${rate} — off whole by more than half a source frame`);
+    return rescaled;
+  };
+  if (doc?.OTIO_SCHEMA !== "Timeline.1") issues.push("top-level OTIO_SCHEMA is not Timeline.1");
+  const stack = doc?.tracks;
+  if (stack?.OTIO_SCHEMA !== "Stack.1" || !Array.isArray(stack?.children) || stack.children.length < 1) {
+    issues.push("tracks is not a Stack.1 with at least one track");
+    return { ok: false, issues };
+  }
+  for (const track of stack.children) {
+    if (track?.OTIO_SCHEMA !== "Track.1" || !Array.isArray(track?.children)) {
+      issues.push(`track ${track?.name ?? "?"} is not a Track.1 with children`);
+      continue;
+    }
+    let posExact = 0;
+    let slack = 0;
+    let prevTileExact = 0;
+    let prevName = null;
+    for (let i = 0; i < track.children.length; i++) {
+      const item = track.children[i];
+      if (item.OTIO_SCHEMA === "Clip.1" || item.OTIO_SCHEMA === "Gap.1") {
+        const sr = item.source_range;
+        if (!sr || sr.OTIO_SCHEMA !== "TimeRange.1") {
+          issues.push(`${track.name}: ${item.name} has no TimeRange.1 source_range`);
+          continue;
+        }
+        const tileExact = checkWhole(rescale(sr.duration.value, sr.duration.rate), sr.duration.rate, `${track.name}: ${item.name} duration`);
+        posExact += tileExact;
+        if (sr.duration.rate !== rate) slack += 0.5 * (rate / sr.duration.rate);
+        prevTileExact = tileExact;
+        prevName = item.name;
+        if (item.OTIO_SCHEMA === "Clip.1") {
+          const avail = item.media_reference?.available_range;
+          const kind = item.metadata?.mediakit?.kind;
+          const looped = item.metadata?.mediakit?.looped === true;
+          // Still images (1-frame available_range, N-frame hold) and
+          // looped music (9s file, 10s film) intentionally extend past
+          // their available_range — legal OTIO, see the header note.
+          if (avail && kind !== "image" && !looped) {
+            const srcStart = rescale(sr.start_time.value, sr.start_time.rate);
+            const srcEnd = srcStart + rescale(sr.duration.value, sr.duration.rate);
+            const availEnd = rescale(avail.start_time.value + avail.duration.value, avail.duration.rate);
+            if (srcEnd > availEnd + 1 + 1e-9) {
+              issues.push(`${track.name}: ${item.name} source_range ends ${srcEnd.toFixed(3)} frames past its available_range end ${availEnd.toFixed(3)}`);
+            }
+          }
+        }
+      } else if (item.OTIO_SCHEMA === "Transition.1") {
+        if (!prevName) {
+          issues.push(`${track.name}: transition ${item.name} has no clip before it`);
+          continue;
+        }
+        const inF = item.in_offset.value * rate / item.in_offset.rate;
+        const outF = item.out_offset.value * rate / item.out_offset.rate;
+        if (Math.abs(inF - Math.round(inF)) > 1e-9 || Math.abs(outF - Math.round(outF)) > 1e-9) {
+          issues.push(`${track.name}: ${item.name} offsets are not whole frames at rate ${rate}`);
+        }
+        if (inF < 0 || outF < 0) issues.push(`${track.name}: ${item.name} has a negative offset`);
+        if (inF > prevTileExact + 1e-9) issues.push(`${track.name}: ${item.name} in_offset ${inF} exceeds the previous clip ${prevName} (${prevTileExact} frames)`);
+        const next = track.children[i + 1];
+        if (!next || (next.OTIO_SCHEMA !== "Clip.1" && next.OTIO_SCHEMA !== "Gap.1")) {
+          issues.push(`${track.name}: transition ${item.name} has no clip after it`);
+        } else {
+          const nextTile = rescale(next.source_range.duration.value, next.source_range.duration.rate);
+          if (outF > nextTile + 1e-9) issues.push(`${track.name}: ${item.name} out_offset ${outF} exceeds the next clip ${next.name} (${nextTile} frames)`);
+        }
+        // A transition adds 0 to the track: posExact does not move.
+      } else {
+        issues.push(`${track.name}: unknown child ${item.OTIO_SCHEMA}`);
+      }
+    }
+    if (Math.abs(posExact - total_frames) > slack + 1e-9) {
+      issues.push(`${track.name} sums to ${posExact.toFixed(3)} frames, expected ${total_frames} (slack ${slack.toFixed(3)})`);
+    }
+  }
+  return { ok: issues.length === 0, issues };
+}
+
+const OTIO_TRANSITION_HANDLES_NOTE = "The ffmpeg xfade render extends each clip by handles during a dissolve (up to half the transition on each side), so its blend shows frames just past the nominal cut; this timeline represents the same dissolve inside the nominal frames (standard OTIO/NLE semantics) — an NLE re-render blends the nominal frames at the cut. Each clip's metadata records the exact ffmpeg build range (mediakit.ffmpeg_build) for a frame-exact rebuild.";
+
+export async function exportTimeline({ manifestPath, output }) {
+  if (typeof output !== "string" || !output.trim()) {
+    throw new MediaKitError("export_timeline needs an output .otio path (-o)", "INVALID_ARG");
+  }
+  if (path.extname(output).toLowerCase() !== ".otio") {
+    throw new MediaKitError(`export_timeline output must end in .otio, got: ${path.extname(output) || "(no extension)"}`, "INVALID_ARG");
+  }
+  const manifestAbs = await requireInput(manifestPath, "film manifest");
+  let raw;
+  try {
+    raw = await readFile(manifestAbs, "utf8");
+  } catch (e) {
+    throw new MediaKitError(`cannot read manifest ${manifestPath}: ${e.message}`, "INVALID_INPUT");
+  }
+  let doc;
+  try {
+    doc = JSON.parse(raw);
+  } catch (e) {
+    throw new MediaKitError(`assemble manifest is not valid JSON: ${e.message}`, "INVALID_ARG");
+  }
+  const plan = await validateAssembleManifest(doc, manifestAbs);
+  const { fps, total_frames: totalFrames, total_seconds: totalSeconds } = plan;
+  const { shots: builtShots } = planAssembleVideo(plan.shots, fps);
+  const warnings = [...plan.warnings];
+  const snap = [];
+  const missing = [];
+  const noteSnap = (label, errorFrames) => {
+    if (Math.abs(errorFrames) > 1e-9) snap.push({ ...label, error_frames: errorFrames });
+  };
+
+  // Probe each distinct video source once (fps + duration drive the
+  // source_range timebase); music/sfx durations drive their clips.
+  const videoMeta = new Map();
+  for (const s of builtShots) {
+    if (s.kind === "video" && !videoMeta.has(s.source)) videoMeta.set(s.source, await probe(s.source));
+  }
+  const musicMeta = plan.music ? await probe(plan.music.path) : null;
+  const sfxMeta = [];
+  for (const s of plan.sfx) sfxMeta.push(await probe(s.file));
+
+  const textLayersMeta = (s) => (s.textLayers?.length
+    ? s.textLayers.map((t) => ({ text: t.text, position: t.position, size: t.size, color: t.color, start_seconds: t.start_seconds, end_seconds: t.end_seconds }))
+    : undefined);
+
+  // ---- video track: one clip/gap per shot, transitions between ----
+  const videoChildren = [];
+  let clips = 0;
+  let gaps = 0;
+  let transitions = 0;
+  for (let i = 0; i < builtShots.length; i++) {
+    const s = builtShots[i];
+    if (i > 0 && s.transition) {
+      const t = s.transition;
+      const hBefore = Math.floor(t.frames / 2);
+      const hAfter = t.frames - hBefore;
+      videoChildren.push({
+        OTIO_SCHEMA: "Transition.1",
+        metadata: { mediakit: { xfade_type: t.type, xfade_duration_seconds: t.duration_seconds, in_offset_frames: hAfter, out_offset_frames: hBefore } },
+        name: `Transition ${t.type}`,
+        in_offset: otioRationalTime(hAfter, fps),
+        out_offset: otioRationalTime(hBefore, fps),
+        transition_type: OTIO_FADE_TYPES.has(t.type) ? "SMPTE_Dissolve" : "Custom_Transition",
+      });
+      transitions++;
+    }
+    const text = textLayersMeta(s);
+    if (s.kind === "video") {
+      const meta = videoMeta.get(s.source);
+      const srcFps = meta.video?.fps ?? null;
+      const effSrcFps = srcFps ?? fps;
+      if (!srcFps) warnings.push(`shot ${s.id}: source fps unknown, using film fps ${fps} for the source_range timebase`);
+      const startF = secondsToFrames(s.start, effSrcFps);
+      const durF = secondsToFrames(s.frames / fps, effSrcFps);
+      const availF = secondsToFrames(s.sourceDuration, effSrcFps);
+      noteSnap({ shot_id: s.id, field: "source_start" }, startF.error_frames);
+      noteSnap({ shot_id: s.id, field: "source_duration" }, durF.error_frames);
+      const available = await otioMediaAvailable(s.source);
+      if (!available) missing.push({ path: s.source, role: `shot ${s.id} video source` });
+      videoChildren.push(otioClip({
+        name: s.id,
+        mediaName: path.basename(s.source),
+        targetUrl: pathToFileURL(s.source).href,
+        availableRange: available ? otioTimeRange(0, availF.frames, effSrcFps) : null,
+        sourceRange: otioTimeRange(startF.frames, durF.frames, effSrcFps),
+        metadata: {
+          mediakit: {
+            kind: "video",
+            shot_id: s.id,
+            shot_frames: s.frames,
+            source_fps: effSrcFps,
+            ...(srcFps ? {} : { source_fps_unknown: true }),
+            source_range_snap_frames: { start: startF.error_frames, duration: durF.error_frames },
+            ffmpeg_build: { start_seconds: +s.buildStart.toFixed(3), duration_seconds: +s.buildSeconds.toFixed(3), handle_in_frames: s.handleInFrames, handle_out_frames: s.handleOutFrames },
+            ...(text ? { text_layers: text } : {}),
+          },
+        },
+      }));
+      clips++;
+    } else if (s.kind === "image") {
+      const available = await otioMediaAvailable(s.source);
+      if (!available) missing.push({ path: s.source, role: `shot ${s.id} image source` });
+      videoChildren.push(otioClip({
+        name: s.id,
+        mediaName: path.basename(s.source),
+        targetUrl: pathToFileURL(s.source).href,
+        // A still has no duration: available_range is 1 frame at the
+        // edit rate, the source_range is the whole hold (extending
+        // past available_range is legal OTIO — see the header note).
+        availableRange: available ? otioTimeRange(0, 1, fps) : null,
+        sourceRange: otioTimeRange(0, s.frames, fps),
+        metadata: { mediakit: { kind: "image", shot_id: s.id, shot_frames: s.frames, still: true, ...(text ? { text_layers: text } : {}) } },
+      }));
+      clips++;
+    } else if (s.kind === "color") {
+      videoChildren.push(otioGap({
+        name: s.id, frames: s.frames, rate: fps,
+        metadata: { mediakit: { kind: "color", shot_id: s.id, shot_frames: s.frames, color: s.color, ...(text ? { text_layers: text } : {}) } },
+      }));
+      gaps++;
+    } else {
+      // canvas_scene: generated frames have no media file — a Gap is
+      // the honest representation, with the template/scene recorded
+      // so an editor knows what was drawn there.
+      videoChildren.push(otioGap({
+        name: s.id, frames: s.frames, rate: fps,
+        metadata: {
+          mediakit: {
+            kind: "canvas_scene", shot_id: s.id, shot_frames: s.frames,
+            ...(s.template ? { template: s.template } : {}),
+            ...(s.scene ? { scene: path.basename(s.scene) } : {}),
+            ...(s.params ? { params: s.params } : {}),
+            ...(text ? { text_layers: text } : {}),
+          },
+        },
+      }));
+      gaps++;
+    }
+  }
+  const markers = plan.chapters.map((c) => {
+    const atF = secondsToFrames(c.at_seconds, fps);
+    noteSnap({ chapter: c.title, field: "at" }, atF.error_frames);
+    return {
+      OTIO_SCHEMA: "Marker.2",
+      metadata: {},
+      name: c.title,
+      color: "GREEN",
+      marked_range: otioTimeRange(atF.frames, 1, fps),
+      comment: "",
+    };
+  });
+
+  // ---- audio tracks: voice (lead + voice + tail), music, sfx ----
+  const tracks = [];
+  const trackNames = ["Video"];
+  tracks.push({
+    OTIO_SCHEMA: "Track.1",
+    metadata: {},
+    name: "Video",
+    kind: "Video",
+    source_range: null,
+    effects: [],
+    markers,
+    enabled: true,
+    children: videoChildren,
+  });
+  const leadF = secondsToFrames(plan.voice.lead, fps);
+  const tailF = secondsToFrames(plan.voice.tail, fps);
+  const voiceFrames = totalFrames - leadF.frames - tailF.frames;
+  if (voiceFrames < 1) {
+    throw new MediaKitError(`export_timeline: lead ${leadF.frames} + tail ${tailF.frames} frames leave no room for the voice in ${totalFrames} frames`, "INVALID_ARG");
+  }
+  const voiceAvailF = secondsToFrames(plan.voice.duration_seconds, fps);
+  const voiceSnap = voiceFrames - voiceAvailF.frames;
+  noteSnap({ track: "Voice", field: "voice_duration" }, voiceSnap === 0 ? 0 : voiceSnap);
+  const voiceAvailable = await otioMediaAvailable(plan.voice.path);
+  if (!voiceAvailable) missing.push({ path: plan.voice.path, role: "voice" });
+  const voiceChildren = [];
+  if (leadF.frames > 0) voiceChildren.push(otioGap({ name: "lead", frames: leadF.frames, rate: fps, metadata: { mediakit: { kind: "lead" } } }));
+  voiceChildren.push(otioClip({
+    name: "voice",
+    mediaName: path.basename(plan.voice.path),
+    targetUrl: pathToFileURL(plan.voice.path).href,
+    availableRange: voiceAvailable ? otioTimeRange(0, voiceAvailF.frames, fps) : null,
+    sourceRange: otioTimeRange(0, voiceFrames, fps),
+    metadata: { mediakit: { kind: "voice", lead_frames: leadF.frames, tail_frames: tailF.frames, voice_snap_frames: voiceSnap } },
+  }));
+  if (tailF.frames > 0) voiceChildren.push(otioGap({ name: "tail", frames: tailF.frames, rate: fps, metadata: { mediakit: { kind: "tail" } } }));
+  tracks.push({
+    OTIO_SCHEMA: "Track.1",
+    metadata: {},
+    name: "Voice",
+    kind: "Audio",
+    source_range: null,
+    effects: [],
+    markers: [],
+    enabled: true,
+    children: voiceChildren,
+  });
+  trackNames.push("Voice");
+  if (plan.music) {
+    const musicDurF = secondsToFrames(musicMeta.duration_seconds, fps);
+    const musicAvailable = await otioMediaAvailable(plan.music.path);
+    if (!musicAvailable) missing.push({ path: plan.music.path, role: "music" });
+    tracks.push({
+      OTIO_SCHEMA: "Track.1",
+      metadata: {},
+      name: "Music",
+      kind: "Audio",
+      source_range: null,
+      effects: [],
+      markers: [],
+      enabled: true,
+      children: [otioClip({
+        name: "music",
+        mediaName: path.basename(plan.music.path),
+        targetUrl: pathToFileURL(plan.music.path).href,
+        availableRange: musicAvailable ? otioTimeRange(0, musicDurF.frames, fps) : null,
+        sourceRange: otioTimeRange(0, totalFrames, fps),
+        metadata: { mediakit: { kind: "music", looped: musicMeta.duration_seconds < totalSeconds, volume: plan.music.volume, duck_db: plan.music.duck_db } },
+      })],
+    });
+    trackNames.push("Music");
+  }
+  if (plan.sfx.length) {
+    const ordered = plan.sfx.map((s, i) => ({ ...s, duration_seconds: sfxMeta[i].duration_seconds })).sort((a, b) => a.at_seconds - b.at_seconds);
+    const sfxChildren = [];
+    let pos = 0;
+    for (const s of ordered) {
+      const startF = secondsToFrames(s.at_seconds, fps).frames;
+      if (startF > pos) sfxChildren.push(otioGap({ name: "gap", frames: startF - pos, rate: fps, metadata: {} }));
+      const durF = secondsToFrames(s.duration_seconds, fps).frames;
+      const clipped = startF + durF > totalFrames;
+      const useF = Math.min(durF, totalFrames - startF);
+      if (useF < 1) {
+        warnings.push(`sfx at ${s.at_seconds}s starts in the last frame — dropped from the timeline`);
+        pos = startF;
+        continue;
+      }
+      const sfxAvailable = await otioMediaAvailable(s.file);
+      if (!sfxAvailable) missing.push({ path: s.file, role: `sfx at ${s.at_seconds}s` });
+      sfxChildren.push(otioClip({
+        name: `sfx-${s.at_seconds}s`,
+        mediaName: path.basename(s.file),
+        targetUrl: pathToFileURL(s.file).href,
+        availableRange: sfxAvailable ? otioTimeRange(0, durF, fps) : null,
+        sourceRange: otioTimeRange(0, useF, fps),
+        metadata: { mediakit: { kind: "sfx", at_seconds: s.at_seconds, volume: s.volume, ...(clipped ? { clipped: true } : {}) } },
+      }));
+      pos = startF + useF;
+    }
+    if (pos < totalFrames) sfxChildren.push(otioGap({ name: "gap", frames: totalFrames - pos, rate: fps, metadata: {} }));
+    tracks.push({
+      OTIO_SCHEMA: "Track.1",
+      metadata: {},
+      name: "SFX",
+      kind: "Audio",
+      source_range: null,
+      effects: [],
+      markers: [],
+      enabled: true,
+      children: sfxChildren,
+    });
+    trackNames.push("SFX");
+  }
+
+  const timeline = {
+    OTIO_SCHEMA: "Timeline.1",
+    metadata: {
+      mediakit: {
+        version: MEDIAKIT_VERSION,
+        tool: "export_timeline",
+        source_manifest: manifestAbs,
+        exported_at: new Date().toISOString(),
+        film: { title: plan.title, fps, width: plan.width, height: plan.height, total_frames: totalFrames, total_seconds: totalSeconds },
+        transition_handles_note: OTIO_TRANSITION_HANDLES_NOTE,
+      },
+    },
+    name: plan.title,
+    global_start_time: otioRationalTime(0, fps),
+    tracks: {
+      OTIO_SCHEMA: "Stack.1",
+      metadata: {},
+      name: "tracks",
+      source_range: null,
+      effects: [],
+      markers: [],
+      enabled: true,
+      children: tracks,
+    },
+  };
+  const selfCheck = validateOtioTimeline(timeline, { total_frames: totalFrames, rate: fps });
+  if (!selfCheck.ok) {
+    throw new MediaKitError(`export_timeline self-check failed (writer bug, nothing written): ${selfCheck.issues.join("; ")}`, "INTERNAL");
+  }
+  const outPath = await prepareOutput(output, [manifestAbs]);
+  const partial = `${outPath}.partial-${process.pid}-${randomBytes(4).toString("hex")}`;
+  try {
+    await writeFile(partial, `${JSON.stringify(timeline, null, 2)}\n`, "utf8");
+    await rename(partial, outPath);
+  } catch (e) {
+    await rm(partial, { force: true }).catch(() => {});
+    throw e;
+  }
+  const info = await fileInfo(outPath);
+  const maxSnap = snap.reduce((m, s) => Math.max(m, Math.abs(s.error_frames)), 0);
+  return {
+    operation: "export_timeline",
+    input: manifestAbs,
+    output: outPath,
+    timeline: { name: plan.title, rate: fps, total_frames: totalFrames, total_seconds: totalSeconds, tracks: trackNames, clips, gaps, transitions, markers: markers.length },
+    frame_math: { rate: fps, total_frames: totalFrames, frame_exact: snap.length === 0, max_snap_error_frames: maxSnap, snap },
+    media: { missing },
+    warnings,
+    self_check: selfCheck,
+    transition_handles_note: OTIO_TRANSITION_HANDLES_NOTE,
+    ...info,
+  };
+}
 
 export function jobsRoot() {
   const env = process.env.MEDIAKIT_JOBS_DIR;

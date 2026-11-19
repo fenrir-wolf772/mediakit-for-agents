@@ -1828,4 +1828,18 @@ export const TOOL_DEFS = [
     category: a.category ?? null,
   })),
   },
+
+
+  {
+    name: "export_timeline",
+    description: "Export an assemble film manifest to an OpenTimelineIO timeline (.otio) — the director's EDL for a real editor (DaVinci / Premiere / any OTIO adapter): the same cuts, transitions, chapters and audio the ffmpeg render produces, with media linked by absolute file:// URL. One Video track (a Clip per image/video shot, a Gap per color/canvas_scene shot — generated frames have no file, so the gap is honest — with a Transition between joined shots), plus Audio tracks for Voice (lead gap + voice + tail gap), Music (looped to the film length) and SFX (each at its timestamp). Chapters become Marker.2 markers on the video track (OTIO 0.18 cannot read Marker.1). Transitions map the xfade join exactly: in_offset/out_offset are the split of the transition frames (in = ceil half, out = floor half), so the OTIO dissolve starts where the ffmpeg blend starts; fade-family xfade names become SMPTE_Dissolve, the rest Custom_Transition with the xfade name in metadata. Frame math is rational, never float seconds: every boundary is a whole number of frames at the film fps, and frame_math reports the snap error per shot (a 26.575s shot at 30fps is 797 frames with a -0.25-frame snap, never 797.25 frames). A file that passed validation and then vanished is linked with available_range null and listed in media.missing instead of failing the export. The writer self-checks the document (every track sums to exactly total_frames) and refuses to write a bad one. Returns the timeline summary, frame_math, media.missing, warnings and the self-check.",
+    schema: {
+    manifest_path: pathSchema.describe("Path to the assemble film manifest (film.json) to export"),
+    output: pathSchema.describe("Output .otio path (must end in .otio)"),
+  },
+    handler: async (a) => safe(() => core.exportTimeline({
+    manifestPath: a.manifest_path,
+    output: a.output,
+  })),
+  },
 ];
