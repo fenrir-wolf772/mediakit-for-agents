@@ -27,12 +27,52 @@ function rng(seed) {
   };
 }
 
+// Bounce-out core as a hoisted function: easeInBounce / easeInOutBounce
+// call it by name, so the ease table below stays a plain object.
+function easeOutBounceFn(k) { const n1 = 7.5625, d1 = 2.75; if (k < 1 / d1) return n1 * k * k; if (k < 2 / d1) return n1 * (k - 1.5 / d1) * (k - 1.5 / d1) + 0.75; if (k < 2.5 / d1) return n1 * (k - 2.25 / d1) * (k - 2.25 / d1) + 0.9375; return n1 * (k - 2.625 / d1) * (k - 2.625 / d1) + 0.984375; }
+
 const ease = {
+  // Legacy short names — kept byte-identical so old scenes do not move:
+  // linear, in (= easeInCubic), out (= easeOutCubic),
+  // inOut (= easeInOutQuad), outBack (= easeOutBack).
   linear: k => k,
   inOut: k => k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2,
   out: k => 1 - Math.pow(1 - k, 3),
   in: k => k * k * k,
   outBack: k => { const c = 1.70158; return 1 + (c + 1) * Math.pow(k - 1, 3) + c * Math.pow(k - 1, 2); },
+  // Full easings.net set (10 families x in/out/inOut). Every function maps
+  // 0 -> 0 and 1 -> 1 (back/elastic/bounce overshoot in between, by design).
+  // Names match the `ease` param enum of the slide-in template.
+  easeInSine: k => 1 - Math.cos((k * Math.PI) / 2),
+  easeOutSine: k => Math.sin((k * Math.PI) / 2),
+  easeInOutSine: k => -(Math.cos(Math.PI * k) - 1) / 2,
+  easeInQuad: k => k * k,
+  easeOutQuad: k => 1 - (1 - k) * (1 - k),
+  easeInOutQuad: k => k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2,
+  easeInCubic: k => k * k * k,
+  easeOutCubic: k => 1 - Math.pow(1 - k, 3),
+  easeInOutCubic: k => k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2,
+  easeInQuart: k => k * k * k * k,
+  easeOutQuart: k => 1 - Math.pow(1 - k, 4),
+  easeInOutQuart: k => k < 0.5 ? 8 * k * k * k * k : 1 - Math.pow(-2 * k + 2, 4) / 2,
+  easeInQuint: k => k * k * k * k * k,
+  easeOutQuint: k => 1 - Math.pow(1 - k, 5),
+  easeInOutQuint: k => k < 0.5 ? 16 * k * k * k * k * k : 1 - Math.pow(-2 * k + 2, 5) / 2,
+  easeInExpo: k => k === 0 ? 0 : Math.pow(2, 10 * k - 10),
+  easeOutExpo: k => k === 1 ? 1 : 1 - Math.pow(2, -10 * k),
+  easeInOutExpo: k => k === 0 ? 0 : k === 1 ? 1 : k < 0.5 ? Math.pow(2, 20 * k - 10) / 2 : (2 - Math.pow(2, -20 * k + 10)) / 2,
+  easeInCirc: k => 1 - Math.sqrt(1 - Math.pow(k, 2)),
+  easeOutCirc: k => Math.sqrt(1 - Math.pow(k - 1, 2)),
+  easeInOutCirc: k => k < 0.5 ? (1 - Math.sqrt(1 - Math.pow(2 * k, 2))) / 2 : (Math.sqrt(1 - Math.pow(-2 * k + 2, 2)) + 1) / 2,
+  easeInBack: k => { const c1 = 1.70158, c3 = c1 + 1; return c3 * k * k * k - c1 * k * k; },
+  easeOutBack: k => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(k - 1, 3) + c1 * Math.pow(k - 1, 2); },
+  easeInOutBack: k => { const c1 = 1.70158, c2 = c1 * 1.525; return k < 0.5 ? (Math.pow(2 * k, 2) * ((c2 + 1) * 2 * k - c2)) / 2 : (Math.pow(2 * k - 2, 2) * ((c2 + 1) * (2 * k - 2) + c2) + 2) / 2; },
+  easeInElastic: k => { const c4 = (2 * Math.PI) / 3; return k === 0 ? 0 : k === 1 ? 1 : -Math.pow(2, 10 * k - 10) * Math.sin((k * 10 - 10.75) * c4); },
+  easeOutElastic: k => { const c4 = (2 * Math.PI) / 3; return k === 0 ? 0 : k === 1 ? 1 : Math.pow(2, -10 * k) * Math.sin((k * 10 - 0.75) * c4) + 1; },
+  easeInOutElastic: k => { const c4 = (2 * Math.PI) / 3; return k === 0 ? 0 : k === 1 ? 1 : k < 0.5 ? -(Math.pow(2, 20 * k - 10) * Math.sin((20 * k - 11.125) * c4)) / 2 : (Math.pow(2, -20 * k + 10) * Math.sin((20 * k - 11.125) * c4)) / 2 + 1; },
+  easeInBounce: k => 1 - easeOutBounceFn(1 - k),
+  easeOutBounce: easeOutBounceFn,
+  easeInOutBounce: k => k < 0.5 ? (1 - easeOutBounceFn(1 - 2 * k)) / 2 : (1 + easeOutBounceFn(2 * k - 1)) / 2,
 };
 
 // progress 0..1 of [t0,t1], clamped; eased with ease.out by default
@@ -46,6 +86,40 @@ function fade(t, t0, t1) { return prog(t, t0, t1, ease.inOut); }
 function pop(t, t0, dur) { return prog(t, t0, t0 + dur, ease.outBack); }
 // slide offset in px: dist -> 0 over [t0, t0+dur]
 function slide(t, t0, dur, dist, e) { return dist * (1 - prog(t, t0, t0 + dur, e || ease.out)); }
+
+// Physical spring: a damped harmonic oscillator settling 0 -> 1.
+// opts {mass=1, stiffness=120, damping=12} — the Revideo-style spring
+// config (mass/stiffness/damping), evaluated in seconds, not frames,
+// so the same scene settles the same way at any fps. Returns 0 before
+// t0; underdamped (damping < 2*sqrt(stiffness*mass)) it overshoots past
+// 1 and rings down to 1; critically/overdamped it creeps to 1 with no
+// overshoot. Pure function of t — deterministic per frame.
+function springValue(dt, o) {
+  const mass = o?.mass ?? 1;
+  const stiffness = o?.stiffness ?? 120;
+  const damping = o?.damping ?? 12;
+  if (![mass, stiffness, damping].every(Number.isFinite)) throw new RangeError("spring mass/stiffness/damping must be finite numbers");
+  if (mass <= 0) throw new RangeError(`spring mass must be > 0, got: ${mass}`);
+  if (stiffness <= 0) throw new RangeError(`spring stiffness must be > 0, got: ${stiffness}`);
+  if (damping < 0) throw new RangeError(`spring damping must be >= 0, got: ${damping}`);
+  if (dt <= 0) return 0;
+  const w0 = Math.sqrt(stiffness / mass);
+  const zeta = damping / (2 * Math.sqrt(stiffness * mass));
+  if (zeta < 1) {
+    const wd = w0 * Math.sqrt(1 - zeta * zeta);
+    return 1 - Math.exp(-zeta * w0 * dt) * (Math.cos(wd * dt) + (zeta / Math.sqrt(1 - zeta * zeta)) * Math.sin(wd * dt));
+  }
+  if (zeta === 1) return 1 - Math.exp(-w0 * dt) * (1 + w0 * dt);
+  const s = w0 * Math.sqrt(zeta * zeta - 1);
+  const r1 = -zeta * w0 + s, r2 = -zeta * w0 - s;
+  return 1 - (r2 * Math.exp(r1 * dt) - r1 * Math.exp(r2 * dt)) / (r2 - r1);
+}
+function spring(t, t0, opts) { return springValue(t - t0, opts); }
+// scale with spring overshoot (for pop-ins): 0 before t0, rings to 1.
+// Same spring as spring(), as a scale factor — use for cards, titles,
+// anything that should land with a physical settle instead of pop()'s
+// fixed outBack overshoot.
+function springPop(t, t0, opts) { return spring(t, t0, opts); }
 
 // looping particle field. p = makeParticles({count, seed, size:[min,max], speed:[min,max],
 //   x:[0,1], y:[0,1] (fractions), driftX, alpha:[min,max]})
@@ -103,4 +177,4 @@ function glow(ctx, color, blur, fn) {
   ctx.restore();
 }
 
-module.exports = { clamp, lerp, rng, ease, prog, fade, pop, slide, makeParticles, positions, transition, drawTransition, glow };
+module.exports = { clamp, lerp, rng, ease, prog, fade, pop, slide, spring, springPop, makeParticles, positions, transition, drawTransition, glow };

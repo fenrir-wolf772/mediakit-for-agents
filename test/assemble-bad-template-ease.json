@@ -1,0 +1,1 @@
+{"preset":"vertical","shots":[{"duration":2.0,"id":"slide","kind":"canvas_scene","params":{"ease":"nope","text":"BAD EASE"},"template":"slide-in"}],"title":"Bad ease demo","version":1,"voice":{"lead":0.5,"path":"canvas-voice.mp3","tail":0.5}}

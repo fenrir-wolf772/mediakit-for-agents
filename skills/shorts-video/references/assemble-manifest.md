@@ -237,10 +237,20 @@ still image cannot do, with no AI video account and no browser.
   ```
 
   `M.lib.camera` (`shot`/`at`/`apply`, virtual 2D camera) and
-  `M.lib.fx` (`ease`/`prog`/`fade`/`pop`/`slide`,
+  `M.lib.fx` (`ease`/`prog`/`fade`/`pop`/`slide`, `spring`/`springPop`,
   `makeParticles`/`positions`, `transition`/`drawTransition`,
   `glow`) are vendored into MediaKit from the pipeline skill —
-  the scene works with no other dependency. `M.params` is the
+  the scene works with no other dependency. `fx.ease` holds the full
+  easings.net set — `easeIn`/`easeOut`/`easeInOut` × Sine, Quad,
+  Cubic, Quart, Quint, Expo, Circ, Back, Elastic, Bounce (30 names),
+  plus the legacy short names `linear`, `in`, `out`, `inOut`,
+  `outBack` (unchanged behavior: `in` = `easeInCubic`,
+  `out` = `easeOutCubic`, `inOut` = `easeInOutQuad`,
+  `outBack` = `easeOutBack`). `fx.spring(t, t0, {mass, stiffness,
+  damping})` is a damped harmonic oscillator settling 0 → 1
+  (defaults 1/120/12, overshoot ≈ 1.13) — use it instead of a fixed
+  easing curve when a move should land with a physical ring-down;
+  `fx.springPop` is the same spring as a scale factor. `M.params` is the
   shot's `params` object, so one scene file serves many shots.
   The scene must be deterministic: same `t` ⇒ same frame. No
   `Math.random()`, no `Date.now()` — use `fx.rng(seed)` for
@@ -278,7 +288,10 @@ registry fails loudly instead of resolving to different motion.
   because the ball top at the default apex reaches 0.075H, inside
   the title band — `diagnose` warns with the exact numbers when
   they overlap), `slide-in` (rounded card slides in from the left,
-  text fades in; `text`, `bg`, `card`, `fg`), `rings`
+  text fades in; `text`, `bg`, `card`, `fg`, `ease` — any `fx.ease`
+  name, default `easeOutCubic`), `spring-in` (rounded card springs
+  in from nothing with a physical overshoot and settles; `text`,
+  `bg`, `card`, `fg`, `stiffness`, `damping`, `mass`), `rings`
   (concentric rings expand and fade; `color`, `bg`, `count`,
   `speed`).
 - Validate echoes `template` + the merged `params` per shot,

@@ -13529,7 +13529,7 @@ export async function resolveAssemblePreset(preset) {
 // the wrong shot. Params are declared per template (string /
 // number / boolean / color, each with a default); the manifest may
 // override any of them, and an unknown param name fails validate.
-export const SCENE_TEMPLATE_IDS = ["title-card", "bounce", "slide-in", "rings"];
+export const SCENE_TEMPLATE_IDS = ["title-card", "bounce", "slide-in", "spring-in", "rings"];
 const SCENE_TEMPLATES_PATH = fileURLToPath(new URL("../skills/shorts-video/scene-templates.json", import.meta.url));
 const SCENE_TEMPLATES_DIR = fileURLToPath(new URL("./canvas-scene-lib/templates/", import.meta.url));
 let cachedSceneTemplates = null;
@@ -13580,6 +13580,11 @@ export async function getSceneTemplates() {
       const param = { type: spec.type, default: spec.default, description: spec.description ?? "" };
       if (spec.type === "string") {
         if (typeof spec.default !== "string") throw new MediaKitError(`${where} default must be a string`, "PRESET_LIBRARY_INVALID");
+        if (spec.enum !== undefined) {
+          if (!Array.isArray(spec.enum) || spec.enum.length === 0 || !spec.enum.every((v) => typeof v === "string")) throw new MediaKitError(`${where} enum must be a non-empty array of strings`, "PRESET_LIBRARY_INVALID");
+          if (!spec.enum.includes(spec.default)) throw new MediaKitError(`${where} default ${JSON.stringify(spec.default)} is not in enum (${spec.enum.join(", ")})`, "PRESET_LIBRARY_INVALID");
+          param.enum = [...spec.enum];
+        }
         if (spec.maxLength !== undefined) {
           if (!Number.isInteger(spec.maxLength) || spec.maxLength < 1) throw new MediaKitError(`${where} maxLength must be a positive integer`, "PRESET_LIBRARY_INVALID");
           if (spec.default.length > spec.maxLength) throw new MediaKitError(`${where} default is longer than maxLength ${spec.maxLength}`, "PRESET_LIBRARY_INVALID");
@@ -13647,6 +13652,7 @@ export function resolveSceneTemplateParams(template, rawParams, label) {
     const where = `${label}: template "${template.id}" param "${name}"`;
     if (spec.type === "string") {
       if (typeof value !== "string") throw new MediaKitError(`${where} must be a string`, "INVALID_ARG");
+      if (spec.enum !== undefined && !spec.enum.includes(value)) throw new MediaKitError(`${where} must be one of ${spec.enum.join(", ")}, got: ${JSON.stringify(value)}`, "INVALID_ARG");
       if (spec.maxLength !== undefined && value.length > spec.maxLength) throw new MediaKitError(`${where} is too long (${value.length} > ${spec.maxLength} characters)`, "INVALID_ARG");
       merged[name] = value;
     } else if (spec.type === "boolean") {

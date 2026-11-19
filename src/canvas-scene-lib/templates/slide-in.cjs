@@ -1,8 +1,9 @@
 // slide-in.cjs — built-in assemble scene template.
-// A rounded card slides in from off-screen left with an ease-out
-// over 0.7s; its text fades in once the card has landed.
+// A rounded card slides in from off-screen left with a named easing
+// curve over 0.7s; its text fades in once the card has landed.
 // Deterministic: frame N is a pure function of t.
-// Params: text, bg, card, fg.
+// Params: text, bg, card, fg, ease (an fx.ease name, default easeOutCubic
+// — the old hard-coded curve, so existing shots do not move).
 
 function roundRectPath(ctx, x, y, w, h, r) {
   ctx.beginPath();
@@ -28,7 +29,11 @@ module.exports.draw = async (ctx, t, W, H, assets, M) => {
   const x1 = W * 0.1;
   const y1 = H * 0.5 - ch / 2;
   // Card starts fully off-screen left, lands at x1 by 0.7s.
-  const k = fx.prog(t, 0, 0.7, fx.ease.out);
+  // The ease name is validated against fx.ease by the template enum,
+  // but draw() can also run standalone — fail loudly on an unknown name.
+  const easeFn = fx.ease[p.ease];
+  if (typeof easeFn !== "function") throw new Error(`slide-in template: unknown ease "${p.ease}" (must be an fx.ease name)`);
+  const k = fx.prog(t, 0, 0.7, easeFn);
   const x = -cw + (x1 + cw) * k;
   roundRectPath(ctx, x, y1, cw, ch, Math.min(24, ch * 0.12));
   ctx.fillStyle = p.card;

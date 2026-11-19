@@ -17,6 +17,9 @@ import { promisify } from "node:util";
 import { compareDeterminismRuns, estimateDecodedWork, estimateTempo, findQuietSnap, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, parseFfmpegProgress, runFfmpegWithProgress, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import bounceTpl from "../src/canvas-scene-lib/templates/bounce.cjs";
+import slideInTpl from "../src/canvas-scene-lib/templates/slide-in.cjs";
+import springInTpl from "../src/canvas-scene-lib/templates/spring-in.cjs";
+import fxLib from "../src/canvas-scene-lib/fx.cjs";
 
 const execFileAsync = promisify(execFile);
 // Independent loudness measurement: run ffmpeg's loudnorm analysis
@@ -7421,7 +7424,7 @@ const assembleTemplateValidateRes = await client.callTool({ name: "assemble", ar
 const assembleTemplateValidateJson = JSON.parse(assembleTemplateValidateRes.content[0].text);
 checkOk(assembleTemplateValidateJson.total_seconds === 4 && assembleTemplateValidateJson.total_frames === 120 && assembleTemplateValidateJson.shots?.length === 2 && assembleTemplateValidateJson.shots[0]?.template === "bounce" && assembleTemplateValidateJson.shots[0]?.params?.color === "#EF4444" && assembleTemplateValidateJson.shots[0]?.params?.bounces === 2 && assembleTemplateValidateJson.shots[0]?.params?.bg === "#0F172A" && assembleTemplateValidateJson.shots[0]?.params?.radius === 0.08 && assembleTemplateValidateJson.shots[0]?.params?.apex === 0.12 && assembleTemplateValidateJson.shots[1]?.template === "title-card" && assembleTemplateValidateJson.shots[1]?.params?.text === "TEMPLATES" && assembleTemplateValidateJson.shots[1]?.params?.fg === "#FFFFFF", "assemble validate echoes template ids + params merged with defaults (bounce color/bounces overridden, bg/radius/apex defaulted)", JSON.stringify(assembleTemplateValidateJson.shots));
 const assembleBadTemplateText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-template.json"), mode: "validate" });
-checkOk(/must be one of title-card, bounce, slide-in, rings/.test(assembleBadTemplateText ?? ""), "assemble validate refuses an unknown scene template id", assembleBadTemplateText ?? "");
+checkOk(/must be one of title-card, bounce, slide-in, spring-in, rings/.test(assembleBadTemplateText ?? ""), "assemble validate refuses an unknown scene template id", assembleBadTemplateText ?? "");
 const assembleBadTemplateSceneText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-template-scene.json"), mode: "validate" });
 checkOk(/either scene or template, not both/.test(assembleBadTemplateSceneText ?? ""), "assemble validate refuses a canvas_scene shot with both scene and template", assembleBadTemplateSceneText ?? "");
 const assembleBadTemplateParamText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-template-param.json"), mode: "validate" });
@@ -7476,6 +7479,102 @@ console.log("bounce apex tops: default", bounceTopDefault, "| high", bounceTopHi
 checkOk(bounceTopDefault !== null && Math.abs(bounceTopDefault - 72) <= 3, "bounce apex 0.12 puts the ball top at row 72 (0.12H minus radius)", `got ${bounceTopDefault}`);
 checkOk(bounceTopHigh !== null && Math.abs(bounceTopHigh - 293) <= 3, "bounce apex 0.35 puts the ball top at row 293", `got ${bounceTopHigh}`);
 checkOk(bounceTopClamped !== null && Math.abs(bounceTopClamped - 109) <= 3, "bounce apex 0.5 + radius 0.4 clamps the apex so the ball still rises (top row 109)", `got ${bounceTopClamped}`);
+// Easing + spring (turn 111): fx.ease is the full easings.net set
+// (30 named curves + 5 legacy short names, all 0 -> 0 and 1 -> 1),
+// fx.spring is a damped harmonic oscillator (mass/stiffness/damping).
+// The slide-in template takes an `ease` param (default easeOutCubic,
+// the old hard-coded curve); the spring-in template draws a card
+// that springs in with a physical overshoot. Pinned values below
+// are computed from the easings.net formulas by hand, not read off
+// the code.
+const easePins = [
+  ["easeOutBounce", 0.5, 0.765625],
+  ["easeInOutSine", 0.25, 0.146447],
+  ["easeOutExpo", 0.5, 0.96875],
+  ["easeInQuad", 0.5, 0.25],
+  ["easeOutQuart", 0.5, 0.9375],
+  ["easeOutQuint", 0.5, 0.96875],
+  ["easeInCirc", 0.5, 0.133975],
+  ["easeOutBack", 0.5, 1.087698],
+  ["easeInElastic", 0.5, -0.015625],
+];
+checkOk(easePins.every(([name, k, want]) => near(fxLib.ease[name](k), want, 1e-6)), "fx.ease pins 9 hand-computed easings.net values (bounce/sine/expo/quad/quart/quint/circ/back/elastic)", JSON.stringify(easePins.map(([n, k]) => [n, fxLib.ease[n](k)])));
+checkOk(Object.keys(fxLib.ease).length === 35 && Object.values(fxLib.ease).every((fn) => typeof fn === "function" && near(fn(0), 0, 1e-9) && near(fn(1), 1, 1e-9)), "fx.ease has 35 curves and every one maps 0 -> 0 and 1 -> 1", `keys=${Object.keys(fxLib.ease).length}`);
+checkOk([0, 0.25, 0.5, 0.75, 1].every((k) => fxLib.ease.in(k) === fxLib.ease.easeInCubic(k) && fxLib.ease.out(k) === fxLib.ease.easeOutCubic(k) && fxLib.ease.inOut(k) === fxLib.ease.easeInOutQuad(k) && fxLib.ease.outBack(k) === fxLib.ease.easeOutBack(k)), "legacy ease names are exact aliases (in=easeInCubic, out=easeOutCubic, inOut=easeInOutQuad, outBack=easeOutBack)", "sampled k=0..1");
+checkOk(fxLib.spring(-0.1, 0) === 0 && fxLib.spring(0, 0) === 0 && near(fxLib.spring(3, 0), 1, 0.005), "fx.spring is 0 before/at t0 and settled at 1 by 3s", `spring(3,0)=${fxLib.spring(3, 0)}`);
+let springPeak = 0;
+for (let i = 0; i <= 200; i++) { const v = fxLib.spring(i * 0.01, 0); if (v > springPeak) springPeak = v; }
+checkOk(springPeak > 1.05 && springPeak < 1.2, "fx.spring with defaults overshoots past 1 (physical ring-down, peak ~1.13)", `peak=${springPeak}`);
+let springOverMax = 0;
+for (let i = 0; i <= 400; i++) { const v = fxLib.spring(i * 0.01, 0, { damping: 40 }); if (v > springOverMax) springOverMax = v; }
+checkOk(springOverMax <= 1.000001, "overdamped fx.spring (damping 40) never overshoots past 1", `max=${springOverMax}`);
+checkOk(fxLib.springPop(0.5, 0) === fxLib.spring(0.5, 0) && near(fxLib.springPop(3, 0), 1, 0.005), "fx.springPop is the same spring as a scale factor (settles at 1)", `springPop(3,0)=${fxLib.springPop(3, 0)}`);
+let springThrowCount = 0;
+for (const bad of [{ stiffness: 0 }, { mass: -1 }, { damping: -2 }]) { try { fxLib.spring(1, 0, bad); } catch { springThrowCount++; } }
+checkOk(springThrowCount === 3, "fx.spring rejects non-positive mass/stiffness and negative damping", `threw ${springThrowCount}/3`);
+// The slide-in `ease` enum in the registry must list exactly the
+// fx.ease keys — a drift here means validate accepts a name the
+// template cannot draw (or rejects one it can).
+const sceneTemplatesDoc = JSON.parse(await readFile(path.join(root, "skills/shorts-video/scene-templates.json"), "utf8"));
+const slideInEnum = sceneTemplatesDoc.templates.find((t) => t.id === "slide-in")?.params?.ease?.enum ?? [];
+checkOk(slideInEnum.length === Object.keys(fxLib.ease).length && slideInEnum.every((n) => typeof fxLib.ease[n] === "function") && Object.keys(fxLib.ease).every((n) => slideInEnum.includes(n)), "slide-in ease enum lists exactly the 35 fx.ease names (registry and code cannot drift)", `enum=${slideInEnum.length} ease keys=${Object.keys(fxLib.ease).length}`);
+// Pixel proof the templates move the way the curves say: on a
+// 540x960 canvas the slide-in card at t=0.35 is 425px wide with the
+// default easeOutCubic, 372px with easeOutBounce, 243px with linear;
+// the spring-in card is 0px at t=0, ~487px at the t=0.34 overshoot
+// peak (432 * 1.128) and exactly 432px once settled at t=2.5.
+// The card is #F59E0B on a navy bg, so scan the middle row for it.
+async function cardWidthPx(tpl, params, t, W = 540, H = 960) {
+  const cv = createCanvas(W, H);
+  const ctx = cv.getContext("2d");
+  await tpl.draw(ctx, t, W, H, {}, { params, duration: 3, lib: { fx: fxLib } });
+  const img = ctx.getImageData(0, 0, W, H).data;
+  const y = Math.floor(H / 2);
+  let minX = W, maxX = -1;
+  for (let x = 0; x < W; x++) {
+    const i = (y * W + x) * 4;
+    if (Math.abs(img[i] - 245) < 12 && Math.abs(img[i + 1] - 158) < 12 && Math.abs(img[i + 2] - 11) < 12) { if (x < minX) minX = x; if (x > maxX) maxX = x; }
+  }
+  return maxX < 0 ? 0 : maxX - minX + 1;
+}
+const slideBase = { text: "HELLO", bg: "#0F172A", card: "#F59E0B", fg: "#111827" };
+const slideWDefault = await cardWidthPx(slideInTpl, { ...slideBase, ease: "easeOutCubic" }, 0.35);
+const slideWBounce = await cardWidthPx(slideInTpl, { ...slideBase, ease: "easeOutBounce" }, 0.35);
+const slideWLinear = await cardWidthPx(slideInTpl, { ...slideBase, ease: "linear" }, 0.35);
+checkOk(near(slideWDefault, 425, 4) && near(slideWBounce, 372, 4) && near(slideWLinear, 243, 4) && new Set([slideWDefault, slideWBounce, slideWLinear]).size === 3, "slide-in ease param changes the motion: t=0.35 card is 425px (easeOutCubic) vs 372px (easeOutBounce) vs 243px (linear)", `cubic=${slideWDefault} bounce=${slideWBounce} linear=${slideWLinear}`);
+const springW0 = await cardWidthPx(springInTpl, { ...slideBase, stiffness: 120, damping: 12, mass: 1 }, 0);
+const springWPeak = await cardWidthPx(springInTpl, { ...slideBase, stiffness: 120, damping: 12, mass: 1 }, 0.34);
+const springWSettled = await cardWidthPx(springInTpl, { ...slideBase, stiffness: 120, damping: 12, mass: 1 }, 2.5);
+checkOk(springW0 === 0 && near(springWPeak, 487, 4) && springWSettled === 432, "spring-in card is 0px at t=0, overshoots to ~487px at t=0.34, settles at exactly 432px", `t0=${springW0} peak=${springWPeak} settled=${springWSettled}`);
+let slideBadEaseThrows = false;
+try { await cardWidthPx(slideInTpl, { ...slideBase, ease: "nope" }, 0.35); } catch { slideBadEaseThrows = true; }
+checkOk(slideBadEaseThrows, "slide-in draw throws on an unknown ease name instead of drawing garbage", "ease=nope");
+// Spring-in + slide-in ease through assemble: validate echoes the
+// merged params (spring-in physics defaults, slide-in ease override),
+// an unknown ease fails with the enum, and the render shows real
+// motion (mid-overshoot vs settled frames differ).
+const assembleSpringinStage = await stageAssembleManifest("assemble-springin.json");
+const assembleSpringinOut = path.join(assembleSpringinStage.dir, "out");
+const assembleSpringinValidateRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleSpringinStage.manifestPath, mode: "validate" } });
+const assembleSpringinValidateJson = JSON.parse(assembleSpringinValidateRes.content[0].text);
+checkOk(assembleSpringinValidateJson.total_seconds === 4 && assembleSpringinValidateJson.total_frames === 120 && assembleSpringinValidateJson.shots?.[0]?.template === "spring-in" && assembleSpringinValidateJson.shots[0]?.params?.text === "SPRING" && assembleSpringinValidateJson.shots[0]?.params?.stiffness === 120 && assembleSpringinValidateJson.shots[0]?.params?.damping === 12 && assembleSpringinValidateJson.shots[0]?.params?.mass === 1 && assembleSpringinValidateJson.shots?.[1]?.template === "slide-in" && assembleSpringinValidateJson.shots[1]?.params?.ease === "easeOutBounce", "assemble validate echoes spring-in params merged with defaults (stiffness/damping/mass) and the slide-in ease override", JSON.stringify(assembleSpringinValidateJson.shots));
+const assembleBadEaseText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-template-ease.json"), mode: "validate" });
+// NOTE: match /nope/ bare, not /"nope"/ — the MCP error text is a
+// JSON-stringified body, so the quotes around the bad value come back
+// backslash-escaped (\"nope\") and a literal-quote regex never matches.
+checkOk(/ease/.test(assembleBadEaseText ?? "") && /must be one of/.test(assembleBadEaseText ?? "") && /easeOutBounce/.test(assembleBadEaseText ?? "") && /nope/.test(assembleBadEaseText ?? ""), "assemble validate refuses slide-in ease \"nope\" (enum error names an allowed ease)", (assembleBadEaseText ?? "").slice(0, 300));
+const assembleSpringinRenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleSpringinStage.manifestPath, mode: "render", output_dir: assembleSpringinOut, force: true } }, undefined, { timeout: 300000 });
+const assembleSpringinRenderJson = JSON.parse(assembleSpringinRenderRes.content[0].text);
+const assembleSpringinFinalPath = path.join(assembleSpringinOut, "final.mp4");
+const assembleSpringinFinalProbe = await probeStreams(assembleSpringinFinalPath);
+const assembleSpringinFinalFrames = await countFrames(assembleSpringinFinalPath);
+checkOk(assembleSpringinRenderJson.approval === "forced" && near(parseFloat(assembleSpringinFinalProbe?.format?.duration), 4, 0.15) && assembleSpringinFinalFrames === 120, "assemble spring-in film renders 4s with exactly 120 frames", `duration=${assembleSpringinFinalProbe?.format?.duration} frames=${assembleSpringinFinalFrames}`);
+const assembleSpringinEarlyPng = path.join(assembleSpringinOut, "springin-0.3s.png");
+const assembleSpringinLatePng = path.join(assembleSpringinOut, "springin-1.5s.png");
+await extractPng(assembleSpringinFinalPath, 0.3, assembleSpringinEarlyPng);
+await extractPng(assembleSpringinFinalPath, 1.5, assembleSpringinLatePng);
+const assembleSpringinPsnr = await framePsnr(assembleSpringinEarlyPng, assembleSpringinLatePng);
+checkOk(assembleSpringinPsnr !== null && assembleSpringinPsnr < 28, "assemble spring-in template really moves: mid-overshoot vs settled frames differ (PSNR < 28 dB)", `PSNR=${assembleSpringinPsnr}`);
 // Preview captions must scale too: the style's locked burn values
 // (60px/500px, tuned for 1080x1920) were passed to burnCaptions
 // unscaled, so on a 540x960 preview the subtitles rendered 2x too
