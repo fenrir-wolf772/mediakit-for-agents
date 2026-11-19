@@ -2417,7 +2417,7 @@ function concatParts(clips) {
   }));
 }
 
-export async function concat({ inputs, output, videoCodec = "libx264", audioCodec = "aac", transition = null, transitionDuration = 1, transitions = null, transitionDurations = null, fast = null }) {
+export async function concat({ inputs, output, videoCodec = "libx264", audioCodec = "aac", transition = null, transitionDuration = 1, transitions = null, transitionDurations = null, fast = null, dryRun = false }) {
   if (!Array.isArray(inputs) || inputs.length < 2) {
     throw new MediaKitError("concat needs at least 2 input files", "INVALID_ARG");
   }
@@ -2442,10 +2442,10 @@ export async function concat({ inputs, output, videoCodec = "libx264", audioCode
     if (fast === true) {
       throw new MediaKitError("concat --fast (stream copy) cannot be combined with --transition — transitions need re-encoding", "INVALID_ARG");
     }
-    return concatTransition({ inPaths, outPath, videoCodec, audioCodec, transition, transitionDuration, transitions, transitionDurations, clips, metas });
+    return concatTransition({ inPaths, outPath, videoCodec, audioCodec, transition, transitionDuration, transitions, transitionDurations, clips, metas, dryRun });
   }
   if (hasTrim) {
-    return concatTrimmed({ inPaths, outPath, videoCodec, audioCodec, clips, metas });
+    return concatTrimmed({ inPaths, outPath, videoCodec, audioCodec, clips, metas, dryRun });
   }
   const compat = checkConcatCompat(metas);
   const useFast = fast === true ? true : fast === false ? false : compat.ok;
@@ -2468,26 +2468,39 @@ export async function concat({ inputs, output, videoCodec = "libx264", audioCode
   // normalizes every clip to the first clip's display size. Mode
   // stays "reencode"; the reason is reported.
   if (!useFast && (compat.timeBaseMismatch || compat.displayMismatch || compat.rotationMismatch)) {
-    return concatTrimmed({ inPaths, outPath, videoCodec, audioCodec, clips, metas, mode: "reencode", fastSkipped: compat.reasons });
+    return concatTrimmed({ inPaths, outPath, videoCodec, audioCodec, clips, metas, mode: "reencode", fastSkipped: compat.reasons, dryRun });
   }
   // Concat demuxer: stream-copy when clips match, re-encode otherwise.
   // The list file is written to a temp file in the output directory.
+  // In a dry run the list file is NOT written — the result carries its
+  // path and exact content, so the printed command runs as-is once the
+  // caller writes list_content to list_file (the only extra step).
   const listPath = path.join(path.dirname(outPath), `.mediakit-concat-${Date.now()}.txt`);
   const { writeFile, unlink } = await import("node:fs/promises");
   const listContent = inPaths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join("\n") + "\n";
+  const demuxerArgs = useFast
+    ? ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-movflags", "+faststart", outPath]
+    : ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c:v", videoCodec, "-c:a", audioCodec, ...audioBitrateArgs(audioCodec), "-movflags", "+faststart", outPath];
+  if (dryRun) {
+    const firstDisp = metas[0]?.video ? displayDims(metas[0]) : null;
+    return {
+      operation: "concat", dry_run: true, inputs: inPaths, output: outPath, parts: concatParts(clips),
+      mode: useFast ? "fast" : "reencode",
+      ...(useFast
+        ? { fast_reason: "all clips identical (codec, size, fps, pixel format, time_base, audio) — stream-copied without re-encoding" }
+        : { fast_skipped: compat.reasons.length ? compat.reasons : ["fast mode disabled"] }),
+      expected_duration_seconds: +clips.reduce((acc, c) => acc + c.effDur, 0).toFixed(3),
+      duration_seconds: null, size_bytes: null,
+      dimensions: firstDisp ? `${firstDisp.width}x${firstDisp.height}` : null,
+      commands: [formatCommand(demuxerArgs)],
+      list_file: listPath,
+      list_content: listContent,
+      note: "Dry run: no file written. The printed command reads the concat list file — write list_content to list_file first, then run the command as-is; it produces exactly what the real run writes.",
+    };
+  }
   await writeFile(listPath, listContent, "utf8");
   try {
-    if (useFast) {
-      await run(FFMPEG, [
-        "-y", "-f", "concat", "-safe", "0", "-i", listPath,
-        "-c", "copy", "-movflags", "+faststart", outPath,
-      ]);
-    } else {
-      await run(FFMPEG, [
-        "-y", "-f", "concat", "-safe", "0", "-i", listPath,
-        "-c:v", videoCodec, "-c:a", audioCodec, ...audioBitrateArgs(audioCodec), "-movflags", "+faststart", outPath,
-      ]);
-    }
+    await run(FFMPEG, demuxerArgs);
   } finally {
     await unlink(listPath).catch(() => {});
   }
@@ -2516,7 +2529,7 @@ export async function concat({ inputs, output, videoCodec = "libx264", audioCode
  * normalizing to the stored 1280x720 would pillarbox it into a
  * landscape output (measured 2026-11-16).
  */
-async function concatTrimmed({ inPaths, outPath, videoCodec, audioCodec, clips, metas, mode = "trim", fastSkipped = null }) {
+async function concatTrimmed({ inPaths, outPath, videoCodec, audioCodec, clips, metas, mode = "trim", fastSkipped = null, dryRun = false }) {
   const hasVideo = metas.some((m) => m.video);
   if (hasVideo && metas.some((m) => !m.video)) {
     throw new MediaKitError("concat with per-clip trims needs video in every input (or audio in every input) — mixed video/audio-only clips are not supported", "INVALID_ARG");
@@ -2558,6 +2571,18 @@ async function concatTrimmed({ inPaths, outPath, videoCodec, audioCodec, clips, 
     args.push("-map", "[aout]");
   }
   args.push("-c:a", audioCodec, ...audioBitrateArgs(audioCodec), "-movflags", "+faststart", outPath);
+  if (dryRun) {
+    return {
+      operation: "concat", dry_run: true, inputs: inPaths, output: outPath, parts: concatParts(clips),
+      mode, expected_duration_seconds: expected,
+      ...(fastSkipped ? { fast_skipped: fastSkipped } : {}),
+      ...(firstDisp ? { normalize_dimensions: `${tw}x${th}`, source_dimensions: `${firstDisp.width}x${firstDisp.height}`, source_rotation: firstDisp.rotation } : {}),
+      duration_seconds: null, size_bytes: null,
+      dimensions: firstDisp ? `${tw}x${th}` : null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. The printed command is the exact filter-graph join the real run executes.",
+    };
+  }
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
@@ -2647,6 +2672,67 @@ function checkConcatCompat(metas) {
   return { ok: reasons.length === 0, reasons, timeBaseMismatch, displayMismatch, rotationMismatch };
 }
 
+/**
+ * Build the exact ffmpeg argv for a transition (xfade) join of pre-cut
+ * clips — one filter graph, no probing, no file writes. concatTransition
+ * runs it; the slideshow dry-run prints it, because the join graph only
+ * needs the clips' effective ranges, the target size/fps and whether
+ * each clip carries audio (a silent clip gets an anullsrc bed of exactly
+ * its length, so acrossfade always has two audio streams). Callers must
+ * validate the transition names and durations first — this builder
+ * assumes they are valid (concatTransition checks them against the
+ * probed durations; slideshow checks them against its slide durations,
+ * which imply the clip rule because every clip is its slide plus a
+ * handle, except the last, which is exactly its slide).
+ */
+export function buildTransitionJoinArgs({ inPaths, outPath, videoCodec = "libx264", audioCodec = "aac", clips, transitions, transitionDurations, width, height, fps, hasAudio }) {
+  const ts = transitions;
+  const tNums = transitionDurations;
+  const durations = clips.map((c) => c.effDur);
+  // Normalize to the target display size/fps (xfade needs identical
+  // dimensions and frame rates on both inputs). A trimmed clip is cut
+  // first (trim/atrim + PTS reset), then scaled like an untrimmed one.
+  const graph = [];
+  clips.forEach((c, i) => {
+    const s = +c.effStart.toFixed(3);
+    const e = +c.effEnd.toFixed(3);
+    graph.push(`[${i}:v]trim=start=${s}:end=${e},setpts=PTS-STARTPTS,scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=${fps}[v${i}]`);
+    if (hasAudio[i]) {
+      graph.push(`[${i}:a]atrim=start=${s}:end=${e},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo[a${i}]`);
+    } else {
+      // Silent bed of exactly this clip's length, so acrossfade always
+      // has two audio streams to work with.
+      graph.push(`anullsrc=r=48000:cl=stereo,atrim=0:${c.effDur},asetpts=PTS-STARTPTS[a${i}]`);
+    }
+  });
+  // Chain xfade pairwise. After joining clips 0..k-1 the running total
+  // is sum(d_0..d_{k-1}) - sum(t_0..t_{k-2}), and the next transition
+  // starts t_{k-1} seconds before its end.
+  let vLabel = "v0";
+  let aLabel = "a0";
+  let running = durations[0];
+  for (let k = 1; k < inPaths.length; k++) {
+    const t = tNums[k - 1];
+    const offset = +(running - t).toFixed(3);
+    const vOut = `x${k}`;
+    const aOut = `c${k}`;
+    graph.push(`[${vLabel}][v${k}]xfade=transition=${ts[k - 1]}:duration=${t}:offset=${offset}[${vOut}]`);
+    graph.push(`[${aLabel}][a${k}]acrossfade=d=${t}[${aOut}]`);
+    vLabel = vOut;
+    aLabel = aOut;
+    running = +(running + durations[k] - t).toFixed(3);
+  }
+  const args = ["-y"];
+  for (const p of inPaths) args.push("-i", p);
+  args.push(
+    "-filter_complex", graph.join(";"),
+    "-map", `[${vLabel}]`, "-map", `[${aLabel}]`,
+    "-c:v", videoCodec, "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "medium",
+    "-c:a", audioCodec, ...audioBitrateArgs(audioCodec), "-movflags", "+faststart", outPath,
+  );
+  return { args, transitions: ts, transitionDurations: tNums, expectedDuration: running };
+}
+
 /** concat with an xfade transition between every pair of clips.
  * One transition type/duration for all joins (transition /
  * transitionDuration), or a different one per join (transitions /
@@ -2654,7 +2740,7 @@ function checkConcatCompat(metas) {
  * per-pair form). Per-join durations change the handle math: each
  * join consumes its own duration, so the running total subtracts
  * that join's t, not a shared one. */
-async function concatTransition({ inPaths, outPath, videoCodec, audioCodec, transition, transitionDuration, transitions = null, transitionDurations = null, clips, metas }) {
+async function concatTransition({ inPaths, outPath, videoCodec, audioCodec, transition, transitionDuration, transitions = null, transitionDurations = null, clips, metas, dryRun = false }) {
   const joins = metas.length - 1;
   const ts = transitions !== null && transitions !== undefined
     ? transitions
@@ -2690,53 +2776,39 @@ async function concatTransition({ inPaths, outPath, videoCodec, audioCodec, tran
     }
   }
   // Normalize to the first clip's display size/fps (xfade needs
-  // identical dimensions and frame rates on both inputs). A trimmed
-  // clip is cut first (trim/atrim + PTS reset), then scaled like an
-  // untrimmed one. Display size: decode autorotates, so a rotated
-  // phone clip stored 1280x720 arrives as 720x1280 frames.
+  // identical dimensions and frame rates on both inputs). Display size:
+  // decode autorotates, so a rotated phone clip stored 1280x720 arrives
+  // as 720x1280 frames.
   const firstDisp = displayDims(metas[0]);
   const tw = firstDisp.width;
   const th = firstDisp.height;
   const fps = metas[0].video.fps || 30;
-  const graph = [];
-  metas.forEach((m, i) => {
-    const c = clips[i];
-    const s = +c.effStart.toFixed(3);
-    const e = +c.effEnd.toFixed(3);
-    graph.push(`[${i}:v]trim=start=${s}:end=${e},setpts=PTS-STARTPTS,scale=${tw}:${th}:force_original_aspect_ratio=decrease,pad=${tw}:${th}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=${fps}[v${i}]`);
-    if (m.audio) {
-      graph.push(`[${i}:a]atrim=start=${s}:end=${e},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo[a${i}]`);
-    } else {
-      // Silent bed of exactly this clip's length, so acrossfade always
-      // has two audio streams to work with.
-      graph.push(`anullsrc=r=48000:cl=stereo,atrim=0:${c.effDur},asetpts=PTS-STARTPTS[a${i}]`);
-    }
+  const { args, expectedDuration: running } = buildTransitionJoinArgs({
+    inPaths, outPath, videoCodec, audioCodec, clips,
+    transitions: ts, transitionDurations: tNums,
+    width: tw, height: th, fps,
+    hasAudio: metas.map((m) => !!m.audio),
   });
-  // Chain xfade pairwise. After joining clips 0..k-1 the running total
-  // is sum(d_0..d_{k-1}) - sum(t_0..t_{k-2}), and the next transition
-  // starts t_{k-1} seconds before its end.
-  let vLabel = "v0";
-  let aLabel = "a0";
-  let running = durations[0];
-  for (let k = 1; k < metas.length; k++) {
-    const t = tNums[k - 1];
-    const offset = +(running - t).toFixed(3);
-    const vOut = `x${k}`;
-    const aOut = `c${k}`;
-    graph.push(`[${vLabel}][v${k}]xfade=transition=${ts[k - 1]}:duration=${t}:offset=${offset}[${vOut}]`);
-    graph.push(`[${aLabel}][a${k}]acrossfade=d=${t}[${aOut}]`);
-    vLabel = vOut;
-    aLabel = aOut;
-    running = +(running + durations[k] - t).toFixed(3);
+  if (dryRun) {
+    return {
+      operation: "concat", dry_run: true, inputs: inPaths, output: outPath, parts: concatParts(clips),
+      // transition / transition_duration keep the old shape when every
+      // join uses the same type and length, and are null otherwise —
+      // transitions / transition_durations always carry the full list.
+      transition: ts.every((x) => x === ts[0]) ? ts[0] : null,
+      transition_duration: tNums.every((x) => x === tNums[0]) ? tNums[0] : null,
+      transitions: ts,
+      transition_durations: tNums,
+      expected_duration_seconds: running,
+      normalize_dimensions: `${tw}x${th}`,
+      source_dimensions: `${firstDisp.width}x${firstDisp.height}`,
+      source_rotation: firstDisp.rotation,
+      duration_seconds: null, size_bytes: null,
+      dimensions: `${tw}x${th}`,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. The printed command is the exact xfade join the real run executes.",
+    };
   }
-  const args = ["-y"];
-  for (const p of inPaths) args.push("-i", p);
-  args.push(
-    "-filter_complex", graph.join(";"),
-    "-map", `[${vLabel}]`, "-map", `[${aLabel}]`,
-    "-c:v", videoCodec, "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "medium",
-    "-c:a", audioCodec, ...audioBitrateArgs(audioCodec), "-movflags", "+faststart", outPath,
-  );
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
@@ -7620,17 +7692,26 @@ export async function slideshow({ images, output, duration = 3, durations = null
     if (dryRun) {
       // Stage 1 commands come from image_to_video's own dry-run (exact,
       // one per slide, into the same temp clip paths the real run uses);
-      // stage 2 is the concat xfade join, and concat has no dry-run
-      // yet, so the join is reported as a plan, not a command — see the
-      // backlog note in mediakit-progress.md. Stage 3 is one exact
-      // command when a bed is looped under the join.
+      // stage 2 is the concat xfade join — now an exact command too,
+      // built by the same builder concatTransition runs (the slide clips
+      // are silent, so each gets an anullsrc bed, exactly as the real
+      // join does). Stage 3 is one exact command when a bed is looped
+      // under the join.
       const stageCommands = [];
+      const clipPaths = [];
       for (let i = 0; i < inPaths.length; i++) {
         const clipPath = path.join(tmpDir, `slide-${String(i).padStart(3, "0")}.mp4`);
+        clipPaths.push(clipPath);
         const r = await imageToVideo({ input: inPaths[i], output: clipPath, duration: clipDurs[i], fps: f, width: w, height: h, crf: c, dryRun: true });
         stageCommands.push(...(r.commands ?? []));
       }
       const joinPath = path.join(tmpDir, "joined.mp4");
+      const joinClips = clipDurs.map((d) => ({ effStart: 0, effEnd: d, effDur: d }));
+      const joinBuilt = buildTransitionJoinArgs({
+        inPaths: clipPaths, outPath: joinPath, videoCodec: "libx264", audioCodec: "aac",
+        clips: joinClips, transitions: ts, transitionDurations: tNums,
+        width: w, height: h, fps: f, hasAudio: clipPaths.map(() => false),
+      });
       const audioCommand = audioPath
         ? formatCommand(["-y", "-stream_loop", "-1", "-i", audioPath, "-i", joinPath, "-map", "1:v:0", "-map", "0:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-t", String(total), outPath])
         : null;
@@ -7650,11 +7731,12 @@ export async function slideshow({ images, output, duration = 3, durations = null
         stage_commands: stageCommands,
         join: {
           tool: "concat", transitions: ts, transition_durations: tNums,
-          expected_duration_seconds: total, command: null,
-          note: "concat has no dry-run yet — the join command is not printed; the join is the concat xfade chain over the stage-1 clips, in order.",
+          expected_duration_seconds: joinBuilt.expectedDuration,
+          command: formatCommand(joinBuilt.args),
+          note: "The exact xfade join command (same builder concat --transition runs). It reads the stage-1 clips, so run the stage commands first, then this, then the audio command.",
         },
         ...(audioCommand ? { audio_command: audioCommand } : {}),
-        note: "Dry run: no file written. The stage-1 clip commands and the stage-3 audio command are exact; the stage-2 join is a plan (see join.note). The temp clip paths name a temp directory the real run creates fresh each time.",
+        note: "Dry run: no file written. All three stages print exact commands — stage-1 clips, the stage-2 join, the stage-3 audio mix — run them in order to reproduce the real output. The temp clip paths name a temp directory the real run creates fresh each time.",
       };
     }
     // Stage 1: one still clip per image, up to 4 at a time

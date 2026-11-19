@@ -127,8 +127,8 @@ const COMMANDS = {
     ],
   },
   concat: {
-    usage: "mediakit concat <input1> <input2> [input3...] -o <output> [--video-codec <c>] [--audio-codec <c>] [--transition fade|wipeleft|dissolve|...] [--transition-duration <s>] [--fast] [--no-fast]",
-    desc: "Join 2+ media files into one. Auto-detects: identical clips are stream-copied (fast, lossless), differing clips are re-encoded. --fast requires identical clips (errors otherwise), --no-fast always re-encodes. --transition crossfades between clips instead of a hard cut. Per-clip trim: write an input as path@start-end (seconds or MM:SS, either side may be empty) — trims always re-encode, and --fast refuses them.",
+    usage: "mediakit concat <input1> <input2> [input3...] -o <output> [--video-codec <c>] [--audio-codec <c>] [--transition fade|wipeleft|dissolve|...] [--transition-duration <s>] [--fast] [--no-fast] [--dry-run]",
+    desc: "Join 2+ media files into one. Auto-detects: identical clips are stream-copied (fast, lossless), differing clips are re-encoded. --fast requires identical clips (errors otherwise), --no-fast always re-encodes. --transition crossfades between clips instead of a hard cut. Per-clip trim: write an input as path@start-end (seconds or MM:SS, either side may be empty) — trims always re-encode, and --fast refuses them. --dry-run prints the exact ffmpeg command and writes no file (demuxer path: also prints the list-file path + content — write the content there first, then run the command as-is).",
     args: [{ name: "inputs", required: true, variadic: true }],
     options: [
       ["--video-codec", "Video codec (default libx264)"],
@@ -137,6 +137,7 @@ const COMMANDS = {
       ["--transition-duration", "Transition length in seconds (default 1, must be shorter than the shortest clip)"],
       ["--fast", "Require stream-copy: error if the clips differ (default is auto-detect)"],
       ["--no-fast", "Always re-encode, never stream-copy"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -437,7 +438,7 @@ const COMMANDS = {
   },
   slideshow: {
     usage: "mediakit slideshow <img1> <img2> [img3...] -o <output.mp4> [--duration 3] [--durations 3,5,2] [--transition fade] [--transition-duration 1] [--transitions fade,wipeleft] [--transition-durations 1,0.5] [--fps 30] [--width 1280] [--height 720] [--audio <file>] [--crf 23] [--dry-run]",
-    desc: "Turn 2-32 still images into one video with an xfade transition between every pair. Each image is visible for its own duration (total = sum of durations); the transition eats a handle, not slide time. --transitions/--transition-durations give a different transition per join (n-1 comma entries); otherwise one type applies to all pairs. --audio loops a bed under the whole slideshow. Output .mp4 only in v1. --dry-run prints the plan and writes no file (one exact command per slide clip, the join as a plan — concat has no dry-run yet — and the exact audio command when a bed is given).",
+    desc: "Turn 2-32 still images into one video with an xfade transition between every pair. Each image is visible for its own duration (total = sum of durations); the transition eats a handle, not slide time. --transitions/--transition-durations give a different transition per join (n-1 comma entries); otherwise one type applies to all pairs. --audio loops a bed under the whole slideshow. Output .mp4 only in v1. --dry-run prints the exact commands for all three stages and writes no file (one exact command per slide clip, the exact xfade join command, and the exact audio command when a bed is given — run them in order to reproduce the real output).",
     args: [{ name: "images", required: true, variadic: true }],
     options: [
       ["--duration", "Visible seconds per image (default 3)"],
@@ -1336,6 +1337,7 @@ async function main() {
           transition: opts.transition ?? null,
           transitionDuration: numOpt(opts, "transition_duration") ?? 1,
           fast: opts.fast === true ? true : opts.fast === false ? false : null,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "frames":

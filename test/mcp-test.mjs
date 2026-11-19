@@ -1534,15 +1534,17 @@ const slidePairsBadDurLen = await callExpectThrow("slideshow", { images: [path.j
 checkOk(/one entry per join/.test(slidePairsBadDurLen), "slideshow refuses a transition_durations list with the wrong length", slidePairsBadDurLen.slice(0, 200));
 const slidePairsBadDur = await callExpectThrow("slideshow", { images: [path.join(root, "test/kenburns.png"), path.join(root, "test/logo.png"), path.join(root, "outputs/mcp-slideshow-green.png")], output: path.join(root, "outputs/mcp-slideshow-bad9.mp4"), transitions: ["fade", "wipeleft"], transition_durations: [1, 3] });
 checkOk(/shorter than the slides it joins/.test(slidePairsBadDur), "slideshow refuses a per-join duration longer than its slides", slidePairsBadDur.slice(0, 200));
-// slideshow dry-run (lượt 116, batch 5): one exact command per slide
-// clip, the join as a plan (concat has no dry-run yet), the audio
-// command exact when a bed is given; duration/frames null, no file.
+// slideshow dry-run (lượt 116, batch 5; lượt 117: the join is now an
+// exact command too — built by the same builder concat --transition
+// runs — not a plan): one exact command per slide clip, the exact
+// xfade join, the audio command exact when a bed is given;
+// duration/frames null, no file.
 const slideDryRes = await client.callTool({
   name: "slideshow",
   arguments: { images: [path.join(root, "test/kenburns.png"), path.join(root, "test/logo.png"), path.join(root, "outputs/mcp-slideshow-green.png")], output: path.join(root, "outputs/mcp-slideshow-dry.mp4"), durations: [3, 3, 3], transition: "fade", transition_duration: 1, fps: 30, width: 640, height: 360, audio: path.join(root, "test/mix-voice.mp3"), dry_run: true },
 });
 const slideDryJson = JSON.parse(slideDryRes.content[0].text);
-checkOk(slideDryJson.dry_run === true && near(slideDryJson.expected_duration_seconds, 9, 0.01) && slideDryJson.duration_seconds === null && slideDryJson.frames === null && slideDryJson.audio === true && slideDryJson.stage_commands?.length === 3 && slideDryJson.join?.tool === "concat" && slideDryJson.join?.command === null && JSON.stringify(slideDryJson.join?.transitions) === '["fade","fade"]' && !existsSync(path.join(root, "outputs/mcp-slideshow-dry.mp4")), "slideshow dry-run plans 3 slide clips + a concat join plan + audio, duration/frames null, writes nothing", JSON.stringify({ stages: slideDryJson.stage_commands?.length, join: slideDryJson.join?.tool }));
+checkOk(slideDryJson.dry_run === true && near(slideDryJson.expected_duration_seconds, 9, 0.01) && slideDryJson.duration_seconds === null && slideDryJson.frames === null && slideDryJson.audio === true && slideDryJson.stage_commands?.length === 3 && slideDryJson.join?.tool === "concat" && typeof slideDryJson.join?.command === "string" && /xfade=transition=fade:duration=1:offset=3/.test(slideDryJson.join.command) && /anullsrc/.test(slideDryJson.join.command) && near(slideDryJson.join?.expected_duration_seconds, 9, 0.01) && JSON.stringify(slideDryJson.join?.transitions) === '["fade","fade"]' && !existsSync(path.join(root, "outputs/mcp-slideshow-dry.mp4")), "slideshow dry-run prints 3 slide clips + the exact concat xfade join (offset 3, silent clips get anullsrc beds) + audio, duration/frames null, writes nothing", JSON.stringify({ stages: slideDryJson.stage_commands?.length, join: slideDryJson.join?.tool }));
 checkOk(slideDryJson.stage_commands.every((c) => c.includes("-loop 1") && c.includes("scale=640:360")) && slideDryJson.stage_commands[0].includes("-t 4") && slideDryJson.stage_commands[2].includes("-t 3"), "slideshow dry-run stage commands are image_to_video clips (first two carry the 1s xfade handle, last is exactly 3s)", slideDryJson.stage_commands?.[0] ?? "");
 checkOk(typeof slideDryJson.audio_command === "string" && slideDryJson.audio_command.includes("-stream_loop -1") && slideDryJson.audio_command.includes("-c:v copy") && slideDryJson.audio_command.includes("-t 9"), "slideshow dry-run audio command loops the bed under the 9s join", slideDryJson.audio_command ?? "");
 
@@ -3699,6 +3701,94 @@ const concatTbFastRes = await client.callTool({
 });
 const concatTbFastJson = JSON.parse(concatTbFastRes.content[0].text);
 checkOk(concatTbFastRes.isError === true && /time_base 1\/90000/.test(concatTbFastJson.error ?? ""), "concat fast=true errors on a time_base mismatch", JSON.stringify(concatTbFastJson));
+
+// concat dry-run (lượt 117 — closes the dry-run set): every route
+// prints the exact command and writes nothing. The demuxer path also
+// returns list_file + list_content — the printed command reads that
+// list file, so the hand-run below writes it first, then runs the
+// command, and must land byte-identical to the real run.
+await rm(path.join(root, "outputs/mcp-concat-dry-fast.mp4"), { force: true });
+const concatDryFastRes = await client.callTool({
+  name: "concat",
+  arguments: {
+    inputs: [path.join(root, "test/source.mp4"), path.join(root, "test/source.mp4")],
+    output: path.join(root, "outputs/mcp-concat-dry-fast.mp4"),
+    dry_run: true,
+  },
+});
+const concatDryFastJson = JSON.parse(concatDryFastRes.content[0].text);
+checkOk(concatDryFastJson.dry_run === true && concatDryFastJson.mode === "fast" && near(concatDryFastJson.expected_duration_seconds, 20, 0.01) && concatDryFastJson.duration_seconds === null && concatDryFastJson.size_bytes === null && concatDryFastJson.commands?.length === 1 && /-f concat/.test(concatDryFastJson.commands[0]) && /-c copy/.test(concatDryFastJson.commands[0]) && typeof concatDryFastJson.list_file === "string" && (concatDryFastJson.list_content ?? "").includes("test/source.mp4") && !existsSync(path.join(root, "outputs/mcp-concat-dry-fast.mp4")) && !existsSync(concatDryFastJson.list_file), "concat dry-run (fast) prints the stream-copy demuxer command + list file/content, mode/expected exact, writes nothing", JSON.stringify({ mode: concatDryFastJson.mode, list: concatDryFastJson.list_file }));
+await writeFile(concatDryFastJson.list_file, concatDryFastJson.list_content, "utf8");
+await execFileAsync("bash", ["-c", concatDryFastJson.commands[0]]);
+const concatDryFastRealRes = await client.callTool({
+  name: "concat",
+  arguments: {
+    inputs: [path.join(root, "test/source.mp4"), path.join(root, "test/source.mp4")],
+    output: path.join(root, "outputs/mcp-concat-dry-fast-real.mp4"),
+  },
+});
+const concatDryFastRealJson = JSON.parse(concatDryFastRealRes.content[0].text);
+checkOk(concatDryFastRealJson.mode === "fast" && near(concatDryFastRealJson.duration_seconds, 20, 0.1), "concat real run for the dry-run comparison stream-copies to 20s", JSON.stringify({ mode: concatDryFastRealJson.mode, dur: concatDryFastRealJson.duration_seconds }));
+const concatDryHandSha = await sha256File(path.join(root, "outputs/mcp-concat-dry-fast.mp4"));
+const concatDryRealSha = await sha256File(path.join(root, "outputs/mcp-concat-dry-fast-real.mp4"));
+checkOk(concatDryHandSha === concatDryRealSha, "concat dry-run command (list file written first) run by hand is byte-identical to the real run", `${concatDryHandSha.slice(0, 12)} vs ${concatDryRealSha.slice(0, 12)}`);
+await rm(concatDryFastJson.list_file, { force: true });
+// Re-encode dry-run (auto on differing clips): one demuxer command
+// with libx264, fast_skipped names the mismatch, no file written.
+await rm(path.join(root, "outputs/mcp-concat-dry-reencode.mp4"), { force: true });
+const concatDryReRes = await client.callTool({
+  name: "concat",
+  arguments: {
+    inputs: [path.join(root, "test/source.mp4"), path.join(root, "test/source2.mp4")],
+    output: path.join(root, "outputs/mcp-concat-dry-reencode.mp4"),
+    dry_run: true,
+  },
+});
+const concatDryReJson = JSON.parse(concatDryReRes.content[0].text);
+checkOk(concatDryReJson.dry_run === true && concatDryReJson.mode === "reencode" && near(concatDryReJson.expected_duration_seconds, 16, 0.01) && concatDryReJson.commands?.length === 1 && /-c:v libx264/.test(concatDryReJson.commands[0]) && Array.isArray(concatDryReJson.fast_skipped) && concatDryReJson.fast_skipped.some((r) => r.includes("640x360")) && !existsSync(path.join(root, "outputs/mcp-concat-dry-reencode.mp4")), "concat dry-run (auto, differing clips) prints the re-encode demuxer command and names the size mismatch, writes nothing", JSON.stringify({ mode: concatDryReJson.mode, skipped: concatDryReJson.fast_skipped }));
+// Transition dry-run: one exact filter-graph command (xfade +
+// acrossfade), expected = sum minus the transition, no file written.
+await rm(path.join(root, "outputs/mcp-concat-dry-fade.mp4"), { force: true });
+const concatDryFadeRes = await client.callTool({
+  name: "concat",
+  arguments: {
+    inputs: [path.join(root, "test/source.mp4"), path.join(root, "test/source2.mp4")],
+    output: path.join(root, "outputs/mcp-concat-dry-fade.mp4"),
+    transition: "fade", transition_duration: 1, dry_run: true,
+  },
+});
+const concatDryFadeJson = JSON.parse(concatDryFadeRes.content[0].text);
+checkOk(concatDryFadeJson.dry_run === true && concatDryFadeJson.transition === "fade" && near(concatDryFadeJson.expected_duration_seconds, 15, 0.01) && concatDryFadeJson.duration_seconds === null && concatDryFadeJson.commands?.length === 1 && /xfade=transition=fade:duration=1:offset=9/.test(concatDryFadeJson.commands[0]) && /acrossfade=d=1/.test(concatDryFadeJson.commands[0]) && !existsSync(path.join(root, "outputs/mcp-concat-dry-fade.mp4")), "concat dry-run (fade) prints the exact xfade join (offset 9 = 10-1) and expects 15s, writes nothing", concatDryFadeJson.commands?.[0]?.slice(0, 200) ?? "");
+// Trim dry-run: per-clip trims go through the filter graph (trim +
+// concat filter), expected = 3s + 6s, no file written.
+await rm(path.join(root, "outputs/mcp-concat-dry-trim.mp4"), { force: true });
+const concatDryTrimRes = await client.callTool({
+  name: "concat",
+  arguments: {
+    inputs: [{ file: path.join(root, "test/source.mp4"), start: 2, end: 5 }, path.join(root, "test/source2.mp4")],
+    output: path.join(root, "outputs/mcp-concat-dry-trim.mp4"),
+    dry_run: true,
+  },
+});
+const concatDryTrimJson = JSON.parse(concatDryTrimRes.content[0].text);
+checkOk(concatDryTrimJson.dry_run === true && concatDryTrimJson.mode === "trim" && near(concatDryTrimJson.expected_duration_seconds, 9, 0.01) && concatDryTrimJson.commands?.length === 1 && /trim=start=2:end=5/.test(concatDryTrimJson.commands[0]) && /concat=n=2:v=1:a=1/.test(concatDryTrimJson.commands[0]) && !existsSync(path.join(root, "outputs/mcp-concat-dry-trim.mp4")), "concat dry-run (trim) prints the exact trim+concat filter graph and expects 9s, writes nothing", concatDryTrimJson.commands?.[0]?.slice(0, 200) ?? "");
+// A dry-run must surface the same refusals as a real run: fast=true
+// on differing clips errors instead of printing a command.
+const concatDryFastFailRes = await client.callTool({
+  name: "concat",
+  arguments: {
+    inputs: [path.join(root, "test/source.mp4"), path.join(root, "test/source2.mp4")],
+    output: path.join(root, "outputs/mcp-concat-dry-fast-fail.mp4"),
+    fast: true, dry_run: true,
+  },
+});
+const concatDryFastFailJson = JSON.parse(concatDryFastFailRes.content[0].text);
+checkOk(concatDryFastFailRes.isError === true && /size 640x360/.test(concatDryFastFailJson.error ?? ""), "concat dry-run + fast=true errors on differing clips with the mismatch (same refusal as the real run)", JSON.stringify(concatDryFastFailJson));
+// CLI wiring: --dry-run is an accepted option (validateOpts would
+// exit 2 on an unknown flag) and prints dry_run JSON.
+const concatCliDry = await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "concat", path.join(root, "test/source.mp4"), path.join(root, "test/source.mp4"), "-o", path.join(root, "outputs/mcp-concat-cli-dry.mp4"), "--dry-run"]);
+const concatCliDryJson = JSON.parse(concatCliDry.stdout);
+checkOk(concatCliDryJson.dry_run === true && concatCliDryJson.mode === "fast" && !existsSync(path.join(root, "outputs/mcp-concat-cli-dry.mp4")), "CLI concat --dry-run prints dry_run JSON and writes nothing", concatCliDry.stdout.slice(0, 120));
 
 // concat/pip/overlay on rotated phone clips (lượt 77): geometry is
 // measured on the DISPLAY frame, not the coded pixels. rotated.mp4

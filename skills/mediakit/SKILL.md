@@ -783,7 +783,7 @@ null — measured on the real output), `rotate` prints the transpose
 with the expected display size (`360x640` for a 90° turn of a
 640x360 clip). The same flag also works on `reverse`/`reframe`/
 `fit`/`silence`/`extract_audio`/`fastforward`/`interpolate`/`denoise`/
-`segment`/`mix`/`mux`/`overlay`/`pip`/`chroma_key`/`burn_captions`:
+`segment`/`mix`/`mux`/`overlay`/`pip`/`chroma_key`/`burn_captions`/`concat`:
 `overlay`/`pip` print the exact display-frame geometry (576,24 on a
 rotated clip), `chroma_key` prints the key/composite command with the
 measured alpha fields null, `burn_captions` prints the subtitles
@@ -803,9 +803,14 @@ the computed bitrate — the passlog path it names is removed, because
 a dry-run writes nothing). `export_gif` prints only the first ladder
 step's command and lists the whole 8-step ladder — later steps only
 run when the budget needs them. `slideshow` prints one exact command
-per slide clip plus the exact audio command when a bed is given, and
-reports the join as a plan (`{tool: "concat", command: null}`) because
-`concat` has no dry-run yet. `titlecard`/`intro` print the exact
+per slide clip plus the exact xfade join command (built by the same
+builder `concat --transition` runs) and the exact audio command when a
+bed is given — run the three stages in order to reproduce the real
+output. `concat` takes it too (lượt 117, closing the dry-run set):
+the demuxer path prints one command plus `list_file`/`list_content`
+(write the content to that path first, then run the command as-is),
+the transition and trim paths print one exact filter-graph command.
+`titlecard`/`intro` print the exact
 command and keep the drawtext text file next to the output (so the
 printed command runs as-is) but write no output file.
 

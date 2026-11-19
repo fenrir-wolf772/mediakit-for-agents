@@ -215,7 +215,7 @@ export const TOOL_DEFS = [
 
   {
     name: "concat",
-    description: "Join 2+ media files into one. By default it probes the clips first: identical clips (codec, size, fps, pixel format, time_base, audio) are stream-copied with no re-encoding (fast, lossless); differing clips are re-encoded so the join still works — except a time_base mismatch, a display-size mismatch, or any rotation difference, which go through the filter graph instead of the demuxer, because the demuxer copies timestamps verbatim and stretches the join (measured 10s+10s → 116.9s) and applies the first clip's display-matrix rotation to every clip (an upright second clip came out rotated 90 degrees and stretched). Size is compared on display dimensions (what the viewer sees after autorotate): a clip stored 1280x720 with rotation 90 displays 720x1280, and fast=true additionally needs identical stored dims + rotation. Set fast=true to require the stream-copy path (errors with the exact mismatch if clips differ), or fast=false to always re-encode. Set transition (e.g. fade, wipeleft, dissolve, circlecrop) to crossfade between clips instead of a hard cut — clips are normalized to the first clip's display size/fps first, and the output is sum(durations) minus (n-1) x transition_duration. Per-clip trim: give an input as {file, start, end} (seconds or MM:SS) — trims always re-encode with exact cuts, and fast=true refuses them (stream-copy cuts snap to keyframes).",
+    description: "Join 2+ media files into one. By default it probes the clips first: identical clips (codec, size, fps, pixel format, time_base, audio) are stream-copied with no re-encoding (fast, lossless); differing clips are re-encoded so the join still works — except a time_base mismatch, a display-size mismatch, or any rotation difference, which go through the filter graph instead of the demuxer, because the demuxer copies timestamps verbatim and stretches the join (measured 10s+10s → 116.9s) and applies the first clip's display-matrix rotation to every clip (an upright second clip came out rotated 90 degrees and stretched). Size is compared on display dimensions (what the viewer sees after autorotate): a clip stored 1280x720 with rotation 90 displays 720x1280, and fast=true additionally needs identical stored dims + rotation. Set fast=true to require the stream-copy path (errors with the exact mismatch if clips differ), or fast=false to always re-encode. Set transition (e.g. fade, wipeleft, dissolve, circlecrop) to crossfade between clips instead of a hard cut — clips are normalized to the first clip's display size/fps first, and the output is sum(durations) minus (n-1) x transition_duration. Per-clip trim: give an input as {file, start, end} (seconds or MM:SS) — trims always re-encode with exact cuts, and fast=true refuses them (stream-copy cuts snap to keyframes). Set dry_run=true to print the exact ffmpeg command that would run and write no file (the demuxer path also returns list_file + list_content — write the content to that path first, then run the printed command as-is; the transition and trim paths print one exact filter-graph command; mode/expected_duration are computed from the probes, so they are exact; duration/size report null — measured on the real output).",
     schema: {
     inputs: z.array(z.union([
       z.string().min(1),
@@ -231,6 +231,7 @@ export const TOOL_DEFS = [
     transition: z.string().optional().describe("xfade transition between clips: fade, fadeblack, wipeleft, wiperight, slideleft, dissolve, pixelize, circlecrop, ... (omit for a hard cut)"),
     transition_duration: z.number().min(0.1).max(10).default(1).describe("Transition length in seconds (must be shorter than the shortest clip)"),
     fast: z.boolean().optional().describe("true = require stream-copy (error if clips differ), false = always re-encode, omit = auto-detect (copy when identical, re-encode otherwise)"),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command that would run and write no file (the demuxer path also returns list_file + list_content — write the content to that path first, then run the command as-is)"),
   },
     handler: async (a) => safe(() => core.concat({
     inputs: a.inputs,
@@ -240,6 +241,7 @@ export const TOOL_DEFS = [
     transition: a.transition ?? null,
     transitionDuration: a.transition_duration,
     fast: a.fast ?? null,
+    dryRun: a.dry_run,
   })),
   },
 
@@ -655,7 +657,7 @@ export const TOOL_DEFS = [
 
   {
     name: "slideshow",
-    description: "Turn 2-32 still images into one video with an xfade transition between every pair. Each image is visible for its own duration — the transition eats a handle, not slide time — so the total is exactly the sum of the durations. One transition type for all pairs (transition/transition_duration), or a different one per join: transitions (one xfade name per join, n-1 entries) and transition_durations (one length per join, each shorter than both slides it joins). Images are rendered to clips in parallel first, then joined with the concat xfade chain. audio loops a bed under the whole slideshow. Output .mp4 only in v1. The result counts frames on the output file, so the duration is measured, not assumed. Set dry_run=true to print the plan and write no file (one exact command per slide clip, the join as a plan — concat has no dry-run yet — and the exact audio command when a bed is given; duration/frames report null — measured on the real output).",
+    description: "Turn 2-32 still images into one video with an xfade transition between every pair. Each image is visible for its own duration — the transition eats a handle, not slide time — so the total is exactly the sum of the durations. One transition type for all pairs (transition/transition_duration), or a different one per join: transitions (one xfade name per join, n-1 entries) and transition_durations (one length per join, each shorter than both slides it joins). Images are rendered to clips in parallel first, then joined with the concat xfade chain. audio loops a bed under the whole slideshow. Output .mp4 only in v1. The result counts frames on the output file, so the duration is measured, not assumed. Set dry_run=true to print the exact commands for all three stages and write no file (one exact command per slide clip, the exact xfade join command — built by the same builder concat --transition runs — and the exact audio command when a bed is given; run them in order to reproduce the real output; duration/frames report null — measured on the real output).",
     schema: {
     images: z.array(z.union([
       z.string().describe("Image file path"),
