@@ -1841,6 +1841,130 @@ export async function extractFrames({ input, outputDir, count = 6, format = "png
   };
 }
 
+// ---------------------------------------------------------------- extract_frames
+// Full frame sequence: EVERY frame of a clip (or a time range) as
+// separate images, not N evenly spaced samples like `frames`. The
+// director's use is scrubbing a shot frame by frame — checking a
+// fast move, a blink, a lip-sync slip — where a 6-frame sample
+// hides the defect. One ffmpeg pass with the `fps` filter, so the
+// count is exact: a 10s 30fps clip at fps=30 writes exactly 300
+// files (measured 2026-11-19: fps=30 -> 300, fps=2 -> 20, -ss 2
+// -t 3 fps=10 -> 30 — round(clipLen * fps) every time).
+// (Idea: herdiansah/ffmpeg-mcp-server's convert_video_to_images —
+// one tool, input/output_dir/format/fps, PNG kept in rgba. Theirs
+// is naive: no probe, no count check, no range, no width/quality,
+// no dry-run, no frame cap, a hardcoded C:\ffmpeg path, and a
+// bare "success" string. This keeps their rgba-PNG idea and adds
+// everything they lack: probe-first, frame count verified on disk
+// against round(clipLen * fps), per-frame timestamps, start/end,
+// width scale, jpg/webp quality, dry-run that prints the exact
+// command, and a 5000-frame ceiling so a careless fps=120 on an
+// hour-long clip fails fast instead of filling the disk.)
+// Names are frame-0001.png ... zero-padded to the expected count
+// (min 4 digits), so a plain `ls` is already in timeline order.
+
+export const MAX_SEQUENCE_FRAMES = 5000;
+
+export async function extractFramesSequence({ input, outputDir, format = "png", fps = null, start = null, end = null, width = null, quality = null, dryRun = false }) {
+  const inPath = await requireInput(input);
+  const fmt = (format || "png").toLowerCase();
+  if (!["png", "jpg", "jpeg", "webp"].includes(fmt)) {
+    throw new MediaKitError(`extract_frames format must be png/jpg/webp, got: ${format}`, "INVALID_ARG");
+  }
+  const ext = fmt === "jpeg" ? "jpg" : fmt;
+  if (typeof outputDir !== "string" || !outputDir.trim()) {
+    throw new MediaKitError("output directory is required", "INVALID_OUTPUT");
+  }
+  const rawDir = path.resolve(outputDir);
+  if (rawDir === inPath || rawDir.startsWith(inPath + path.sep)) {
+    throw new MediaKitError("extract_frames output directory must not be inside the input file", "INVALID_OUTPUT");
+  }
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("extract_frames needs a video input", "INVALID_ARG");
+  const duration = meta.duration_seconds;
+  if (duration === null || duration <= 0) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
+  const s = start === null || start === undefined ? 0 : parseTime(start, "start");
+  const e = end === null || end === undefined ? duration : parseTime(end, "end");
+  if (s >= duration) throw new MediaKitError(`start ${s}s is past the end of the file (${duration}s)`, "INVALID_ARG");
+  if (e <= s) throw new MediaKitError(`end (${e}s) must be after start (${s}s)`, "INVALID_ARG");
+  const clipEnd = Math.min(e, duration);
+  const clipLen = clipEnd - s;
+  const srcFps = meta.video.fps;
+  const wantFps = fps === null || fps === undefined ? (srcFps || 30) : num(fps, "fps", { min: 0.1, max: 120 });
+  // The fps filter takes a rate, not a count: round to 3 decimals
+  // so 29.97 stays 29.97 and a caller-given 2.5 stays 2.5.
+  const fpsEff = Math.round(wantFps * 1000) / 1000;
+  const expected = Math.max(1, Math.round(clipLen * fpsEff));
+  if (expected > MAX_SEQUENCE_FRAMES) {
+    throw new MediaKitError(`extract_frames would write ${expected} frames (limit ${MAX_SEQUENCE_FRAMES}) — lower fps or shorten the range`, "INVALID_ARG");
+  }
+  const w = width === null || width === undefined ? null : num(width, "width", { min: 80, max: 3840, integer: true });
+  const q = quality === null || quality === undefined ? null : num(quality, "quality", { min: 1, max: 100, integer: true });
+  if (q !== null && ext === "png") {
+    throw new MediaKitError("quality only applies to jpg/webp (png is lossless)", "INVALID_ARG");
+  }
+  const pad = Math.max(4, String(expected).length);
+  const pattern = `frame-%0${pad}d.${ext}`;
+  // Build the argv ONCE; dry-run prints it, the real run executes
+  // the same array (lượt 113 pattern — no second build to drift).
+  const filters = [`fps=${fpsEff}`];
+  if (w !== null) filters.push(`scale=${w}:-2`);
+  const args = ["-y"];
+  if (s > 0) args.push("-ss", String(s));
+  args.push("-i", inPath, "-t", String(+clipLen.toFixed(3)), "-vf", filters.join(","), "-an");
+  if (ext === "png") args.push("-pix_fmt", "rgba");
+  if (ext === "jpg") args.push("-q:v", String(q === null ? 2 : Math.round(31 - ((q - 1) / 99) * 29)));
+  if (ext === "webp") {
+    // The .webp extension alone picks the animated-webp muxer (all
+    // frames into ONE file) and -q:v is not a libwebp option — both
+    // silently produce one corrupt file (measured 2026-11-19: 1
+    // file, ffprobe 0x0). Force the image2 muxer + libwebp encoder
+    // and its own -quality option instead: 4/4 frames, valid.
+    args.push("-f", "image2", "-c:v", "libwebp");
+    if (q !== null) args.push("-quality", String(q));
+  }
+  const dir = dryRun ? rawDir : await prepareOutputDir(outputDir);
+  const outPattern = path.join(dir, pattern);
+  const fullArgs = [...args, outPattern];
+  const base = {
+    operation: "extract_frames", input: inPath, output_dir: dir, format: ext,
+    fps: fpsEff, start_seconds: s, end_seconds: clipEnd,
+    duration_seconds: +clipLen.toFixed(3),
+    frame_count_expected: expected,
+    ...(w !== null ? { width: w } : {}),
+    ...(q !== null ? { quality: q } : {}),
+  };
+  if (dryRun) {
+    return { ...base, dry_run: true, command: formatCommand(fullArgs), frames: null, frame_count: null, frames_verified: null };
+  }
+  await run(FFMPEG, fullArgs);
+  // Verify on disk: count the files that match the pattern (a
+  // pre-existing dir may hold other files — only frame-NNNN.ext
+  // counts) and compare against the probe-derived expectation.
+  const nameRe = new RegExp(`^frame-\\d{${pad}}\\.${ext}$`);
+  const names = (await readdir(dir)).filter((f) => nameRe.test(f)).sort();
+  const entries = [];
+  for (const name of names) {
+    const info = await fileInfo(path.join(dir, name));
+    entries.push({ file: name, path: path.join(dir, name), ...info });
+  }
+  // The fps filter emits frame i at source time s + i/fps, so the
+  // timestamp is arithmetic, not a second probe per file.
+  const stamp = (i) => +(s + i / fpsEff).toFixed(3);
+  const frames = entries.map((e, i) => ({ ...e, timestamp_seconds: stamp(i) }));
+  const sample = frames.length <= 8 ? frames : [...frames.slice(0, 3), ...frames.slice(-3)];
+  return {
+    ...base,
+    frame_count: frames.length,
+    frames_verified: frames.length === expected,
+    count_diff: frames.length - expected,
+    first_timestamp_seconds: frames.length ? stamp(0) : null,
+    last_timestamp_seconds: frames.length ? stamp(frames.length - 1) : null,
+    frames_sample: sample,
+    frames_truncated: frames.length > 8,
+  };
+}
+
 // ---------------------------------------------------------------- export_gif
 // Animated GIF for READMEs / chat: two-pass palette in a single ffmpeg
 // call (split + palettegen + paletteuse — the palette is built from
@@ -8858,6 +8982,7 @@ const TOOL_REQUIREMENTS = {
   qa_report: { filters: ["loudnorm", "blackdetect", "freezedetect", "silencedetect", "astats", "ametadata", "select"] },
   concat: { filters: ["concat", "xfade", "acrossfade", "fps", "scale", "pad"] },
   frames: { filters: ["scale", "convolution", "signalstats"] },
+  extract_frames: { filters: ["fps", "scale"] },
   export_gif: { filters: ["palettegen", "paletteuse", "fps", "scale"] },
   burn_captions: { filters: ["subtitles", "ass"] },
   reframe: { filters: ["crop", "scale", "pad", "gblur", "overlay"], encoders: ["libx264"] },

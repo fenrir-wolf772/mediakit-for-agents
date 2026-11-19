@@ -153,6 +153,21 @@ const COMMANDS = {
       ["-o, --output", "Output directory (required, created if needed)"],
     ],
   },
+  "extract-frames": {
+    usage: "mediakit extract-frames <input> -o <directory> [--format png|jpg|webp] [--fps <n>] [--start <s|MM:SS>] [--end <s|MM:SS>] [--width <px>] [--quality <n>] [--dry-run]",
+    desc: "Export EVERY frame of a clip (or a time range) as a sequence of images (frame-0001.png, ...) into a directory — the full sequence, not N samples like frames. fps defaults to the source frame rate (every frame); set it lower for a sparser sequence. Frame i lands at start + i/fps, and the count is verified on disk against round((end-start) * fps). PNG is written rgba (keeps alpha). Refuses over 5000 frames — lower fps or shorten the range. --dry-run prints the exact ffmpeg command and writes no file.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--format", "Image format png (default) | jpg | webp"],
+      ["--fps", "Frames per second to extract (default: source frame rate, i.e. every frame)"],
+      ["--start", "Range start in seconds or MM:SS (default 0)"],
+      ["--end", "Range end in seconds or MM:SS (default end of file)"],
+      ["--width", "Scale frames to this width (keeps aspect)"],
+      ["--quality", "jpg/webp quality 1-100 (default jpg q 2, webp libwebp 75); refused for png"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
+      ["-o, --output", "Output directory (required, created if needed)"],
+    ],
+  },
   "export-gif": {
     usage: "mediakit export-gif <input> -o <output.gif> [--start <s|MM:SS>] [--end <s|MM:SS>] [--fps 15] [--width 640] [--max-size-mb 10]",
     desc: "Export a clip (or segment) as an animated GIF with a two-pass palette. Fits under --max-size-mb (default 10 MB, the GitHub README limit; Slack auto-plays only under ~2 MB) by stepping down fps, then width, then palette colours; reports size_budget_met measured on disk.",
@@ -958,7 +973,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 75 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 76 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -1321,6 +1336,18 @@ async function main() {
           width: numOpt(opts, "width") ?? null,
           sharpest: opts.sharpest === true,
           sharpestSamples: numOpt(opts, "sharpest_samples") ?? 5,
+        });
+        break;
+      case "extract-frames":
+        result = await core.extractFramesSequence({
+          input: needInput(), outputDir: needOutput(opts),
+          format: opts.format ?? "png",
+          fps: numOpt(opts, "fps") ?? null,
+          start: opts.start ?? null,
+          end: opts.end ?? null,
+          width: numOpt(opts, "width") ?? null,
+          quality: numOpt(opts, "quality") ?? null,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "export-gif":

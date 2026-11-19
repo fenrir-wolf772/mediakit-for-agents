@@ -14,6 +14,9 @@ video or audio file, and instead of writing one-off ffmpeg shell commands.
 - **User asks "what does it look like at 0:12?"**: `extract_frame`, then
   read the image. For an overview of the whole clip: `frames` (separate
   images with timestamps — read several) or `thumbnail` (one contact sheet).
+  To scrub a shot frame by frame (a fast move, a blink, a lip-sync slip):
+  `extract_frames` (the full sequence, `frame-0001.png` … — `--fps` to
+  thin it out; refuses over 5000 frames).
 - **Audio is too quiet/loud or inconsistent**: `loudness` (default −14 LUFS).
 - **User asks to join clips**: `concat`. For a smooth join instead of a
   hard cut: `concat` with `transition` (`fade`, `wipeleft`, `dissolve`,

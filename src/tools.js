@@ -269,6 +269,34 @@ export const TOOL_DEFS = [
 
 
   {
+    name: "extract_frames",
+    description: "Export EVERY frame of a clip (or a time range) as a sequence of images (frame-0001.png, ...) into a directory — the full sequence, not N samples like frames. Use it to scrub a shot frame by frame: a fast move, a blink, a lip-sync slip that a 6-frame sample hides. fps defaults to the source frame rate (every frame); set it lower for a sparser sequence. Frame i lands at start + i/fps, and the count is verified on disk against round((end-start) * fps). PNG is written rgba (keeps alpha, e.g. ProRes 4444 sources). Refuses over 5000 frames — lower fps or shorten the range instead of filling the disk. Set dry_run=true to print the exact ffmpeg command and write no file.",
+    schema: {
+    input: pathSchema,
+    output_dir: pathSchema.describe("Directory to write the frame files into (created if needed)"),
+    format: z.enum(["png", "jpg", "webp"]).default("png"),
+    fps: z.number().min(0.1).max(120).optional().describe("Frames per second to extract (default: the source frame rate, i.e. every frame)"),
+    start: z.union([z.number(), z.string()]).optional().describe("Range start in seconds or MM:SS (default 0)"),
+    end: z.union([z.number(), z.string()]).optional().describe("Range end in seconds or MM:SS (default the end of the file)"),
+    width: z.number().int().min(80).max(3840).optional().describe("Scale frames to this width (keeps aspect)"),
+    quality: z.number().int().min(1).max(100).optional().describe("jpg/webp quality 1-100 (default jpg q 2, webp libwebp 75); refused for png, which is lossless"),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
+  },
+    handler: async (a) => safe(() => core.extractFramesSequence({
+    input: a.input,
+    outputDir: a.output_dir,
+    format: a.format,
+    fps: a.fps ?? null,
+    start: a.start ?? null,
+    end: a.end ?? null,
+    width: a.width ?? null,
+    quality: a.quality ?? null,
+    dryRun: a.dry_run,
+  })),
+  },
+
+
+  {
     name: "burn_captions",
     description: "Burn subtitles into the video (hardcoded, always visible). Accepts .srt, .ass or .vtt. Style: background (default — white text on a semi-transparent black box), outline (black outline, no box), shadow (thin outline + drop shadow), or glow (thick halo in the text's own colour, reads on bright footage). Defaults scale with frame height: ~60px type on 1080x1920, sitting ~500px above the bottom edge so platform UI (bottom ~480px) never covers the text. Explicit font_size / margin_v override. max_lines shrinks the type (measured with the same font libass draws, Liberation Sans) until every cue wraps to at most that many lines, never below a readability floor (1.6% of frame height, min 16px); a cue that still overflows at the floor burns at the floor and reports fit.fits=false. platform sets the default margin from that platform's own bottom UI depth (tiktok 520px at 1920 high, youtube 100px at 1080 high) and narrows the fit width to its text-safe rect; explicit margin_v wins. .ass files carry their own styles, so style, max_lines and the platform margin are ignored there (style_applied=false, fit=null with a note). Set dry_run=true to print the exact ffmpeg command and write no file (font_size/margin/style/fit are computed from the input, so they are exact; duration/size report null — measured on the real output).",
     schema: {

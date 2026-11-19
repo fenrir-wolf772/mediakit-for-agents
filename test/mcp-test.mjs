@@ -186,10 +186,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 75 tools present");
-checkOk(missing.length === 0, "tools/list has all 75 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 76 tools present");
+checkOk(missing.length === 0, "tools/list has all 76 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -1632,6 +1632,7 @@ if (process.env.MEDIAKIT_TEST_ASR === "1") {
 checkOk(doctorJson.tools.fit?.available === true, "doctor: fit is available");
 checkOk(doctorJson.tools.generate_srt?.available === true, "doctor: generate_srt is available (pure Node, no ffmpeg filter needed)");
 checkOk(doctorJson.tools.export_gif?.available === true, "doctor: export_gif is available (palettegen/paletteuse present)");
+checkOk(doctorJson.tools.extract_frames?.available === true, "doctor: extract_frames is available (fps/scale present)");
 checkOk(doctorJson.tools.grade?.available === true, "doctor: grade is available (eq/hue/colorbalance/lutrgb present)");
 checkOk(doctorJson.tools.check?.available === true, "doctor: check is available (astats/ametadata present for the peaks scan)");
 checkOk(doctorJson.tools.reverse?.available === true, "doctor: reverse is available (reverse/areverse filters present)");
@@ -2235,6 +2236,86 @@ const framesJson = JSON.parse(framesRes.content[0].text);
 console.log("frames call: extracted", framesJson.extracted, "| timestamps", framesJson.frames.map((f) => f.timestamp_seconds).join(","));
 checkOk(framesJson.extracted === 5, "frames extracts 5 frames", `got ${framesJson.extracted}`);
 checkOk(framesJson.frames?.[0]?.timestamp_seconds === 0 && framesJson.frames?.[4]?.timestamp_seconds === 8, "frames timestamps are 0,2,4,6,8", framesJson.frames.map((f) => f.timestamp_seconds).join(","));
+
+// extract_frames (turn 115): the full sequence, not N samples —
+// herdiansah/ffmpeg-mcp-server's convert_video_to_images idea, but
+// probe-first with the count verified on disk. test/source.mp4 is
+// 10s at 30fps, so fps=2 writes exactly 20 files.
+const seqRes = await client.callTool({
+  name: "extract_frames",
+  arguments: { input: path.join(root, "test/source.mp4"), output_dir: path.join(root, "outputs/mcp-extract-frames"), fps: 2, format: "png" },
+});
+const seqJson = JSON.parse(seqRes.content[0].text);
+console.log("extract_frames call:", seqJson.frame_count, "/", seqJson.frame_count_expected, "| first", seqJson.first_timestamp_seconds, "| last", seqJson.last_timestamp_seconds);
+checkOk(seqJson.frame_count === 20 && seqJson.frame_count_expected === 20 && seqJson.frames_verified === true && seqJson.count_diff === 0 && seqJson.first_timestamp_seconds === 0 && seqJson.last_timestamp_seconds === 9.5, "extract_frames fps=2 on a 10s clip writes exactly 20 frames, verified, timestamps 0..9.5", JSON.stringify({ frame_count: seqJson.frame_count, expected: seqJson.frame_count_expected, verified: seqJson.frames_verified }));
+// Independent: the files on disk are really there, in order.
+const seqFiles = (await readdir(path.join(root, "outputs/mcp-extract-frames"))).sort();
+checkOk(seqFiles.length === 20 && seqFiles[0] === "frame-0001.png" && seqFiles[19] === "frame-0020.png", "extract_frames files on disk: frame-0001.png..frame-0020.png", seqFiles.join(","));
+// Default fps is the source rate (30): range 2-3s writes 30 frames.
+const seqRangeRes = await client.callTool({
+  name: "extract_frames",
+  arguments: { input: path.join(root, "test/source.mp4"), output_dir: path.join(root, "outputs/mcp-extract-frames-range"), start: 2, end: 3 },
+});
+const seqRangeJson = JSON.parse(seqRangeRes.content[0].text);
+checkOk(seqRangeJson.fps === 30 && seqRangeJson.frame_count === 30 && seqRangeJson.frames_verified === true && seqRangeJson.first_timestamp_seconds === 2 && seqRangeJson.last_timestamp_seconds === 2.967, "extract_frames defaults to source fps (30) on range 2-3s: 30 frames, timestamps 2..2.967", JSON.stringify({ fps: seqRangeJson.fps, frame_count: seqRangeJson.frame_count, first: seqRangeJson.first_timestamp_seconds, last: seqRangeJson.last_timestamp_seconds }));
+// jpg with quality, and webp with quality + width (the webp path
+// needs the image2 muxer + libwebp or it writes one corrupt file).
+const seqJpgRes = await client.callTool({
+  name: "extract_frames",
+  arguments: { input: path.join(root, "test/source.mp4"), output_dir: path.join(root, "outputs/mcp-extract-frames-jpg"), fps: 2, format: "jpg", quality: 80 },
+});
+const seqJpgJson = JSON.parse(seqJpgRes.content[0].text);
+checkOk(seqJpgJson.frame_count === 20 && seqJpgJson.frames_verified === true && seqJpgJson.frames_sample?.[0]?.file === "frame-0001.jpg", "extract_frames jpg quality 80 writes 20 verified .jpg frames", JSON.stringify({ frame_count: seqJpgJson.frame_count, first: seqJpgJson.frames_sample?.[0]?.file }));
+const seqWebpRes = await client.callTool({
+  name: "extract_frames",
+  arguments: { input: path.join(root, "test/source.mp4"), output_dir: path.join(root, "outputs/mcp-extract-frames-webp"), fps: 2, format: "webp", quality: 90, width: 320 },
+});
+const seqWebpJson = JSON.parse(seqWebpRes.content[0].text);
+checkOk(seqWebpJson.frame_count === 20 && seqWebpJson.frames_verified === true, "extract_frames webp quality 90 width 320 writes 20 verified frames", JSON.stringify({ frame_count: seqWebpJson.frame_count, verified: seqWebpJson.frames_verified }));
+const seqWebpDims = await execFileAsync("ffprobe", ["-v", "error", "-show_entries", "stream=width,height", "-of", "csv", path.join(root, "outputs/mcp-extract-frames-webp/frame-0001.webp")]);
+checkOk(/320,180/.test(seqWebpDims.stdout), "extract_frames webp frame decodes 320x180 (image2 muxer, not animated-webp)", seqWebpDims.stdout.trim());
+// dry-run prints the exact command and writes nothing; the printed
+// command run by hand must produce a byte-identical first frame.
+// Clear the dir first: the hand-run below creates it, so a re-run
+// would otherwise see the leftover and fail the "writes nothing"
+// half of this check.
+await rm(path.join(root, "outputs/mcp-extract-frames-dry"), { recursive: true, force: true });
+const seqDryRes = await client.callTool({
+  name: "extract_frames",
+  arguments: { input: path.join(root, "test/source.mp4"), output_dir: path.join(root, "outputs/mcp-extract-frames-dry"), fps: 2, dry_run: true },
+});
+const seqDryJson = JSON.parse(seqDryRes.content[0].text);
+checkOk(seqDryJson.dry_run === true && seqDryJson.frames === null && seqDryJson.frame_count === null && /fps=2/.test(seqDryJson.command ?? "") && /frame-%04d\.png/.test(seqDryJson.command ?? "") && /rgba/.test(seqDryJson.command ?? "") && !existsSync(path.join(root, "outputs/mcp-extract-frames-dry")), "extract_frames dry-run prints the exact command (fps filter + rgba + pattern) and writes nothing", seqDryJson.command ?? "");
+// ffmpeg's image2 muxer does not create the output directory — the
+// real run does that via prepareOutputDir, so a hand-run needs the
+// dir to exist first (same as running any printed ffmpeg command
+// whose output folder is new).
+await mkdir(path.join(root, "outputs/mcp-extract-frames-dry"), { recursive: true });
+await execFileAsync("bash", ["-c", seqDryJson.command]);
+const seqDrySha = await sha256File(path.join(root, "outputs/mcp-extract-frames-dry/frame-0001.png"));
+const seqRealSha = await sha256File(path.join(root, "outputs/mcp-extract-frames/frame-0001.png"));
+checkOk(seqDrySha === seqRealSha, "extract_frames dry-run command run by hand produces a byte-identical first frame", `${seqDrySha.slice(0, 12)} vs ${seqRealSha.slice(0, 12)}`);
+// The 5000-frame ceiling: a 60s clip at 120fps would write 7200.
+await execFileAsync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "color=c=red:s=320x180:d=60", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30", "-y", path.join(root, "outputs/mcp-extract-frames-long60.mp4")]);
+const seqCapRes = await client.callTool({
+  name: "extract_frames",
+  arguments: { input: path.join(root, "outputs/mcp-extract-frames-long60.mp4"), output_dir: path.join(root, "outputs/mcp-extract-frames-cap"), fps: 120 },
+});
+const seqCapJson = JSON.parse(seqCapRes.content[0].text);
+checkOk(seqCapRes.isError === true && /7200 frames/.test(seqCapJson.error ?? "") && /limit 5000/.test(seqCapJson.error ?? "") && !existsSync(path.join(root, "outputs/mcp-extract-frames-cap")), "extract_frames refuses 7200 frames (60s at 120fps) over the 5000 cap before writing anything", JSON.stringify(seqCapJson));
+// quality is refused for png, and audio-only input is refused.
+const seqQRes = await client.callTool({
+  name: "extract_frames",
+  arguments: { input: path.join(root, "test/source.mp4"), output_dir: path.join(root, "outputs/mcp-extract-frames-q"), fps: 2, quality: 80 },
+});
+const seqQJson = JSON.parse(seqQRes.content[0].text);
+checkOk(seqQRes.isError === true && /quality only applies to jpg\/webp/.test(seqQJson.error ?? ""), "extract_frames refuses quality with png (lossless)", JSON.stringify(seqQJson));
+const seqAudioRes = await client.callTool({
+  name: "extract_frames",
+  arguments: { input: path.join(root, "test/silence-audio.mp3"), output_dir: path.join(root, "outputs/mcp-extract-frames-audio"), fps: 2 },
+});
+const seqAudioJson = JSON.parse(seqAudioRes.content[0].text);
+checkOk(seqAudioRes.isError === true && /needs a video input/.test(seqAudioJson.error ?? ""), "extract_frames refuses an audio-only input", JSON.stringify(seqAudioJson));
 
 const overlayRes = await client.callTool({
   name: "overlay",
@@ -6034,7 +6115,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 75 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 75 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 76 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 76 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -8270,7 +8351,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 75 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 76 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -8330,11 +8411,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 75, "GET /mcp reports name/version/transport and 75 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 76, "GET /mcp reports name/version/transport and 76 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 75 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 75 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 76 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 76 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -8358,7 +8439,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 75, "JSON-RPC tools/list returns the same 75 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 76, "JSON-RPC tools/list returns the same 76 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));
