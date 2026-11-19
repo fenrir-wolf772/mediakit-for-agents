@@ -296,7 +296,7 @@ export const TOOL_DEFS = [
 
   {
     name: "reframe",
-    description: "Reframe a video to a target aspect/size in one step (e.g. 16:9 to 9:16 vertical 1080x1920). mode crop cuts the target aspect out (centre, or x/y anchor, or a named anchor: left/right/top/bottom/top-left/... to keep an edge subject in frame); pad letterboxes with black bars; blur fills the empty area with a blurred copy of the frame. Crop mode reports crop_kept_percent and warns below 40% kept (upscaled, may look soft).",
+    description: "Reframe a video to a target aspect/size in one step (e.g. 16:9 to 9:16 vertical 1080x1920). mode crop cuts the target aspect out (centre, or x/y anchor, or a named anchor: left/right/top/bottom/top-left/... to keep an edge subject in frame); pad letterboxes with black bars; blur fills the empty area with a blurred copy of the frame. Crop mode reports crop_kept_percent and warns below 40% kept (upscaled, may look soft). Set dry_run=true to print the exact ffmpeg command and write no file (crop/kept-percent are computed from the input geometry, so they are exact; duration/size report null — measured on the real output).",
     schema: {
     input: pathSchema,
     output: pathSchema,
@@ -307,8 +307,20 @@ export const TOOL_DEFS = [
     y: z.number().int().min(0).optional().describe("Crop anchor: top offset of the crop window (crop mode only)"),
     anchor: z.enum(["center", "left", "right", "top", "bottom", "top-left", "top-right", "bottom-left", "bottom-right"]).optional().describe("Named crop anchor (crop mode only); explicit x/y win over it"),
     blur: z.number().min(0).max(100).default(20).describe("Blur strength for the background fill (blur mode only)"),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
-    handler: async (a) => safe(() => core.reframe(a)),
+    handler: async (a) => safe(() => core.reframe({
+    input: a.input,
+    output: a.output,
+    width: a.width,
+    height: a.height,
+    mode: a.mode,
+    x: a.x ?? null,
+    y: a.y ?? null,
+    anchor: a.anchor ?? null,
+    blur: a.blur,
+    dryRun: a.dry_run,
+  })),
   },
 
 
@@ -451,18 +463,20 @@ export const TOOL_DEFS = [
 
   {
     name: "reverse",
-    description: "Play a clip backwards: video frames reversed with the `reverse` filter, audio reversed with `areverse` (on by default; set audio false to keep the audio playing forward under reversed video). Re-encodes video (libx264, crf 23 default). The `reverse` filter buffers every frame, so very long inputs cost memory. The result reports whether video/audio were actually reversed, plus duration measured on disk.",
+    description: "Play a clip backwards: video frames reversed with the `reverse` filter, audio reversed with `areverse` (on by default; set audio false to keep the audio playing forward under reversed video). Re-encodes video (libx264, crf 23 default). The `reverse` filter buffers every frame, so very long inputs cost memory. The result reports whether video/audio were actually reversed, plus duration measured on disk. Set dry_run=true to print the exact ffmpeg command and write no file (duration/size report null — measured on the real output).",
     schema: {
     input: pathSchema,
     output: pathSchema,
     audio: z.boolean().default(true).describe("Reverse the audio too (default true); false copies the audio forward under the reversed video"),
     crf: z.number().int().min(0).max(51).default(23),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
     handler: async (a) => safe(() => core.reverseClip({
     input: a.input,
     output: a.output,
     audio: a.audio,
     crf: a.crf,
+    dryRun: a.dry_run,
   })),
   },
 
@@ -759,14 +773,15 @@ export const TOOL_DEFS = [
 
   {
     name: "silence",
-    description: "Remove silent stretches from speech/video. Detects silence with silencedetect, keeps the speech plus a margin of silence on each side (so words are never clipped), then cuts and re-joins — every kept segment gets a 12ms fade out + 15ms fade in at the join, so a cut mid-tone has no click. Set detect_only=true to just report the silence/kept segments without writing a file. Returns removed_seconds and the kept segment list — verify those before trusting the cut.",
+    description: "Remove silent stretches from speech/video. Detects silence with silencedetect, keeps the speech plus a margin of silence on each side (so words are never clipped), then cuts and re-joins — every kept segment gets a 12ms fade out + 15ms fade in at the join, so a cut mid-tone has no click. Set detect_only=true to just report the silence/kept segments without writing a file. Returns removed_seconds and the kept segment list — verify those before trusting the cut. Set dry_run=true to print the exact ffmpeg command that would run and write no file (the silencedetect measurement still runs, read-only; duration_after/size report null — measured on the real output; with nothing worth cutting the command is a stream-copy).",
     schema: {
     input: pathSchema,
-    output: pathSchema.optional().describe("Output file path (not needed with detect_only=true)"),
+    output: pathSchema.optional().describe("Output file path (not needed with detect_only=true; dry_run=true still needs it to print the command)"),
     threshold_db: z.number().min(-90).max(0).default(-40).describe("Silence threshold in dB (more negative = stricter)"),
     min_duration: z.number().min(0.05).max(60).default(0.5).describe("Minimum silence length in seconds to cut"),
     margin: z.number().min(0).max(5).default(0.2).describe("Seconds of silence kept around each speech segment"),
     detect_only: z.boolean().default(false).describe("Report silence/kept segments without writing output"),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
     handler: async (a) => safe(() => core.silence({
     input: a.input,
@@ -775,6 +790,7 @@ export const TOOL_DEFS = [
     minDuration: a.min_duration,
     margin: a.margin,
     detectOnly: a.detect_only,
+    dryRun: a.dry_run,
   })),
   },
 
@@ -1178,13 +1194,14 @@ export const TOOL_DEFS = [
 
   {
     name: "fit",
-    description: "Fit a media file to an exact target duration in seconds. method speed (default) speeds it up/down with setpts + chained atempo (factor must stay in 0.25-4x); trim cuts a longer source down; loop repeats a shorter source until it reaches the target. max_fps caps the output frame rate (e.g. 15 for a smaller file) — it only ever lowers the fps, never raises it by duplicating frames. Returns the output duration and fps actually measured with ffprobe, plus duration_error_seconds.",
+    description: "Fit a media file to an exact target duration in seconds. method speed (default) speeds it up/down with setpts + chained atempo (factor must stay in 0.25-4x); trim cuts a longer source down; loop repeats a shorter source until it reaches the target. max_fps caps the output frame rate (e.g. 15 for a smaller file) — it only ever lowers the fps, never raises it by duplicating frames. Returns the output duration and fps actually measured with ffprobe, plus duration_error_seconds. Set dry_run=true to print the exact ffmpeg command and write no file (speed_factor/loops/fps_capped are computed from the probe, so they are exact; duration_actual/duration_error/fps/size report null — measured on the real output).",
     schema: {
     input: pathSchema,
     output: pathSchema,
     duration: z.number().positive().describe("Target duration in seconds"),
     method: z.enum(["speed", "trim", "loop"]).default("speed").describe("speed = change playback speed (keeps the whole clip), trim = cut a longer source, loop = repeat a shorter source"),
     max_fps: z.number().int().min(1).max(120).optional().describe("Cap the output frame rate (1-120). Only lowers fps — a 30fps source with max_fps 60 keeps 30fps; video only, ignored for audio-only input"),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
     handler: async (a) => safe(() => core.fitDuration({
     input: a.input,
@@ -1192,6 +1209,7 @@ export const TOOL_DEFS = [
     duration: a.duration,
     method: a.method,
     maxFps: a.max_fps ?? null,
+    dryRun: a.dry_run,
   })),
   },
 

@@ -36,13 +36,14 @@ const COMMANDS = {
     ],
   },
   fit: {
-    usage: "mediakit fit <input> --duration <s|MM:SS> -o <output> [--method speed|trim|loop] [--max-fps <n>]",
-    desc: "Fit a file to an exact target duration. speed (default) speeds it up/down (factor 0.25-4x); trim cuts a longer source; loop repeats a shorter source. --max-fps caps the output frame rate (only ever lowers it). Times accept seconds or MM:SS.",
+    usage: "mediakit fit <input> --duration <s|MM:SS> -o <output> [--method speed|trim|loop] [--max-fps <n>] [--dry-run]",
+    desc: "Fit a file to an exact target duration. speed (default) speeds it up/down (factor 0.25-4x); trim cuts a longer source; loop repeats a shorter source. --max-fps caps the output frame rate (only ever lowers it). Times accept seconds or MM:SS. --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--duration", "Target duration in seconds or MM:SS (required)"],
       ["--method", "speed (default) | trim | loop"],
       ["--max-fps", "Cap the output frame rate, 1-120 (only lowers fps, never raises it)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -180,8 +181,8 @@ const COMMANDS = {
     ],
   },
   reframe: {
-    usage: "mediakit reframe <input> -o <output> [--width 1080] [--height 1920] [--mode crop|pad|blur] [--x <px>] [--y <px>] [--anchor <name>] [--blur <n>]",
-    desc: "Reframe to a target aspect/size in one step (e.g. 16:9 -> 9:16 vertical).",
+    usage: "mediakit reframe <input> -o <output> [--width 1080] [--height 1920] [--mode crop|pad|blur] [--x <px>] [--y <px>] [--anchor <name>] [--blur <n>] [--dry-run]",
+    desc: "Reframe to a target aspect/size in one step (e.g. 16:9 -> 9:16 vertical). --dry-run prints the exact ffmpeg command and writes no file (crop/kept-percent are computed from the input geometry, so they are exact).",
     args: [{ name: "input", required: true }],
     options: [
       ["--width", "Target width in pixels (default 1080, must be even)"],
@@ -191,6 +192,7 @@ const COMMANDS = {
       ["--y", "Crop anchor: top offset (crop mode only)"],
       ["--anchor", "Named crop anchor: center | left | right | top | bottom | top-left | top-right | bottom-left | bottom-right (crop mode only; explicit --x/--y win)"],
       ["--blur", "Blur strength for blur mode (default 20)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -313,12 +315,13 @@ const COMMANDS = {
     ],
   },
   reverse: {
-    usage: "mediakit reverse <input> -o <output> [--no-audio] [--crf 23]",
-    desc: "Play a clip backwards: video frames reversed, audio reversed too by default. Reports whether each stream was actually reversed. Works on audio-only input as well.",
+    usage: "mediakit reverse <input> -o <output> [--no-audio] [--crf 23] [--dry-run]",
+    desc: "Play a clip backwards: video frames reversed, audio reversed too by default. Reports whether each stream was actually reversed. Works on audio-only input as well. --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--no-audio", "Keep the audio playing forward under the reversed video (reverses nothing on audio-only input)"],
       ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -476,14 +479,15 @@ const COMMANDS = {
     ],
   },
   silence: {
-    usage: "mediakit silence <input> -o <output> [--threshold-db <n>] [--min-duration <s>] [--margin <s>] [--detect-only]",
-    desc: "Remove silent stretches, keeping a margin of silence around speech. --detect-only reports segments without writing.",
+    usage: "mediakit silence <input> -o <output> [--threshold-db <n>] [--min-duration <s>] [--margin <s>] [--detect-only] [--dry-run]",
+    desc: "Remove silent stretches, keeping a margin of silence around speech. --detect-only reports segments without writing. --dry-run prints the exact ffmpeg command and writes no file (needs -o, like a real run; with nothing worth cutting the command is a stream-copy).",
     args: [{ name: "input", required: true }],
     options: [
       ["--threshold-db", "Silence threshold in dB (default -40, more negative = stricter)"],
       ["--min-duration", "Minimum silence length to cut, seconds (default 0.5)"],
       ["--margin", "Silence kept around each speech segment, seconds (default 0.2)"],
       ["--detect-only", "Report silence/kept segments, write no file"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required unless --detect-only)"],
     ],
   },
@@ -1219,6 +1223,7 @@ async function main() {
           duration: opts.duration,
           method: opts.method ?? "speed",
           maxFps: numOpt(opts, "max_fps") ?? null,
+          dryRun: opts.dry_run === true,
         });
         break;
       }
@@ -1329,6 +1334,7 @@ async function main() {
           y: numOpt(opts, "y") ?? null,
           anchor: opts.anchor ?? null,
           blur: numOpt(opts, "blur") ?? 20,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "qa-report":
@@ -1416,6 +1422,7 @@ async function main() {
           input: needInput(), output: needOutput(opts),
           audio: opts.audio !== false,
           crf: numOpt(opts, "crf") ?? 23,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "rotate":
@@ -1553,6 +1560,7 @@ async function main() {
           minDuration: numOpt(opts, "min_duration") ?? 0.5,
           margin: numOpt(opts, "margin") ?? 0.2,
           detectOnly,
+          dryRun: opts.dry_run === true,
         });
         break;
       }

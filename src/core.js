@@ -1201,7 +1201,7 @@ function atempoChain(factor) {
   return steps.map((s) => `atempo=${s}`).join(",");
 }
 
-export async function fitDuration({ input, output, duration, method = "speed", maxFps = null }) {
+export async function fitDuration({ input, output, duration, method = "speed", maxFps = null, dryRun = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const target = parseTime(duration, "duration");
@@ -1267,6 +1267,20 @@ export async function fitDuration({ input, output, duration, method = "speed", m
     if (meta.video) args.push("-c:v", "libx264", "-crf", "18", "-preset", "veryfast");
     if (meta.audio) args.push("-c:a", audioCodec, ...audioBitrateArgs(audioCodec));
     args.push(outPath);
+  }
+  if (dryRun) {
+    // factor / speed_factor / loops / fps_capped are all computed from
+    // the probe above, so they are exact in a dry run; only the actual
+    // duration, error, fps and size are measured on the real output.
+    return {
+      operation: "fit", dry_run: true, input: inPath, output: outPath,
+      source_duration_seconds: srcDur, target_duration_seconds: target,
+      ...applied, max_fps: maxF, fps_capped: capFps !== null,
+      duration_actual: null, duration_error_seconds: null,
+      fps: null, size_bytes: null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. duration_actual/duration_error/fps/size are measured on the real output, so they report null here.",
+    };
   }
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
@@ -4384,7 +4398,7 @@ export async function social({ input, outputDir, platforms = ["tiktok", "reels",
 // black bars. mode "blur": same fit, but the empty area is filled with
 // a blurred, darkened copy of the frame (the Shorts/Reels look).
 
-export async function reframe({ input, output, width = 1080, height = 1920, mode = "crop", x = null, y = null, blur = 20, anchor = null }) {
+export async function reframe({ input, output, width = 1080, height = 1920, mode = "crop", x = null, y = null, blur = 20, anchor = null, dryRun = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const tw = num(width, "width", { min: 2, integer: true });
@@ -4445,11 +4459,28 @@ export async function reframe({ input, output, width = 1080, height = 1920, mode
     const b = num(blur, "blur", { min: 0, max: 100 });
     vf = `split[a][b];[a]scale=${tw}:${th}:force_original_aspect_ratio=increase,crop=${tw}:${th},gblur=sigma=${b},eq=brightness=-0.25[bg];[b]scale=${tw}:${th}:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2`;
   }
-  await run(FFMPEG, [
+  const args = [
     "-y", "-i", inPath, "-vf", vf,
     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "medium",
     "-c:a", "copy", "-movflags", "+faststart", outPath,
-  ]);
+  ];
+  if (dryRun) {
+    // The crop window, kept-percent and warning are all computed from
+    // the probe geometry above, so they are exact in a dry run; only
+    // duration/size are measured on the real output.
+    return {
+      operation: "reframe", dry_run: true, input: inPath, output: outPath, mode,
+      target: `${tw}x${th}`, source: `${sw}x${sh}`,
+      source_rotation: disp.rotation,
+      ...(cropRect ? { crop: cropRect } : {}),
+      ...(cropStats ? { crop_kept_percent: cropStats.kept_percent, upscale: cropStats.upscale, ...(cropStats.warning ? { warning: cropStats.warning } : {}) } : {}),
+      dimensions: `${tw}x${th}`,
+      duration_seconds: null, size_bytes: null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. crop/kept-percent are computed from the input geometry, so they are exact; duration/size are measured on the real output, so they report null here.",
+    };
+  }
+  await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
   return {
@@ -5378,7 +5409,7 @@ export async function grade({ input, output, preset = null, filter = null, crf =
 // result reports whether each stream was actually reversed, and the
 // test suite verifies the swap on pixels (red/blue halves trade
 // places) and on audio (the silence gaps trade places too).
-export async function reverseClip({ input, output, audio = true, crf = 23 }) {
+export async function reverseClip({ input, output, audio = true, crf = 23, dryRun = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const c = num(crf, "crf", { min: 0, max: 51, integer: true });
@@ -5401,6 +5432,21 @@ export async function reverseClip({ input, output, audio = true, crf = 23 }) {
     else args.push("-c:a", "copy");
   }
   args.push(outPath);
+  if (dryRun) {
+    // The probe above is read-only, so the printed command is exact.
+    // duration/size are measured on the real output, so they report
+    // null here; dimensions do not change when reversing, so the
+    // expected value is the input's display size.
+    return {
+      operation: "reverse", dry_run: true, input: inPath, output: outPath,
+      video_reversed: !!meta.video, audio_reversed: reverseAudio,
+      audio_codec: reverseAudio ? audioCodec : (meta.audio ? "copy" : null),
+      duration_seconds: null, size_bytes: null,
+      dimensions: meta.video ? `${meta.video.display_width}x${meta.video.display_height}` : null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. duration/size are measured on the real output, so they report null here.",
+    };
+  }
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
@@ -8124,7 +8170,7 @@ function joinFadeAudio(seg, i) {
   return `${chain}[a${i}]`;
 }
 
-export async function silence({ input, output = null, thresholdDb = -40, minDuration = 0.5, margin = 0.2, detectOnly = false }) {
+export async function silence({ input, output = null, thresholdDb = -40, minDuration = 0.5, margin = 0.2, detectOnly = false, dryRun = false }) {
   const inPath = await requireInput(input);
   const m = num(margin, "margin", { min: 0, max: 5 });
   const det = await detectSilence(inPath, { thresholdDb, minDuration });
@@ -8145,13 +8191,17 @@ export async function silence({ input, output = null, thresholdDb = -40, minDura
     removed_seconds: removed,
     removed_count: det.silences.length,
   };
-  if (detectOnly) return { ...base, detect_only: true };
+  if (detectOnly) return { ...base, detect_only: true, ...(dryRun ? { dry_run: true } : {}) };
 
   const outPath = await prepareOutput(output, [inPath]);
   const meta = await probe(inPath);
   if (removed < 0.05) {
     // Nothing worth cutting: copy the streams as-is.
-    await run(FFMPEG, ["-y", "-i", inPath, "-c", "copy", outPath]);
+    const copyArgs = ["-y", "-i", inPath, "-c", "copy", outPath];
+    if (dryRun) {
+      return { ...base, dry_run: true, output: outPath, duration_after: null, stream_copy: true, size_bytes: null, commands: [formatCommand(copyArgs)], note: "Dry run: no file written. Nothing worth cutting (removed < 0.05s), so the real run stream-copies the input." };
+    }
+    await run(FFMPEG, copyArgs);
     const info = await fileInfo(outPath);
     return { ...base, output: outPath, duration_after: duration, stream_copy: true, ...info };
   }
@@ -8184,6 +8234,20 @@ export async function silence({ input, output = null, thresholdDb = -40, minDura
     args.push("-map", "[aout]", "-c:a", codec, ...audioBitrateArgs(codec));
   }
   args.push(outPath);
+  if (dryRun) {
+    // silencedetect + the kept-segment plan are read-only, so the
+    // printed command is exact; duration_after/size are measured on
+    // the real output, so they report null here. Dimensions do not
+    // change when cutting silence, so the expected value is the
+    // input's display size.
+    return {
+      ...base, dry_run: true, output: outPath,
+      duration_after: null, stream_copy: false, size_bytes: null,
+      dimensions: meta.video ? `${meta.video.display_width}x${meta.video.display_height}` : null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. duration_after/size are measured on the real output, so they report null here.",
+    };
+  }
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);

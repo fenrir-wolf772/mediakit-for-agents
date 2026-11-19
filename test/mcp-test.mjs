@@ -291,6 +291,18 @@ checkOk(reframeRightJson.crop.x === 876, "reframe anchor right pins crop to x=87
 const anchorPsnr = await bandPsnr(path.join(root, "outputs/mcp-reframe-left.mp4"), path.join(root, "outputs/mcp-reframe-right.mp4"), 5, 0, 1920);
 checkOk(anchorPsnr !== null && anchorPsnr < 30, "reframe left vs right frames differ (anchor moves the crop)", `got PSNR ${anchorPsnr}`);
 
+// reframe --dry-run (lượt 108): crop geometry is computed from the
+// probe, so it is exact without rendering.
+const reframeDryRes = await client.callTool({
+  name: "reframe",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-reframe-dry.mp4"), width: 1080, height: 1920, mode: "crop", dry_run: true },
+});
+const reframeDryJson = JSON.parse(reframeDryRes.content[0].text);
+console.log("reframe dry-run:", JSON.stringify({ crop: reframeDryJson.crop, kept: reframeDryJson.crop_kept_percent }));
+checkOk(reframeDryJson.dry_run === true && reframeDryJson.crop?.x === 438 && near(reframeDryJson.crop_kept_percent, 31.6, 0.2) && typeof reframeDryJson.warning === "string", "reframe dry-run reports the exact crop (x=438, 31.6% kept) + warning", JSON.stringify(reframeDryJson.crop));
+checkOk(reframeDryJson.commands?.length === 1 && reframeDryJson.commands[0].includes("crop=404:720:438:0,scale=1080:1920"), "reframe dry-run prints the exact crop command", reframeDryJson.commands?.[0] ?? "");
+checkOk(!existsSync(path.join(root, "outputs/mcp-reframe-dry.mp4")), "reframe dry-run writes no file", "outputs/mcp-reframe-dry.mp4");
+
 const checkRes = await client.callTool({
   name: "check",
   arguments: {
@@ -602,6 +614,19 @@ const reverseVideoOnlyJson = JSON.parse(reverseVideoOnlyRes.content[0].text);
 checkOk(reverseVideoOnlyJson.video_reversed === true && reverseVideoOnlyJson.audio_reversed === false && near(reverseVideoOnlyJson.duration_seconds, 10, 0.1), "reverse on video-only input reverses video, no audio to reverse", JSON.stringify(reverseVideoOnlyJson));
 const reverseNoop = await callExpectThrow("reverse", { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-reverse-noop.mp3"), audio: false });
 checkOk(/reverses nothing/.test(reverseNoop), "reverse audio-only + audio=false is refused (nothing to reverse)", reverseNoop.slice(0, 200));
+
+// reverse --dry-run (lượt 108): prints the exact command, writes no file.
+const reverseDryRes = await client.callTool({
+  name: "reverse",
+  arguments: { input: path.join(root, "test/scenes-source.mp4"), output: path.join(root, "outputs/mcp-reverse-dry.mp4"), dry_run: true },
+});
+const reverseDryJson = JSON.parse(reverseDryRes.content[0].text);
+console.log("reverse dry-run:", JSON.stringify({ commands: reverseDryJson.commands?.length, video_reversed: reverseDryJson.video_reversed }));
+checkOk(reverseDryJson.dry_run === true && reverseDryJson.video_reversed === true && reverseDryJson.audio_reversed === true && reverseDryJson.duration_seconds === null, "reverse dry-run reports reversed streams, duration null", JSON.stringify(reverseDryJson));
+checkOk(reverseDryJson.commands?.length === 1 && reverseDryJson.commands[0].includes("-vf reverse") && reverseDryJson.commands[0].includes("-af areverse"), "reverse dry-run prints the exact reverse command", reverseDryJson.commands?.[0] ?? "");
+checkOk(!existsSync(path.join(root, "outputs/mcp-reverse-dry.mp4")), "reverse dry-run writes no file", "outputs/mcp-reverse-dry.mp4");
+const reverseDryCli = await runCliJson(["reverse", path.join(root, "test/scenes-source.mp4"), "-o", path.join(root, "outputs/mcp-reverse-cli-dry.mp4"), "--dry-run"]);
+checkOk(reverseDryCli.dry_run === true && reverseDryCli.commands?.[0]?.includes("-vf reverse") && !existsSync(path.join(root, "outputs/mcp-reverse-cli-dry.mp4")), "CLI reverse --dry-run prints the command and writes no file", JSON.stringify(reverseDryCli.commands));
 
 // make_loopable: tail-to-head crossfade so a clip loops with no
 // jump. Fixture test/scenes-source.mp4 is red 5s + blue 5s, so the
@@ -1849,6 +1874,29 @@ if (typeof fadeJoin === "number" && fadePcm) {
   // a real click (tone-scale) still fails both caps.
   checkOk(jump < 0.03 && jump < toneJump * 0.5, "silence join: max sample jump at the join is under 0.03 and under half the in-tone jump (no click)", `jump=${jump.toFixed(3)} tone=${toneJump.toFixed(3)}`);
 }
+
+// silence --dry-run (lượt 108): the silencedetect plan is read-only,
+// so the printed command is the exact command the real run executes.
+const silenceDryRes = await client.callTool({
+  name: "silence",
+  arguments: { input: path.join(root, "test/silence-source.mp4"), output: path.join(root, "outputs/mcp-silence-dry.mp4"), dry_run: true },
+});
+const silenceDryJson = JSON.parse(silenceDryRes.content[0].text);
+console.log("silence dry-run:", JSON.stringify({ removed: silenceDryJson.removed_seconds, segments: silenceDryJson.kept_segments?.length }));
+checkOk(silenceDryJson.dry_run === true && near(silenceDryJson.removed_seconds, 2.195, 0.05) && silenceDryJson.duration_after === null, "silence dry-run reports the same 2.195s plan, duration_after null", JSON.stringify({ removed: silenceDryJson.removed_seconds, after: silenceDryJson.duration_after }));
+checkOk(silenceDryJson.commands?.length === 1 && silenceDryJson.commands[0].includes("trim=start=0:end=2.202") && silenceDryJson.commands[0].includes("concat=n=3"), "silence dry-run prints the exact trim+concat command", silenceDryJson.commands?.[0]?.slice(0, 200) ?? "");
+checkOk(!existsSync(path.join(root, "outputs/mcp-silence-dry.mp4")), "silence dry-run writes no file", "outputs/mcp-silence-dry.mp4");
+const silenceDryCli = await runCliJson(["silence", path.join(root, "test/silence-source.mp4"), "-o", path.join(root, "outputs/mcp-silence-cli-dry.mp4"), "--dry-run"]);
+checkOk(silenceDryCli.dry_run === true && silenceDryCli.commands?.[0]?.includes("trim=start=0:end=2.202") && !existsSync(path.join(root, "outputs/mcp-silence-cli-dry.mp4")), "CLI silence --dry-run prints the command and writes no file", JSON.stringify(silenceDryCli.commands));
+// silence dry-run on a file with nothing to cut: the command is a
+// stream-copy, same as the real run.
+const silenceCopyDryRes = await client.callTool({
+  name: "silence",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-silence-copy-dry.mp4"), dry_run: true },
+});
+const silenceCopyDryJson = JSON.parse(silenceCopyDryRes.content[0].text);
+checkOk(silenceCopyDryJson.dry_run === true && silenceCopyDryJson.stream_copy === true && silenceCopyDryJson.commands?.[0]?.includes("-c copy"), "silence dry-run with nothing to cut prints the stream-copy command", JSON.stringify(silenceCopyDryJson.commands));
+checkOk(!existsSync(path.join(root, "outputs/mcp-silence-copy-dry.mp4")), "silence copy dry-run writes no file", "outputs/mcp-silence-copy-dry.mp4");
 
 const cropdetectRes = await client.callTool({
   name: "cropdetect",
@@ -3373,6 +3421,20 @@ const fitTrimCapJson = JSON.parse(fitTrimCapRes.content[0].text);
 checkOk(fitTrimCapJson.fps_capped === true && fitTrimCapJson.fps === 15 && near(fitTrimCapJson.duration_actual, 6, 0.05), "fit trim + max_fps 15 caps output to 15fps at 6s", JSON.stringify({ capped: fitTrimCapJson.fps_capped, fps: fitTrimCapJson.fps, actual: fitTrimCapJson.duration_actual }));
 const fitBadFps = await runCli(["fit", path.join(root, "test/source.mp4"), "--duration", "5", "--max-fps", "0", "-o", path.join(root, "outputs/mcp-fit-bad.mp4")]);
 checkOk(fitBadFps.code !== 0 && fitBadFps.out.includes("max_fps"), "CLI fit --max-fps 0 is rejected", fitBadFps.out.slice(0, 200));
+
+// fit --dry-run (lượt 108): factor is computed from the probe, so it
+// is exact without rendering.
+const fitDryRes = await client.callTool({
+  name: "fit",
+  arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-fit-dry.mp4"), duration: 5, method: "speed", dry_run: true },
+});
+const fitDryJson = JSON.parse(fitDryRes.content[0].text);
+console.log("fit dry-run:", JSON.stringify({ factor: fitDryJson.speed_factor, commands: fitDryJson.commands?.length }));
+checkOk(fitDryJson.dry_run === true && fitDryJson.speed_factor === 2 && fitDryJson.duration_actual === null && fitDryJson.fps === null, "fit dry-run reports the 2x factor, measured fields null", JSON.stringify({ factor: fitDryJson.speed_factor, actual: fitDryJson.duration_actual }));
+checkOk(fitDryJson.commands?.length === 1 && fitDryJson.commands[0].includes("setpts=PTS/2") && fitDryJson.commands[0].includes("atempo=2"), "fit dry-run prints the exact speed command", fitDryJson.commands?.[0] ?? "");
+checkOk(!existsSync(path.join(root, "outputs/mcp-fit-dry.mp4")), "fit dry-run writes no file", "outputs/mcp-fit-dry.mp4");
+const fitDryCli = await runCliJson(["fit", path.join(root, "test/source.mp4"), "--duration", "5", "-o", path.join(root, "outputs/mcp-fit-cli-dry.mp4"), "--dry-run"]);
+checkOk(fitDryCli.dry_run === true && fitDryCli.commands?.[0]?.includes("setpts=PTS/2") && !existsSync(path.join(root, "outputs/mcp-fit-cli-dry.mp4")), "CLI fit --dry-run prints the command and writes no file", JSON.stringify(fitDryCli.commands));
 
 // resize --preset: fit inside the named box, keep aspect, never
 // upscale. Source is 1280x720, so 720p is already a fit (no scale),
