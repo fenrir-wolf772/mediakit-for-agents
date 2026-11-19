@@ -167,8 +167,8 @@ const COMMANDS = {
     ],
   },
   "burn-captions": {
-    usage: "mediakit burn-captions <input> --captions <file.srt|ass|vtt> -o <output> [--font-size <n>] [--margin-v <n>] [--style background|outline|shadow|glow] [--outline-color <name|hex>] [--max-lines <n>] [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin]",
-    desc: "Burn subtitles into the video (hardcoded, always visible).",
+    usage: "mediakit burn-captions <input> --captions <file.srt|ass|vtt> -o <output> [--font-size <n>] [--margin-v <n>] [--style background|outline|shadow|glow] [--outline-color <name|hex>] [--max-lines <n>] [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin] [--dry-run]",
+    desc: "Burn subtitles into the video (hardcoded, always visible). --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--captions", "Subtitle file .srt/.ass/.vtt (required)"],
@@ -178,6 +178,7 @@ const COMMANDS = {
       ["--outline-color", "Outline colour for outline/shadow styles: name or RRGGBB hex (default black)"],
       ["--max-lines", "Fit-to-width: shrink the font until every cue wraps to at most N lines (1-4), never below the readability floor (~31px at 1920 high). Ignored for .ass files"],
       ["--platform", "Destination platform: default margin becomes that platform's bottom UI depth, and the fit width narrows to its text-safe rect. Explicit --margin-v wins"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -349,8 +350,8 @@ const COMMANDS = {
     ],
   },
   "chroma-key": {
-    usage: "mediakit chroma-key <input> -o <output.mov> [--color 00FF00] [--similarity 0.1] [--blend 0] [--background <image|hex>] [--crf 23]",
-    desc: "Remove a green/blue screen. Without --background the output keeps transparency and MUST be .mov (ProRes 4444) — .mp4 has no alpha, and this ffmpeg build drops VP9 alpha in .webm. With --background (an image file or a hex color) the subject is composited onto it and the output is a flat .mp4/.webm. Reports the alpha measured on disk (middle frame): full-frame mean, corner (~0 for a full-screen key) and center (~255 on the subject).",
+    usage: "mediakit chroma-key <input> -o <output.mov> [--color 00FF00] [--similarity 0.1] [--blend 0] [--background <image|hex>] [--crf 23] [--dry-run]",
+    desc: "Remove a green/blue screen. Without --background the output keeps transparency and MUST be .mov (ProRes 4444) — .mp4 has no alpha, and this ffmpeg build drops VP9 alpha in .webm. With --background (an image file or a hex color) the subject is composited onto it and the output is a flat .mp4/.webm. Reports the alpha measured on disk (middle frame): full-frame mean, corner (~0 for a full-screen key) and center (~255 on the subject). --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--color", "Key color as 6-digit hex (default 00FF00 green; 0000FF for blue)"],
@@ -358,6 +359,7 @@ const COMMANDS = {
       ["--blend", "Edge blend 0-1 (default 0)"],
       ["--background", "Image file or hex color to composite onto (e.g. bg.jpg or 1E40AF); without it the output keeps transparency and must be .mov"],
       ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -634,8 +636,8 @@ const COMMANDS = {
     ],
   },
   overlay: {
-    usage: "mediakit overlay <input> --image <logo.png> -o <output> [--position top-right|top-left|bottom-left|bottom-right|center] [--margin 24] [--width <px>] [--opacity 0.8] [--start <s>] [--end <s>]",
-    desc: "Overlay a logo/watermark image on a video, with position, scale, opacity and optional timing.",
+    usage: "mediakit overlay <input> --image <logo.png> -o <output> [--position top-right|top-left|bottom-left|bottom-right|center] [--margin 24] [--width <px>] [--opacity 0.8] [--start <s>] [--end <s>] [--dry-run]",
+    desc: "Overlay a logo/watermark image on a video, with position, scale, opacity and optional timing. --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--image", "Overlay image file (PNG with transparency recommended, required)"],
@@ -645,12 +647,13 @@ const COMMANDS = {
       ["--opacity", "Overlay opacity 0-1 (default 1)"],
       ["--start", "Show the overlay from this time in seconds"],
       ["--end", "Hide the overlay after this time in seconds"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
   pip: {
-    usage: "mediakit pip <input> --pip <video> -o <output> [--position bottom-right|top-left|top-center|top-right|center-left|center|center-right|bottom-left|bottom-center] [--margin 24] [--width <px>] [--scale 0.25] [--opacity 1] [--start <s>] [--end <s>] [--audio main|pip|mix]",
-    desc: "Picture-in-picture: place a second video over the main one, with position, size, opacity, timing and audio choice.",
+    usage: "mediakit pip <input> --pip <video> -o <output> [--position bottom-right|top-left|top-center|top-right|center-left|center|center-right|bottom-left|bottom-center] [--margin 24] [--width <px>] [--scale 0.25] [--opacity 1] [--start <s>] [--end <s>] [--audio main|pip|mix] [--dry-run]",
+    desc: "Picture-in-picture: place a second video over the main one, with position, size, opacity, timing and audio choice. --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--pip", "Video to place on top (required)"],
@@ -662,6 +665,7 @@ const COMMANDS = {
       ["--start", "Show the PiP from this time in seconds"],
       ["--end", "Hide the PiP after this time in seconds"],
       ["--audio", "main (default) | pip | mix (both)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -1338,6 +1342,7 @@ async function main() {
           style: opts.style ?? null, outlineColor: opts.outline_color ?? "black",
           maxLines: numOpt(opts, "max_lines") ?? null,
           platform: opts.platform ?? null,
+          dryRun: opts.dry_run === true,
         });
         break;
       }
@@ -1467,6 +1472,7 @@ async function main() {
           blend: numOpt(opts, "blend") ?? 0.0,
           background: opts.background ?? null,
           crf: numOpt(opts, "crf") ?? 23,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "zoom-pan":
@@ -1734,6 +1740,7 @@ async function main() {
           opacity: numOpt(opts, "opacity") ?? 1,
           start: numOpt(opts, "start") ?? null,
           end: numOpt(opts, "end") ?? null,
+          dryRun: opts.dry_run === true,
         });
         break;
       }
@@ -1749,6 +1756,7 @@ async function main() {
           start: opts.start ?? null,
           end: opts.end ?? null,
           audio: opts.audio ?? "main",
+          dryRun: opts.dry_run === true,
         });
         break;
       }

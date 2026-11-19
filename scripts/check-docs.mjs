@@ -81,6 +81,24 @@ if (reqMatch) {
   }
 }
 
+// CI tool-count guard (lượt 113): the smoke test in
+// .github/workflows/ci.yml asserts the HTTP /mcp endpoint reports
+// `"tools": N`. That N is a third copy of the tool count, and it
+// drifted twice before (lượt 89/91: 71 vs 73; lượt 112: 74 vs 75 —
+// verify_cuts shipped as tool 75 while CI still asserted 74, so
+// both CI runs on the lượt 112 commit failed at the HTTP curl after
+// every other smoke command had passed). Derive it here instead:
+// any `"tools": N` assertion in ci.yml must equal TOOL_DEFS length,
+// so `npm run check` fails locally the moment a new tool ships
+// without the CI bump — the smoke step never gets to be the one
+// that discovers it.
+const ciYml = await readFile(path.join(root, ".github/workflows/ci.yml"), "utf8");
+const ciCounts = [...ciYml.matchAll(/"tools": (\d+)/g)].map((m) => Number(m[1]));
+if (!ciCounts.length) problems.push("could not find a \"tools\": N assertion in .github/workflows/ci.yml");
+for (const n of ciCounts) {
+  if (n !== serverTools.length) problems.push(`CI asserts "tools": ${n} but src/tools.js has ${serverTools.length} tools — bump the ci.yml assertion when a tool ships`);
+}
+
 if (problems.length) {
   console.error("check-docs FAILED:");
   for (const p of problems) console.error(`  - ${p}`);

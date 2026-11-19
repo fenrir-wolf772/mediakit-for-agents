@@ -1278,6 +1278,23 @@ const chromaMp4 = await callExpectThrow("chroma_key", { input: path.join(root, "
 checkOk(/must be \.mov/.test(chromaMp4), "chroma_key refuses .mp4 without a background (no alpha channel)", chromaMp4.slice(0, 200));
 const chromaBadColor = await callExpectThrow("chroma_key", { input: path.join(root, "test/greenscreen.mp4"), output: path.join(root, "outputs/mcp-chroma-bad2.mov"), color: "ZZZZZZ" });
 checkOk(/6-digit hex/.test(chromaBadColor), "chroma_key refuses a non-hex key color", chromaBadColor.slice(0, 200));
+// chroma_key --dry-run (lượt 113, batch 4): both branches print
+// the exact command and write no file; measured fields report null.
+const chromaDryRes = await client.callTool({
+  name: "chroma_key",
+  arguments: { input: path.join(root, "test/greenscreen.mp4"), output: path.join(root, "outputs/mcp-chroma-dry.mov"), dry_run: true },
+});
+const chromaDryJson = JSON.parse(chromaDryRes.content[0].text);
+checkOk(chromaDryJson.dry_run === true && chromaDryJson.mode === "transparent" && chromaDryJson.pixel_format === null && chromaDryJson.has_alpha === null && chromaDryJson.alpha_mean === null && chromaDryJson.duration_seconds === null && chromaDryJson.dimensions === null, "chroma_key transparent dry-run reports mode + null measured fields", JSON.stringify(chromaDryJson));
+checkOk(chromaDryJson.commands?.length === 1 && chromaDryJson.commands[0].includes("chromakey=0x00FF00:0.1:0") && chromaDryJson.commands[0].includes("prores_ks"), "chroma_key transparent dry-run prints the exact ProRes key command", chromaDryJson.commands?.[0] ?? "");
+checkOk(!existsSync(path.join(root, "outputs/mcp-chroma-dry.mov")), "chroma_key transparent dry-run writes no file", "outputs/mcp-chroma-dry.mov");
+const chromaBgDryRes = await client.callTool({
+  name: "chroma_key",
+  arguments: { input: path.join(root, "test/greenscreen.mp4"), output: path.join(root, "outputs/mcp-chroma-bg-dry.mp4"), background: "1E40AF", dry_run: true },
+});
+const chromaBgDryJson = JSON.parse(chromaBgDryRes.content[0].text);
+checkOk(chromaBgDryJson.dry_run === true && chromaBgDryJson.mode === "composite" && chromaBgDryJson.background === "1E40AF" && chromaBgDryJson.commands?.[0]?.includes("color=c=0x1E40AF"), "chroma_key composite dry-run reports the background color + exact lavfi command", JSON.stringify(chromaBgDryJson));
+checkOk(!existsSync(path.join(root, "outputs/mcp-chroma-bg-dry.mp4")), "chroma_key composite dry-run writes no file", "outputs/mcp-chroma-bg-dry.mp4");
 const chromaBadSim = await callExpectThrow("chroma_key", { input: path.join(root, "test/greenscreen.mp4"), output: path.join(root, "outputs/mcp-chroma-bad3.mov"), similarity: 2 });
 checkOk(/similarity/.test(chromaBadSim), "chroma_key refuses similarity above 1", chromaBadSim.slice(0, 200));
 
@@ -3695,6 +3712,29 @@ const pipRotClipRes = await client.callTool({
 const pipRotClipJson = JSON.parse(pipRotClipRes.content[0].text);
 console.log("pip rotated clip:", pipRotClipJson.pip_size, "|", pipRotClipJson.x + "," + pipRotClipJson.y, "| pip src", pipRotClipJson.pip_source_dimensions);
 checkOk(pipRotClipJson.pip_size === "320x568" && pipRotClipJson.x === 936 && pipRotClipJson.y === 128 && pipRotClipJson.pip_source_dimensions === "720x1280", "pip with a rotated clip is 320x568 at 936,128 (display aspect, not stored)", `got ${pipRotClipJson.pip_size} ${pipRotClipJson.x},${pipRotClipJson.y} ${pipRotClipJson.pip_source_dimensions}`);
+// overlay + pip --dry-run (lượt 113, batch 4): print the exact
+// command, write no file. Geometry is computed from the display
+// probe, so the dry-run values are the real ones (576,24 / 936,128).
+const overlayDryRes = await client.callTool({
+  name: "overlay",
+  arguments: { input: path.join(root, "test/rotated.mp4"), overlay: path.join(root, "test/logo.png"), output: path.join(root, "outputs/mcp-overlay-dry.mp4"), position: "top-right", width: 120, dry_run: true },
+});
+const overlayDryJson = JSON.parse(overlayDryRes.content[0].text);
+checkOk(overlayDryJson.dry_run === true && overlayDryJson.x === 576 && overlayDryJson.y === 24 && overlayDryJson.overlay_size === "120x120" && overlayDryJson.dimensions === "720x1280" && overlayDryJson.duration_seconds === null, "overlay dry-run reports the exact display-frame geometry (576,24, 120x120), duration null", JSON.stringify(overlayDryJson));
+checkOk(overlayDryJson.commands?.length === 1 && overlayDryJson.commands[0].includes("overlay=576:24") && overlayDryJson.commands[0].includes("scale=120:-2"), "overlay dry-run prints the exact overlay command", overlayDryJson.commands?.[0] ?? "");
+checkOk(!existsSync(path.join(root, "outputs/mcp-overlay-dry.mp4")), "overlay dry-run writes no file", "outputs/mcp-overlay-dry.mp4");
+const overlayDryCli = await runCliJson(["overlay", path.join(root, "test/rotated.mp4"), "--image", path.join(root, "test/logo.png"), "--width", "120", "-o", path.join(root, "outputs/mcp-overlay-cli-dry.mp4"), "--dry-run"]);
+checkOk(overlayDryCli.dry_run === true && overlayDryCli.commands?.[0]?.includes("overlay=576:24") && !existsSync(path.join(root, "outputs/mcp-overlay-cli-dry.mp4")), "CLI overlay --dry-run prints the command and writes no file", JSON.stringify(overlayDryCli.commands));
+const pipDryRes = await client.callTool({
+  name: "pip",
+  arguments: { input: path.join(root, "test/source.mp4"), pip: path.join(root, "test/rotated.mp4"), output: path.join(root, "outputs/mcp-pip-dry.mp4"), audio: "mix", dry_run: true },
+});
+const pipDryJson = JSON.parse(pipDryRes.content[0].text);
+checkOk(pipDryJson.dry_run === true && pipDryJson.pip_size === "320x568" && pipDryJson.x === 936 && pipDryJson.y === 128 && pipDryJson.audio === "mix" && pipDryJson.dimensions === "1280x720" && pipDryJson.duration_seconds === null, "pip dry-run reports the exact display-frame geometry (320x568 at 936,128, audio mix), duration null", JSON.stringify(pipDryJson));
+checkOk(pipDryJson.commands?.length === 1 && pipDryJson.commands[0].includes("-stream_loop -1") && pipDryJson.commands[0].includes("amix=inputs=2") && pipDryJson.commands[0].includes("overlay=936:128"), "pip dry-run prints the exact loop + amix + overlay command", pipDryJson.commands?.[0] ?? "");
+checkOk(!existsSync(path.join(root, "outputs/mcp-pip-dry.mp4")), "pip dry-run writes no file", "outputs/mcp-pip-dry.mp4");
+const pipDryCli = await runCliJson(["pip", path.join(root, "test/source.mp4"), "--pip", path.join(root, "test/rotated.mp4"), "-o", path.join(root, "outputs/mcp-pip-cli-dry.mp4"), "--audio", "mix", "--dry-run"]);
+checkOk(pipDryCli.dry_run === true && pipDryCli.commands?.[0]?.includes("-stream_loop -1") && !existsSync(path.join(root, "outputs/mcp-pip-cli-dry.mp4")), "CLI pip --dry-run prints the command and writes no file", JSON.stringify(pipDryCli.commands));
 
 // concat per-clip trim: {file, start, end} objects (MCP) and
 // path@start-end (CLI). Trims re-encode through the filter graph —
@@ -4256,6 +4296,20 @@ const capsBand = await bandPsnr(path.join(root, "test/source.mp4"), path.join(ro
 checkOk(capsBand !== null && capsBand < 30, "burn_captions text lands in the safe band (low PSNR there)", `got PSNR ${capsBand}`);
 const capsStrip = await bandPsnr(path.join(root, "test/source.mp4"), path.join(root, "outputs/mcp-captions.mp4"), 3.5, 680, 40);
 checkOk(capsStrip !== null && capsStrip > 40, "burn_captions text stays out of the bottom strip (high PSNR there)", `got PSNR ${capsStrip}`);
+
+// burn_captions --dry-run (lượt 113, batch 4): font/margin/style
+// are computed from the input probe, so they are exact; the printed
+// subtitles command is the real one.
+const capsDryRes = await client.callTool({
+  name: "burn_captions",
+  arguments: { input: path.join(root, "test/source.mp4"), captions: path.join(root, "test/captions.srt"), output: path.join(root, "outputs/mcp-captions-dry.mp4"), dry_run: true },
+});
+const capsDryJson = JSON.parse(capsDryRes.content[0].text);
+checkOk(capsDryJson.dry_run === true && capsDryJson.font_size === 22 && capsDryJson.margin_v === 187 && capsDryJson.style === "background" && capsDryJson.duration_seconds === null && capsDryJson.size_bytes === null, "burn_captions dry-run reports the exact computed font/margin/style (22/187/background), duration/size null", JSON.stringify(capsDryJson));
+checkOk(capsDryJson.commands?.length === 1 && capsDryJson.commands[0].includes("subtitles=") && capsDryJson.commands[0].includes("FontSize=22") && capsDryJson.commands[0].includes("MarginV=187"), "burn_captions dry-run prints the exact subtitles command", capsDryJson.commands?.[0] ?? "");
+checkOk(!existsSync(path.join(root, "outputs/mcp-captions-dry.mp4")), "burn_captions dry-run writes no file", "outputs/mcp-captions-dry.mp4");
+const capsDryCli = await runCliJson(["burn-captions", path.join(root, "test/source.mp4"), "--captions", path.join(root, "test/captions.srt"), "-o", path.join(root, "outputs/mcp-captions-cli-dry.mp4"), "--style", "glow", "--dry-run"]);
+checkOk(capsDryCli.dry_run === true && capsDryCli.commands?.[0]?.includes("subtitles=") && capsDryCli.commands?.[0]?.includes("Outline=4") && !existsSync(path.join(root, "outputs/mcp-captions-cli-dry.mp4")), "CLI burn-captions --dry-run prints the glow command and writes no file", JSON.stringify(capsDryCli.commands));
 
 // burn_captions on a rotated clip: defaults scale with the DISPLAY
 // frame (1080x1920), not the coded 1920x1080 — font 60px, margin
@@ -8109,16 +8163,18 @@ checkOk(/does not cache playlists/.test(dlCacheHlsText ?? ""), "download refuses
 // Token bucket (lượt 85): two downloads at 1 req/s in one server
 // process — the first takes a free token, the second waits. The wait
 // is 1000ms MINUS the time the first download itself took (the
-// bucket refills while it runs), so the bound is on the wait being
-// most of a second and on the two calls together taking >=900ms
-// wall-clock — without the bucket both would finish in ~300ms.
+// bucket refills while it runs), so the bound on the second wait must
+// tolerate a first download a few ms over 500ms — observed 497ms on
+// 2026-11-19 (first download took 503ms). The hard proof the bucket
+// throttled is the two calls together taking >=900ms wall-clock —
+// without the bucket both would finish in ~300ms.
 const dlRateT0 = Date.now();
 const dlRate1Res = await client.callTool({ name: "download", arguments: { url: `${dlBase}/cacheable.mp4`, output: path.join(root, "outputs/mcp-download-rate1.mp4"), rate_limit_rps: 1 } });
 const dlRate1 = JSON.parse(dlRate1Res.content[0].text);
 const dlRate2Res = await client.callTool({ name: "download", arguments: { url: `${dlBase}/cacheable.mp4`, output: path.join(root, "outputs/mcp-download-rate2.mp4"), rate_limit_rps: 1 } });
 const dlRate2 = JSON.parse(dlRate2Res.content[0].text);
 const dlRateElapsedMs = Date.now() - dlRateT0;
-checkOk(dlRate1.rate_limited_wait_ms === 0 && dlRate2.rate_limited_wait_ms >= 500 && dlRate2.rate_limited_wait_ms < 5000 && dlRateElapsedMs >= 900, "token bucket at 1 rps: first download waits 0ms, second waits most of a second (bucket refills during the first download), both calls take >=900ms wall-clock", JSON.stringify({ first: dlRate1.rate_limited_wait_ms, second: dlRate2.rate_limited_wait_ms, elapsed_ms: dlRateElapsedMs }));
+checkOk(dlRate1.rate_limited_wait_ms === 0 && dlRate2.rate_limited_wait_ms >= 400 && dlRate2.rate_limited_wait_ms < 5000 && dlRateElapsedMs >= 900, "token bucket at 1 rps: first download waits 0ms, second waits most of the remaining second (1000ms minus the first download's own wall time), both calls take >=900ms wall-clock", JSON.stringify({ first: dlRate1.rate_limited_wait_ms, second: dlRate2.rate_limited_wait_ms, elapsed_ms: dlRateElapsedMs }));
 // CLI flags for the same features (hermetic cache dir under outputs/).
 const dlCliCache1 = await runCliJson(["download", `${dlBase}/cacheable.mp4`, "-o", path.join(root, "outputs/mcp-download-cli-cache1.mp4"), "--cache", "--cache-dir", path.join(root, "outputs/dl-cache-cli")]);
 checkOk(dlCliCache1.cached === false && dlCliCache1.cache_stored === true, "CLI download --cache stores on first fetch", JSON.stringify({ cached: dlCliCache1.cached, cache_stored: dlCliCache1.cache_stored }));

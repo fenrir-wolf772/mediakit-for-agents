@@ -270,7 +270,7 @@ export const TOOL_DEFS = [
 
   {
     name: "burn_captions",
-    description: "Burn subtitles into the video (hardcoded, always visible). Accepts .srt, .ass or .vtt. Style: background (default — white text on a semi-transparent black box), outline (black outline, no box), shadow (thin outline + drop shadow), or glow (thick halo in the text's own colour, reads on bright footage). Defaults scale with frame height: ~60px type on 1080x1920, sitting ~500px above the bottom edge so platform UI (bottom ~480px) never covers the text. Explicit font_size / margin_v override. max_lines shrinks the type (measured with the same font libass draws, Liberation Sans) until every cue wraps to at most that many lines, never below a readability floor (1.6% of frame height, min 16px); a cue that still overflows at the floor burns at the floor and reports fit.fits=false. platform sets the default margin from that platform's own bottom UI depth (tiktok 520px at 1920 high, youtube 100px at 1080 high) and narrows the fit width to its text-safe rect; explicit margin_v wins. .ass files carry their own styles, so style, max_lines and the platform margin are ignored there (style_applied=false, fit=null with a note).",
+    description: "Burn subtitles into the video (hardcoded, always visible). Accepts .srt, .ass or .vtt. Style: background (default — white text on a semi-transparent black box), outline (black outline, no box), shadow (thin outline + drop shadow), or glow (thick halo in the text's own colour, reads on bright footage). Defaults scale with frame height: ~60px type on 1080x1920, sitting ~500px above the bottom edge so platform UI (bottom ~480px) never covers the text. Explicit font_size / margin_v override. max_lines shrinks the type (measured with the same font libass draws, Liberation Sans) until every cue wraps to at most that many lines, never below a readability floor (1.6% of frame height, min 16px); a cue that still overflows at the floor burns at the floor and reports fit.fits=false. platform sets the default margin from that platform's own bottom UI depth (tiktok 520px at 1920 high, youtube 100px at 1080 high) and narrows the fit width to its text-safe rect; explicit margin_v wins. .ass files carry their own styles, so style, max_lines and the platform margin are ignored there (style_applied=false, fit=null with a note). Set dry_run=true to print the exact ffmpeg command and write no file (font_size/margin/style/fit are computed from the input, so they are exact; duration/size report null — measured on the real output).",
     schema: {
     input: pathSchema,
     output: pathSchema,
@@ -281,6 +281,7 @@ export const TOOL_DEFS = [
     outline_color: z.string().optional().describe("Outline colour for outline/shadow styles: name (white/black/yellow/cyan/red/green/blue/orange/magenta) or RRGGBB hex; default black"),
     max_lines: z.number().int().min(1).max(4).optional().describe("Fit-to-width: shrink the font until every cue wraps to at most this many lines (default 2 in spirit, off unless set); never below the readability floor. Ignored for .ass inputs"),
     platform: z.enum(["tiktok", "reels", "shorts", "youtube", "instagram-feed", "instagram-story", "linkedin"]).optional().describe("Destination platform: default margin_v becomes that platform's bottom UI depth, and the fit width narrows to its text-safe rect. Explicit margin_v wins"),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
     handler: async (a) => safe(() => core.burnCaptions({
     input: a.input,
@@ -292,6 +293,7 @@ export const TOOL_DEFS = [
     outlineColor: a.outline_color ?? "black",
     maxLines: a.max_lines ?? null,
     platform: a.platform ?? null,
+    dryRun: a.dry_run,
   })),
   },
 
@@ -527,7 +529,7 @@ export const TOOL_DEFS = [
 
   {
     name: "chroma_key",
-    description: "Remove a green/blue screen: keys out one color (chromakey filter) and either keeps the transparency (output MUST be .mov, ProRes 4444 — .mp4 has no alpha channel, and this ffmpeg build drops VP9 alpha in .webm) or composites the subject onto a background in the same call (image file or hex color, output .mp4/.webm). similarity 0-1 is the tolerance (too high eats the subject), blend 0-1 softens the edge. The result measures the alpha on disk (middle frame, 0-255): full-frame mean plus corner (should be ~0 for a full-screen key) and center (should be ~255 on the subject).",
+    description: "Remove a green/blue screen: keys out one color (chromakey filter) and either keeps the transparency (output MUST be .mov, ProRes 4444 — .mp4 has no alpha channel, and this ffmpeg build drops VP9 alpha in .webm) or composites the subject onto a background in the same call (image file or hex color, output .mp4/.webm). similarity 0-1 is the tolerance (too high eats the subject), blend 0-1 softens the edge. The result measures the alpha on disk (middle frame, 0-255): full-frame mean plus corner (should be ~0 for a full-screen key) and center (should be ~255 on the subject). Set dry_run=true to print the exact ffmpeg command and write no file (mode/background are decided before the run; pixel_format/alpha/duration/dimensions/size report null — measured on the real output).",
     schema: {
     input: pathSchema,
     output: pathSchema.describe("Output file path: .mov for transparency, .mp4/.webm when background is given"),
@@ -536,6 +538,7 @@ export const TOOL_DEFS = [
     blend: z.number().min(0).max(1).default(0).describe("Edge blend 0-1 (default 0)"),
     background: z.string().optional().describe("Optional background to composite onto: an image file path, or a hex color (e.g. 1E40AF). Without it the output keeps transparency and must be .mov"),
     crf: z.number().int().min(0).max(51).default(23),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
     handler: async (a) => safe(() => core.chromaKey({
     input: a.input,
@@ -545,6 +548,7 @@ export const TOOL_DEFS = [
     blend: a.blend,
     background: a.background ?? null,
     crf: a.crf,
+    dryRun: a.dry_run,
   })),
   },
 
@@ -1083,7 +1087,7 @@ export const TOOL_DEFS = [
 
   {
     name: "overlay",
-    description: "Overlay a logo/watermark image on a video. Named position (top-right, top-left, bottom-left, bottom-right, center) plus a margin from the edge; the overlay is scaled to width keeping its aspect ratio, opacity 0-1, and start/end (seconds) show it only during that window. Position and fit are measured on the display frame — a phone clip stored 1280x720 with rotation 90 is 720x1280 to the filter, so top-right lands at 576,24 there, not 1136,24. Audio is copied through.",
+    description: "Overlay a logo/watermark image on a video. Named position (top-right, top-left, bottom-left, bottom-right, center) plus a margin from the edge; the overlay is scaled to width keeping its aspect ratio, opacity 0-1, and start/end (seconds) show it only during that window. Position and fit are measured on the display frame — a phone clip stored 1280x720 with rotation 90 is 720x1280 to the filter, so top-right lands at 576,24 there, not 1136,24. Audio is copied through. Set dry_run=true to print the exact ffmpeg command and write no file (x/y/overlay_size are computed from the display probe, so they are exact; duration/size report null — measured on the real output).",
     schema: {
     input: pathSchema,
     overlay: pathSchema.describe("Overlay image file (PNG with transparency recommended)"),
@@ -1094,6 +1098,7 @@ export const TOOL_DEFS = [
     opacity: z.number().min(0).max(1).default(1).describe("Overlay opacity (0-1)"),
     start: z.number().min(0).optional().describe("Show the overlay from this time in seconds"),
     end: z.number().min(0).optional().describe("Hide the overlay after this time in seconds"),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
     handler: async (a) => safe(() => core.overlayImage({
     input: a.input,
@@ -1105,13 +1110,14 @@ export const TOOL_DEFS = [
     opacity: a.opacity,
     start: a.start ?? null,
     end: a.end ?? null,
+    dryRun: a.dry_run,
   })),
   },
 
 
   {
     name: "pip",
-    description: "Picture-in-picture: place a second video over the main one. 9 named positions (corners, edges, center), size by width in pixels or by scale fraction of the main width (default 0.25), opacity 0-1, and start/end (seconds) show it only during that window — the PiP clip loops so it never runs out. Geometry is measured on display frames: a rotated main clip is 720 wide (not 1280 stored), and a rotated PiP clip keeps its portrait aspect instead of being squashed to the stored one. Audio: main (default, PiP audio dropped), pip (PiP audio only), or mix (both mixed, levels kept).",
+    description: "Picture-in-picture: place a second video over the main one. 9 named positions (corners, edges, center), size by width in pixels or by scale fraction of the main width (default 0.25), opacity 0-1, and start/end (seconds) show it only during that window — the PiP clip loops so it never runs out. Geometry is measured on display frames: a rotated main clip is 720 wide (not 1280 stored), and a rotated PiP clip keeps its portrait aspect instead of being squashed to the stored one. Audio: main (default, PiP audio dropped), pip (PiP audio only), or mix (both mixed, levels kept). Set dry_run=true to print the exact ffmpeg command and write no file (x/y/pip_size are computed from the display probes, so they are exact; duration/size report null — measured on the real output).",
     schema: {
     input: pathSchema,
     pip: pathSchema.describe("Video to place on top"),
@@ -1124,6 +1130,7 @@ export const TOOL_DEFS = [
     start: z.number().min(0).optional().describe("Show the PiP from this time in seconds"),
     end: z.number().min(0).optional().describe("Hide the PiP after this time in seconds"),
     audio: z.enum(["main", "pip", "mix"]).default("main").describe("Which audio to keep: main, pip, or mix (both)"),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
     handler: async (a) => safe(() => core.pictureInPicture({
     input: a.input,
@@ -1137,6 +1144,7 @@ export const TOOL_DEFS = [
     start: a.start ?? null,
     end: a.end ?? null,
     audio: a.audio,
+    dryRun: a.dry_run,
   })),
   },
 

@@ -778,7 +778,14 @@ real run re-measures the compressed temp first), `grade` prints its
 filter chain with the input's real `color_before` (`color_after`
 null — measured on the real output), `rotate` prints the transpose
 with the expected display size (`360x640` for a 90° turn of a
-640x360 clip). The plan is computed from real probes
+640x360 clip). The same flag also works on `reverse`/`reframe`/
+`fit`/`silence`/`extract_audio`/`fastforward`/`interpolate`/`denoise`/
+`segment`/`mix`/`mux`/`overlay`/`pip`/`chroma_key`/`burn_captions`:
+`overlay`/`pip` print the exact display-frame geometry (576,24 on a
+rotated clip), `chroma_key` prints the key/composite command with the
+measured alpha fields null, `burn_captions` prints the subtitles
+command with the exact computed font/margin. `cut_words --dry-run`
+prints the cut plan instead of a command. The plan is computed from real probes
 (the keyframe list for `--snap`, the GOP for `--gop`), so a dry-run
 that prints the wrong cut is a bug, not a guess — read the command
 before you run it.

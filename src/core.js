@@ -2748,7 +2748,7 @@ function assColor(value, label) {
   return `&H00${hex.slice(4, 6)}${hex.slice(2, 4)}${hex.slice(0, 2)}&`;
 }
 
-export async function burnCaptions({ input, output, captions, fontSize = null, fontColor = "white", box = true, marginV = null, style = null, outlineColor = "black", maxLines = null, platform = null, onProgress = null }) {
+export async function burnCaptions({ input, output, captions, fontSize = null, fontColor = "white", box = true, marginV = null, style = null, outlineColor = "black", maxLines = null, platform = null, onProgress = null, dryRun = false }) {
   const inPath = await requireInput(input);
   const capPath = await requireInput(captions, "captions file");
   const outPath = await prepareOutput(output, [inPath]);
@@ -2857,7 +2857,21 @@ export async function burnCaptions({ input, output, captions, fontSize = null, f
     const color = fontColor.toLowerCase() === "white" ? "" : `,PrimaryColour=&H${fontColor}&`;
     vf = `subtitles='${esc}':force_style='${forceStyle}${color}'`;
   }
-  await runFfmpegWithProgress(["-y", "-i", inPath, "-vf", vf, "-c:a", "copy", outPath], {
+  const args = ["-y", "-i", inPath, "-vf", vf, "-c:a", "copy", outPath];
+  if (dryRun) {
+    // font_size/margin/style/fit are computed from the input probe
+    // and the captions file, so they are exact; duration/size are
+    // measured on the real output, so they report null here.
+    return {
+      operation: "burn_captions", dry_run: true, input: inPath, output: outPath, captions: capPath,
+      font_size: size, margin_v: margin, style: styleName, style_applied: ext !== ".ass",
+      platform: platform ?? null, fit, fit_note: fitNote,
+      duration_seconds: null, size_bytes: null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. duration/size are measured on the real output, so they report null here.",
+    };
+  }
+  await runFfmpegWithProgress(args, {
     totalSeconds: meta.duration_seconds, onProgress,
   });
   const info = await fileInfo(outPath);
@@ -6254,7 +6268,7 @@ async function alphaMeanAt(file, timeSeconds, crop) {
   }
 }
 
-export async function chromaKey({ input, output, color = "00FF00", similarity = 0.1, blend = 0.0, background = null, crf = 23 }) {
+export async function chromaKey({ input, output, color = "00FF00", similarity = 0.1, blend = 0.0, background = null, crf = 23, dryRun = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const key = normalizeKeyColor(color);
@@ -6316,6 +6330,22 @@ export async function chromaKey({ input, output, color = "00FF00", similarity = 
     args.push("-c:v", videoCodec, "-crf", String(c), "-preset", "medium");
     if (dur) args.push("-t", String(dur));
     args.push(outPath);
+  }
+  if (dryRun) {
+    // mode/background/color are decided above; pixel_format, alpha
+    // and the output geometry are measured on the real output, so
+    // they report null here.
+    return {
+      operation: "chroma_key", dry_run: true, input: inPath, output: outPath,
+      color: key, similarity: sim, blend: bl,
+      background: bg ? (bg.kind === "color" ? bg.value : bg.path) : null,
+      mode: bg ? "composite" : "transparent",
+      pixel_format: null, has_alpha: null,
+      alpha_mean: null, alpha_corner_mean: null, alpha_center_mean: null,
+      duration_seconds: null, dimensions: null, size_bytes: null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. pixel_format/alpha/duration/dimensions/size are measured on the real output, so they report null here.",
+    };
   }
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
@@ -9863,7 +9893,7 @@ const OVERLAY_POSITIONS = ["top-left", "top-right", "bottom-left", "bottom-right
 export async function overlayImage({
   input, overlay, output,
   position = "top-right", margin = 24, width = null, opacity = 1,
-  start = null, end = null,
+  start = null, end = null, dryRun = false,
 }) {
   const inPath = await requireInput(input);
   const ovPath = await requireInput(overlay, "overlay image");
@@ -9919,12 +9949,34 @@ export async function overlayImage({
   // but refuse it — it is almost certainly a mistake.
   if (op === 0) throw new MediaKitError("opacity 0 would render nothing — use at least 0.05", "INVALID_ARG");
   const graph = `[1:v]scale=${ow}:-2,format=rgba${op < 1 ? `,colorchannelmixer=aa=${op}` : ""}[ovr];[0:v][ovr]overlay=${x}:${y}${enable}[out]`;
-  await run(FFMPEG, [
+  const args = [
     "-y", "-i", inPath, "-i", ovPath,
     "-filter_complex", graph, "-map", "[out]", "-map", "0:a?",
     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "medium",
     "-c:a", "copy", "-movflags", "+faststart", outPath,
-  ]);
+  ];
+  if (dryRun) {
+    // Geometry (x/y/size) is computed from the display probe, so it
+    // is exact; the overlay never changes the frame size, so
+    // dimensions is the source display size. Duration/size are
+    // measured on the real output, so they report null here.
+    return {
+      operation: "overlay", dry_run: true,
+      input: inPath, overlay: ovPath, output: outPath,
+      position, x, y, margin: m,
+      overlay_size: `${ow}x${oh}`,
+      opacity: op,
+      source_dimensions: `${sw}x${sh}`,
+      source_rotation: disp.rotation,
+      ...(s !== null ? { visible_from_seconds: s } : {}),
+      ...(e !== null ? { visible_until_seconds: e } : {}),
+      dimensions: `${sw}x${sh}`,
+      duration_seconds: null, size_bytes: null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. duration/size are measured on the real output, so they report null here.",
+    };
+  }
+  await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
   return {
@@ -9961,7 +10013,7 @@ const PIP_POSITIONS = [
 export async function pictureInPicture({
   input, pip, output,
   position = "bottom-right", margin = 24, width = null, scale = 0.25,
-  opacity = 1, start = null, end = null, audio = "main",
+  opacity = 1, start = null, end = null, audio = "main", dryRun = false,
 }) {
   const inPath = await requireInput(input);
   const pipPath = await requireInput(pip, "pip video");
@@ -10050,12 +10102,36 @@ export async function pictureInPicture({
   }
   const filterComplex = audioFilter ? `${graph};${audioFilter}` : graph;
   const durationArgs = duration !== null ? ["-t", String(duration)] : [];
-  await run(FFMPEG, [
+  const args = [
     "-y", "-i", inPath, "-stream_loop", "-1", "-i", pipPath,
     "-filter_complex", filterComplex, "-map", "[out]", ...audioArgs,
     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "medium",
     "-movflags", "+faststart", ...durationArgs, outPath,
-  ]);
+  ];
+  if (dryRun) {
+    // Geometry (x/y/pip_size) is computed from the display probes,
+    // so it is exact; PiP never changes the main frame size, so
+    // dimensions is the main display size. Duration/size are measured
+    // on the real output, so they report null here.
+    return {
+      operation: "pip", dry_run: true,
+      input: inPath, pip: pipPath, output: outPath,
+      position, x, y, margin: m,
+      pip_size: `${pw}x${ph}`,
+      opacity: op,
+      audio,
+      source_dimensions: `${sw}x${sh}`,
+      source_rotation: disp.rotation,
+      pip_source_dimensions: `${pipDisp.width}x${pipDisp.height}`,
+      ...(s !== null ? { visible_from_seconds: s } : {}),
+      ...(e !== null ? { visible_until_seconds: e } : {}),
+      dimensions: `${sw}x${sh}`,
+      duration_seconds: null, size_bytes: null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. duration/size are measured on the real output, so they report null here.",
+    };
+  }
+  await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
   return {
