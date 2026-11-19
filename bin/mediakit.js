@@ -74,13 +74,14 @@ const COMMANDS = {
     ],
   },
   "extract-audio": {
-    usage: "mediakit extract-audio <input> -o <output.mp3|aac|wav|ogg|opus|flac> [--format <fmt>] [--whisper] [--channel <n>]",
-    desc: "Extract the audio track. --whisper forces the Whisper ASR preset (16 kHz mono WAV) and renames the output to .wav when needed. --channel <n> (0-based) picks one channel out of a multi-channel input and returns it as mono.",
+    usage: "mediakit extract-audio <input> -o <output.mp3|aac|wav|ogg|opus|flac> [--format <fmt>] [--whisper] [--channel <n>] [--dry-run]",
+    desc: "Extract the audio track. --whisper forces the Whisper ASR preset (16 kHz mono WAV) and renames the output to .wav when needed. --channel <n> (0-based) picks one channel out of a multi-channel input and returns it as mono. --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--format", "Audio format (overrides output extension; ignored with --whisper)"],
       ["--whisper", "Whisper preset: 16 kHz mono WAV, the direct input for transcription"],
       ["--channel", "Channel index (0-based) to extract as mono from a multi-channel input"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -303,14 +304,15 @@ const COMMANDS = {
     ],
   },
   fastforward: {
-    usage: "mediakit fastforward <input> -o <output> --span 5-9@4 [--span ...] [--no-badge] [--label ...] [--crf 23]",
-    desc: "Speed up marked spans of a clip and burn a badge on them: --span <start>-<end>@<speed> is repeatable (max 16), times in seconds or MM:SS, speed 1.1-16. The output is shorter by exactly the saved time and everything after a span keeps its place; audio keeps its pitch (atempo). Spans are clamped to the clip and overlaps collapse onto the previous span's end. The badge reads \">> fast-forward xN\" bottom-right (use --no-badge to skip it, --label to change the word). Reports duration_expected vs duration_seconds plus timing_check_mapped vs timing_check_unmapped.",
+    usage: "mediakit fastforward <input> -o <output> --span 5-9@4 [--span ...] [--no-badge] [--label ...] [--crf 23] [--dry-run]",
+    desc: "Speed up marked spans of a clip and burn a badge on them: --span <start>-<end>@<speed> is repeatable (max 16), times in seconds or MM:SS, speed 1.1-16. The output is shorter by exactly the saved time and everything after a span keeps its place; audio keeps its pitch (atempo). Spans are clamped to the clip and overlaps collapse onto the previous span's end. The badge reads \">> fast-forward xN\" bottom-right (use --no-badge to skip it, --label to change the word). Reports duration_expected vs duration_seconds plus timing_check_mapped vs timing_check_unmapped. --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--span", "Span to speed up: <start>-<end>@<speed>, repeatable, max 16 (times in seconds or MM:SS, speed 1.1-16)"],
       ["--no-badge", "Skip the \">> fast-forward xN\" badge on sped spans"],
       ["--label", "Badge word (default \"fast-forward\")"],
       ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
@@ -428,30 +430,32 @@ const COMMANDS = {
     ],
   },
   interpolate: {
-    usage: "mediakit interpolate <input> -o <output> --fps 60 [--mode mci|blend|dup] [--crf 23]",
-    desc: "Raise the frame rate with motion interpolation (minterpolate). blend is the fast default; mci is true motion compensation but much slower (~9x realtime on CPU). Reports fps and frame counts measured on the output file.",
+    usage: "mediakit interpolate <input> -o <output> --fps 60 [--mode mci|blend|dup] [--crf 23] [--dry-run]",
+    desc: "Raise the frame rate with motion interpolation (minterpolate). blend is the fast default; mci is true motion compensation but much slower (~9x realtime on CPU). Reports fps and frame counts measured on the output file. --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--fps", "Target frame rate, must be above the source fps (required)"],
       ["--mode", "mci | blend (default) | dup"],
       ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
   denoise: {
-    usage: "mediakit denoise <input> -o <output> [--filter hqdn3d|nlmeans] [--strength 0-1] [--crf 23]",
-    desc: "Reduce sensor noise: hqdn3d is the fast default (strength 0.5 = 15, the level that gained +2.9 dB PSNR on sigma-10 noise in testing); nlmeans is better on fine detail but much slower. Reports high-frequency noise energy before and after, measured on disk.",
+    usage: "mediakit denoise <input> -o <output> [--filter hqdn3d|nlmeans] [--strength 0-1] [--crf 23] [--dry-run]",
+    desc: "Reduce sensor noise: hqdn3d is the fast default (strength 0.5 = 15, the level that gained +2.9 dB PSNR on sigma-10 noise in testing); nlmeans is better on fine detail but much slower. Reports high-frequency noise energy before and after, measured on disk. --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--filter", "hqdn3d (default) | nlmeans"],
       ["--strength", "Noise-reduction strength 0-1 (default 0.5)"],
       ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
   },
   segment: {
-    usage: "mediakit segment <input> -o <directory> [--segment-time 6] [--playlist index.m3u8] [--segment-prefix seg] [--reencode] [--crf 23]",
-    desc: "Cut a video into an HLS VOD playlist (index.m3u8 + .ts segments) in a directory. Stream-copy by default (fast, lossless) — but segments can only start on keyframes, so actual lengths follow the source GOP; --reencode re-encodes to libx264/aac with forced keyframes for exact segment boundaries. Reports the segment count and durations parsed back from the playlist on disk.",
+    usage: "mediakit segment <input> -o <directory> [--segment-time 6] [--playlist index.m3u8] [--segment-prefix seg] [--reencode] [--crf 23] [--dry-run]",
+    desc: "Cut a video into an HLS VOD playlist (index.m3u8 + .ts segments) in a directory. Stream-copy by default (fast, lossless) — but segments can only start on keyframes, so actual lengths follow the source GOP; --reencode re-encodes to libx264/aac with forced keyframes for exact segment boundaries. Reports the segment count and durations parsed back from the playlist on disk. --dry-run prints the exact ffmpeg command and writes no file (no directory is created).",
     args: [{ name: "input", required: true }],
     options: [
       ["--segment-time", "Target segment length in seconds, 1-60 (default 6)"],
@@ -459,6 +463,7 @@ const COMMANDS = {
       ["--segment-prefix", "Segment filename stem (default seg -> seg000.ts, ...)"],
       ["--reencode", "Re-encode to libx264/aac with forced keyframes (exact segment grid)"],
       ["--crf", "Quality 0-51, lower is better (default 23, reencode only)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file (no directory created)"],
       ["-o, --output", "Output directory (required, created if needed)"],
     ],
   },
@@ -1249,6 +1254,7 @@ async function main() {
           input: needInput(), output: needOutput(opts), format: opts.format ?? null,
           whisper: opts.whisper === true,
           channel: numOpt(opts, "channel") ?? null,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "extract-frame":
@@ -1414,6 +1420,7 @@ async function main() {
           badge: opts.badge !== false,
           label: opts.label ?? null,
           crf: numOpt(opts, "crf") ?? 23,
+          dryRun: opts.dry_run === true,
         });
         break;
       }
@@ -1531,6 +1538,7 @@ async function main() {
           fps: numOpt(opts, "fps"),
           mode: opts.mode ?? "blend",
           crf: numOpt(opts, "crf") ?? 23,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "denoise":
@@ -1539,6 +1547,7 @@ async function main() {
           filter: opts.filter ?? "hqdn3d",
           strength: numOpt(opts, "strength") ?? 0.5,
           crf: numOpt(opts, "crf") ?? 23,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "segment":
@@ -1549,6 +1558,7 @@ async function main() {
           segmentPrefix: opts.segment_prefix ?? "seg",
           reencode: opts.reencode === true,
           crf: numOpt(opts, "crf") ?? 23,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "silence": {

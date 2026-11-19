@@ -123,13 +123,14 @@ export const TOOL_DEFS = [
 
   {
     name: "extract_audio",
-    description: "Extract the audio track to mp3, aac, wav, ogg, opus or flac (from the output extension). Set whisper=true for the Whisper ASR preset: 16 kHz mono WAV (the output is renamed to .wav when needed) — the direct input for a transcribe step. Set channel (0-based) to pick one channel out of a multi-channel input and return it as mono.",
+    description: "Extract the audio track to mp3, aac, wav, ogg, opus or flac (from the output extension). Set whisper=true for the Whisper ASR preset: 16 kHz mono WAV (the output is renamed to .wav when needed) — the direct input for a transcribe step. Set channel (0-based) to pick one channel out of a multi-channel input and return it as mono. Set dry_run=true to print the exact ffmpeg command and write no file (duration/size/output_codec report null — measured on the real output; with whisper=true the sample rate/channels are forced by the command, so they are exact).",
     schema: {
     input: pathSchema,
     output: pathSchema,
     format: z.enum(["mp3", "aac", "wav", "ogg", "opus", "flac"]).optional().describe("Overrides the output extension (ignored when whisper=true)"),
     whisper: z.boolean().default(false).describe("Whisper preset: force 16 kHz mono WAV, rename output to .wav"),
     channel: z.number().int().min(0).max(63).optional().describe("Channel index (0-based) to extract as mono from a multi-channel input; refused when out of range"),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
     handler: async (a) => safe(() => core.extractAudio({
     input: a.input,
@@ -137,6 +138,7 @@ export const TOOL_DEFS = [
     format: a.format ?? null,
     whisper: a.whisper,
     channel: a.channel ?? null,
+    dryRun: a.dry_run,
   })),
   },
 
@@ -437,7 +439,7 @@ export const TOOL_DEFS = [
 
   {
     name: "fastforward",
-    description: "Speed up marked spans of a clip and burn a badge on them (khang-nyb/demo-recorder's render() idea: their demo tool fast-forwards dead backend waits and stamps \">> tua nhanh x8\" on the sped footage; this is the general version). The timeline is split into pieces — normal spans at 1x, marked spans at N x — and re-joined, so the output is shorter by exactly the saved time and everything after a span keeps its place. Video speeds up with setpts, audio keeps its pitch with chained atempo. Spans are clamped to the clip, sorted, and overlaps collapse onto the previous span's end instead of failing on input order. The badge is a dark box + text bottom-right, sized from the display frame height (same relative size on vertical and landscape clips); set badge false to skip it. Re-encodes video (libx264, crf 23 default), AAC pinned 192k. The result measures the speed-up on disk: duration_expected vs duration_seconds, timing_check_mapped (input frame mid-span vs the output frame it should land on, ~0 when the mapping is right) vs timing_check_unmapped, and the frame count.",
+    description: "Speed up marked spans of a clip and burn a badge on them (khang-nyb/demo-recorder's render() idea: their demo tool fast-forwards dead backend waits and stamps \">> tua nhanh x8\" on the sped footage; this is the general version). The timeline is split into pieces — normal spans at 1x, marked spans at N x — and re-joined, so the output is shorter by exactly the saved time and everything after a span keeps its place. Video speeds up with setpts, audio keeps its pitch with chained atempo. Spans are clamped to the clip, sorted, and overlaps collapse onto the previous span's end instead of failing on input order. The badge is a dark box + text bottom-right, sized from the display frame height (same relative size on vertical and landscape clips); set badge false to skip it. Re-encodes video (libx264, crf 23 default), AAC pinned 192k. The result measures the speed-up on disk: duration_expected vs duration_seconds, timing_check_mapped (input frame mid-span vs the output frame it should land on, ~0 when the mapping is right) vs timing_check_unmapped, and the frame count. Set dry_run=true to print the exact ffmpeg command and write no file (duration/timing/frames report null — measured on the real output; the badge label files are written to a deterministic temp dir and kept, so the printed command runs as-is).",
     schema: {
     input: pathSchema,
     segments: z.array(z.object({
@@ -449,6 +451,7 @@ export const TOOL_DEFS = [
     badge: z.boolean().default(true).describe("Burn the \">> fast-forward xN\" badge on sped spans (default true)"),
     label: z.string().optional().describe("Badge word (default \"fast-forward\"); the badge reads \">> <label> x<speed>\""),
     crf: z.number().int().min(0).max(51).default(23),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
     handler: async (a) => safe(() => core.fastForwardClip({
     input: a.input,
@@ -457,6 +460,7 @@ export const TOOL_DEFS = [
     badge: a.badge,
     label: a.label ?? null,
     crf: a.crf,
+    dryRun: a.dry_run,
   })),
   },
 
@@ -651,13 +655,14 @@ export const TOOL_DEFS = [
 
   {
     name: "interpolate",
-    description: "Raise a clip's frame rate with motion interpolation (minterpolate): 30fps to 60fps for smoother playback or slow motion. Modes: blend (fast default, cross-fades neighbours), mci (true motion-compensated frames, best quality but much slower — about 9x realtime on CPU), dup (repeats frames). Only raises the frame rate; use fit --max-fps to lower it. The result counts frames on the output file, so the fps is measured, not assumed.",
+    description: "Raise a clip's frame rate with motion interpolation (minterpolate): 30fps to 60fps for smoother playback or slow motion. Modes: blend (fast default, cross-fades neighbours), mci (true motion-compensated frames, best quality but much slower — about 9x realtime on CPU), dup (repeats frames). Only raises the frame rate; use fit --max-fps to lower it. The result counts frames on the output file, so the fps is measured, not assumed. Set dry_run=true to print the exact ffmpeg command and write no file (frames_before is counted on the input, so it is exact; fps_after/frames_after report null — measured on the real output).",
     schema: {
     input: pathSchema,
     output: pathSchema,
     fps: z.number().min(1).max(240).describe("Target frame rate, must be above the source fps"),
     mode: z.enum(["mci", "blend", "dup"]).default("blend").describe("Interpolation mode (default blend)"),
     crf: z.number().int().min(0).max(51).default(23),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
     handler: async (a) => safe(() => core.interpolate({
     input: a.input,
@@ -665,19 +670,21 @@ export const TOOL_DEFS = [
     fps: a.fps,
     mode: a.mode,
     crf: a.crf,
+    dryRun: a.dry_run,
   })),
   },
 
 
   {
     name: "denoise",
-    description: "Reduce sensor noise on a video: hqdn3d (fast default) or nlmeans (better on fine detail, much slower — minutes for a few seconds of 720p). strength 0-1 maps to hqdn3d 0-30 (0.5 is 15, the strength that gained +2.9 dB PSNR on sigma-10 noise in testing) or nlmeans s 0-10. The result measures high-frequency noise energy before and after (mean |frame minus blurred frame|), so the reduction is measured, not assumed.",
+    description: "Reduce sensor noise on a video: hqdn3d (fast default) or nlmeans (better on fine detail, much slower — minutes for a few seconds of 720p). strength 0-1 maps to hqdn3d 0-30 (0.5 is 15, the strength that gained +2.9 dB PSNR on sigma-10 noise in testing) or nlmeans s 0-10. The result measures high-frequency noise energy before and after (mean |frame minus blurred frame|), so the reduction is measured, not assumed. Set dry_run=true to print the exact ffmpeg command and write no file (noise_before is measured on the input, so it is exact; noise_after reports null — measured on the real output).",
     schema: {
     input: pathSchema,
     output: pathSchema,
     filter: z.enum(["hqdn3d", "nlmeans"]).default("hqdn3d").describe("Denoise filter (default hqdn3d)"),
     strength: z.number().min(0).max(1).default(0.5).describe("Noise-reduction strength 0-1 (default 0.5)"),
     crf: z.number().int().min(0).max(51).default(23),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
     handler: async (a) => safe(() => core.denoise({
     input: a.input,
@@ -685,13 +692,14 @@ export const TOOL_DEFS = [
     filter: a.filter,
     strength: a.strength,
     crf: a.crf,
+    dryRun: a.dry_run,
   })),
   },
 
 
   {
     name: "segment",
-    description: "Cut a video into an HLS VOD playlist: index.m3u8 plus .ts segments in an output directory, ready to serve statically or preview in a player. Stream-copy is the default (fast, lossless) but segments can only start on keyframes, so actual segment lengths follow the source GOP — a sparse-GOP source gives fewer, longer segments than requested; use reencode=true to re-encode to libx264/aac with forced keyframes so segments land exactly on the requested grid. Copy mode refuses non-H.264 video or non-AAC/MP3 audio up front. The result parses the playlist back from disk and stats every segment file, so the count and durations are measured, not assumed.",
+    description: "Cut a video into an HLS VOD playlist: index.m3u8 plus .ts segments in an output directory, ready to serve statically or preview in a player. Stream-copy is the default (fast, lossless) but segments can only start on keyframes, so actual segment lengths follow the source GOP — a sparse-GOP source gives fewer, longer segments than requested; use reencode=true to re-encode to libx264/aac with forced keyframes so segments land exactly on the requested grid. Copy mode refuses non-H.264 video or non-AAC/MP3 audio up front. The result parses the playlist back from disk and stats every segment file, so the count and durations are measured, not assumed. Set dry_run=true to print the exact ffmpeg command and write no file — no directory is created and no stale segments are deleted (segment_count/durations report null — measured on the real output).",
     schema: {
     input: pathSchema,
     output_dir: pathSchema.describe("Output directory for the playlist and .ts segments (created if needed)"),
@@ -700,6 +708,7 @@ export const TOOL_DEFS = [
     segment_prefix: z.string().default("seg").describe("Segment filename stem (default seg -> seg000.ts, seg001.ts, ...)"),
     reencode: z.boolean().default(false).describe("Re-encode to libx264/aac with forced keyframes for exact segment boundaries (default false = stream-copy)"),
     crf: z.number().int().min(0).max(51).default(23),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file (no directory created)"),
   },
     handler: async (a) => safe(() => core.segment({
     input: a.input,
@@ -709,6 +718,7 @@ export const TOOL_DEFS = [
     segmentPrefix: a.segment_prefix,
     reencode: a.reencode,
     crf: a.crf,
+    dryRun: a.dry_run,
   })),
   },
 

@@ -1430,7 +1430,7 @@ export async function resize({ input, output, width = null, height = null, keepA
 
 const AUDIO_FORMATS = { mp3: "libmp3lame", aac: "aac", m4a: "aac", wav: "pcm_s16le", ogg: "libvorbis", opus: "libopus", flac: "flac" };
 
-export async function extractAudio({ input, output, format = null, whisper = false, channel = null }) {
+export async function extractAudio({ input, output, format = null, whisper = false, channel = null, dryRun = false }) {
   const inPath = await requireInput(input);
   // --whisper forces the Whisper ASR preset (16 kHz mono WAV) and
   // renames the output to .wav when needed; the real output path is
@@ -1465,6 +1465,25 @@ export async function extractAudio({ input, output, format = null, whisper = fal
   args.push("-c:a", codec, ...audioBitrateArgs(codec));
   if (whisper) args.push("-ar", "16000", "-ac", "1");
   args.push(outPath);
+  if (dryRun) {
+    // The channel-range check above probed the input (read-only), so
+    // the printed command is exact. duration/size/output_codec are
+    // measured on the real output, so they report null here — and
+    // codec_verified stays null too: it is checked on the real output,
+    // never assumed from the plan. With --whisper the sample rate /
+    // channels are forced by the args, so they are exact.
+    return {
+      operation: "extract_audio", dry_run: true, input: inPath, output: outPath,
+      format: ext, codec, duration_seconds: null, size_bytes: null,
+      output_codec: null, codec_verified: null,
+      sample_rate_hz: whisper ? 16000 : null,
+      channels: whisper ? 1 : null,
+      ...(whisper ? { whisper_preset: true } : {}),
+      ...(channelIdx !== null ? { channel: channelIdx } : {}),
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. duration/size/output_codec are measured on the real output, so they report null here.",
+    };
+  }
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
@@ -5871,7 +5890,7 @@ export async function freezeFrame({ input, output, at = null, hold = 2, crf = 23
 // which is why the tests use the red/blue scenes fixture).
 const FASTFORWARD_MAX_SEGMENTS = 16;
 
-export async function fastForwardClip({ input, segments, output, badge = true, label = null, crf = 23 }) {
+export async function fastForwardClip({ input, segments, output, badge = true, label = null, crf = 23, dryRun = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const c = num(crf, "crf", { min: 0, max: 51, integer: true });
@@ -5966,7 +5985,18 @@ export async function fastForwardClip({ input, segments, output, badge = true, l
   }
   try {
     if (badgeGeom) {
-      tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-fastforward-"));
+      // Dry-run writes the badge label files to a deterministic temp
+      // dir and KEEPS them, so the printed command runs verbatim (the
+      // real run uses a fresh mkdtemp dir and removes it after, so its
+      // printed command would point at deleted files — the dry-run
+      // path is the runnable one). The files are tiny text, one per
+      // distinct speed.
+      if (dryRun) {
+        tmpDir = path.join(os.tmpdir(), "mediakit-fastforward-dryrun");
+        await mkdir(tmpDir, { recursive: true });
+      } else {
+        tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-fastforward-"));
+      }
       const speeds = [...new Set(pieces.filter((p) => p.speed > 1).map((p) => p.speed))];
       for (let i = 0; i < speeds.length; i++) {
         const file = path.join(tmpDir, `badge-${i}.txt`);
@@ -6010,6 +6040,29 @@ export async function fastForwardClip({ input, segments, output, badge = true, l
     // -t caps the AAC encoder padding tail so the measured duration
     // lands on the expected one (the fit --t lesson, lượt 8).
     args.push("-t", String(expected), outPath);
+    if (dryRun) {
+      // duration/timing/frames are measured on the real output, so
+      // they report null here; duration_expected and the applied
+      // spans are computed from the input probe, so they are exact.
+      return {
+        operation: "fastforward", dry_run: true, input: inPath, output: outPath,
+        source_duration_seconds: D,
+        segments: applied,
+        duration_expected_seconds: expected,
+        duration_seconds: null,
+        duration_error_seconds: null,
+        timing_check_mapped: null,
+        timing_check_unmapped: null,
+        frames: null,
+        frames_expected: meta.video ? Math.round(expected * fps) : null,
+        badge: badgeGeom,
+        has_audio: !!meta.audio,
+        dimensions: meta.video ? `${disp.width}x${disp.height}` : null,
+        size_bytes: null,
+        commands: [formatCommand(args)],
+        note: "Dry run: no file written. duration/timing/frames are measured on the real output, so they report null here. Badge label files live in the deterministic temp dir and are kept, so the printed command runs as-is.",
+      };
+    }
     await run(FFMPEG, args);
     const info = await fileInfo(outPath);
     const out = await probe(outPath);
@@ -6045,7 +6098,9 @@ export async function fastForwardClip({ input, segments, output, badge = true, l
       size_bytes: info.size_bytes,
     };
   } finally {
-    if (tmpDir) await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    // Dry-run keeps the deterministic badge dir so the printed
+    // command stays runnable; the real run removes its mkdtemp dir.
+    if (tmpDir && !dryRun) await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
@@ -7347,7 +7402,7 @@ async function countVideoFrames(file) {
 
 const INTERPOLATE_MODES = ["mci", "blend", "dup"];
 
-export async function interpolate({ input, output, fps, mode = "blend", crf = 23 }) {
+export async function interpolate({ input, output, fps, mode = "blend", crf = 23, dryRun = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const c = num(crf, "crf", { min: 0, max: 51, integer: true });
@@ -7365,6 +7420,21 @@ export async function interpolate({ input, output, fps, mode = "blend", crf = 23
   const args = ["-y", "-i", inPath, "-vf", `minterpolate=fps=${targetFps}:mi_mode=${mode}`, "-c:v", "libx264", "-crf", String(c), "-preset", "medium"];
   if (meta.audio) args.push("-c:a", "copy");
   args.push(outPath);
+  if (dryRun) {
+    // frames_before is counted on the input (read-only), so it is
+    // exact; fps_after/frames_after/duration/size are measured on
+    // the real output, so they report null here.
+    return {
+      operation: "interpolate", dry_run: true, input: inPath, output: outPath,
+      mode, fps_before: srcFps, fps_after: null,
+      frames_before: framesBefore, frames_after: null,
+      duration_seconds: null,
+      dimensions: meta.video ? `${meta.video.display_width}x${meta.video.display_height}` : null,
+      size_bytes: null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. fps_after/frames_after/duration/size are measured on the real output, so they report null here.",
+    };
+  }
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
@@ -7409,7 +7479,7 @@ async function measureHfNoise(file, frames = 30) {
 
 const DENOISE_FILTERS = ["hqdn3d", "nlmeans"];
 
-export async function denoise({ input, output, filter = "hqdn3d", strength = 0.5, crf = 23 }) {
+export async function denoise({ input, output, filter = "hqdn3d", strength = 0.5, crf = 23, dryRun = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const c = num(crf, "crf", { min: 0, max: 51, integer: true });
@@ -7429,6 +7499,21 @@ export async function denoise({ input, output, filter = "hqdn3d", strength = 0.5
   const args = ["-y", "-i", inPath, "-vf", vf, "-c:v", "libx264", "-crf", String(c), "-preset", "medium"];
   if (meta.audio) args.push("-c:a", "copy");
   args.push(outPath);
+  if (dryRun) {
+    // noise_before is measured on the input (read-only), so it is
+    // exact; noise_after is measured on the real output, so it
+    // reports null here.
+    return {
+      operation: "denoise", dry_run: true, input: inPath, output: outPath,
+      filter, strength: s, filter_value: value,
+      noise_before: noiseBefore, noise_after: null,
+      duration_seconds: null,
+      dimensions: meta.video ? `${meta.video.display_width}x${meta.video.display_height}` : null,
+      size_bytes: null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. noise_after is measured on the real output, so it reports null here.",
+    };
+  }
   await run(FFMPEG, args);
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
@@ -7463,7 +7548,7 @@ export async function denoise({ input, output, filter = "hqdn3d", strength = 0.5
 // leftovers.
 const HLS_TS_AUDIO = ["aac", "mp3"];
 
-export async function segment({ input, outputDir, segmentTime = 6, playlist = "index.m3u8", segmentPrefix = "seg", reencode = false, crf = 23 }) {
+export async function segment({ input, outputDir, segmentTime = 6, playlist = "index.m3u8", segmentPrefix = "seg", reencode = false, crf = 23, dryRun = false }) {
   const inPath = await requireInput(input);
   const seg = num(segmentTime, "segment_time", { min: 1, max: 60 });
   const c = num(crf, "crf", { min: 0, max: 51, integer: true });
@@ -7491,17 +7576,14 @@ export async function segment({ input, outputDir, segmentTime = 6, playlist = "i
   if (rawDir === inPath || rawDir.startsWith(inPath + path.sep)) {
     throw new MediaKitError("segment output directory must not be inside the input file", "INVALID_OUTPUT");
   }
-  const dir = await prepareOutputDir(outputDir);
-  const { readdir, readFile, unlink } = await import("node:fs/promises");
-  // Clear stale output from a previous run with the same prefix so
-  // the segment count below never includes leftovers.
-  for (const f of await readdir(dir)) {
-    if ((f.startsWith(segmentPrefix) && f.endsWith(".ts")) || f === playlist) {
-      await unlink(path.join(dir, f));
-    }
-  }
-  const playlistPath = path.join(dir, playlist);
-  const pattern = path.join(dir, `${segmentPrefix}%03d.ts`);
+  // Dry-run must not create the directory or delete stale segments:
+  // the sandbox check is read-only, so it still runs, but mkdir +
+  // cleanup wait for the real run. The playlist/segment paths are the
+  // resolved ones the real run uses (prepareOutputDir returns the same
+  // path.resolve), so the printed command is exact.
+  await assertInsideWorkdir(rawDir, "output directory");
+  const playlistPath = path.join(rawDir, playlist);
+  const pattern = path.join(rawDir, `${segmentPrefix}%03d.ts`);
   const args = ["-y", "-i", inPath];
   if (reencode) {
     args.push("-c:v", "libx264", "-crf", String(c), "-preset", "medium",
@@ -7516,6 +7598,33 @@ export async function segment({ input, outputDir, segmentTime = 6, playlist = "i
   args.push("-hls_time", String(seg), "-hls_playlist_type", "vod",
     "-hls_flags", "independent_segments",
     "-hls_segment_filename", pattern, "-f", "hls", playlistPath);
+  if (dryRun) {
+    // Segment count/durations are parsed back from the playlist on
+    // the real output, so they report null here — in copy mode they
+    // follow the source GOP and cannot be predicted from the plan.
+    return {
+      operation: "segment", dry_run: true, input: inPath, output_dir: rawDir,
+      playlist: playlistPath, playlist_name: playlist, mode,
+      segment_time_seconds: seg,
+      segment_count: null, segments: null,
+      total_duration_seconds: null,
+      source_duration_seconds: meta.duration_seconds,
+      duration_error_seconds: null,
+      dimensions: meta.video ? `${meta.video.display_width}x${meta.video.display_height}` : null,
+      size_bytes: null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no directory created, no file written. segment_count/durations are measured on the real output, so they report null here.",
+    };
+  }
+  const dir = await prepareOutputDir(outputDir);
+  const { readdir, readFile, unlink } = await import("node:fs/promises");
+  // Clear stale output from a previous run with the same prefix so
+  // the segment count below never includes leftovers.
+  for (const f of await readdir(dir)) {
+    if ((f.startsWith(segmentPrefix) && f.endsWith(".ts")) || f === playlist) {
+      await unlink(path.join(dir, f));
+    }
+  }
   await run(FFMPEG, args);
   const text = await readFile(playlistPath, "utf8");
   if (!text.includes("#EXT-X-ENDLIST")) {

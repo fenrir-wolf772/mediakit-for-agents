@@ -5270,6 +5270,44 @@ checkOk(!existsSync(dryCropPath), "crop dry-run writes no file", dryCropPath);
 const dryCliTrim = await runCli(["trim", path.join(root, "test/source.mp4"), "--start", "1", "--duration", "2", "-o", dryTrimPath, "--dry-run"]);
 const dryCliTrimJson = JSON.parse(dryCliTrim.out);
 checkOk(dryCliTrim.code === 0 && dryCliTrimJson.dry_run === true && dryCliTrimJson.commands?.length === 1 && !existsSync(dryTrimPath), "CLI trim --dry-run prints the plan and writes no file", dryCliTrim.out.slice(0, 150));
+// Batch 3 of the dry-run backlog (lượt 109): extract_audio,
+// interpolate, denoise, segment, fastforward. Same rule as batches
+// 1-2: each tool builds its ffmpeg argv once and either prints it
+// (dry-run) or runs it, so the printed command is the command the
+// real run executes.
+const dryExtractPath = path.join(root, "outputs/mcp-dry-extract.mp3");
+const dryExtractRes = await client.callTool({ name: "extract_audio", arguments: { input: path.join(root, "test/source.mp4"), output: dryExtractPath, dry_run: true } });
+const dryExtractJson = JSON.parse(dryExtractRes.content[0].text);
+checkOk(dryExtractJson.dry_run === true && dryExtractJson.codec === "libmp3lame" && dryExtractJson.duration_seconds === null && dryExtractJson.codec_verified === null && dryExtractJson.commands?.[0]?.includes("-vn") && dryExtractJson.commands[0].includes("libmp3lame"), "extract_audio dry-run prints the extraction command, duration/codec_verified null (measured on real output only)", JSON.stringify(dryExtractJson.commands));
+checkOk(!existsSync(dryExtractPath), "extract_audio dry-run writes no file", dryExtractPath);
+const dryExtractWhisperRes = await client.callTool({ name: "extract_audio", arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-dry-extract-whisper.mp3"), whisper: true, dry_run: true } });
+const dryExtractWhisperJson = JSON.parse(dryExtractWhisperRes.content[0].text);
+checkOk(dryExtractWhisperJson.dry_run === true && dryExtractWhisperJson.output.endsWith(".wav") && dryExtractWhisperJson.sample_rate_hz === 16000 && dryExtractWhisperJson.channels === 1 && dryExtractWhisperJson.commands?.[0]?.includes("-ar 16000"), "extract_audio dry-run --whisper renames to .wav and forces 16 kHz mono in the printed command", JSON.stringify(dryExtractWhisperJson).slice(0, 200));
+checkOk(!existsSync(path.join(root, "outputs/mcp-dry-extract-whisper.wav")), "extract_audio dry-run --whisper writes no file", "mcp-dry-extract-whisper.wav");
+const dryInterpPath = path.join(root, "outputs/mcp-dry-interp.mp4");
+const dryInterpRes = await client.callTool({ name: "interpolate", arguments: { input: path.join(root, "test/source.mp4"), output: dryInterpPath, fps: 60, mode: "blend", dry_run: true } });
+const dryInterpJson = JSON.parse(dryInterpRes.content[0].text);
+checkOk(dryInterpJson.dry_run === true && dryInterpJson.fps_before === 30 && dryInterpJson.frames_before === 300 && dryInterpJson.fps_after === null && dryInterpJson.frames_after === null && dryInterpJson.commands?.[0]?.includes("minterpolate=fps=60:mi_mode=blend"), "interpolate dry-run prints the minterpolate command with the input's real 30fps/300 frames, fps_after/frames_after null", JSON.stringify(dryInterpJson.commands));
+checkOk(!existsSync(dryInterpPath), "interpolate dry-run writes no file", dryInterpPath);
+const dryDenoisePath = path.join(root, "outputs/mcp-dry-denoise.mp4");
+const dryDenoiseRes = await client.callTool({ name: "denoise", arguments: { input: path.join(root, "test/source.mp4"), output: dryDenoisePath, filter: "hqdn3d", strength: 0.5, dry_run: true } });
+const dryDenoiseJson = JSON.parse(dryDenoiseRes.content[0].text);
+checkOk(dryDenoiseJson.dry_run === true && dryDenoiseJson.filter_value === 15 && typeof dryDenoiseJson.noise_before === "number" && dryDenoiseJson.noise_after === null && dryDenoiseJson.commands?.[0]?.includes("hqdn3d=15:15:15:15"), "denoise dry-run prints the hqdn3d command (strength 0.5 -> 15) with noise_before measured on the input, noise_after null", JSON.stringify(dryDenoiseJson.commands));
+checkOk(!existsSync(dryDenoisePath), "denoise dry-run writes no file", dryDenoisePath);
+const drySegDir = path.join(root, "outputs/mcp-dry-hls");
+const drySegRes = await client.callTool({ name: "segment", arguments: { input: path.join(root, "test/source.mp4"), output_dir: drySegDir, segment_time: 2, dry_run: true } });
+const drySegJson = JSON.parse(drySegRes.content[0].text);
+checkOk(drySegJson.dry_run === true && drySegJson.mode === "copy" && drySegJson.segment_count === null && drySegJson.segments === null && near(drySegJson.source_duration_seconds, 10, 0.01) && drySegJson.commands?.[0]?.includes("-hls_time 2") && drySegJson.commands[0].includes("-f hls"), "segment dry-run prints the HLS command with the source duration, segment_count null (GOP-dependent in copy mode)", JSON.stringify(drySegJson.commands));
+checkOk(!existsSync(drySegDir), "segment dry-run creates no directory and writes no file", drySegDir);
+const dryFfPath = path.join(root, "outputs/mcp-dry-fastforward.mp4");
+const dryFfRes = await client.callTool({ name: "fastforward", arguments: { input: path.join(root, "test/source.mp4"), output: dryFfPath, segments: [{ start: 2, end: 4, speed: 2 }], dry_run: true } });
+const dryFfJson = JSON.parse(dryFfRes.content[0].text);
+checkOk(dryFfJson.dry_run === true && dryFfJson.duration_expected_seconds === 9 && dryFfJson.duration_seconds === null && dryFfJson.timing_check_mapped === null && dryFfJson.commands?.[0]?.includes("setpts=(PTS-STARTPTS)/2") && dryFfJson.commands[0].includes("atempo") && dryFfJson.commands[0].includes("mediakit-fastforward-dryrun"), "fastforward dry-run prints the setpts/atempo command for a 2-4s@2x span (expected 9s) with badge files in the deterministic temp dir", JSON.stringify(dryFfJson.commands).slice(0, 300));
+checkOk(!existsSync(dryFfPath), "fastforward dry-run writes no file", dryFfPath);
+// CLI dry-run: segment through the real CLI creates no directory.
+const dryCliSeg = await runCli(["segment", path.join(root, "test/source.mp4"), "--segment-time", "2", "-o", drySegDir, "--dry-run"]);
+const dryCliSegJson = JSON.parse(dryCliSeg.out);
+checkOk(dryCliSeg.code === 0 && dryCliSegJson.dry_run === true && !existsSync(drySegDir), "CLI segment --dry-run prints the plan and creates no directory", dryCliSeg.out.slice(0, 150));
 // Errors: audio file as the video, video file as the audio, offset out of range.
 const muxBadVideoRes = await client.callTool({
   name: "mux",
@@ -8201,3 +8239,4 @@ if (failures.length) {
   process.exit(1);
 }
 console.log("MCP test done — all assertions passed");
+process.exit(0);
