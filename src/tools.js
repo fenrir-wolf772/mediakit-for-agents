@@ -1497,7 +1497,7 @@ export const TOOL_DEFS = [
   // captions, an assets/ layout and a CLAUDE.md with the lifecycle.
   {
     name: "init_project",
-    description: "Scaffold a new assemble video project in a directory: a film.json that already validates (preset vertical by default, two template shots, 4s total), a placeholder voice (440 Hz tone WAV, 3s — replace it with the real narration before delivery), placeholder captions, an assets/ layout (shots/, music/) and a CLAUDE.md with the project lifecycle (validate → diagnose → preview → approve → render → verify). The starter film renders a real preview out of the box, so the project is edited, not debugged into existence. Refuses when film.json or CLAUDE.md already exists unless force:true. Use this before writing a film manifest by hand.",
+    description: "Scaffold a new assemble video project in a directory: a film.json that already validates (preset vertical by default, two template shots, 4s total), a placeholder voice (440 Hz tone WAV, 3s — replace it with the real narration before delivery), placeholder captions, an assets/ layout (shots/, music/) and a CLAUDE.md with the project lifecycle (validate → diagnose → preview → approve → render → verify → verify-cuts). The starter film renders a real preview out of the box, so the project is edited, not debugged into existence. Refuses when film.json or CLAUDE.md already exists unless force:true. Use this before writing a film manifest by hand.",
     schema: {
     dir: pathSchema.describe("Project directory to create (relative to the workspace, or absolute)"),
     title: z.string().optional().describe("Film title (default: the directory name)"),
@@ -1781,6 +1781,42 @@ export const TOOL_DEFS = [
     receipt: a.receipt,
     rerender: a.rerender === true,
     outputDir: a.output_dir ?? null,
+  })),
+  },
+
+  // Cut verification for an assemble render (metiutek/editorvideo-ai's
+  // `review.verify` idea, turn 112): verify proves the files did not
+  // move since the render; verify_cuts proves the RENDER cuts where
+  // the manifest promised. It downscales the delivered file to a 270p
+  // draft, measures the real hard cuts with the content scene
+  // detector, and compares them against the manifest's shot
+  // boundaries: a hard cut must land within tolerance (default 0.25s)
+  // of its promised time, a transition must show a real visual change
+  // across its blend window (a 0.4s fade fires no scene cut at all,
+  // so the frames just outside the window are diffed instead), and
+  // any cut the detector finds that no boundary explains is reported
+  // as unexpected. Duration is checked against the voice timeline.
+  // Probe-only: the only file written is the temp draft, removed
+  // afterwards unless keep_draft. Run it after every render you must
+  // trust, next to verify.
+  {
+    name: "verify_cuts",
+    description: "Verify an assemble render cuts where its film manifest promises: downscale the delivered video to a 270p draft, measure the real hard cuts with the content scene detector, and compare them against the manifest's shot boundaries — a hard cut must land within tolerance (default 0.25s) of its promised time, a transition must show a real visual change across its blend window (measured as a frame diff, since a fade fires no scene cut), and any extra cut is reported as unexpected. Duration is checked against the voice timeline (±0.2s). Returns ok plus one entry per boundary (confirmed/missing/invisible_transition/unmeasured) and the list of unexpected cuts. Probe-only: writes nothing except a temp draft, removed afterwards unless keep_draft.",
+    schema: {
+    manifest_path: pathSchema.describe("Path to the film manifest JSON file (same schema as assemble)"),
+    video: pathSchema.describe("Path to the rendered video to check (final.mp4 from a full assemble render)"),
+    tolerance: z.number().min(0).max(5).default(0.25).describe("How far a measured cut may drift from its promised time, in seconds (default 0.25)"),
+    threshold: z.number().min(0).max(1).optional().describe("Content scene-detector threshold (default 0.05 — the calibrated content-detector default; raise it only if smooth animation inside a shot is reported as a cut)"),
+    draft_height: z.number().int().min(16).max(4320).default(270).describe("Draft height in px for the scene-detection pass (default 270 — detection is resolution-insensitive; raise it only if a cut is missed on the draft)"),
+    keep_draft: z.boolean().default(false).describe("Keep the temp draft render and report its path (default false = removed afterwards)"),
+  },
+    handler: async (a) => safe(() => core.verifyAssembleCuts({
+    manifestPath: a.manifest_path,
+    video: a.video,
+    tolerance: a.tolerance,
+    threshold: a.threshold ?? null,
+    draftHeight: a.draft_height,
+    keepDraft: a.keep_draft === true,
   })),
   },
 

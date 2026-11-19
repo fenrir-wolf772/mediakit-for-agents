@@ -186,10 +186,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 74 tools present");
-checkOk(missing.length === 0, "tools/list has all 74 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 75 tools present");
+checkOk(missing.length === 0, "tools/list has all 75 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -1691,7 +1691,7 @@ checkOk(near(parseFloat(initVoiceProbe.format?.duration), 3, 0.05) && initVoiceP
 const initValidate = await runCliJson(["assemble", path.join(initDir, "film.json"), "--mode", "validate"]);
 checkOk(initValidate.mode === "validate" && initValidate.total_seconds === 4 && initValidate.total_frames === 120 && initValidate.voice?.duration_seconds === 3 && initValidate.captions?.cue_count === 2, "the scaffolded film validates through assemble (4s/120 frames, 3s voice, 2 caption cues)", JSON.stringify({ total_seconds: initValidate.total_seconds, voice: initValidate.voice, captions: initValidate.captions }));
 const initClaude = await readFile(path.join(initDir, "CLAUDE.md"), "utf8");
-checkOk(/PLACEHOLDER voice/.test(initClaude) && /validate → diagnose → preview → approve → render → verify/.test(initClaude) && /Do not approve your own checks/.test(initClaude), "init_project CLAUDE.md names the placeholder voice and the full lifecycle", initClaude.split("\n").slice(0, 8).join(" | "));
+checkOk(/PLACEHOLDER voice/.test(initClaude) && /validate → diagnose → preview → approve → render → verify → verify-cuts/.test(initClaude) && /Do not approve your own checks/.test(initClaude), "init_project CLAUDE.md names the placeholder voice and the full lifecycle", initClaude.split("\n").slice(0, 8).join(" | "));
 // A second init refuses to clobber the project; force replaces it.
 const initAgain = await callExpectThrow("init_project", { dir: initDir, title: "Second" });
 checkOk(/refuses to overwrite/.test(initAgain) && /film\.json/.test(initAgain), "init_project refuses a second scaffold without force", initAgain.slice(0, 200));
@@ -5980,7 +5980,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 74 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 74 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 75 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 75 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -6956,6 +6956,61 @@ const verifyRerenderRes = await client.callTool({ name: "verify", arguments: { r
 const verifyRerenderJson = JSON.parse(verifyRerenderRes.content[0].text);
 checkOk(verifyRerenderJson.verdict === "pass" && verifyRerenderJson.mode === "rerender" && verifyRerenderJson.rerender_removed === true && verifyRerenderJson.items?.find((i) => i.name === "output_bytes")?.status === "matched", "verify --rerender passes: the re-render is byte-identical and the temp dir is removed", JSON.stringify({ verdict: verifyRerenderJson.verdict, removed: verifyRerenderJson.rerender_removed, first: verifyRerenderJson.first_difference }));
 checkOk(existsSync(path.join(verifyTinyOut, "final.mp4")) && readdirSync(verifyTinyOut).filter((n) => n.startsWith(".mediakit-verify-rerender-")).length === 0, "verify rerender keeps the original final.mp4 and leaves no rerender temp dir behind", readdirSync(verifyTinyOut).join(", "));
+
+// verify_cuts (turn 112): the assemble render must cut where the
+// film manifest promises. Fixture test/verify-cuts-film.json: 4
+// template shots, 4s, brand warm-story, explicit bg per shot — 2
+// hard cuts (1.0s, 3.0s) + 1 fade (2.0s, 0.4s). The mixed hard-cut
+// + transition film is also the regression test for the join bug
+// fixed this turn: before the fix, joinAssembleSegments assumed
+// every boundary had a transition and dropped segments 3-4 (the
+// render failed the frame-count check at 36 frames instead of 120).
+const vcStage = await stageAssembleManifest("verify-cuts-film.json");
+const vcOut = path.join(vcStage.dir, "out");
+const vcValidateRes = await client.callTool({ name: "assemble", arguments: { manifest_path: vcStage.manifestPath, mode: "validate" } });
+const vcValidateJson = JSON.parse(vcValidateRes.content[0].text);
+// Brand maps spring-in (turn 111 follow-up): card/fg come from the
+// warm-story palette, the explicit bg wins over the brand bg.
+checkOk(vcValidateJson.brand_applied?.includes("shot 4 (s4) template.spring-in.card") && vcValidateJson.brand_applied?.includes("shot 4 (s4) template.spring-in.fg") && vcValidateJson.brand_overrides?.includes("shot 4 (s4) template.spring-in.bg") && vcValidateJson.shots?.[3]?.params?.card === "#B45309" && vcValidateJson.shots?.[3]?.params?.fg === "#FFF7ED" && vcValidateJson.shots?.[3]?.params?.bg === "#1E3A5F", "brand warm-story paints spring-in card/fg (primary/on_primary) while the explicit bg wins", JSON.stringify(vcValidateJson.shots?.[3]?.params));
+const vcRenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: vcStage.manifestPath, mode: "render", output_dir: vcOut, force: true } }, undefined, { timeout: 300000 });
+const vcRenderJson = JSON.parse(vcRenderRes.content[0].text);
+checkOk(vcRenderJson.final?.frames === 120 && near(parseFloat(vcRenderJson.final?.duration_seconds), 4, 0.05), "mixed hard-cut + fade film renders 4s / 120 frames (join regression: was 36 frames before the fix)", JSON.stringify(vcRenderJson.final));
+const vcFinalPath = path.join(vcOut, "final.mp4");
+const vcRes = await client.callTool({ name: "verify_cuts", arguments: { manifest_path: vcStage.manifestPath, video: vcFinalPath } }, undefined, { timeout: 300000 });
+const vcJson = JSON.parse(vcRes.content[0].text);
+checkOk(vcJson.ok === true && vcJson.cuts?.length === 3 && vcJson.cuts?.[0]?.status === "confirmed" && vcJson.cuts?.[0]?.measured_seconds === 1 && vcJson.cuts?.[0]?.drift_seconds === 0 && vcJson.cuts?.[1]?.status === "confirmed" && vcJson.cuts?.[1]?.type === "transition" && vcJson.cuts?.[1]?.transition_diff > 1 && vcJson.cuts?.[2]?.status === "confirmed" && vcJson.cuts?.[2]?.measured_seconds === 3 && vcJson.unexpected_cuts?.length === 0 && vcJson.duration_ok === true, "verify_cuts passes on the mixed film: hard cuts at 1.0s/3.0s drift 0, fade confirmed by frame diff, no unexpected cuts", JSON.stringify(vcJson.cuts));
+// Wrong timeline: the same render checked against a manifest that
+// promises the first cut at 1.5s instead of 1.0s — the cut at 1.5s
+// must be missing and the real cut at 1.0s unexpected, while the
+// other two boundaries still confirm.
+const vcWrongDoc = JSON.parse(await readFile(vcStage.manifestPath, "utf8"));
+vcWrongDoc.shots[0].duration = 1.5;
+vcWrongDoc.shots[1].duration = 0.5;
+const vcWrongPath = path.join(vcStage.dir, "verify-cuts-wrong.json");
+await writeFile(vcWrongPath, JSON.stringify(vcWrongDoc), "utf8");
+const vcWrongRes = await client.callTool({ name: "verify_cuts", arguments: { manifest_path: vcWrongPath, video: vcFinalPath } }, undefined, { timeout: 300000 });
+const vcWrongJson = JSON.parse(vcWrongRes.content[0].text);
+checkOk(vcWrongJson.ok === false && vcWrongJson.cuts?.[0]?.status === "missing" && vcWrongJson.cuts?.[0]?.expected_seconds === 1.5 && vcWrongJson.unexpected_cuts?.includes(1) && vcWrongJson.cuts?.[1]?.status === "confirmed" && vcWrongJson.cuts?.[2]?.status === "confirmed", "verify_cuts fails on a wrong timeline: cut at 1.5s missing, real cut at 1.0s unexpected, other boundaries still confirmed", JSON.stringify(vcWrongJson.cuts));
+// Same-color films: a hard cut between two identical color shots is
+// invisible (missing), and a fade between them blends identical
+// frames (invisible_transition, diff 0).
+const vcSameStage = await stageAssembleManifest("verify-cuts-same.json");
+const vcSameOut = path.join(vcSameStage.dir, "out");
+await client.callTool({ name: "assemble", arguments: { manifest_path: vcSameStage.manifestPath, mode: "render", output_dir: vcSameOut, force: true } }, undefined, { timeout: 300000 });
+const vcSameRes = await client.callTool({ name: "verify_cuts", arguments: { manifest_path: vcSameStage.manifestPath, video: path.join(vcSameOut, "final.mp4") } }, undefined, { timeout: 300000 });
+const vcSameJson = JSON.parse(vcSameRes.content[0].text);
+checkOk(vcSameJson.ok === false && vcSameJson.cuts?.length === 1 && vcSameJson.cuts?.[0]?.status === "missing" && vcSameJson.unexpected_cuts?.length === 0, "verify_cuts fails on a hard cut between identical color shots (missing, no unexpected)", JSON.stringify(vcSameJson.cuts));
+const vcSameFadeStage = await stageAssembleManifest("verify-cuts-same-fade.json");
+const vcSameFadeOut = path.join(vcSameFadeStage.dir, "out");
+await client.callTool({ name: "assemble", arguments: { manifest_path: vcSameFadeStage.manifestPath, mode: "render", output_dir: vcSameFadeOut, force: true } }, undefined, { timeout: 300000 });
+const vcSameFadeRes = await client.callTool({ name: "verify_cuts", arguments: { manifest_path: vcSameFadeStage.manifestPath, video: path.join(vcSameFadeOut, "final.mp4") } }, undefined, { timeout: 300000 });
+const vcSameFadeJson = JSON.parse(vcSameFadeRes.content[0].text);
+checkOk(vcSameFadeJson.ok === false && vcSameFadeJson.cuts?.length === 1 && vcSameFadeJson.cuts?.[0]?.status === "invisible_transition" && vcSameFadeJson.cuts?.[0]?.transition_diff === 0 && vcSameFadeJson.unexpected_cuts?.length === 0, "verify_cuts fails on a fade between identical color shots (invisible_transition, diff 0)", JSON.stringify(vcSameFadeJson.cuts));
+// verify_cuts refuses a non-video input and a missing manifest.
+const vcBadVideoText = await callExpectThrow("verify_cuts", { manifest_path: vcStage.manifestPath, video: path.join(root, "test/canvas-voice.mp3") });
+checkOk(/needs a video input/.test(vcBadVideoText ?? ""), "verify_cuts refuses an audio-only video input", (vcBadVideoText ?? "").slice(0, 160));
+const vcBadManifestText = await callExpectThrow("verify_cuts", { manifest_path: "/tmp/no-such-film-xyz.json", video: vcFinalPath });
+checkOk(/not found|not readable/.test(vcBadManifestText ?? ""), "verify_cuts refuses a missing manifest", (vcBadManifestText ?? "").slice(0, 160));
 
 // determinism (turn 83): the linear manifest tool must reproduce
 // byte-identically across fresh renders (cache off — a cache hit
@@ -8159,7 +8214,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 74 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 75 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -8219,11 +8274,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 74, "GET /mcp reports name/version/transport and 74 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 75, "GET /mcp reports name/version/transport and 75 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 74 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 74 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 75 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 75 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -8247,7 +8302,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 74, "JSON-RPC tools/list returns the same 74 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 75, "JSON-RPC tools/list returns the same 75 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

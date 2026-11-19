@@ -8890,6 +8890,10 @@ const TOOL_REQUIREMENTS = {
   // patch_manifest is pure JSON + a manifest --dry-run validation —
   // no ffmpeg capability needed either.
   patch_manifest: {},
+  // verify_cuts renders a 270p draft (scale + libx264) and measures
+  // cuts with the content scene detector (signalstats per frame) +
+  // frame diffs (blend on rgb24 + signalstats).
+  verify_cuts: { filters: ["scale", "signalstats", "blend", "trim", "setpts"], encoders: ["libx264"] },
   // export_timeline is pure JSON + ffprobe (validateAssembleManifest
   // probes every asset) — ffprobe presence is the global doctor gate,
   // like probe: {}.
@@ -13811,6 +13815,7 @@ const BRAND_TEMPLATE_COLOR_MAP = {
   "title-card": { bg1: "background", accent: "primary", fg: "text" },
   bounce: { bg: "background", color: "primary" },
   "slide-in": { bg: "background", card: "primary", fg: "on_primary" },
+  "spring-in": { bg: "background", card: "primary", fg: "on_primary" },
   rings: { bg: "background", color: "accent" },
 };
 
@@ -14616,8 +14621,21 @@ async function buildAssembleShot(plan, shot, opts, outPath, onShotProgress = nul
 }
 
 // Join uniform segments with xfade transitions (video-only — the
-// audio is mixed separately from the voice timeline). Every offset
-// is frame-aligned by construction (see deriveAssembleJoins), so the
+// audio is mixed separately from the voice timeline). Boundaries
+// are walked in order: a transition boundary xfades the accumulated
+// stream with the next segment at the join's offset, a hard-cut
+// boundary concats them. The offsets stay frame-aligned by
+// construction (see deriveAssembleJoins): a hard-cut boundary adds
+// no handles, so the accumulated stream at boundary b is exactly
+// cutFrames_b frames long, and a transition's offset
+// (cutFrames - hAfter)/fps still lands hAfter frames before the
+// nominal cut — the concat steps change nothing about the xfade
+// math, they only append. Before this fix (turn 112, caught by the
+// verify-cuts fixture film) the chain assumed EVERY boundary had a
+// transition: with 4 segments and 1 join it xfade'd only inputs 0+1
+// and silently dropped segments 2+3, so any film mixing hard cuts
+// with transitions failed the frame-count check. Every offset is
+// frame-aligned by construction (see deriveAssembleJoins), so the
 // joined video has exactly the nominal frame count; the caller
 // verifies that on disk. The final fps filter pins the frame rate
 // after the chain.
@@ -14625,18 +14643,41 @@ async function joinAssembleSegments(segmentPaths, joins, opts, outPath, onJoinPr
   const { fps, crf, preset } = opts;
   const graph = [];
   let vLabel = "0:v";
-  for (let k = 0; k < joins.length; k++) {
-    const j = joins[k];
-    const vOut = `x${k}`;
-    // Full double precision on the offset: it is (cutFrames -
-    // hAfter)/fps, and a repeating decimal like 542/30 =
-    // 18.0666... rounded to 4 decimals (18.0667) overshoots by
-    // 33us — enough for the trailing fps filter to emit one extra
-    // frame at the end (measured 2026-11-14: 601 frames instead of
-    // 600 on a 20s preview; full precision gives exactly 600).
-    // durationSeconds is already printed at full precision.
-    graph.push(`[${vLabel}][${k + 1}:v]xfade=transition=${j.type}:duration=${j.durationSeconds}:offset=${j.offsetSeconds}[${vOut}]`);
-    vLabel = vOut;
+  let inputIdx = 1;
+  for (let b = 0; b < segmentPaths.length - 1; b++) {
+    const j = joins.find((x) => x.index === b + 1);
+    if (j) {
+      const vOut = `x${b}`;
+      // Full double precision on the offset: it is (cutFrames -
+      // hAfter)/fps, and a repeating decimal like 542/30 =
+      // 18.0666... rounded to 4 decimals (18.0667) overshoots by
+      // 33us — enough for the trailing fps filter to emit one extra
+      // frame at the end (measured 2026-11-14: 601 frames instead of
+      // 600 on a 20s preview; full precision gives exactly 600).
+      // durationSeconds is already printed at full precision.
+      // settb=AVTB on BOTH xfade inputs: xfade refuses mismatched
+      // timebases, and a concat step upstream outputs 1/1000000
+      // while a raw segment is 1/15360 (measured: "First input link
+      // main timebase (1/1000000) do not match the corresponding
+      // second input link xfade timebase (1/15360)"). Normalizing
+      // both sides to AVTB keeps the timestamps (seconds) identical
+      // and the offsets valid.
+      const acc = `a${b}`;
+      const seg = `s${b}`;
+      graph.push(`[${vLabel}]settb=AVTB[${acc}]`);
+      graph.push(`[${inputIdx}:v]settb=AVTB[${seg}]`);
+      graph.push(`[${acc}][${seg}]xfade=transition=${j.type}:duration=${j.durationSeconds}:offset=${j.offsetSeconds}[${vOut}]`);
+      vLabel = vOut;
+    } else {
+      // Hard cut: append the next segment unchanged. Segments are
+      // uniform (same size/fps/format by construction), so the
+      // concat filter just re-timestamps; the trailing fps filter
+      // pins CFR.
+      const vOut = `c${b}`;
+      graph.push(`[${vLabel}][${inputIdx}:v]concat=n=2:v=1:a=0[${vOut}]`);
+      vLabel = vOut;
+    }
+    inputIdx++;
   }
   graph.push(`[${vLabel}]fps=${fps},format=yuv420p[vout]`);
   const args = ["-y"];
@@ -15121,7 +15162,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
 // validates, a placeholder voice so the timeline math is real,
 // captions, an assets/ layout, and a CLAUDE.md that walks the agent
 // (or the user) through validate → diagnose → preview → approve →
-// render → verify. The scaffold is deliberately runnable, not a blank
+// render → verify → verify-cuts. The scaffold is deliberately runnable, not a blank
 // template: the starter film renders a real 4-second film out of the
 // box (two template shots, no image assets needed), so the first
 // `assemble --mode validate` passes and the first preview shows
@@ -15232,7 +15273,7 @@ export async function initProject({ dir, title = null, preset = "vertical", bran
     "",
     "## Lifecycle (never skip a step)",
     "",
-    "validate → diagnose → preview → approve → render → verify.",
+    "validate → diagnose → preview → approve → render → verify → verify-cuts.",
     "",
     "1. Edit `film.json` (shots, voice, captions, chapters).",
     "2. `mediakit assemble film.json --mode validate` — the timeline math must pass.",
@@ -15242,6 +15283,7 @@ export async function initProject({ dir, title = null, preset = "vertical", bran
     "6. `mediakit assemble film.json --mode approve -o outputs/preview`",
     "7. `mediakit assemble film.json --mode render -o outputs`",
     "8. `mediakit verify outputs/assemble-receipt.json` — the render must verify clean.",
+    "9. `mediakit verify-cuts film.json outputs/final.mp4` — the render must cut where the manifest promises.",
     "",
     "## Rules",
     "",
@@ -15521,6 +15563,161 @@ export async function verifyRender({ receipt, rerender = false, outputDir = null
       ? (mode === "rerender" ? "Rerender is byte-identical and all inputs match the receipt — the render reproduces." : "All inputs and the output match the receipt — nothing moved.")
       : `${bad.length} of ${items.length} checks differ, first: ${firstDifference}.`,
   };
+}
+
+// ---------------------------------------------------------------- verify_cuts
+// Cut verification for an assemble render (metiutek/editorvideo-ai's
+// `review.verify` idea, turn 112): downscale the delivered file to a
+// 270p draft (vedit's draft-render pattern — scene detection is
+// resolution-insensitive, and the draft decodes ~10x faster), measure
+// the real hard cuts with the content scene detector, and compare
+// them against the cuts the film manifest promises. A hard cut must
+// land within `tolerance` of its promised time. A transition cannot
+// be seen by a scene detector — a 0.4s fade fires no cut at all
+// (measured: 0 cuts on the lượt 111 film, which has two fades) — so
+// it is verified differently: the frames just outside the blend
+// window must actually differ, measured with frameDiffMean on the
+// same 0-255 scale motion uses. The floor is 1.0: two identical
+// static frames measure 0.00, while the weakest real change measured
+// (rings animating across 0.7s) is 2.95 and a real fade window is
+// 7.3-36.9 — 3x margin on both sides. Anything the detector finds
+// that no boundary explains is an unexpected cut: the render changes
+// picture where the manifest promises one continuous shot. Duration
+// is checked against the voice timeline (±0.2s, vedit's verify
+// number). Probe-only: the only file written is the temp draft,
+// removed afterwards unless keep_draft.
+const VERIFY_CUTS_TOLERANCE_DEFAULT = 0.25;
+const VERIFY_CUTS_DURATION_TOLERANCE = 0.2;
+const VERIFY_CUTS_DRAFT_HEIGHT = 270;
+const VERIFY_CUTS_MIN_SCENE_LEN_FRAMES = 3;
+const VERIFY_CUTS_TRANSITION_DIFF_FLOOR = 1.0;
+
+export async function verifyAssembleCuts({ manifestPath, video, tolerance = VERIFY_CUTS_TOLERANCE_DEFAULT, threshold = null, draftHeight = VERIFY_CUTS_DRAFT_HEIGHT, keepDraft = false }) {
+  const tol = num(tolerance, "tolerance", { min: 0, max: 5 });
+  const dh = num(draftHeight, "draft_height", { min: 16, max: 4320, integer: true });
+  const manifestAbs = await requireInput(manifestPath, "manifest");
+  let doc;
+  try {
+    doc = JSON.parse(await readFile(manifestAbs, "utf8"));
+  } catch (e) {
+    throw new MediaKitError(`verify_cuts cannot read manifest ${manifestPath}: ${e.message}`, "INVALID_ARG");
+  }
+  const plan = await validateAssembleManifest(doc, manifestAbs);
+  const videoAbs = await requireInput(video, "video");
+  const meta = await probe(videoAbs);
+  if (!meta.video) throw new MediaKitError("verify_cuts needs a video input", "INVALID_ARG");
+  const fps = plan.fps;
+  const duration = meta.duration_seconds;
+
+  // Draft render: scene detection on a 270p copy, not the master.
+  let draftPath = videoAbs;
+  let draftMade = false;
+  if (meta.video.height > dh) {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-verify-cuts-"));
+    draftPath = path.join(tmpDir, "draft.mp4");
+    const w = Math.max(2, Math.floor(((meta.video.width * dh) / meta.video.height / 2)) * 2);
+    await run(FFMPEG, ["-hide_banner", "-nostats", "-i", videoAbs, "-vf", `scale=${w}:${dh}`, "-an", "-c:v", "libx264", "-crf", "28", "-preset", "veryfast", "-y", draftPath]);
+    draftMade = true;
+  }
+  try {
+    const scenes = await detectScenes({
+      input: draftPath,
+      detector: "content",
+      threshold: threshold ?? CONTENT_DETECTOR_DEFAULT_THRESHOLD,
+      minSceneLen: VERIFY_CUTS_MIN_SCENE_LEN_FRAMES,
+      flashFrames: CONTENT_DETECTOR_DEFAULT_FLASH_FRAMES,
+    });
+    const measured = scenes.scene_changes;
+
+    // The boundaries the manifest promises. Same handle math as
+    // deriveAssembleJoins: a transition of F frames is centered on
+    // its cut, so the blend window starts (cutFrames - hAfter)/fps.
+    const boundaries = [];
+    let cutFrames = 0;
+    for (let i = 0; i < plan.shots.length - 1; i++) {
+      cutFrames += plan.shots[i].frames;
+      const next = plan.shots[i + 1];
+      const t = +(cutFrames / fps).toFixed(3);
+      if (!next.transition) {
+        boundaries.push({ index: i + 1, type: "cut", expected_seconds: t });
+      } else {
+        const hAfter = next.transition.frames - Math.floor(next.transition.frames / 2);
+        const ws = +((cutFrames - hAfter) / fps).toFixed(3);
+        const we = +(ws + next.transition.frames / fps).toFixed(3);
+        boundaries.push({ index: i + 1, type: "transition", transition: next.transition.type, expected_seconds: t, window_seconds: [ws, we] });
+      }
+    }
+
+    const remaining = [...measured];
+    const cuts = [];
+    const warnings = [];
+    for (const b of boundaries) {
+      if (b.type === "cut") {
+        let best = -1;
+        let bestD = Infinity;
+        remaining.forEach((m, j) => {
+          const d = Math.abs(m - b.expected_seconds);
+          if (d < bestD) { bestD = d; best = j; }
+        });
+        if (best >= 0 && bestD <= tol) {
+          const m = remaining.splice(best, 1)[0];
+          cuts.push({ ...b, status: "confirmed", measured_seconds: m, drift_seconds: +(m - b.expected_seconds).toFixed(3) });
+        } else {
+          cuts.push({ ...b, status: "missing", measured_seconds: null, drift_seconds: null });
+          warnings.push(`cut ${b.index} at ${b.expected_seconds}s was not found in the render (nearest measured cut: ${best >= 0 ? `${remaining[best]}s` : "none"}) — the two shots look identical at the boundary, or the render dropped the cut`);
+        }
+      } else {
+        const [ws, we] = b.window_seconds;
+        const inWin = remaining.findIndex((m) => m >= ws - tol && m <= we + tol);
+        if (inWin >= 0) {
+          const m = remaining.splice(inWin, 1)[0];
+          cuts.push({ ...b, status: "confirmed", measured_seconds: m, drift_seconds: +(m - b.expected_seconds).toFixed(3), transition_diff: null });
+        } else {
+          const t1 = Math.max(0, +(ws - 0.1).toFixed(3));
+          const t2 = Math.min(duration ?? we + 0.1, +(we + 0.1).toFixed(3));
+          const diff = await frameDiffMean(draftPath, t1, t2, fps);
+          if (diff === null) {
+            cuts.push({ ...b, status: "unmeasured", measured_seconds: null, drift_seconds: null, transition_diff: null });
+            warnings.push(`transition ${b.index} (${b.transition}, ${ws}s–${we}s) could not be measured — the frame diff returned nothing`);
+          } else if (diff < VERIFY_CUTS_TRANSITION_DIFF_FLOOR) {
+            cuts.push({ ...b, status: "invisible_transition", measured_seconds: null, drift_seconds: null, transition_diff: diff });
+            warnings.push(`transition ${b.index} (${b.transition}, ${ws}s–${we}s) blends two frames that measure identical (diff ${diff} on a 0–255 scale) — the viewer sees no change at this boundary`);
+          } else {
+            cuts.push({ ...b, status: "confirmed", measured_seconds: null, drift_seconds: null, transition_diff: diff });
+          }
+        }
+      }
+    }
+    const unexpected = remaining.map((m) => +m.toFixed(3));
+    for (const m of unexpected) warnings.push(`unexpected cut at ${m}s — the render changes picture where the manifest promises one continuous shot`);
+    const durationOk = duration !== null && Number.isFinite(duration) && Math.abs(duration - plan.total_seconds) <= VERIFY_CUTS_DURATION_TOLERANCE;
+    if (!durationOk) warnings.push(`duration ${duration}s differs from the manifest timeline ${plan.total_seconds}s by more than ${VERIFY_CUTS_DURATION_TOLERANCE}s`);
+    const ok = warnings.length === 0;
+    return {
+      operation: "verify_cuts",
+      manifest: manifestAbs,
+      video: videoAbs,
+      expected_duration_seconds: plan.total_seconds,
+      measured_duration_seconds: duration,
+      duration_ok: durationOk,
+      tolerance_seconds: tol,
+      detector: "content",
+      threshold: threshold ?? CONTENT_DETECTOR_DEFAULT_THRESHOLD,
+      draft_height: dh,
+      draft: draftMade && keepDraft ? draftPath : null,
+      cuts,
+      unexpected_cuts: unexpected,
+      warnings,
+      ok,
+      summary: ok
+        ? `All ${boundaries.length} boundaries confirmed (${cuts.filter((c) => c.status === "confirmed").length} confirmed, 0 missing, 0 unexpected) and duration matches the timeline.`
+        : `${warnings.length} problem(s): ${warnings.join(" ")}`,
+    };
+  } finally {
+    if (draftMade && !keepDraft) {
+      try { await rm(path.dirname(draftPath), { recursive: true, force: true }); } catch { /* best-effort */ }
+    }
+  }
 }
 
 // ---------------------------------------------------------------- diagnose

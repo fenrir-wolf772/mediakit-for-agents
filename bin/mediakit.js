@@ -864,6 +864,17 @@ const COMMANDS = {
       ["-o, --output", "Output directory for the rerender (kept; without it the rerender is compared then removed)"],
     ],
   },
+  "verify-cuts": {
+    usage: "mediakit verify-cuts <film.json> <video.mp4> [--tolerance 0.25] [--threshold 0.05] [--draft-height 270] [--keep-draft]",
+    desc: "Verify an assemble render cuts where its film manifest promises: downscale the video to a 270p draft, measure the real hard cuts with the content scene detector, and compare them against the manifest's shot boundaries — a hard cut must land within --tolerance (default 0.25s) of its promised time, a transition must show a real visual change across its blend window (a fade fires no scene cut, so the frames just outside the window are diffed instead), and any extra cut is reported as unexpected. Duration is checked against the voice timeline (±0.2s). Probe-only: writes nothing except a temp draft, removed afterwards unless --keep-draft.",
+    args: [{ name: "manifest", required: true }, { name: "video", required: true }],
+    options: [
+      ["--tolerance", "How far a measured cut may drift from its promised time, in seconds (default 0.25)"],
+      ["--threshold", "Content scene-detector threshold (default 0.05)"],
+      ["--draft-height", "Draft height in px for the scene-detection pass (default 270)"],
+      ["--keep-draft", "Keep the temp draft render and report its path"],
+    ],
+  },
   diagnose: {
     usage: "mediakit diagnose <film.json>",
     desc: "Director preflight for an assemble film manifest: validate the manifest, then measure what validation cannot — real motion inside each video shot's exact window (a frozen video is an error), source geometry vs the film frame (upscale over 2x or a low fps warns), the visual seam across each transition, voice loudness, caption coverage and gaps, music loop count, sfx tails past the film end, chapter alignment to cuts, and text layers that are too tall or sit in the burned-caption band. Probe-only, writes nothing. A broken manifest reports verdict fail with format_error instead of exiting 2. Run it after writing a film.json and before approve/render; run verify after the render.",
@@ -943,7 +954,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 74 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 75 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -1999,6 +2010,18 @@ async function main() {
           receipt: positional[0],
           rerender: opts.rerender === true,
           outputDir: opts.output ?? null,
+        });
+        break;
+      }
+      case "verify-cuts": {
+        if (!positional[0] || !positional[1]) fail("missing manifest/video: mediakit verify-cuts <film.json> <video.mp4> [--tolerance 0.25]");
+        result = await core.verifyAssembleCuts({
+          manifestPath: positional[0],
+          video: positional[1],
+          tolerance: numOpt(opts, "tolerance") ?? 0.25,
+          threshold: numOpt(opts, "threshold") ?? null,
+          draftHeight: numOpt(opts, "draft_height") ?? 270,
+          keepDraft: opts.keep_draft === true,
         });
         break;
       }

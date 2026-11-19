@@ -1,0 +1,1 @@
+{"fps":30,"height":960,"shots":[{"color":"0F172A","duration":1.0,"id":"a","kind":"color"},{"color":"0F172A","duration":1.0,"id":"b","kind":"color","transition":{"duration":0.4,"type":"fade"}}],"title":"Verify cuts same-color fade","version":1,"voice":{"lead":0,"path":"verify-voice.mp3","tail":0},"width":540}
