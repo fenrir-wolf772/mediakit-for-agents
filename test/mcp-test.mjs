@@ -221,6 +221,20 @@ const probeTbRes = await client.callTool({
 });
 const probeTbJson = JSON.parse(probeTbRes.content[0].text);
 checkOk(probeTbJson.video?.time_base === "1/90000", "probe reports video time_base 1/90000 on the timescale fixture", `got ${probeTbJson.video?.time_base}`);
+// Per-stream durations (lượt 127): probe exposes each stream's own
+// length, so check's audio_sync rule can compare video vs audio.
+const probeSyncOkRes = await client.callTool({
+  name: "probe",
+  arguments: { input: path.join(root, "test/avsync-ok.mp4") },
+});
+const probeSyncOkJson = JSON.parse(probeSyncOkRes.content[0].text);
+checkOk(probeSyncOkJson.video?.duration_seconds === 5 && probeSyncOkJson.audio?.duration_seconds === 5, "probe reports per-stream durations 5s/5s on the in-sync fixture", JSON.stringify({ v: probeSyncOkJson.video?.duration_seconds, a: probeSyncOkJson.audio?.duration_seconds }));
+const probeSyncDriftRes = await client.callTool({
+  name: "probe",
+  arguments: { input: path.join(root, "test/avsync-drift.mp4") },
+});
+const probeSyncDriftJson = JSON.parse(probeSyncDriftRes.content[0].text);
+checkOk(probeSyncDriftJson.video?.duration_seconds === 5 && probeSyncDriftJson.audio?.duration_seconds === 4.4, "probe reports per-stream durations 5s/4.4s on the drift fixture", JSON.stringify({ v: probeSyncDriftJson.video?.duration_seconds, a: probeSyncDriftJson.audio?.duration_seconds }));
 // check judges dimensions as displayed: the vertical fixture is coded
 // 1920x1080 but displays 1080x1920, so its dimensions rule passes
 // TikTok; the 720x1280 rotated file reports its display size, not
@@ -489,6 +503,59 @@ const contentRangeCli = await runCli(["check", path.join(root, "test/content-bla
 checkOk(contentRangeCli.code === 0, "CLI check --content --start works", contentRangeCli.out.slice(0, 200));
 const contentRangeNoContent = await runCli(["check", path.join(root, "test/content-black.mp4"), "--start", "2"], {});
 checkOk(contentRangeNoContent.code !== 0 && /need --content/.test(contentRangeNoContent.out), "CLI --start without --content is refused", contentRangeNoContent.out.slice(0, 200));
+
+// check audio_sync (lượt 127, idea: OpenEdit qc/gate.py): video and
+// audio stream durations must agree within ±0.2s.
+async function checkSync(file) {
+  const r = await client.callTool({ name: "check", arguments: { input: path.join(root, file), platform: "youtube" } });
+  return JSON.parse(r.content[0].text);
+}
+const syncOk = await checkSync("test/avsync-ok.mp4");
+checkOk(syncOk.checks.find((c) => c.name === "audio_sync")?.pass === true, "audio_sync passes when video and audio are both 5s", JSON.stringify(syncOk.checks.find((c) => c.name === "audio_sync")));
+const syncDrift = await checkSync("test/avsync-drift.mp4");
+const syncDriftRule = syncDrift.checks.find((c) => c.name === "audio_sync");
+console.log("check audio_sync drift:", JSON.stringify(syncDriftRule));
+checkOk(syncDriftRule?.pass === false && /-0\.6s/.test(syncDriftRule?.actual ?? ""), "audio_sync fails on 5s video vs 4.4s audio (Δ -0.6s)", JSON.stringify(syncDriftRule));
+checkOk(syncDrift.issues?.some((i) => i.startsWith("audio_sync")), "audio_sync appears in top-level issues", JSON.stringify(syncDrift.issues));
+const syncVideoOnly = await checkSync("test/content-video-only.mp4");
+checkOk(!syncVideoOnly.checks.some((c) => c.name === "audio_sync"), "no audio_sync rule on a video-only file (unmeasurable, not failed)", JSON.stringify(syncVideoOnly.checks.map((c) => c.name)));
+
+// check --palette (lượt 127, idea: cardstock-diorama-myth qc.py):
+// frames sampled at 2 fps, measured against a locked look.
+async function checkPalette(file, extra) {
+  const r = await client.callTool({ name: "check", arguments: { input: path.join(root, file), platform: "youtube", ...extra } });
+  return JSON.parse(r.content[0].text);
+}
+const paletteGrey = await checkPalette("test/palette-grey.mp4", { palette: "#808080,#FFFFFF,#000000" });
+console.log("check palette grey:", JSON.stringify(paletteGrey.palette));
+checkOk(paletteGrey.palette?.colors?.find((c) => c.hex === "#808080")?.share_pct === 100, "palette: solid grey is 100% grey", JSON.stringify(paletteGrey.palette));
+checkOk(paletteGrey.palette?.off_palette_pct === 0 && paletteGrey.palette?.frames_sampled === 6, "palette: 0% off-palette, 6 frames sampled at 2 fps over 3s", JSON.stringify(paletteGrey.palette));
+checkOk(near(paletteGrey.palette?.mean_luma, 126, 3), "palette: mean luma of grey 128 is ~126 (yuv rounding)", `got ${paletteGrey.palette?.mean_luma}`);
+checkOk(paletteGrey.checks.find((c) => c.name === "content_palette")?.pass === true, "content_palette passes on the matching grey palette", JSON.stringify(paletteGrey.checks.find((c) => c.name === "content_palette")));
+const paletteWhite = await checkPalette("test/palette-white.mp4", { palette: "#808080,#FFFFFF,#000000" });
+checkOk(paletteWhite.palette?.blown_pct === 100, "palette: solid white is 100% blown", JSON.stringify(paletteWhite.palette));
+checkOk(paletteWhite.checks.find((c) => c.name === "content_palette")?.pass === false && !paletteWhite.checks.find((c) => c.name === "content_palette")?.severity, "content_palette fails (error) when blown past 2%", JSON.stringify(paletteWhite.checks.find((c) => c.name === "content_palette")));
+checkOk(paletteWhite.issues?.some((i) => i.startsWith("content_palette")), "content_palette appears in top-level issues", JSON.stringify(paletteWhite.issues));
+const paletteRed = await checkPalette("test/palette-red.mp4", { palette: "#808080,#FFFFFF,#000000" });
+console.log("check palette red:", JSON.stringify(paletteRed.palette));
+checkOk(paletteRed.palette?.off_palette_pct === 100, "palette: solid red is 100% off a grey/white/black palette", JSON.stringify(paletteRed.palette));
+checkOk(paletteRed.checks.find((c) => c.name === "content_palette")?.pass === false && paletteRed.checks.find((c) => c.name === "content_palette")?.severity === "warn", "content_palette only warns (mean luma 75 < 95, all off-palette) instead of failing", JSON.stringify(paletteRed.checks.find((c) => c.name === "content_palette")));
+checkOk(paletteRed.warnings?.some((w) => w.startsWith("content_palette")), "content_palette warning appears in top-level warnings", JSON.stringify(paletteRed.warnings));
+const paletteBrand = await checkPalette("test/palette-grey.mp4", { palette_brand: "warm-story" });
+checkOk(paletteBrand.palette?.brand === "warm-story" && paletteBrand.palette?.colors?.length === 4, "palette_brand warm-story resolves to 4 distinct brand colors (text == on_primary deduped)", JSON.stringify(paletteBrand.palette));
+checkOk(paletteBrand.palette?.off_palette_pct === 100, "palette_brand: grey is 100% off the warm-story palette", JSON.stringify(paletteBrand.palette));
+const paletteBad = await callExpectThrow("check", { input: path.join(root, "test/palette-grey.mp4"), platform: "youtube", palette: "#808080" });
+checkOk(/2-6 colors/.test(paletteBad), "a 1-color palette is refused", paletteBad.slice(0, 200));
+const paletteBadHex = await callExpectThrow("check", { input: path.join(root, "test/palette-grey.mp4"), platform: "youtube", palette: "#GGGGGG,#FFFFFF" });
+checkOk(/6-digit hex/.test(paletteBadHex), "a non-hex palette color is refused", paletteBadHex.slice(0, 200));
+const paletteBoth = await callExpectThrow("check", { input: path.join(root, "test/palette-grey.mp4"), platform: "youtube", palette: "#808080,#FFFFFF", palette_brand: "warm-story" });
+checkOk(/mutually exclusive/.test(paletteBoth), "palette + palette_brand together are refused", paletteBoth.slice(0, 200));
+const paletteBadBrand = await callExpectThrow("check", { input: path.join(root, "test/palette-grey.mp4"), platform: "youtube", palette_brand: "nope" });
+checkOk(/palette brand must be one of/.test(paletteBadBrand), "an unknown palette brand is refused", paletteBadBrand.slice(0, 200));
+const paletteCli = await runCli(["check", path.join(root, "test/palette-grey.mp4"), "--platform", "youtube", "--palette", "#808080,#FFFFFF,#000000"], {});
+checkOk(paletteCli.code === 0, "CLI check --palette works", paletteCli.out.slice(0, 200));
+const paletteCliBoth = await runCli(["check", path.join(root, "test/palette-grey.mp4"), "--palette", "#808080,#FFFFFF", "--palette-brand", "warm-story"], {});
+checkOk(paletteCliBoth.code !== 0 && /mutually exclusive/.test(paletteCliBoth.out), "CLI --palette + --palette-brand together are refused", paletteCliBoth.out.slice(0, 200));
 
 // grade: named presets + custom filter, verified on pixels.
 // Source mid-frame is near-neutral (R 122, G 128, B 127).
@@ -1921,7 +1988,13 @@ const auditAllRes = await client.callTool({ name: "audit", arguments: { limit: 2
 const auditAll = JSON.parse(auditAllRes.content[0].text);
 checkOk(auditAll.audit_path === auditPath && auditAll.total >= 10 && Array.isArray(auditAll.entries) && auditAll.entries.length > 0, "audit: log reads back with path + total + newest-first entries", `total=${auditAll.total} entries=${auditAll.entries.length}`);
 checkOk(auditAll.entries.every((e) => e.id && e.tool && e.via && typeof e.duration_ms === "number" && e.status && /^[0-9a-f]{64}$/.test(e.args_sha256 ?? "")), "audit: every entry has id/tool/via/duration/status + a 64-hex args hash", JSON.stringify(auditAll.entries[0]).slice(0, 300));
-const auditTrim = auditAll.entries.find((e) => e.tool === "trim" && e.status === "ok" && e.files?.some((f) => f.path.endsWith("outputs/mcp-trim.mp4")));
+// The first trim is found through the --tool filter, not the newest-200
+// window: the suite grows every round (lượt 127 added ~24 calls), so
+// the unfiltered window eventually evicts the oldest entries and the
+// lookup fails for a reason that has nothing to do with auditing.
+const auditTrimRes = await client.callTool({ name: "audit", arguments: { tool: "trim", limit: 200 } });
+const auditTrimAll = JSON.parse(auditTrimRes.content[0].text);
+const auditTrim = auditTrimAll.entries.find((e) => e.tool === "trim" && e.status === "ok" && e.files?.some((f) => f.path.endsWith("outputs/mcp-trim.mp4")));
 checkOk(!!auditTrim, "audit: the suite's first trim call is in the log with status ok", `found=${!!auditTrim}`);
 if (auditTrim) {
   const trimIn = auditTrim.files.find((f) => f.role === "input");

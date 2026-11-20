@@ -263,8 +263,8 @@ const COMMANDS = {
     ],
   },
   check: {
-    usage: "mediakit check <input> [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin] [--expected-duration <s|MM:SS>] [--content] [--start <s|MM:SS>] [--end <s|MM:SS>] [--peak-threshold <dB>] [--faststart] [--decoded-work]",
-    desc: "Verify a file against a platform delivery spec (dimensions, codecs, duration, loudness). --expected-duration fails when the measured duration is more than 0.5s off the brief. --content also scans for black/frozen frames, silence and audio peaks; --start/--end scan only that time range. --decoded-work also estimates the decode load and warns when it is over the ceiling.",
+    usage: "mediakit check <input> [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin] [--expected-duration <s|MM:SS>] [--content] [--start <s|MM:SS>] [--end <s|MM:SS>] [--peak-threshold <dB>] [--faststart] [--decoded-work] [--palette \"#hex,#hex,#hex\"] [--palette-brand amber-teal|warm-story|minimal-line]",
+    desc: "Verify a file against a platform delivery spec (dimensions, codecs, duration, loudness). --expected-duration fails when the measured duration is more than 0.5s off the brief. --content also scans for black/frozen frames, silence and audio peaks; --start/--end scan only that time range. --decoded-work also estimates the decode load and warns when it is over the ceiling. Video and audio stream durations must agree within ±0.2s (audio_sync, always checked when both durations are measurable). --palette (2-6 hex colors) or --palette-brand measures frames at 2 fps against a locked look: per-color shares, off-palette share, mean luma, crushed/blown share, luma swing — crushed or blown past 2% fails.",
     args: [{ name: "input", required: true }],
     options: [
       ["--platform", "Delivery platform (default tiktok)"],
@@ -275,6 +275,8 @@ const COMMANDS = {
       ["--peak-threshold", "Audio peak threshold in dBFS for the peaks rule (default -1; >= 0 dBFS is clipping; needs --content)"],
       ["--faststart", "Also check MP4 faststart (moov before mdat) — fails when the file is not an MP4 or its moov box comes after mdat"],
       ["--decoded-work", "Also estimate the decoded work (video pixel-frames + audio sample-channels) and warn when it is over the ceiling (250B pixel-frames / 6B sample-channels, plus 3600s, 8192px, 120fps, 8ch, 192kHz)"],
+      ["--palette", "Locked look as 2-6 comma-separated hex colors, e.g. \"#DCC0A0,#A02D19,#1B2740\" (mutually exclusive with --palette-brand)"],
+      ["--palette-brand", "Locked look as a brand id: amber-teal | warm-story | minimal-line (same registry as assemble; mutually exclusive with --palette)"],
     ],
   },
   "qa-report": {
@@ -1450,6 +1452,7 @@ async function main() {
         const wantContent = opts.content === true;
         const hasRange = opts.start !== undefined || opts.end !== undefined || opts.peak_threshold !== undefined;
         if (hasRange && !wantContent) fail("--start/--end/--peak-threshold need --content (they only affect the content scan)");
+        if (opts.palette !== undefined && opts.palette_brand !== undefined) fail("--palette and --palette-brand are mutually exclusive");
         result = await core.check({
           input: needInput(), platform: opts.platform ?? "tiktok",
           expectedDuration: opts.expected_duration ?? null,
@@ -1459,6 +1462,8 @@ async function main() {
           peakThresholdDb: numOpt(opts, "peak_threshold") ?? -1,
           faststart: opts.faststart === true,
           decodedWork: opts.decoded_work === true,
+          palette: opts.palette ?? null,
+          paletteBrand: opts.palette_brand ?? null,
         });
         break;
       }

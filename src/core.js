@@ -525,12 +525,17 @@ export async function probe(input) {
       pixel_format: video.pix_fmt ?? null,
       time_base: video.time_base ?? null,
       bit_rate: numOrNull(video.bit_rate),
+      // Per-stream duration (null when the container does not carry
+      // one): check's audio_sync rule compares video vs audio stream
+      // lengths from here, instead of the single format duration.
+      duration_seconds: numOrNull(video.duration),
     } : null,
     audio: audio ? {
       codec: audio.codec_name,
       sample_rate: audio.sample_rate ? Number(audio.sample_rate) : null,
       channels: audio.channels ?? null,
       bit_rate: numOrNull(audio.bit_rate),
+      duration_seconds: numOrNull(audio.duration),
     } : null,
     streams: (data.streams ?? []).map((s) => ({ index: s.index, type: s.codec_type, codec: s.codec_name })),
   };
@@ -5062,7 +5067,7 @@ export function estimateDecodedWork(meta) {
   };
 }
 
-export async function check({ input, platform = "tiktok", content = false, contentStart = null, contentEnd = null, peakThresholdDb = -1, expectedDuration = null, faststart = false, decodedWork = false }) {
+export async function check({ input, platform = "tiktok", content = false, contentStart = null, contentEnd = null, peakThresholdDb = -1, expectedDuration = null, faststart = false, decodedWork = false, palette = null, paletteBrand = null }) {
   const inPath = await requireInput(input);
   const spec = PLATFORMS[platform];
   if (!spec) throw new MediaKitError(`unknown platform: ${platform} (supported: ${Object.keys(PLATFORMS).join(", ")})`, "INVALID_ARG");
@@ -5199,6 +5204,24 @@ export async function check({ input, platform = "tiktok", content = false, conte
   } else {
     checks.push({ name: "audio", expected: "audio stream present", actual: "no audio stream", pass: false });
   }
+  // Audio sync (idea: AH64-dll/OpenEdit qc/gate.py — video/audio
+  // stream durations must agree within ±0.2s). Always on when both
+  // streams exist and both carry a duration: a mux that pads or
+  // truncates one stream by more than a few frames plays out of
+  // sync on some players and drifts a caption burn. When either
+  // duration is missing the rule is skipped, not failed — "unknown
+  // is not missing" — and the probe still reports both durations.
+  if (meta.video && meta.audio) {
+    const vDur = meta.video.duration_seconds;
+    const aDur = meta.audio.duration_seconds;
+    if (vDur !== null && aDur !== null) {
+      const delta = +(aDur - vDur).toFixed(3);
+      add("audio_sync", "video and audio durations within ±0.2s",
+        `video ${vDur}s vs audio ${aDur}s (Δ ${delta >= 0 ? "+" : ""}${delta}s)`,
+        Math.abs(delta) <= 0.2,
+        "re-mux with the audio padded/trimmed to the video length (apad/atrim), or re-encode with -shortest");
+    }
+  }
   // Content QC (opt-in): black/frozen frames + silence in one decode
   // pass, folded into the same pass/fail list. A stream that does not
   // exist is "unavailable" in the content detail, not a failed rule.
@@ -5224,6 +5247,50 @@ export async function check({ input, platform = "tiktok", content = false, conte
         errs > 0 ? "error" : "warn");
     }
   }
+  // Palette adherence (opt-in, idea: sadekxD/cardstock-diorama-myth
+  // qc.py): the locked look — either explicit hex colors or a brand
+  // id from the same registry as assemble/titlecard/intro — measured
+  // against the frames, so a film that drifted off-brand fails the
+  // gate instead of shipping on a vibe. Crushed/blown past 2% fail
+  // (cardstock's own thresholds); a mean luma outside 95–175
+  // (DARK/WASHED) or more than half the pixels off-palette only warn:
+  // exposure swing is stylistic, and a wrong palette is a warning
+  // the director reads, not a gate that blocks a good cut.
+  let paletteResult = null;
+  if (palette !== null || paletteBrand !== null) {
+    if (palette !== null && paletteBrand !== null) {
+      throw new MediaKitError("check --palette and --palette-brand are mutually exclusive", "INVALID_ARG");
+    }
+    let colors;
+    if (paletteBrand !== null) {
+      const brand = await resolveAssembleBrand(paletteBrand, "palette brand");
+      const seen = new Set();
+      colors = [];
+      for (const key of ["background", "primary", "accent", "text", "on_primary"]) {
+        const hex = brand.palette?.[key];
+        if (!hex || seen.has(hex.toUpperCase())) continue;
+        seen.add(hex.toUpperCase());
+        colors.push(parseOneHexColor(`#${hex}`, "palette brand"));
+      }
+      if (colors.length < 2) {
+        throw new MediaKitError(`palette brand ${paletteBrand} has fewer than 2 distinct colors`, "INVALID_ARG");
+      }
+    } else {
+      colors = parsePaletteColors(palette);
+    }
+    paletteResult = await measurePalette({ input: inPath, colors });
+    if (paletteBrand !== null) paletteResult.brand = paletteBrand;
+    const crushFail = paletteResult.crushed_pct > 2;
+    const blowFail = paletteResult.blown_pct > 2;
+    const darkWash = paletteResult.mean_luma < 95 || paletteResult.mean_luma > 175;
+    const mostlyOff = paletteResult.off_palette_pct > 50;
+    const sharesText = paletteResult.colors.map((c) => `${c.hex} ${c.share_pct}%`).join(", ");
+    add("content_palette", "crushed ≤2%, blown ≤2% (mean luma 95–175, mostly on-palette)",
+      `${sharesText} | off-palette ${paletteResult.off_palette_pct}% | mean luma ${paletteResult.mean_luma} (crushed ${paletteResult.crushed_pct}%, blown ${paletteResult.blown_pct}%, swing ${paletteResult.luma_swing})`,
+      !crushFail && !blowFail && !darkWash && !mostlyOff,
+      crushFail || blowFail ? "re-grade the exposure (crushed/blown) and re-render" : "check the locked palette matches this footage",
+      crushFail || blowFail ? "error" : "warn");
+  }
   const failed = checks.filter((c) => !c.pass && c.severity !== "warn");
   const warnings = checks.filter((c) => !c.pass && c.severity === "warn");
   return {
@@ -5233,6 +5300,7 @@ export async function check({ input, platform = "tiktok", content = false, conte
     safe_zone: spec.safeZone,
     ...(decodedWorkResult ? { decoded_work: decodedWorkResult } : {}),
     ...(contentResult ? { content: contentResult } : {}),
+    ...(paletteResult ? { palette: paletteResult } : {}),
     ...(failed.length ? { issues: failed.map((c) => `${c.name}: ${c.actual} (want ${c.expected})${c.hint ? ` — ${c.hint}` : ""}`) } : {}),
     ...(warnings.length ? { warnings: warnings.map((c) => `${c.name}: ${c.actual} (want ${c.expected})${c.hint ? ` — ${c.hint}` : ""}`) } : {}),
   };
@@ -5567,6 +5635,110 @@ export async function detectContent(input, { blackMinDuration = 0.5, freezeMinDu
     ...(issues.length ? { issues } : {}),
     ...(warnings.length ? { warnings } : {}),
   };
+}
+
+// ---------------------------------------------------------------- palette
+// Palette adherence (idea: sadekxD/cardstock-diorama-myth scripts/qc.py
+// — the look is a specification, not a vibe: palette, exposure and
+// pacing are numbers, measured against the output. Their QC is Python
+// + numpy + sklearn KMeans; this is the same measurement in pure
+// Node + ffmpeg + node-canvas: sample frames at 2 fps (capped at 60
+// frames), assign every pixel to its nearest palette colour, and
+// report time-averaged shares plus exposure — mean luma, crushed
+// (<10) and blown (>245) share, luma swing. A pixel farther than 60
+// (Euclidean RGB distance) from EVERY palette colour counts as
+// off-palette: the locked palette does not cover this footage.
+// No target shares here — MediaKit has no reference film to copy
+// shares from, so the shares are reported, and only the exposure
+// numbers (cardstock's own thresholds: crushed/blown > 2%) fail.
+export const PALETTE_OFF_DISTANCE = 60;
+export const PALETTE_MAX_FRAMES = 60;
+export const PALETTE_SAMPLE_FPS = 2;
+
+function parseOneHexColor(p, label) {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(p.trim());
+  if (!m) throw new MediaKitError(`${label} color must be 6-digit hex (#RRGGBB), got: ${p}`, "INVALID_ARG");
+  const hex = m[1].toUpperCase();
+  return { hex: `#${hex}`, r: parseInt(hex.slice(0, 2), 16), g: parseInt(hex.slice(2, 4), 16), b: parseInt(hex.slice(4, 6), 16) };
+}
+
+export function parsePaletteColors(value, label = "palette") {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new MediaKitError(`${label} must be a comma-separated list of hex colors, e.g. "#DCC0A0,#A02D19,#1B2740"`, "INVALID_ARG");
+  }
+  const parts = value.split(",").map((s) => s.trim()).filter(Boolean);
+  if (parts.length < 2 || parts.length > 6) {
+    throw new MediaKitError(`${label} needs 2-6 colors, got ${parts.length}`, "INVALID_ARG");
+  }
+  return parts.map((p) => parseOneHexColor(p, label));
+}
+
+export async function measurePalette({ input, colors }) {
+  const inPath = await requireInput(input);
+  if (!Array.isArray(colors) || colors.length < 2 || colors.length > 6) {
+    throw new MediaKitError("measurePalette needs 2-6 palette colors", "INVALID_ARG");
+  }
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("palette needs a video input", "INVALID_ARG");
+  const duration = meta.duration_seconds;
+  if (duration === null || duration <= 0) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
+  const fps = Math.min(PALETTE_SAMPLE_FPS, PALETTE_MAX_FRAMES / duration);
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-palette-"));
+  try {
+    await run(FFMPEG, ["-hide_banner", "-nostats", "-i", inPath,
+      "-vf", `fps=${+fps.toFixed(3)},scale=96:-2`, "-f", "image2", path.join(tmpDir, "f-%04d.png")]);
+    const files = (await readdir(tmpDir)).filter((f) => f.endsWith(".png")).sort();
+    if (files.length === 0) throw new MediaKitError("palette: no frames extracted", "FFMPEG_FAILED");
+    const { createCanvas, loadImage } = loadCanvasPackage("palette measurement");
+    const shares = colors.map(() => 0);
+    let offPixels = 0, totalPixels = 0;
+    let lumaSum = 0, crushedSum = 0, blownSum = 0;
+    let minMean = Infinity, maxMean = -Infinity;
+    for (const f of files) {
+      const img = await loadImage(path.join(tmpDir, f));
+      const cv = createCanvas(img.width, img.height);
+      const ctx = cv.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      const data = ctx.getImageData(0, 0, img.width, img.height).data;
+      const n = img.width * img.height;
+      let frameLuma = 0, frameCrushed = 0, frameBlown = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+        const luma = 0.299 * r + 0.587 * g + 0.114 * b;
+        frameLuma += luma;
+        if (luma < 10) frameCrushed++;
+        if (luma > 245) frameBlown++;
+        let best = Infinity, bestIdx = 0;
+        for (let c = 0; c < colors.length; c++) {
+          const dr = r - colors[c].r, dg = g - colors[c].g, db = b - colors[c].b;
+          const d = dr * dr + dg * dg + db * db;
+          if (d < best) { best = d; bestIdx = c; }
+        }
+        shares[bestIdx]++;
+        if (Math.sqrt(best) > PALETTE_OFF_DISTANCE) offPixels++;
+      }
+      totalPixels += n;
+      const frameMean = frameLuma / n;
+      lumaSum += frameMean;
+      crushedSum += frameCrushed / n;
+      blownSum += frameBlown / n;
+      if (frameMean < minMean) minMean = frameMean;
+      if (frameMean > maxMean) maxMean = frameMean;
+    }
+    const frames = files.length;
+    return {
+      colors: colors.map((c, i) => ({ hex: c.hex, share_pct: +(shares[i] / totalPixels * 100).toFixed(1) })),
+      off_palette_pct: +(offPixels / totalPixels * 100).toFixed(2),
+      mean_luma: +(lumaSum / frames).toFixed(1),
+      crushed_pct: +(crushedSum / frames * 100).toFixed(2),
+      blown_pct: +(blownSum / frames * 100).toFixed(2),
+      luma_swing: +(maxMean - minMean).toFixed(1),
+      frames_sampled: frames,
+      sample_fps: +fps.toFixed(3),
+    };
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 // ---------------------------------------------------------------- grade
