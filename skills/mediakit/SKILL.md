@@ -100,6 +100,13 @@ silence. Position matters — a 1s black stretch at the very start warns
 (likely a fade in), a 3s black stretch mid-file or at the end fails;
 3s of mid-file silence warns (run `silence` to remove it), 5s+ fails.
 A stream that does not exist reports `unavailable`, never zero.
+When the source itself already has defects, pass a `--baseline`
+(`baseline` over MCP) — the JSON of an earlier `check --content` run
+on the source, or a plain `{black, freeze, silence, peaks}` span list:
+spans it covers are reported as `pre_existing` and do not fail the
+gate, so only NEW spans fail. A detected interval counts as
+pre-existing when it overlaps a baseline span of the same kind by
+>= 50% of its own duration.
 Add `--decoded-work` (`decoded_work: true` over MCP) before running a
 heavy tool on a big input: it estimates the decode load from the probe
 (video pixel-frames + audio sample-channels) and warns when it is over

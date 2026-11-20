@@ -5067,8 +5067,11 @@ export function estimateDecodedWork(meta) {
   };
 }
 
-export async function check({ input, platform = "tiktok", content = false, contentStart = null, contentEnd = null, peakThresholdDb = -1, expectedDuration = null, faststart = false, decodedWork = false, palette = null, paletteBrand = null }) {
+export async function check({ input, platform = "tiktok", content = false, contentStart = null, contentEnd = null, peakThresholdDb = -1, expectedDuration = null, faststart = false, decodedWork = false, palette = null, paletteBrand = null, baseline = null }) {
   const inPath = await requireInput(input);
+  if (baseline !== null && baseline !== undefined && !content) {
+    throw new MediaKitError("--baseline needs --content (it only forgives spans the content scan found)", "INVALID_ARG");
+  }
   const spec = PLATFORMS[platform];
   if (!spec) throw new MediaKitError(`unknown platform: ${platform} (supported: ${Object.keys(PLATFORMS).join(", ")})`, "INVALID_ARG");
   // Same ±0.5s tolerance as qa_report's expected_duration: a render
@@ -5226,8 +5229,26 @@ export async function check({ input, platform = "tiktok", content = false, conte
   // pass, folded into the same pass/fail list. A stream that does not
   // exist is "unavailable" in the content detail, not a failed rule.
   let contentResult = null;
+  let baselineSummary = null;
   if (content) {
     contentResult = await detectContent(inPath, { start: contentStart, end: contentEnd, peakThresholdDb });
+    // Baseline (OpenEdit qc/gate.py idea): spans already in the
+    // source's own baseline snapshot are pre-existing, not render
+    // defects — only NEW spans fail the gate. The baseline file is
+    // usually the JSON of an earlier `check --content` run on the
+    // source; a plain {black, freeze, silence, peaks} span list and
+    // a raw content result are accepted too.
+    if (baseline !== null && baseline !== undefined) {
+      const baselinePath = await requireInput(baseline, "baseline");
+      let rawBaseline;
+      try {
+        rawBaseline = JSON.parse(await readFile(baselinePath, "utf8"));
+      } catch (e) {
+        throw new MediaKitError(`baseline file ${baselinePath} is not valid JSON: ${e.message}`, "INVALID_ARG");
+      }
+      contentResult = applyContentBaseline(contentResult, parseContentBaseline(rawBaseline));
+      baselineSummary = { file: baselinePath, ...contentResult.baseline };
+    }
     const hints = {
       black: "re-cut or re-render the black stretch",
       freeze: "re-render or trim the frozen stretch",
@@ -5237,10 +5258,14 @@ export async function check({ input, platform = "tiktok", content = false, conte
     for (const [kind, label] of [["black", "black frames"], ["freeze", "frozen frames"], ["silence", "silence"], ["peaks", "audio peaks"]]) {
       const s = contentResult[kind];
       if (s.status === "unavailable") continue;
-      const errs = s.intervals.filter((i) => i.severity === "error").length;
-      const warns = s.intervals.filter((i) => i.severity === "warn").length;
+      // A pre-existing error is a warning, not a gate failure: the
+      // span was already in the source, the render did not introduce
+      // it. It still shows in the rule's actual text and in warnings.
+      const errs = s.intervals.filter((i) => i.severity === "error" && !i.pre_existing).length;
+      const warns = s.intervals.filter((i) => i.severity === "warn" || i.pre_existing).length;
+      const preCount = s.intervals.filter((i) => i.pre_existing).length;
       const actual = s.total_intervals === 0 ? "none"
-        : `${s.total_intervals} interval${s.total_intervals === 1 ? "" : "s"} (${s.total_duration_seconds}s total)`;
+        : `${s.total_intervals} interval${s.total_intervals === 1 ? "" : "s"} (${s.total_duration_seconds}s total${preCount ? `, ${preCount} pre-existing` : ""})`;
       // Warn-level intervals fail the rule but not the check (same
       // pattern as video_bitrate): they show up in `warnings`.
       add(`content_${kind}`, `no ${label}`, actual, errs === 0 && warns === 0, hints[kind],
@@ -5300,6 +5325,7 @@ export async function check({ input, platform = "tiktok", content = false, conte
     safe_zone: spec.safeZone,
     ...(decodedWorkResult ? { decoded_work: decodedWorkResult } : {}),
     ...(contentResult ? { content: contentResult } : {}),
+    ...(baselineSummary ? { baseline: baselineSummary } : {}),
     ...(paletteResult ? { palette: paletteResult } : {}),
     ...(failed.length ? { issues: failed.map((c) => `${c.name}: ${c.actual} (want ${c.expected})${c.hint ? ` — ${c.hint}` : ""}`) } : {}),
     ...(warnings.length ? { warnings: warnings.map((c) => `${c.name}: ${c.actual} (want ${c.expected})${c.hint ? ` — ${c.hint}` : ""}`) } : {}),
@@ -5482,6 +5508,111 @@ function classifyContent(kind, iv, duration, rangeStart = 0, rangeEnd = null) {
   }
   if (iv.duration >= 5 && !edge) return { severity: "error", reason: `silence ${where} ${span} — dead air; run silence to remove it` };
   return { severity: "warn", reason: `silence ${where} ${span} — pause or dead air; run silence to remove it` };
+}
+
+// ---------------------------------------------------------------- content baseline
+// QC gate vs a baseline (idea: AH64-dll/OpenEdit qc/gate.py — only
+// NEW spans fail). The baseline is a snapshot of the source's known
+// defects, usually the JSON of an earlier `check --content` run on
+// the source: a black stretch that was already in the source is
+// reported as pre-existing and does not fail the gate, so a render
+// is judged on what it introduced, not on what it inherited. A
+// detected interval is pre-existing when it overlaps a baseline span
+// of the same kind by >= 50% of its own duration — detection jitter
+// moves boundaries by a frame or two, and 50% survives that without
+// forgiving a genuinely new span that merely touches an old one.
+// Accepts three shapes: a full `check` result ({content: {...}}), a
+// raw `detectContent` result ({black: {intervals}, ...}), or a plain
+// span list ({black: [{start, end}], ...}).
+
+export const CONTENT_BASELINE_MIN_OVERLAP = 0.5;
+const CONTENT_BASELINE_KINDS = ["black", "freeze", "silence", "peaks"];
+
+function parseBaselineSpans(value, kind) {
+  // One kind's spans: either a bare array [{start, end}] or an
+  // object carrying .intervals (the detectContent/check shape).
+  const list = value === undefined || value === null ? [] : Array.isArray(value) ? value : value.intervals;
+  if (list === undefined) return [];
+  if (!Array.isArray(list)) throw new MediaKitError(`baseline ${kind} must be an array of {start, end} spans or an object with .intervals`, "INVALID_ARG");
+  return list.map((s, i) => {
+    const start = Number(s?.start);
+    const end = Number(s?.end);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      throw new MediaKitError(`baseline ${kind}[${i}] has an invalid span (need start < end, got ${JSON.stringify(s)})`, "INVALID_ARG");
+    }
+    return { start, end };
+  }).sort((a, b) => a.start - b.start);
+}
+
+export function parseContentBaseline(data) {
+  if (data === null || typeof data !== "object" || Array.isArray(data)) {
+    throw new MediaKitError("baseline must be a JSON object (a check --content result, a content result, or {black, freeze, silence, peaks} spans)", "INVALID_ARG");
+  }
+  const content = data.content ?? data;
+  if (content === null || typeof content !== "object" || Array.isArray(content)) {
+    throw new MediaKitError("baseline .content must be an object with black/freeze/silence/peaks spans", "INVALID_ARG");
+  }
+  const out = {};
+  for (const kind of CONTENT_BASELINE_KINDS) out[kind] = parseBaselineSpans(content[kind], kind);
+  return out;
+}
+
+export function contentBaselineOverlapSeconds(iv, spans) {
+  let total = 0;
+  for (const s of spans) {
+    total += Math.max(0, Math.min(iv.end, s.end) - Math.max(iv.start, s.start));
+  }
+  return +total.toFixed(3);
+}
+
+/** Annotate a detectContent result against a parsed baseline (pure,
+ * returns a new object — the input is not mutated). Intervals that
+ * overlap a baseline span of the same kind by >= 50% of their own
+ * duration are marked `pre_existing` with the overlap in seconds;
+ * `pass`/`issues`/`warnings` are rebuilt so only NEW error intervals
+ * fail — a pre-existing error is demoted to a warning, still visible
+ * in the detail. The summary counts baseline spans, matched
+ * intervals and new ones, per kind and in total. */
+export function applyContentBaseline(contentResult, baseline) {
+  const perKind = {};
+  let totalSpans = 0, totalMatched = 0, totalNew = 0;
+  const out = { ...contentResult };
+  const issues = [];
+  const warnings = [];
+  for (const kind of CONTENT_BASELINE_KINDS) {
+    const s = contentResult[kind];
+    totalSpans += baseline[kind].length;
+    if (!s || s.status !== "complete") {
+      perKind[kind] = { baseline_spans: baseline[kind].length, matched: 0, new_spans: 0 };
+      continue;
+    }
+    const intervals = s.intervals.map((iv) => {
+      const overlap = contentBaselineOverlapSeconds(iv, baseline[kind]);
+      const dur = iv.end - iv.start;
+      const preExisting = dur > 0 && overlap / dur >= CONTENT_BASELINE_MIN_OVERLAP;
+      if (preExisting) totalMatched++;
+      else totalNew++;
+      return preExisting ? { ...iv, pre_existing: true, baseline_overlap_seconds: overlap } : { ...iv };
+    });
+    perKind[kind] = {
+      baseline_spans: baseline[kind].length,
+      matched: intervals.filter((i) => i.pre_existing).length,
+      new_spans: intervals.filter((i) => !i.pre_existing).length,
+    };
+    for (const iv of intervals) {
+      const text = `${kind}: ${iv.reason}`;
+      if (iv.severity === "error" && !iv.pre_existing) issues.push(text);
+      else warnings.push(text);
+    }
+    out[kind] = { ...s, intervals };
+  }
+  out.baseline = { spans: totalSpans, matched: totalMatched, new_spans: totalNew, per_kind: perKind };
+  out.pass = issues.length === 0;
+  if (issues.length) out.issues = issues;
+  else delete out.issues;
+  if (warnings.length) out.warnings = warnings;
+  else delete out.warnings;
+  return out;
 }
 
 export async function detectContent(input, { blackMinDuration = 0.5, freezeMinDuration = 2, silenceThresholdDb = -40, silenceMinDuration = 0.5, start = null, end = null, peakThresholdDb = -1 } = {}) {

@@ -14,7 +14,7 @@ import { createCanvas } from "canvas";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { compareDeterminismRuns, estimateDecodedWork, estimateJobRemaining, estimateTempo, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, parseFfmpegProgress, parseSmartCutFillers, planSmartCuts, runFfmpegWithProgress, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, SHORTS_STYLE_IDS } from "../src/core.js";
+import { applyContentBaseline, compareDeterminismRuns, estimateDecodedWork, estimateJobRemaining, estimateTempo, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, planSmartCuts, runFfmpegWithProgress, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import bounceTpl from "../src/canvas-scene-lib/templates/bounce.cjs";
 import slideInTpl from "../src/canvas-scene-lib/templates/slide-in.cjs";
@@ -503,6 +503,67 @@ const contentRangeCli = await runCli(["check", path.join(root, "test/content-bla
 checkOk(contentRangeCli.code === 0, "CLI check --content --start works", contentRangeCli.out.slice(0, 200));
 const contentRangeNoContent = await runCli(["check", path.join(root, "test/content-black.mp4"), "--start", "2"], {});
 checkOk(contentRangeNoContent.code !== 0 && /need --content/.test(contentRangeNoContent.out), "CLI --start without --content is refused", contentRangeNoContent.out.slice(0, 200));
+
+// check --content --baseline (lượt 128, idea: OpenEdit qc/gate.py):
+// only NEW spans fail the gate — spans already in the source's own
+// baseline snapshot are pre-existing, not render defects.
+const baselinePlain = parseContentBaseline({ black: [{ start: 3, end: 6 }], freeze: [{ start: 3, end: 6 }] });
+checkOk(baselinePlain.black.length === 1 && baselinePlain.freeze.length === 1 && baselinePlain.silence.length === 0 && baselinePlain.peaks.length === 0, "parseContentBaseline accepts a plain span list (missing kinds default to [])", JSON.stringify(baselinePlain));
+const baselineFromCheck = parseContentBaseline(contentBlack);
+checkOk(baselineFromCheck.black.length === 1 && near(baselineFromCheck.black[0].start, 3, 0.05) && near(baselineFromCheck.black[0].end, 6, 0.05), "parseContentBaseline accepts a full check result ({content: {...}})", JSON.stringify(baselineFromCheck.black));
+const baselineFromContent = parseContentBaseline(contentBlack.content);
+checkOk(baselineFromContent.freeze.length === 1 && near(baselineFromContent.freeze[0].start, 3, 0.05), "parseContentBaseline accepts a raw content result ({black: {intervals}, ...})", JSON.stringify(baselineFromContent.freeze));
+let baselineBad = null;
+try { parseContentBaseline({ black: [{ start: 6, end: 3 }] }); } catch (e) { baselineBad = e.message; }
+checkOk(/invalid span/.test(baselineBad ?? ""), "parseContentBaseline refuses an end<=start span", baselineBad ?? "");
+let baselineBadShape = null;
+try { parseContentBaseline([1, 2]); } catch (e) { baselineBadShape = e.message; }
+checkOk(/JSON object/.test(baselineBadShape ?? ""), "parseContentBaseline refuses a non-object baseline", baselineBadShape ?? "");
+// Pure matching: 50% overlap is the boundary — 1.5s of a 3s interval
+// counts as pre-existing, 1.4s does not; a black baseline never
+// forgives a freeze interval; the input object is not mutated.
+const matchContent = {
+  operation: "content", duration_seconds: 10, pass: false,
+  issues: ["black: black mid-file 3s–6s (3s) — broken render or missing footage"],
+  black: { status: "complete", total_intervals: 1, total_duration_seconds: 3, intervals_truncated: false, intervals: [{ start: 3, end: 6, duration: 3, severity: "error", reason: "black mid-file 3s–6s (3s) — broken render or missing footage" }] },
+  freeze: { status: "complete", total_intervals: 0, total_duration_seconds: 0, intervals_truncated: false, intervals: [] },
+  silence: { status: "complete", total_intervals: 0, total_duration_seconds: 0, intervals_truncated: false, intervals: [] },
+  peaks: { status: "complete", total_intervals: 0, total_duration_seconds: 0, intervals_truncated: false, intervals: [] },
+};
+const matchHalf = applyContentBaseline(matchContent, { black: [{ start: 3, end: 4.5 }], freeze: [], silence: [], peaks: [] });
+checkOk(matchHalf.black.intervals[0]?.pre_existing === true && matchHalf.black.intervals[0]?.baseline_overlap_seconds === 1.5 && matchHalf.pass === true && !matchHalf.issues && matchHalf.warnings?.length === 1, "applyContentBaseline: 50% overlap (1.5s of 3s) is pre-existing, demotes the error to a warning, content passes", JSON.stringify(matchHalf.baseline));
+const matchUnder = applyContentBaseline(matchContent, { black: [{ start: 3, end: 4.4 }], freeze: [], silence: [], peaks: [] });
+checkOk(matchUnder.black.intervals[0]?.pre_existing !== true && matchUnder.pass === false && matchUnder.issues?.length === 1, "applyContentBaseline: 1.4s of 3s (<50%) is a NEW span, still fails", JSON.stringify(matchUnder.baseline));
+const matchWrongKind = applyContentBaseline(matchContent, { black: [], freeze: [{ start: 3, end: 6 }], silence: [], peaks: [] });
+checkOk(matchWrongKind.black.intervals[0]?.pre_existing !== true && matchWrongKind.baseline.matched === 0, "applyContentBaseline: a freeze baseline span does not forgive a black interval", JSON.stringify(matchWrongKind.baseline));
+checkOk(matchContent.black.intervals[0]?.pre_existing === undefined && matchContent.pass === false, "applyContentBaseline does not mutate its input", JSON.stringify(matchContent.black.intervals[0]));
+// MCP end to end on the real fixture: the planted black/freeze 3-6s
+// is forgiven by the matching baseline and still fails against a
+// baseline that covers a different stretch.
+const contentBaselineMatch = await checkContent("test/content-black.mp4", "tiktok", { baseline: path.join(root, "test/content-baseline-black.json") });
+console.log("check content baseline match:", JSON.stringify(contentBaselineMatch.baseline), "| black rule:", JSON.stringify(contentBaselineMatch.checks.find((c) => c.name === "content_black")));
+checkOk(contentBaselineMatch.content.pass === true, "check --content --baseline passes the content gate when every error span is pre-existing", JSON.stringify(contentBaselineMatch.content));
+checkOk(contentBaselineMatch.content.black.intervals[0]?.pre_existing === true && contentBaselineMatch.content.black.intervals[0]?.baseline_overlap_seconds === 3, "the black interval is flagged pre_existing with its 3s overlap", JSON.stringify(contentBaselineMatch.content.black.intervals));
+checkOk(contentBaselineMatch.baseline?.matched === 2 && contentBaselineMatch.baseline?.new_spans === 0 && contentBaselineMatch.baseline?.spans === 2, "baseline summary reports 2 spans, 2 matched, 0 new", JSON.stringify(contentBaselineMatch.baseline));
+checkOk(contentBaselineMatch.checks.find((c) => c.name === "content_black")?.severity === "warn" && /1 pre-existing/.test(contentBaselineMatch.checks.find((c) => c.name === "content_black")?.actual ?? ""), "content_black rule is demoted to warn and names the pre-existing span", JSON.stringify(contentBaselineMatch.checks.find((c) => c.name === "content_black")));
+checkOk(!contentBaselineMatch.issues?.some((i) => i.startsWith("content_black")) && !contentBaselineMatch.issues?.some((i) => i.startsWith("content_freeze")), "pre-existing spans leave the top-level issues list", JSON.stringify(contentBaselineMatch.issues));
+checkOk(contentBaselineMatch.warnings?.some((w) => w.startsWith("content_black")), "pre-existing spans still show in top-level warnings", JSON.stringify(contentBaselineMatch.warnings));
+const contentBaselineWrong = await checkContent("test/content-black.mp4", "tiktok", { baseline: path.join(root, "test/content-baseline-wrong.json") });
+checkOk(contentBaselineWrong.content.pass === false && contentBaselineWrong.baseline?.matched === 0 && contentBaselineWrong.baseline?.new_spans === 2, "a baseline covering 0-1s forgives nothing: 0 matched, 2 new", JSON.stringify(contentBaselineWrong.baseline));
+checkOk(contentBaselineWrong.checks.find((c) => c.name === "content_black")?.severity !== "warn" && contentBaselineWrong.issues?.some((i) => i.startsWith("content_black")), "content_black still fails as an error against the wrong baseline", JSON.stringify(contentBaselineWrong.checks.find((c) => c.name === "content_black")));
+checkOk(contentBaselineWrong.content.black.intervals[0]?.pre_existing === undefined, "no pre_existing flag against the wrong baseline", JSON.stringify(contentBaselineWrong.content.black.intervals));
+// Dogfood: the check result itself is a valid baseline (shape 1).
+await writeFile(path.join(root, "outputs/mcp-baseline-dogfood.json"), JSON.stringify(contentBlack));
+const contentBaselineDogfood = await checkContent("test/content-black.mp4", "tiktok", { baseline: path.join(root, "outputs/mcp-baseline-dogfood.json") });
+checkOk(contentBaselineDogfood.content.pass === true && contentBaselineDogfood.baseline?.matched === 2, "a previous check --content result fed back as baseline forgives its own spans", JSON.stringify(contentBaselineDogfood.baseline));
+const baselineMissing = await callExpectThrow("check", { input: path.join(root, "test/content-black.mp4"), platform: "tiktok", content: true, baseline: path.join(root, "test/no-such-baseline.json") });
+checkOk(/baseline not found/.test(baselineMissing), "a missing baseline file fails loudly instead of silently passing", baselineMissing.slice(0, 200));
+const baselineNoContent = await callExpectThrow("check", { input: path.join(root, "test/content-black.mp4"), platform: "tiktok", baseline: path.join(root, "test/content-baseline-black.json") });
+checkOk(/needs --content/.test(baselineNoContent), "MCP baseline without content=true is refused", baselineNoContent.slice(0, 200));
+const contentBaselineCli = await runCli(["check", path.join(root, "test/content-black.mp4"), "--content", "--baseline", path.join(root, "test/content-baseline-black.json")], {});
+checkOk(contentBaselineCli.code === 0 && /pre-existing/.test(contentBaselineCli.out), "CLI check --content --baseline works and reports pre-existing spans", contentBaselineCli.out.slice(0, 300));
+const contentBaselineCliNoContent = await runCli(["check", path.join(root, "test/content-black.mp4"), "--baseline", path.join(root, "test/content-baseline-black.json")], {});
+checkOk(contentBaselineCliNoContent.code !== 0 && /needs --content/.test(contentBaselineCliNoContent.out), "CLI --baseline without --content is refused", contentBaselineCliNoContent.out.slice(0, 200));
 
 // check audio_sync (lượt 127, idea: OpenEdit qc/gate.py): video and
 // audio stream durations must agree within ±0.2s.
