@@ -15053,6 +15053,17 @@ async function validateAssembleManifest(doc, manifestAbs) {
     }
     framesSum += frames;
     const shot = { id, kind, duration, frames };
+    // Per-shot audio level (lượt 124, idea: soniccraft's per-track
+    // `volume` 0-1 + burningion/video-editing-mcp's per-cut
+    // `audio_level`): scales the whole film mix (voice + music +
+    // SFX) inside this shot's nominal window. Default 1 is unity
+    // gain — NOT 0.5: a 0.5 default would silently attenuate every
+    // existing film by 6 dB. 0 mutes the shot (digital silence).
+    // Range-checked here so a bad level fails validate, not mid-render.
+    shot.audio_level = assembleOptNum(raw.audio_level, 1, `${label} (${id}) audio_level`, { min: 0, max: 1 });
+    if (shot.audio_level === 0) {
+      warnings.push(`${label} (${id}): audio_level 0 mutes the whole mix during this shot`);
+    }
     if (kind === "image") {
       if (typeof raw.source !== "string" || !raw.source.trim()) throw new MediaKitError(`${label} (${id}): image shot needs a source`, "INVALID_ARG");
       const srcPath = await requireInput(resolveRel(raw.source), `${label} (${id}) source`);
@@ -15689,6 +15700,47 @@ async function assembleCachedShot(plan, shot, opts, tmpDir, onShotProgress = nul
 // Voice padded to the film timeline: adelay by lead, apad to the
 // total duration. The padded voice IS the final timeline, so mix()
 // SFX timestamps and the music loop both land in absolute time.
+// Per-shot audio levels (lượt 124): scale the mixed film audio
+// inside each shot's nominal window — one `volume` filter per shot
+// whose level is not 1, gated by enable='gte(t,S)*lt(t,E)' so the
+// boundary sample belongs to the incoming shot only (between() is
+// inclusive on both ends and would double-apply one frame at the
+// cut). Windows are the cumulative nominal shot durations — the
+// same boundaries verify_cuts checks — so a transition's blend does
+// not move the audio switch: the level changes exactly at the cut.
+// Runs AFTER mix()/loudness(), so the master stays at -14 LUFS and
+// the ratios between windows are exact (a linear gain after the
+// master, not a re-master). Level 0 mutes (digital silence).
+// AAC 192k, like every other assemble audio encode (lượt 54 pin).
+// Callers skip this entirely when every shot is level 1, so films
+// without audio_level render byte-identical audio to before.
+async function applyAssembleShotAudioLevels({ shots, fps, totalSeconds }, inPath, outPath, onLevelProgress = null) {
+  const windows = [];
+  let cursorFrames = 0;
+  for (const s of shots) {
+    const start = cursorFrames / fps;
+    const end = (cursorFrames + s.frames) / fps;
+    cursorFrames += s.frames;
+    if (s.audio_level !== undefined && s.audio_level !== 1) {
+      windows.push({ shot: s.id, level: s.audio_level, start: +start.toFixed(3), end: +end.toFixed(3) });
+    }
+  }
+  if (windows.length === 0) return { applied: [], skipped: true };
+  const chain = windows
+    .map((w) => `volume=${w.level}:enable='gte(t,${w.start})*lt(t,${w.end})'`)
+    .join(",");
+  await runFfmpegWithProgress([
+    "-y", "-i", inPath, "-af", chain,
+    "-c:a", "aac", "-b:a", "192k", "-t", String(totalSeconds), outPath,
+  ], {
+    totalSeconds,
+    onProgress: typeof onLevelProgress === "function" ? (p) => onLevelProgress(p.fraction, p) : null,
+  });
+  const meta = await probe(outPath);
+  if (!meta.audio) throw new MediaKitError("assemble could not apply per-shot audio levels", "PROBE_FAILED");
+  return { applied: windows, skipped: false };
+}
+
 async function buildPaddedVoice(plan, totalSeconds, outPath, onVoiceProgress = null) {
   const leadMs = Math.round(plan.voice.lead * 1000);
   const af = leadMs > 0
@@ -15783,7 +15835,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       sfx_count: plan.sfx.length,
       captions: plan.captions,
       chapters: plan.chapters,
-      shots: plan.shots.map((s) => ({ id: s.id, kind: s.kind, duration: s.duration, frames: s.frames, ...(s.template ? { template: s.template, params: s.params ?? null } : {}), ...(s.transition ? { transition: { type: s.transition.type, duration_seconds: s.transition.duration_seconds, frames: s.transition.frames } } : {}), ...(s.textLayers?.length ? { text_layers: s.textLayers.map((t) => ({ text: t.text, lines: t.lines, position: t.position, size: t.size, color: t.color, box: t.box, start_seconds: t.start_seconds, end_seconds: t.end_seconds })) } : {}) })),
+      shots: plan.shots.map((s) => ({ id: s.id, kind: s.kind, duration: s.duration, frames: s.frames, ...(s.audio_level !== undefined && s.audio_level !== 1 ? { audio_level: s.audio_level } : {}), ...(s.template ? { template: s.template, params: s.params ?? null } : {}), ...(s.transition ? { transition: { type: s.transition.type, duration_seconds: s.transition.duration_seconds, frames: s.transition.frames } } : {}), ...(s.textLayers?.length ? { text_layers: s.textLayers.map((t) => ({ text: t.text, lines: t.lines, position: t.position, size: t.size, color: t.color, box: t.box, start_seconds: t.start_seconds, end_seconds: t.end_seconds })) } : {}) })),
     };
   }
   if (!["preview", "approve", "render"].includes(mode)) {
@@ -15943,6 +15995,22 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
     } else {
       await loudness({ input: paddedPath, output: mixedPath, targetLufs: -14 });
     }
+    // Per-shot audio levels (lượt 124): a post-master gain envelope
+    // over the mixed audio, only when some rendered shot is not
+    // level 1 — otherwise the mixed file goes straight to the mux,
+    // byte-identical to films without audio_level.
+    let audioPath = mixedPath;
+    let audioLevelsApplied = [];
+    if (renderShots.some((s) => s.audio_level !== undefined && s.audio_level !== 1)) {
+      const leveledPath = path.join(tmpDir, "mixed-leveled.m4a");
+      const leveled = await applyAssembleShotAudioLevels(
+        { shots: renderShots, fps: plan.fps, totalSeconds: renderTotalSeconds },
+        mixedPath, leveledPath,
+        (frac, p) => { emitProgress("audio", 0.5 + frac * 0.5, p?.speed != null ? `levels · ${p.speed}x` : "levels"); },
+      );
+      audioLevelsApplied = leveled.applied;
+      audioPath = leveledPath;
+    }
     emitProgress("audio", 1);
     // Chapters (render only): an ffmetadata sidecar with one
     // [CHAPTER] per entry — the last chapter runs to the film end.
@@ -15961,7 +16029,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
     }
     const muxedPath = path.join(tmpDir, "muxed.mp4");
     emitProgress("mux", 0);
-    const muxArgs = ["-y", "-i", videoOnlyPath, "-i", mixedPath];
+    const muxArgs = ["-y", "-i", videoOnlyPath, "-i", audioPath];
     if (chapterPath) muxArgs.push("-i", chapterPath);
     muxArgs.push("-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "copy", "-t", String(renderTotalSeconds));
     if (chapterPath) muxArgs.push("-map_metadata", "2", "-map_chapters", "2");
@@ -16007,6 +16075,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
         output: finalPath,
         dimensions: `${outW}x${outH}`,
         cache_hits: cacheHits,
+        ...(audioLevelsApplied.length ? { audio_levels: audioLevelsApplied } : {}),
         transition_warnings: previewWarnings,
         elapsed_seconds: elapsed,
       };
@@ -16043,6 +16112,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
           ...(s.scene ? { scene: s.scene } : {}),
           ...(s.assets ? { assets: s.assets } : {}),
           ...(s.color ? { color: s.color } : {}),
+          ...(s.audio_level !== undefined && s.audio_level !== 1 ? { audio_level: s.audio_level } : {}),
         }])),
       },
       mediakit_version: MEDIAKIT_VERSION,
@@ -16050,6 +16120,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       cache_hits: cacheHits,
       chapters: plan.chapters,
       shots_run: renderShots.length,
+      ...(audioLevelsApplied.length ? { audio_levels: audioLevelsApplied } : {}),
       joins: joins.map((j) => ({ into_shot: renderShotsBuilt[j.index]?.id ?? null, type: j.type, duration_seconds: j.durationSeconds, offset_seconds: j.offsetSeconds })),
       elapsed_seconds: elapsed,
       final: {

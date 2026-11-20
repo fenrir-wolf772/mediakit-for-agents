@@ -156,6 +156,17 @@ pictures — pictures fit the voice:
     the segment cache key — changing only the text rebuilds just
     that shot. Latin and Vietnamese shape correctly; complex
     scripts (Indic, Thai) need libass, which layers do not use.
+  - Any shot may carry `audio_level` 0–1 (default 1, unity gain):
+    it scales the whole film mix (voice + music + SFX) inside
+    that shot's nominal window — the same window boundaries
+    `verify_cuts` checks. Applied after the −14 LUFS master, so
+    the ratios between windows are exact: 0.25 is −12 dB, 0 mutes
+    the shot (validate warns). The level changes exactly at the
+    cut, even under a transition — transitions stay video-only.
+    Default 1 is deliberate, not 0.5: a 0.5 default would silently
+    attenuate every existing film by 6 dB. The level is part of the
+    manifest, so changing it re-approves the film; the shot
+    segments are video-only, so it never rebuilds them.
 
 ## Motion gate
 

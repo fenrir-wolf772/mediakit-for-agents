@@ -7498,6 +7498,48 @@ checkOk(/assemble receipt/.test(verifyBadReceiptText ?? ""), "verify refuses a f
 const assembleRender2Res = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleStage.manifestPath, mode: "render", output_dir: assembleOut } }, undefined, { timeout: 300000 });
 const assembleRender2Json = JSON.parse(assembleRender2Res.content[0].text);
 checkOk(assembleRender2Json.cache_hits === 4, "assemble second render reuses all 4 shot segments from the cache", `cache_hits=${assembleRender2Json.cache_hits}`);
+// Per-shot audio_level (lượt 124, ideas: soniccraft per-track
+// `volume` 0-1 + burningion/video-editing-mcp per-cut audio_level):
+// fixture test/assemble-audio-levels.json is assemble-film.json
+// with s2 at 0.25 and s4 at 0 — the whole mix (voice + music +
+// SFX) is scaled inside each shot's nominal window, after the
+// -14 LUFS master, so the ratios between windows are exact.
+// Validate echoes the levels and warns on the mute; 1.5 and a
+// non-number are refused. The render is measured A/B against the
+// plain final above: s2 (0.25) must sit 20*log10(0.25) = -12.04 dB
+// below the same window, s1 (level 1) must match within 1 dB, and
+// s4 (0) must fall to the AAC silence floor (rms < -60 dB).
+const levelsStage = await stageAssembleManifest("assemble-audio-levels.json");
+const levelsValidateRes = await client.callTool({ name: "assemble", arguments: { manifest_path: levelsStage.manifestPath, mode: "validate" } });
+const levelsValidateJson = JSON.parse(levelsValidateRes.content[0].text);
+checkOk(levelsValidateJson.shots?.[1]?.audio_level === 0.25 && levelsValidateJson.shots?.[3]?.audio_level === 0 && levelsValidateJson.shots?.[0]?.audio_level === undefined && levelsValidateJson.warnings?.some((w) => /s4.*mutes/.test(w)), "assemble validate echoes per-shot audio_level (s2 0.25, s4 0, s1 unset) and warns that s4 is muted", JSON.stringify(levelsValidateJson.shots?.map((s) => s.audio_level)));
+const levelsBadDoc = JSON.parse(await readFile(levelsStage.manifestPath, "utf8"));
+levelsBadDoc.shots[1].audio_level = 1.5;
+const levelsBadPath = path.join(levelsStage.dir, "film-bad-level.json");
+await writeFile(levelsBadPath, JSON.stringify(levelsBadDoc), "utf8");
+const levelsBadText = await callExpectThrow("assemble", { manifest_path: levelsBadPath, mode: "validate" });
+levelsBadDoc.shots[1].audio_level = "loud";
+await writeFile(levelsBadPath, JSON.stringify(levelsBadDoc), "utf8");
+const levelsBadText2 = await callExpectThrow("assemble", { manifest_path: levelsBadPath, mode: "validate" });
+checkOk(/audio_level.*1\.5|at most 1|must be <= 1/.test(levelsBadText ?? "") && /audio_level/.test(levelsBadText2 ?? ""), "assemble validate refuses audio_level 1.5 and a non-number level", `${levelsBadText ?? ""} / ${levelsBadText2 ?? ""}`);
+const levelsOut = path.join(levelsStage.dir, "out");
+const levelsRenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: levelsStage.manifestPath, mode: "render", output_dir: levelsOut, force: true } }, undefined, { timeout: 300000 });
+const levelsRenderJson = JSON.parse(levelsRenderRes.content[0].text);
+const levelsFinalPath = path.join(levelsOut, "final.mp4");
+const levelsFinalFrames = await countFrames(levelsFinalPath);
+checkOk(levelsRenderJson.final?.frames === 300 && levelsFinalFrames === 300 && JSON.stringify(levelsRenderJson.audio_levels) === JSON.stringify([{ shot: "s2", level: 0.25, start: 4, end: 8 }, { shot: "s4", level: 0, start: 9, end: 10 }]), "assemble leveled render: 300 frames, receipt records the two level windows (s2 0.25 [4,8), s4 0 [9,10))", JSON.stringify(levelsRenderJson.audio_levels));
+const meanBucketDb = (buckets, lo, hi) => {
+  const vals = buckets.filter((b) => b.start >= lo && b.end <= hi && typeof b.rms_db === "number").map((b) => 10 ** (b.rms_db / 10));
+  return vals.length ? 10 * Math.log10(vals.reduce((a, b) => a + b, 0) / vals.length) : null;
+};
+const levelsCurveRes = await client.callTool({ name: "audio_levels", arguments: { input: levelsFinalPath, top_n: 0 } });
+const levelsCurveJson = JSON.parse(levelsCurveRes.content[0].text);
+const plainCurveRes = await client.callTool({ name: "audio_levels", arguments: { input: path.join(assembleOut, "final.mp4"), top_n: 0 } });
+const plainCurveJson = JSON.parse(plainCurveRes.content[0].text);
+const s1Diff = meanBucketDb(levelsCurveJson.buckets, 0, 4) - meanBucketDb(plainCurveJson.buckets, 0, 4);
+const s2Diff = meanBucketDb(levelsCurveJson.buckets, 4, 8) - meanBucketDb(plainCurveJson.buckets, 4, 8);
+checkOk(near(s1Diff, 0, 1) && near(s2Diff, -12.04, 1.5), "per-shot audio_level measured A/B: untouched s1 window matches within 1 dB, s2 at 0.25 drops -12.04 dB (20*log10 0.25)", `s1 diff=${s1Diff?.toFixed(2)} dB, s2 diff=${s2Diff?.toFixed(2)} dB`);
+checkOk(levelsCurveJson.buckets[9]?.rms_db !== null && levelsCurveJson.buckets[9].rms_db < -60, "per-shot audio_level 0: the muted s4 window [9,10) falls to the AAC silence floor (rms < -60 dB)", JSON.stringify(levelsCurveJson.buckets[9]));
 // Fingerprint sensitivity + force: a copy with a different title
 // (absolute paths, so it can live under outputs/) has a different
 // fingerprint, renders without approval only with force:true, and
