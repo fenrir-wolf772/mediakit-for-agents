@@ -8998,13 +8998,15 @@ export function parseWordIndices(spec, label = "indices") {
 // or a hand-written file): [{start, end, word}], seconds or "MM:SS".
 // Sorted by start; slight overlaps are tolerated (ASR token timings
 // can overlap by a few ms) — overlapping cut intervals merge later.
-export function normalizeTranscriptWords(raw, label = "words file") {
+// `tool` names the caller in error messages (cut_words by default —
+// search_words reuses this loader, and its errors must say so).
+export function normalizeTranscriptWords(raw, label = "words file", tool = "cut_words") {
   const arr = Array.isArray(raw) ? raw : raw?.words;
   if (!Array.isArray(arr)) {
-    throw new MediaKitError(`cut_words ${label} must be a JSON object with a "words" array (from transcribe --word-timestamps) or a bare words array, got ${typeof raw}`, "INVALID_ARG");
+    throw new MediaKitError(`${tool} ${label} must be a JSON object with a "words" array (from transcribe --word-timestamps) or a bare words array, got ${typeof raw}`, "INVALID_ARG");
   }
-  if (arr.length === 0) throw new MediaKitError(`cut_words ${label} has 0 words — nothing to cut from`, "INVALID_ARG");
-  if (arr.length > 20000) throw new MediaKitError(`cut_words ${label} has ${arr.length} words (max 20000)`, "INVALID_ARG");
+  if (arr.length === 0) throw new MediaKitError(`${tool} ${label} has 0 words — nothing to cut from`, "INVALID_ARG");
+  if (arr.length > 20000) throw new MediaKitError(`${tool} ${label} has ${arr.length} words (max 20000)`, "INVALID_ARG");
   const words = arr.map((w, i) => {
     const start = parseTime(w?.start, `word ${i} start`);
     const end = parseTime(w?.end, `word ${i} end`);
@@ -9349,6 +9351,118 @@ export async function removeRetakes({ input, output = null, wordsFile, minWords 
   };
 }
 
+// ---------------------------------------------------------------- search_words
+// Search-first editing (burningion/video-editing-mcp's search-first
+// idea, idea only — no code copied): find WHERE a phrase is said,
+// then cut from the result — instead of guessing timestamps. The
+// transcript is the words file transcribe --word-timestamps prints
+// (or a hand-written {words:[{start,end,word}]}), the same file
+// cut_words cuts by, so a search result plugs straight into a trim:
+// every match carries a padded cut window, and cut_list merges the
+// windows into the ready-to-cut list. Matching is on normalized
+// words (normalizeWord: case-insensitive, punctuation ignored —
+// "Hello," matches "hello"), contiguous only: a phrase split by
+// another word is not a match, and ASR mis-hearings are not
+// fuzzy-matched — a missed phrase means the transcript says
+// something else, not that the search is broken. Probe-only: no
+// file is written, so this also works as a batch operation (one
+// words file per clip, by the cut_words convention) and a manifest
+// probe-only step (the step that records WHY the next trim cuts
+// where it does).
+
+// Pure matcher, exported for unit tests: normalized phrase words
+// against normalized transcript words, left-to-right, non-overlapping
+// (a 1-word phrase inside "ha ha ha" matches at 0 and 2, a 2-word
+// phrase "ha ha" matches at 0 only — the tail "ha" is not a second
+// match). Returns [{word_start_index, word_end_index}] (inclusive).
+export function findPhraseMatches(words, phraseWords) {
+  const norm = words.map((w) => normalizeWord(w.word));
+  const n = phraseWords.length;
+  const out = [];
+  let i = 0;
+  while (i + n <= norm.length) {
+    let ok = true;
+    for (let j = 0; j < n; j++) {
+      if (norm[i + j] !== phraseWords[j]) { ok = false; break; }
+    }
+    if (ok) {
+      out.push({ word_start_index: i, word_end_index: i + n - 1 });
+      i += n;
+    } else i++;
+  }
+  return out;
+}
+
+export async function searchWords({ wordsFile, query, padBefore = 0.5, padAfter = 0.5, maxMatches = 10, contextWords = 5 }) {
+  const wordsPath = await requireInput(wordsFile, "words file");
+  const padB = num(padBefore, "pad_before", { min: 0, max: 5 });
+  const padA = num(padAfter, "pad_after", { min: 0, max: 5 });
+  const maxM = num(maxMatches, "max_matches", { min: 1, max: 100, integer: true });
+  const ctxW = num(contextWords, "context_words", { min: 0, max: 20, integer: true });
+  if (typeof query !== "string" || !query.trim()) {
+    throw new MediaKitError("search_words needs a query phrase — e.g. --query \"welcome back\"", "INVALID_ARG");
+  }
+  const phraseWords = query.trim().split(/\s+/).map((w) => normalizeWord(w)).filter(Boolean);
+  if (!phraseWords.length) {
+    throw new MediaKitError(`search_words query "${query}" has no searchable words (only punctuation?)`, "INVALID_ARG");
+  }
+  let rawWords;
+  try {
+    rawWords = JSON.parse(await readFile(wordsPath, "utf8"));
+  } catch (e) {
+    throw new MediaKitError(`search_words could not parse the words file as JSON: ${e.message}`, "INVALID_ARG");
+  }
+  const words = normalizeTranscriptWords(rawWords, "words file", "search_words");
+  const found = findPhraseMatches(words, phraseWords);
+  const totalMatches = found.length;
+  const truncated = totalMatches > maxM;
+  const matches = found.slice(0, maxM).map((m, k) => {
+    const first = words[m.word_start_index];
+    const last = words[m.word_end_index];
+    const start = first.start;
+    const end = last.end;
+    const winStart = Math.max(0, +(start - padB).toFixed(3));
+    const winEnd = +(end + padA).toFixed(3);
+    const before = words.slice(Math.max(0, m.word_start_index - ctxW), m.word_start_index).map((w) => w.word).join(" ");
+    const after = words.slice(m.word_end_index + 1, m.word_end_index + 1 + ctxW).map((w) => w.word).join(" ");
+    return {
+      match_index: k,
+      word_start_index: m.word_start_index,
+      word_end_index: m.word_end_index,
+      start: +start.toFixed(3),
+      end: +end.toFixed(3),
+      duration: +(end - start).toFixed(3),
+      text: words.slice(m.word_start_index, m.word_end_index + 1).map((w) => w.word).join(" "),
+      context_before: before,
+      context_after: after,
+      window: { start: winStart, end: winEnd, duration: +(winEnd - winStart).toFixed(3) },
+    };
+  });
+  // cut_list: the padded windows merged (a window that starts before
+  // the previous one ends is one cut, not two) — the shape a trim
+  // list or an assemble shot list takes directly.
+  const cutList = [];
+  for (const m of matches) {
+    const last = cutList[cutList.length - 1];
+    if (last && m.window.start <= last.end) {
+      last.end = Math.max(last.end, m.window.end);
+      last.duration = +(last.end - last.start).toFixed(3);
+    } else cutList.push({ start: m.window.start, end: m.window.end, duration: m.window.duration });
+  }
+  return {
+    operation: "search_words",
+    words_file: wordsPath,
+    query,
+    phrase: phraseWords.join(" "),
+    total_words: words.length,
+    match_count: totalMatches,
+    returned_matches: matches.length,
+    truncated,
+    matches,
+    cut_list: cutList,
+  };
+}
+
 // ---------------------------------------------------------------- doctor
 // Read-only environment preflight (kinocut's video_doctor idea): what
 // ffmpeg/ffprobe can actually do on this machine, and which mediakit
@@ -9461,6 +9575,9 @@ const TOOL_REQUIREMENTS = {
   // tempo_drift is the same family (decode + pure-Node tempogram) —
   // no ffmpeg capability needed either.
   tempo_drift: {},
+  // search_words reads a transcript JSON in pure Node — no ffmpeg
+  // capability needed either.
+  search_words: {},
   // transitions is a pure data lookup over the catalog — no ffmpeg
   // capability needed either.
   transitions: {},
@@ -12811,6 +12928,25 @@ export const BATCH_OPERATIONS = {
     args: ["bucket_seconds", "top_n", "min_gap_seconds"],
     run: (input, output, a) => audioLevels({ input, bucketSeconds: a.bucket_seconds ?? 1, topN: a.top_n ?? 5, minGapSeconds: a.min_gap_seconds ?? 2 }),
   },
+  // search_words in batch/manifest is probe-only like hook: it
+  // reads a transcript, not the media — the words file comes from
+  // the same convention as cut_words (<words_dir>/<stem>.words.json
+  // per clip in batch; a single words_file arg in a manifest, see
+  // the MANIFEST_STEPS override below), and the matches + cut_list
+  // come back in the row's `result` (batch) or the step's result
+  // (manifest). The words bytes belong in the cache key, or editing
+  // the transcript re-serves the old matches.
+  search_words: {
+    probeOnly: true,
+    args: ["query", "words_dir", "pad_before", "pad_after", "max_matches", "context_words"],
+    run: (input, output, a) => searchWords({
+      wordsFile: cutWordsFileFor(input, a.words_dir),
+      query: a.query,
+      padBefore: a.pad_before ?? 0.5, padAfter: a.pad_after ?? 0.5,
+      maxMatches: a.max_matches ?? 10, contextWords: a.context_words ?? 5,
+    }),
+    extraHash: async (input, a) => hashSidecar(cutWordsFileFor(input, a.words_dir)),
+  },
   // slideshow in batch is a SET operation, not a per-file one: the
   // whole matched set becomes ONE slideshow (batch() branches on it
   // before the per-file loop, so this run is only ever called from
@@ -13375,6 +13511,24 @@ export const MANIFEST_STEPS = {
       minWords: a.min_words ?? 3, maxGapWords: a.max_gap_words ?? 8, maxGapSeconds: a.max_gap_seconds ?? 5,
       keep: a.keep ?? "last",
       padBefore: a.pad_before ?? 0.06, padAfter: a.pad_after ?? 0.12, minKeep: a.min_keep ?? 0.2,
+    }),
+  },
+  // Same override for search_words: one words file for the one
+  // input (the batch shape takes words_dir instead). Probe-only, so
+  // the step passes the chain file through unchanged — it records
+  // WHY the next trim cuts where it does. probeOnly must be repeated
+  // here: the override replaces the whole BATCH_OPERATIONS spec, and
+  // without it the manifest treats the step as mutating and tries to
+  // copy a step output file that was never written (measured
+  // lượt 123: ENOENT on step-00-search_words.mp4).
+  search_words: {
+    probeOnly: true,
+    args: ["words_file", "query", "pad_before", "pad_after", "max_matches", "context_words"],
+    run: (input, output, a) => searchWords({
+      wordsFile: a.words_file,
+      query: a.query,
+      padBefore: a.pad_before ?? 0.5, padAfter: a.pad_after ?? 0.5,
+      maxMatches: a.max_matches ?? 10, contextWords: a.context_words ?? 5,
     }),
   },
   // download is manifest-only, not a batch operation: batch maps one

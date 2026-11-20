@@ -1,0 +1,1 @@
+{"input":"source.mp4","output":"../outputs/mcp-manifest-search-words.mp4","steps":[{"args":{"query":"quick brown fox","words_file":"search-words.json"},"tool":"search_words"},{"args":{"end":2.3,"start":0},"tool":"trim"}],"version":1}

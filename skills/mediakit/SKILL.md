@@ -1629,6 +1629,27 @@ switch, so its peak already reads loud while its RMS is still mixed). Cap: at mo
 wider `--bucket`. Like the other audio probes it is a probe-only step
 in `batch` and `manifest`.
 
+### 58b. Find the phrase before you cut — `search_words`
+`cut_words` cuts by word, but it needs you to already know WHICH
+words to cut. `search_words --words-file words.json --query "welcome
+back"` answers that first (probe-only, writes no file): it searches
+the same transcript `cut_words` cuts by and returns every place the
+phrase is said — word indices, start/end/duration, the matched text
+with `--context-words` (default 5) on each side so you can read the
+hit in place, and a padded cut window (default 0.5s each side).
+`cut_list` merges the windows into the ready-to-cut list, so the
+next step is a `trim` on a window it returned — never a hand-typed
+timestamp. Matching is on normalized words (case-insensitive,
+punctuation ignored — "Hello," matches "hello"), contiguous only: a
+phrase split by another word is not a match, and ASR mis-hearings
+are not fuzzy-matched — a missed phrase means the transcript says
+something else, so re-read the transcript instead of widening the
+search. `--max-matches` (default 10) caps the returned matches;
+`match_count` is the true total even when `truncated` is true. Like
+`cut_words` it is a probe-only step in `batch` (one words file per
+clip, `<words_dir>/<stem>.words.json`) and `manifest` (a single
+`words_file` arg).
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

@@ -1048,6 +1048,41 @@ export const TOOL_DEFS = [
   },
 
 
+  // Search-first editing (burningion/video-editing-mcp's
+  // search-first idea, idea only — no code copied): find WHERE a
+  // phrase is said in the transcript, then cut from the result.
+  // The words file is the same one cut_words cuts by, so a match's
+  // padded window is a trim waiting to happen — and cut_list merges
+  // the windows into the ready-to-cut list. Matching is on
+  // normalized words (case-insensitive, punctuation ignored —
+  // "Hello," matches "hello"), contiguous only: a phrase split by
+  // another word is not a match, and ASR mis-hearings are not
+  // fuzzy-matched. Probe-only, writes no file — also a batch
+  // operation (one words file per clip, the cut_words convention)
+  // and a manifest probe-only step (the step that records WHY the
+  // next trim cuts where it does).
+  {
+    name: "search_words",
+    description: "Find a phrase in a transcript and return where it is said (probe-only, writes no file): give a words file (the JSON transcribe --word-timestamps prints — save its stdout — or a hand-written {words:[{start,end,word}]}), the same file cut_words cuts by, and a query phrase. Matching is on normalized words (case-insensitive, punctuation ignored — 'Hello,' matches 'hello'), contiguous only: a phrase split by another word is not a match, and ASR mis-hearings are not fuzzy-matched — a missed phrase means the transcript says something else. Every match returns its word indices, start/end/duration, the matched text with context_before/context_after (default 5 words each side), and a padded cut window (default 0.5s each side); cut_list merges the windows into the ready-to-cut list (overlapping windows become one cut). Use it before trim: search the phrase, then cut the window it returns — never guess timestamps. max_matches caps the returned matches (default 10); when more exist, truncated=true and match_count is the true total.",
+    schema: {
+    words_file: pathSchema.describe("Transcript JSON with a words array — the stdout of `transcribe --word-timestamps` saved to a file, or a hand-written {words:[{start,end,word}]}"),
+    query: z.string().min(1).describe("Phrase to find, e.g. 'welcome back' (case-insensitive, punctuation ignored)"),
+    pad_before: z.number().min(0).max(5).default(0.5).describe("Seconds before each match's first word in its cut window (default 0.5, clamped at 0)"),
+    pad_after: z.number().min(0).max(5).default(0.5).describe("Seconds after each match's last word in its cut window (default 0.5)"),
+    max_matches: z.number().int().min(1).max(100).default(10).describe("Max matches to return (default 10); match_count is the true total even when truncated"),
+    context_words: z.number().int().min(0).max(20).default(5).describe("Words of context on each side of the match, for reading the hit in place (default 5)"),
+  },
+    handler: async (a) => safe(() => core.searchWords({
+    wordsFile: a.words_file,
+    query: a.query,
+    padBefore: a.pad_before ?? 0.5,
+    padAfter: a.pad_after ?? 0.5,
+    maxMatches: a.max_matches ?? 10,
+    contextWords: a.context_words ?? 5,
+  })),
+  },
+
+
   {
     name: "find",
     description: "Find media files by filename, recursively under a directory (case-insensitive substring match). Returns each match with probe info (duration, dimensions, codecs) so the agent can pick the right file without guessing paths. Skips .git, node_modules and hidden folders; does not follow symlinked directories.",
@@ -1453,9 +1488,9 @@ export const TOOL_DEFS = [
 
   {
     name: "batch",
-    description: "Apply ONE operation to many files matching a glob under a folder, in one call: loudness, resize, reframe, compress, convert, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, trim, silence, chroma_key, cut_words, remove_retakes, slideshow, hook, bpm, beat_grid or tempo_drift — the same args for every file. Outputs are named <stem>-<operation>.<ext> under the output directory, mirroring the input tree. Returns one row per file (input order) with status ok/error/cached/skipped plus counts, so a failure in one file never hides the rest. Unchanged files are skipped via a content-hash cache (.mediakit-batch-cache.json in the output dir, verified against the output's size + sha256); jobs runs up to 8 files at once under one shared timeout_seconds budget; dry_run lists the planned outputs and writes nothing. cut_words and remove_retakes find each clip's words file by convention (<words_dir>/<stem>.words.json, default the input's own folder) — a clip with no words file fails its own row only. slideshow is the exception: a SET operation — the whole matched set of images (2-32) becomes ONE slideshow video (output_name, default slideshow.mp4) instead of one output per file, and the per-file cache does not apply. hook, bpm, beat_grid and tempo_drift are the probe-only exceptions: they write no file (output is null, output_suffix is null) — the measurement comes back in each row's result, and the cache stores that result instead of a file.",
+    description: "Apply ONE operation to many files matching a glob under a folder, in one call: loudness, resize, reframe, compress, convert, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, trim, silence, chroma_key, cut_words, remove_retakes, slideshow, hook, bpm, beat_grid, tempo_drift, audio_levels or search_words — the same args for every file. Outputs are named <stem>-<operation>.<ext> under the output directory, mirroring the input tree. Returns one row per file (input order) with status ok/error/cached/skipped plus counts, so a failure in one file never hides the rest. Unchanged files are skipped via a content-hash cache (.mediakit-batch-cache.json in the output dir, verified against the output's size + sha256); jobs runs up to 8 files at once under one shared timeout_seconds budget; dry_run lists the planned outputs and writes nothing. cut_words, remove_retakes and search_words find each clip's words file by convention (<words_dir>/<stem>.words.json, default the input's own folder) — a clip with no words file fails its own row only. slideshow is the exception: a SET operation — the whole matched set of images (2-32) becomes ONE slideshow video (output_name, default slideshow.mp4) instead of one output per file, and the per-file cache does not apply. hook, bpm, beat_grid, tempo_drift, audio_levels and search_words are the probe-only exceptions: they write no file (output is null, output_suffix is null) — the measurement comes back in each row's result, and the cache stores that result instead of a file.",
     schema: {
-    operation: z.enum(["loudness", "resize", "reframe", "compress", "convert", "extract_audio", "reverse", "rotate", "boomerang", "make_loopable", "freeze", "grade", "fit", "trim", "silence", "chroma_key", "cut_words", "remove_retakes", "slideshow", "hook", "bpm", "beat_grid", "tempo_drift", "audio_levels"]).describe("The operation to apply to every matched file"),
+    operation: z.enum(["loudness", "resize", "reframe", "compress", "convert", "extract_audio", "reverse", "rotate", "boomerang", "make_loopable", "freeze", "grade", "fit", "trim", "silence", "chroma_key", "cut_words", "remove_retakes", "slideshow", "hook", "bpm", "beat_grid", "tempo_drift", "audio_levels", "search_words"]).describe("The operation to apply to every matched file"),
     pattern: z.string().min(1).describe("Glob matched against paths under input_dir: **/*.mp4 for every mp4 at any depth, sub/*.mp4 for one folder, or a bare *.mp4 (matches the basename at any depth)"),
     input_dir: pathSchema.describe("Folder to search under (recursive; hidden dirs, .git, node_modules and .next are skipped)"),
     output_dir: pathSchema.describe("Directory to write outputs + batch-manifest.json into (created if needed; files under it are never treated as inputs)"),
@@ -1487,7 +1522,7 @@ export const TOOL_DEFS = [
 
   {
     name: "manifest",
-    description: "Run a whole edit pipeline from ONE declarative JSON manifest file: {version: 1, input, output, steps: [{tool, args}], qa?} — paths in the manifest are relative to the manifest file. Steps run in order, each feeding the next (slideshow as step 1 only — it builds a video from images in args, so the manifest input should be the first slide image; download as step 1 only — it fetches from a URL in args, and when it is step 1 the manifest input may be omitted entirely; then trim, resize, reframe, compress, convert, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, silence, denoise, interpolate, burn_captions, overlay, chroma_key, cut_words, remove_retakes; hook, bpm, beat_grid and tempo_drift are the probe-only steps — they analyze the chain file at that point and pass it through unchanged, so their results record WHY the next trim cuts where it does); the whole plan is validated before anything renders, so a typo fails in seconds. Each step is cached by content hash (input bytes + tool + args + sidecar-file bytes, verified against the cached output's size + sha256; a probe-only step stores only its result, there is no file to verify) — re-running an unchanged manifest re-encodes nothing, and editing step 3 only re-runs from step 3. Set qa to a platform (or 'any') to run qa_report on the final file. dry_run prints the plan and writes nothing — the approve-before-render gate. A step failure aborts the run and keeps the intermediates for inspection.",
+    description: "Run a whole edit pipeline from ONE declarative JSON manifest file: {version: 1, input, output, steps: [{tool, args}], qa?} — paths in the manifest are relative to the manifest file. Steps run in order, each feeding the next (slideshow as step 1 only — it builds a video from images in args, so the manifest input should be the first slide image; download as step 1 only — it fetches from a URL in args, and when it is step 1 the manifest input may be omitted entirely; then trim, resize, reframe, compress, convert, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, silence, denoise, interpolate, burn_captions, overlay, chroma_key, cut_words, remove_retakes; hook, bpm, beat_grid, tempo_drift, audio_levels and search_words are the probe-only steps — they analyze the chain file at that point and pass it through unchanged, so their results record WHY the next trim cuts where it does); the whole plan is validated before anything renders, so a typo fails in seconds. Each step is cached by content hash (input bytes + tool + args + sidecar-file bytes, verified against the cached output's size + sha256; a probe-only step stores only its result, there is no file to verify) — re-running an unchanged manifest re-encodes nothing, and editing step 3 only re-runs from step 3. Set qa to a platform (or 'any') to run qa_report on the final file. dry_run prints the plan and writes nothing — the approve-before-render gate. A step failure aborts the run and keeps the intermediates for inspection.",
     schema: {
     manifest_path: pathSchema.describe("Path to the manifest JSON file"),
     output: pathSchema.optional().describe("Output file path (overrides the manifest's output; the extension is adjusted to the step chain's final format when needed)"),

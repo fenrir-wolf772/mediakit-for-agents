@@ -14,7 +14,7 @@ import { createCanvas } from "canvas";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { compareDeterminismRuns, estimateDecodedWork, estimateJobRemaining, estimateTempo, findQuietSnap, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, parseFfmpegProgress, runFfmpegWithProgress, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, SHORTS_STYLE_IDS } from "../src/core.js";
+import { compareDeterminismRuns, estimateDecodedWork, estimateJobRemaining, estimateTempo, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, parseFfmpegProgress, runFfmpegWithProgress, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import bounceTpl from "../src/canvas-scene-lib/templates/bounce.cjs";
 import slideInTpl from "../src/canvas-scene-lib/templates/slide-in.cjs";
@@ -187,10 +187,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 77 tools present");
-checkOk(missing.length === 0, "tools/list has all 77 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 78 tools present");
+checkOk(missing.length === 0, "tools/list has all 78 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -6244,6 +6244,108 @@ checkOk(rtBadKeepRes.isError === true && /keep/.test(rtBadKeepRes.content[0].tex
 const rtCliDetect = await runCli(["remove-retakes", path.join(root, "test/source.mp4"), "--words-file", path.join(root, "test/retakes-words.json"), "--detect-only"]);
 checkOk(rtCliDetect.code === 0 && /"detect_only": true/.test(rtCliDetect.out) && /"removed_count": 10/.test(rtCliDetect.out), "CLI remove-retakes --detect-only needs no -o and reports 10 words", rtCliDetect.out.slice(0, 200));
 
+// search_words: search-first editing on the transcript — fixture
+// test/search-words.json is 14 words: "the quick brown fox jumps
+// over the lazy dog the quick brown fox again" (word times 0-7.4s).
+// "quick brown fox" is said twice; "lazy dog" once.
+const swWords = path.join(root, "test/search-words.json");
+const swRes = await client.callTool({ name: "search_words", arguments: { words_file: swWords, query: "quick brown fox" } });
+const swJson = JSON.parse(swRes.content[0].text);
+console.log("search_words:", JSON.stringify(swJson.matches.map((m) => `${m.start}-${m.end}`)), "| cut_list", JSON.stringify(swJson.cut_list));
+checkOk(swRes.isError !== true && swJson.match_count === 2 && swJson.returned_matches === 2 && swJson.truncated === false && swJson.phrase === "quick brown fox" && swJson.total_words === 14, "search_words finds 'quick brown fox' twice in 14 words", JSON.stringify({ match_count: swJson.match_count, phrase: swJson.phrase }));
+checkOk(JSON.stringify(swJson.matches.map((m) => [m.word_start_index, m.word_end_index, m.start, m.end])) === JSON.stringify([[1, 3, 0.5, 1.8], [10, 12, 5.5, 6.8]]) && swJson.matches[0].text === "quick brown fox" && swJson.matches[0].context_before === "the" && swJson.matches[0].context_after === "jumps over the lazy dog" && swJson.matches[1].context_after === "again", "search_words matches carry word indices, times, text + 5-word context each side", JSON.stringify(swJson.matches.map((m) => m.context_after)));
+checkOk(JSON.stringify(swJson.matches.map((m) => m.window)) === JSON.stringify([{ start: 0, end: 2.3, duration: 2.3 }, { start: 5, end: 7.3, duration: 2.3 }]) && JSON.stringify(swJson.cut_list) === JSON.stringify([{ start: 0, end: 2.3, duration: 2.3 }, { start: 5, end: 7.3, duration: 2.3 }]), "search_words cut windows are the match ±0.5s (clamped at 0) and cut_list is the same two windows", JSON.stringify(swJson.cut_list));
+const swCaseRes = await client.callTool({ name: "search_words", arguments: { words_file: swWords, query: "QUICK, brown FOX" } });
+const swCaseJson = JSON.parse(swCaseRes.content[0].text);
+checkOk(swCaseRes.isError !== true && swCaseJson.match_count === 2 && JSON.stringify(swCaseJson.matches.map((m) => m.start)) === JSON.stringify([0.5, 5.5]), "search_words matching is case-insensitive and punctuation-ignored ('QUICK, brown FOX' = 'quick brown fox')", JSON.stringify(swCaseJson.matches.map((m) => m.start)));
+const swPadRes = await client.callTool({ name: "search_words", arguments: { words_file: swWords, query: "lazy dog", pad_before: 1, pad_after: 1 } });
+const swPadJson = JSON.parse(swPadRes.content[0].text);
+checkOk(swPadRes.isError !== true && swPadJson.match_count === 1 && JSON.stringify(swPadJson.matches[0].window) === JSON.stringify({ start: 2.4, end: 5.1, duration: 2.7 }), "search_words --pad-before/after 1 widens the 'lazy dog' window to 2.4-5.1", JSON.stringify(swPadJson.matches[0].window));
+const swNoneRes = await client.callTool({ name: "search_words", arguments: { words_file: swWords, query: "not here" } });
+const swNoneJson = JSON.parse(swNoneRes.content[0].text);
+checkOk(swNoneRes.isError !== true && swNoneJson.match_count === 0 && swNoneJson.returned_matches === 0 && swNoneJson.matches.length === 0 && swNoneJson.cut_list.length === 0, "search_words with no hit returns 0 matches and an empty cut_list (not an error)", JSON.stringify(swNoneJson));
+const swCapRes = await client.callTool({ name: "search_words", arguments: { words_file: swWords, query: "quick brown fox", max_matches: 1 } });
+const swCapJson = JSON.parse(swCapRes.content[0].text);
+checkOk(swCapRes.isError !== true && swCapJson.match_count === 2 && swCapJson.returned_matches === 1 && swCapJson.truncated === true && swCapJson.matches[0].start === 0.5, "search_words --max-matches 1 returns the first hit, truncated=true, match_count still 2", JSON.stringify({ returned: swCapJson.returned_matches, truncated: swCapJson.truncated }));
+// Overlapping windows merge in cut_list: "the" ×3 with 1s pads
+// gives [0,1.4] + [2.0,4.3] + [4.0,6.4] → the last two merge.
+const swMergeRes = await client.callTool({ name: "search_words", arguments: { words_file: swWords, query: "the", pad_before: 1, pad_after: 1 } });
+const swMergeJson = JSON.parse(swMergeRes.content[0].text);
+checkOk(swMergeRes.isError !== true && swMergeJson.match_count === 3 && JSON.stringify(swMergeJson.cut_list) === JSON.stringify([{ start: 0, end: 1.4, duration: 1.4 }, { start: 2, end: 6.4, duration: 4.4 }]), "search_words cut_list merges overlapping windows ([2.0,4.3]+[4.0,6.4] → [2.0,6.4])", JSON.stringify(swMergeJson.cut_list));
+// findPhraseMatches is pure: a 2-word phrase inside "ha ha ha"
+// matches once (non-overlapping scan), a 1-word phrase 3 times.
+const haWords = [0, 1, 2].map((i) => ({ start: i, end: i + 0.5, word: "ha" }));
+checkOk(JSON.stringify(findPhraseMatches(haWords, ["ha", "ha"])) === JSON.stringify([{ word_start_index: 0, word_end_index: 1 }]) && findPhraseMatches(haWords, ["ha"]).length === 3 && findPhraseMatches(haWords, ["ha", "ha", "ha", "ha"]).length === 0, "findPhraseMatches: 'ha ha' in 'ha ha ha' matches once at 0, 'ha' 3 times, 4-word phrase never", JSON.stringify(findPhraseMatches(haWords, ["ha", "ha"])));
+// Validation: empty query, missing words file, a JSON file with no
+// words array (test/cues.json is a bare cues array).
+const swEmptyRes = await client.callTool({ name: "search_words", arguments: { words_file: swWords, query: "" } });
+checkOk(swEmptyRes.isError === true, "search_words refuses an empty query", swEmptyRes.content[0].text.slice(0, 200));
+const swMissingRes = await client.callTool({ name: "search_words", arguments: { words_file: path.join(root, "test/no-such-words.json"), query: "fox" } });
+const swMissingJson = JSON.parse(swMissingRes.content[0].text);
+checkOk(swMissingRes.isError === true && /words file not found/.test(swMissingJson.error ?? ""), "search_words refuses a missing words file", JSON.stringify(swMissingJson));
+const swBadFileRes = await client.callTool({ name: "search_words", arguments: { words_file: path.join(root, "test/search-words-bad.json"), query: "fox" } });
+const swBadFileJson = JSON.parse(swBadFileRes.content[0].text);
+checkOk(swBadFileRes.isError === true && /search_words words file must be/.test(swBadFileJson.error ?? ""), "search_words refuses a JSON file with no words array, naming itself in the error", JSON.stringify(swBadFileJson));
+// search_words through the CLI: no -o (probe-only); missing --query refuses.
+const swCli = await runCli(["search-words", "--words-file", path.join(root, "test/search-words.json"), "--query", "quick brown fox"]);
+checkOk(swCli.code === 0 && /"match_count": 2/.test(swCli.out), "CLI search-words needs no -o and reports 2 matches", swCli.out.slice(0, 200));
+const swCliNoQuery = await runCli(["search-words", "--words-file", path.join(root, "test/search-words.json")]);
+checkOk(swCliNoQuery.code !== 0 && /--query/.test(swCliNoQuery.out), "CLI search-words without --query refuses", swCliNoQuery.out.slice(0, 200));
+
+// search_words in batch + manifest (lượt 123): probe-only like
+// hook — no file is written, the matches + cut_list come back in
+// the row's / step's result; a clip with no words file fails its
+// own row only. The manifest step records WHY the next trim cuts
+// where it does, then trim cuts the first window (0-2.3s).
+await rm(path.join(root, "outputs/mcp-batch-sw-in"), { recursive: true, force: true });
+await rm(path.join(root, "outputs/mcp-batch-sw-out"), { recursive: true, force: true });
+await mkdir(path.join(root, "outputs/mcp-batch-sw-in"), { recursive: true });
+await copyFile(path.join(root, "test/source.mp4"), path.join(root, "outputs/mcp-batch-sw-in/source.mp4"));
+await copyFile(path.join(root, "test/search-words.json"), path.join(root, "outputs/mcp-batch-sw-in/source.words.json"));
+await copyFile(path.join(root, "test/hook-source.mp4"), path.join(root, "outputs/mcp-batch-sw-in/hook-source.mp4"));
+const swBatchRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "search_words", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-sw-in"), output_dir: path.join(root, "outputs/mcp-batch-sw-out"), args: { query: "quick brown fox" }, jobs: 2 },
+});
+const swBatchJson = JSON.parse(swBatchRes.content[0].text);
+console.log("batch search_words:", JSON.stringify(swBatchJson.results.map((r) => ({ status: r.status, output: r.output, matches: r.result?.match_count }))), "| suffix", swBatchJson.output_suffix);
+const swBatchRow = (name) => swBatchJson.results.find((r) => r.input.endsWith(`/${name}`));
+checkOk(swBatchJson.succeeded === 1 && swBatchJson.failed === 1 && swBatchJson.output_suffix === null && swBatchRow("source.mp4").status === "ok" && swBatchRow("source.mp4").output === null && swBatchRow("source.mp4").result.match_count === 2 && swBatchRow("hook-source.mp4").status === "error", "batch search_words: 1 ok (2 matches, output null, suffix null) + 1 error row for the clip with no words file", JSON.stringify(swBatchJson.results.map((r) => r.status)));
+const swBatchCacheRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "search_words", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-sw-in"), output_dir: path.join(root, "outputs/mcp-batch-sw-out"), args: { query: "quick brown fox" }, jobs: 2 },
+});
+const swBatchCacheJson = JSON.parse(swBatchCacheRes.content[0].text);
+checkOk(swBatchCacheJson.cached === 1 && swBatchCacheJson.failed === 1 && swBatchCacheJson.succeeded === 0 && swBatchCacheJson.results.find((r) => r.input.endsWith("/source.mp4")).status === "cached", "batch search_words second run serves the ok row from the result cache (the failed row re-runs, it is not cached)", JSON.stringify(swBatchCacheJson.results.map((r) => r.status)));
+const swBatchDryRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "search_words", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-sw-in"), output_dir: path.join(root, "outputs/mcp-batch-sw-out"), args: { query: "quick brown fox" }, dry_run: true },
+});
+const swBatchDryJson = JSON.parse(swBatchDryRes.content[0].text);
+checkOk(swBatchDryJson.dry_run === true && swBatchDryJson.results.every((r) => r.status === "planned" && r.output === null), "batch search_words dry-run plans with null outputs and writes nothing", JSON.stringify(swBatchDryJson.results.map((r) => r.output)));
+await rm(path.join(root, "outputs/mcp-manifest-search-words.mp4"), { force: true });
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const swManifestRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-search-words.json") },
+});
+const swManifestJson = JSON.parse(swManifestRes.content[0].text);
+console.log("manifest search_words:", JSON.stringify(swManifestJson.steps.map((s) => ({ tool: s.tool, status: s.status, output: s.output, matches: s.result?.match_count }))), "| final", swManifestJson.final?.duration_seconds);
+checkOk(swManifestJson.steps_run === 2 && swManifestJson.steps.every((s) => s.status === "ok") && swManifestJson.steps[0].tool === "search_words" && swManifestJson.steps[0].result.match_count === 2 && JSON.stringify(swManifestJson.steps[0].result.cut_list) === JSON.stringify([{ start: 0, end: 2.3, duration: 2.3 }, { start: 5, end: 7.3, duration: 2.3 }]) && near(swManifestJson.final.duration_seconds, 2.3, 0.05), "manifest search_words step records 2 matches + cut_list, then trim cuts the first window (final 2.3s)", JSON.stringify(swManifestJson.steps.map((s) => s.result?.match_count ?? s.result?.duration_seconds)));
+checkOk(swManifestJson.steps[0].output === swManifestJson.input && swManifestJson.steps[1].output !== swManifestJson.steps[0].output, "manifest search_words step passes the chain file through (its output is the input it analyzed)", swManifestJson.steps[0].output);
+const swManifestCacheRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-search-words.json") },
+});
+const swManifestCacheJson = JSON.parse(swManifestCacheRes.content[0].text);
+checkOk(swManifestCacheJson.cache_hits === 2 && swManifestCacheJson.steps.every((s) => s.status === "cached") && swManifestCacheJson.steps[0].result.match_count === 2, "manifest search_words re-run serves both steps from cache (search result cached, trim file cached)", JSON.stringify(swManifestCacheJson.steps.map((s) => s.status)));
+const swManifestDryRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-search-words.json"), dry_run: true },
+});
+const swManifestDryJson = JSON.parse(swManifestDryRes.content[0].text);
+checkOk(swManifestDryJson.dry_run === true && swManifestDryJson.steps[0].output === swManifestDryJson.input && swManifestDryJson.steps[1].input === swManifestDryJson.input, "manifest search_words dry-run plans the search step as a pass-through (output = input)", JSON.stringify(swManifestDryJson.steps.map((s) => s.output)));
+
 // No engine at all (both disabled): doctor must report engine
 // "none" with a fix carrying BOTH install lines.
 const noEngTransport = new StdioClientTransport({
@@ -6469,7 +6571,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 77 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 77 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 78 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 78 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -8781,7 +8883,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 77 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 78 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -8841,11 +8943,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 77, "GET /mcp reports name/version/transport and 77 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 78, "GET /mcp reports name/version/transport and 78 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 77 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 77 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 78 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 78 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -8916,7 +9018,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 77, "JSON-RPC tools/list returns the same 77 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 78, "JSON-RPC tools/list returns the same 78 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));
