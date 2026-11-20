@@ -1,0 +1,1 @@
+{"input":"source.mp4","output":"../outputs/mcp-manifest-smartcut.mp4","steps":[{"args":{"words_file":"smartcut-words.json"},"tool":"smart_cut"}],"version":1}

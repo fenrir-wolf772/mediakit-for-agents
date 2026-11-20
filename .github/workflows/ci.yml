@@ -175,6 +175,10 @@ jobs:
           node bin/mediakit.js remove-retakes test/source.mp4 --words-file test/retakes-words.json -o outputs/ci-retakes.mp4 | grep '"removed_count": 10'
           ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-retakes.mp4 | grep '^5.74'
           node bin/mediakit.js remove-retakes test/source.mp4 --words-file test/retakes-words.json --detect-only | grep '"detect_only": true'
+          node bin/mediakit.js smart-cut test/source.mp4 --words-file test/smartcut-words.json -o outputs/ci-smartcut.mp4 | grep '"removed_count": 4'
+          ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-smartcut.mp4 | grep '^6.95'
+          node bin/mediakit.js smart-cut test/source.mp4 --words-file test/smartcut-words.json --detect-only | grep '"detect_only": true'
+          node bin/mediakit.js smart-cut test/source.mp4 --words-file test/smartcut-clean-words.json -o outputs/ci-smartcut-none.mp4 | grep '"stream_copy": true'
           mkdir -p outputs/ci-batch-rt-in && cp test/source.mp4 outputs/ci-batch-rt-in/take.mp4 && cp test/retakes-words.json outputs/ci-batch-rt-in/take.words.json
           node bin/mediakit.js batch remove-retakes --pattern '*.mp4' --input-dir outputs/ci-batch-rt-in -o outputs/ci-batch-rt --args-json '{}' | grep '"succeeded": 1'
           ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-batch-rt/take-remove_retakes.mp4 | grep '^5.74'
@@ -214,7 +218,7 @@ jobs:
           node bin/mediakit.js mcp --http --port 3101 > outputs/ci-http.log 2>&1 &
           HTTP_PID=$!
           sleep 2
-          curl -fsS http://127.0.0.1:3101/mcp | grep '"tools": 78'
+          curl -fsS http://127.0.0.1:3101/mcp | grep '"tools": 79'
           curl -fsS http://127.0.0.1:3101/mcp/tools | grep -c '"name": "probe"'
           curl -fsS -X POST http://127.0.0.1:3101/mcp/tools/probe/invoke -H 'content-type: application/json' -d '{"arguments": {"input": "test/source.mp4"}}' | grep '"duration_seconds": 10'
           curl -fsS -X POST http://127.0.0.1:3101/ -H 'content-type: application/json' -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}' | grep -c '"name": "download"'

@@ -9351,6 +9351,278 @@ export async function removeRetakes({ input, output = null, wordsFile, minWords 
   };
 }
 
+// ---------------------------------------------------------------- smart_cut
+// Tighten a talking-head take on the transcript (dhirajlochib/VidMCP's
+// smart_cut, idea only — no code copied): cut the hesitation out of a
+// take — long pauses between words, long filler words, and words held
+// so long they became a stall — in one pass, with one aggressiveness
+// knob. Times always come from the words file, never a hand-typed
+// timestamp (the same rule as cut_words).
+//
+// How it differs from the neighbours:
+//   * `silence` cuts on audio energy (silencedetect): it cannot tell
+//     a 0.45s thinking pause from a 0.45s breath, and its floor is
+//     0.5s. smart_cut cuts on word boundaries, so a 0.45s gap between
+//     two words is cut exactly, pads and all.
+//   * `cut_words --fillers` cuts EVERY filler, even a 0.1s "um"
+//     that sounds like a normal syllable. smart_cut only cuts a
+//     filler when it is LONG (duration >= 0.35s - 0.15*aggressiveness),
+//     so a quick "um" survives and a stretched "ummm" does not.
+//     That duration gate is also what makes "like" / "you know" /
+//     "basically" / "actually" safe to include in the default list:
+//     cut_words deliberately excludes them (no LLM to judge context),
+//     smart_cut includes them because a 0.1s "like" (verb) is below
+//     the gate while a 0.6s "liiiike" (filler) is above it.
+//   * A stretched non-filler ("soooo", "this...") is cut from 0.05s
+//     in — the first 50ms is kept so the word's attack survives and
+//     the join does not swallow the previous word's tail.
+// Aggressiveness 0..1 (default 0.5) scales all three thresholds at
+// once: gap_threshold = min_gap * (1.2 - 0.6*agg), filler_min =
+// 0.35 - 0.15*agg, stretch_min = 0.9 - 0.3*agg. --detect-only is the
+// review gate: read the removed list before cutting.
+//
+// One deviation from VidMCP, fixed deliberately: their DEFAULT_FILLERS
+// lists "you know" but the check is per single token, so a two-word
+// phrase can never match — the entry is dead. smart_cut matches
+// phrases on consecutive tokens, so "you know" really is cut when
+// it is long enough.
+
+// VidMCP's DEFAULT_FILLERS, plus cut_words' extra single-token
+// fillers (umm, uhm, er, hmm, mm, mhm, ah, eh) — all gated by the
+// duration rule above, so the longer list is safe here.
+const SMART_CUT_FILLERS = [
+  "um", "umm", "uh", "uhh", "uhm", "erm", "er", "hmm", "mm", "mhm", "ah", "eh",
+  "like", "you know", "basically", "actually",
+];
+// Single words that, held long, are a stall rather than emphasis.
+const SMART_CUT_STRETCH_WORDS = new Set([
+  ...SMART_CUT_FILLERS.filter((f) => !f.includes(" ")),
+  "this", "so", "and",
+]);
+const SMART_CUT_GAP_PAD_SECONDS = 0.05;
+const SMART_CUT_STRETCH_KEEP_SECONDS = 0.05;
+const SMART_CUT_MERGE_TOLERANCE_SECONDS = 0.02;
+
+// Parse a fillers spec into phrases of normalized tokens: a string
+// ("um,uh,you know" — comma separates phrases, spaces join them),
+// an array of phrase strings, or null for the default list. A phrase
+// is matched on consecutive transcript tokens.
+export function parseSmartCutFillers(spec) {
+  const raw = spec === null || spec === undefined
+    ? SMART_CUT_FILLERS
+    : (typeof spec === "string" ? spec.split(",") : spec);
+  if (!Array.isArray(raw)) throw new MediaKitError("smart_cut fillers must be a comma-separated string or an array of phrases", "INVALID_ARG");
+  const phrases = [];
+  const seen = new Set();
+  for (const entry of raw) {
+    if (typeof entry !== "string" || !entry.trim()) throw new MediaKitError(`smart_cut fillers has a bad entry ${JSON.stringify(entry)} — want phrases like "um" or "you know"`, "INVALID_ARG");
+    const tokens = entry.trim().split(/\s+/).map((t) => normalizeWord(t)).filter(Boolean);
+    if (!tokens.length) throw new MediaKitError(`smart_cut fillers has a bad entry ${JSON.stringify(entry)} — a phrase needs at least one word`, "INVALID_ARG");
+    const key = tokens.join(" ");
+    if (!seen.has(key)) { seen.add(key); phrases.push(tokens); }
+  }
+  if (!phrases.length) throw new MediaKitError("smart_cut fillers is empty — give at least one phrase, or omit it for the default list", "INVALID_ARG");
+  return phrases;
+}
+
+// Pure planner, exported for unit tests: words are the normalized
+// [{start, end, word}] from normalizeTranscriptWords, duration is the
+// media duration in seconds. Returns the merged remove intervals
+// (each with reason filler/stretched/gap/mixed + text), the keep
+// segments (min_keep-filtered), and any kept word that ends up mostly
+// cut out (swallowed — same definition as cut_words).
+export function planSmartCuts(words, duration, { minGap = 0.45, aggressiveness = 0.5, fillers = null, minKeep = 0.2 } = {}) {
+  const agg = num(aggressiveness, "aggressiveness", { min: 0, max: 1 });
+  const minG = num(minGap, "min_gap", { min: 0.1, max: 5 });
+  const minK = num(minKeep, "min_keep", { min: 0.05, max: 5 });
+  const dur = num(duration, "duration", { min: 0 });
+  const gapThreshold = +(minG * (1.2 - 0.6 * agg)).toFixed(3);
+  const fillerMinDuration = +(0.35 - 0.15 * agg).toFixed(3);
+  const stretchMinDuration = +(0.9 - 0.3 * agg).toFixed(3);
+  const phrases = parseSmartCutFillers(fillers);
+  const norm = words.map((w) => normalizeWord(w.word));
+  const removed = [];
+  // Filler phrases (long ones only) and stretched single words,
+  // scanned left to right; a matched phrase advances past all its
+  // tokens, longest phrase wins at each position.
+  let i = 0;
+  while (i < words.length) {
+    let matched = null;
+    for (const ph of phrases) {
+      if (ph.length > words.length - i) continue;
+      let ok = true;
+      for (let j = 0; j < ph.length; j++) {
+        if (norm[i + j] !== ph[j]) { ok = false; break; }
+      }
+      if (ok && (!matched || ph.length > matched.ph.length)) matched = { ph, len: ph.length };
+    }
+    if (matched) {
+      const first = words[i];
+      const last = words[i + matched.len - 1];
+      if (last.end - first.start >= fillerMinDuration) {
+        removed.push({
+          start: +first.start.toFixed(3), end: +last.end.toFixed(3),
+          duration: +(last.end - first.start).toFixed(3),
+          reason: "filler", text: words.slice(i, i + matched.len).map((w) => w.word).join(" "),
+        });
+      }
+      i += matched.len;
+      continue;
+    }
+    const w = words[i];
+    if (SMART_CUT_STRETCH_WORDS.has(norm[i]) && w.end - w.start >= stretchMinDuration) {
+      removed.push({
+        start: +(w.start + SMART_CUT_STRETCH_KEEP_SECONDS).toFixed(3), end: +w.end.toFixed(3),
+        duration: +(w.end - w.start - SMART_CUT_STRETCH_KEEP_SECONDS).toFixed(3),
+        reason: "stretched", text: w.word,
+      });
+    }
+    i++;
+  }
+  // Inter-word gaps at or over the threshold, with 0.05s kept on
+  // each side so the neighbouring words keep their attacks/tails.
+  for (let k = 1; k < words.length; k++) {
+    const gap = words[k].start - words[k - 1].end;
+    if (gap >= gapThreshold) {
+      const a = +(words[k - 1].end + SMART_CUT_GAP_PAD_SECONDS).toFixed(3);
+      const b = +(words[k].start - SMART_CUT_GAP_PAD_SECONDS).toFixed(3);
+      if (b > a) removed.push({ start: a, end: b, duration: +(b - a).toFixed(3), reason: "gap", text: "" });
+    }
+  }
+  removed.sort((a, b) => a.start - b.start);
+  const merged = [];
+  for (const r of removed) {
+    const last = merged[merged.length - 1];
+    if (last && r.start <= last.end + SMART_CUT_MERGE_TOLERANCE_SECONDS) {
+      last.end = Math.max(last.end, r.end);
+      last.duration = +(last.end - last.start).toFixed(3);
+      if (last.reason !== r.reason) last.reason = "mixed";
+      last.text = [last.text, r.text].filter(Boolean).join(" ");
+    } else merged.push({ ...r });
+  }
+  const keep = [];
+  let cur = 0;
+  for (const r of merged) {
+    if (r.start > cur + 0.02) keep.push({ start: +cur.toFixed(3), end: r.start, duration: +(r.start - cur).toFixed(3) });
+    cur = Math.max(cur, r.end);
+  }
+  if (cur < dur - 0.02) keep.push({ start: +cur.toFixed(3), end: +dur.toFixed(3), duration: +(dur - cur).toFixed(3) });
+  const kept = keep.filter((s) => s.end - s.start >= minK);
+  const swallowed = [];
+  words.forEach((w, idx) => {
+    const removedCov = merged.reduce((s, r) => s + Math.max(0, Math.min(w.end, r.end) - Math.max(w.start, r.start)), 0);
+    if (removedCov / (w.end - w.start) >= 0.5) return; // a cut word, not swallowed
+    const keptCov = kept.reduce((s, k) => s + Math.max(0, Math.min(w.end, k.end) - Math.max(w.start, k.start)), 0);
+    if (keptCov / (w.end - w.start) < 0.5) swallowed.push({ index: idx, word: w.word, start: w.start });
+  });
+  return {
+    thresholds: { gap_threshold: gapThreshold, filler_min_duration: fillerMinDuration, stretch_min_duration: stretchMinDuration },
+    removed: merged,
+    removed_count: merged.length,
+    keep: kept,
+    swallowed,
+  };
+}
+
+export async function smartCut({ input, output = null, wordsFile, minGap = 0.45, aggressiveness = 0.5, fillers = null, minKeep = 0.2, detectOnly = false, dryRun = false }) {
+  const inPath = await requireInput(input);
+  const wordsPath = await requireInput(wordsFile, "words file");
+  let rawWords;
+  try {
+    rawWords = JSON.parse(await readFile(wordsPath, "utf8"));
+  } catch (e) {
+    throw new MediaKitError(`smart_cut could not parse the words file as JSON: ${e.message}`, "INVALID_ARG");
+  }
+  const words = normalizeTranscriptWords(rawWords, "words file", "smart_cut");
+  const meta = await probe(inPath);
+  if (!meta.audio) throw new MediaKitError("smart_cut needs an input with an audio stream", "INVALID_ARG");
+  const duration = meta.duration_seconds;
+  if (duration === null) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
+  const plan = planSmartCuts(words, duration, { minGap, aggressiveness, fillers, minKeep });
+  const keptTotal = plan.keep.reduce((s, k) => s + k.duration, 0);
+  const base = {
+    operation: "smart_cut",
+    input: inPath,
+    words_file: wordsPath,
+    words_total: words.length,
+    min_gap: num(minGap, "min_gap", { min: 0.1, max: 5 }),
+    aggressiveness: num(aggressiveness, "aggressiveness", { min: 0, max: 1 }),
+    fillers: parseSmartCutFillers(fillers).map((ph) => ph.join(" ")),
+    thresholds: plan.thresholds,
+    removed: plan.removed,
+    removed_count: plan.removed_count,
+    keep_segments: plan.keep,
+    removed_seconds: +(duration - keptTotal).toFixed(3),
+    duration_before: duration,
+    min_keep: num(minKeep, "min_keep", { min: 0.05, max: 5 }),
+    cut_check: { swallowed: plan.swallowed, warnings: plan.swallowed.map((s) => `kept word #${s.index} '${s.word}' @${s.start}s is mostly cut out — play it, then re-run with a larger --min-gap or smaller --aggressiveness`) },
+  };
+  if (detectOnly === true) return { ...base, detect_only: true, ...(dryRun ? { dry_run: true } : {}) };
+  if (plan.removed_count === 0) {
+    // Nothing to cut: copy the streams as-is (silence's no-op path).
+    const outPath = await prepareOutput(output, [inPath, wordsPath]);
+    await run(FFMPEG, ["-y", "-i", inPath, "-c", "copy", outPath]);
+    const info = await fileInfo(outPath);
+    return { ...base, output: outPath, duration_after: duration, stream_copy: true, warning: "nothing to cut — copied unchanged", ...info };
+  }
+  if (plan.keep.length === 0) {
+    throw new MediaKitError("smart_cut would remove everything — nothing to keep (pass a larger --min-gap or smaller --aggressiveness)", "INVALID_ARG");
+  }
+  const outPath = await prepareOutput(output, [inPath, wordsPath]);
+  // One filter graph: trim each kept segment (video + audio), then
+  // concat — the same graph silence builds, so a hesitation cut and
+  // a silence cut compose.
+  const vParts = [];
+  const aParts = [];
+  const vLabels = [];
+  const aLabels = [];
+  plan.keep.forEach((seg, i) => {
+    if (meta.video) {
+      vParts.push(`[0:v]trim=start=${seg.start}:end=${seg.end},setpts=PTS-STARTPTS[v${i}]`);
+      vLabels.push(`[v${i}]`);
+    }
+    aParts.push(joinFadeAudio(seg, i));
+    aLabels.push(`[a${i}]`);
+  });
+  const graph = [...vParts, ...aParts];
+  if (meta.video) graph.push(`${vLabels.join("")}concat=n=${plan.keep.length}:v=1:a=0[vout]`);
+  graph.push(`${aLabels.join("")}concat=n=${plan.keep.length}:v=0:a=1[aout]`);
+  const args = ["-y", "-i", inPath, "-filter_complex", graph.join(";")];
+  if (meta.video) {
+    args.push("-map", "[vout]", "-map", "[aout]",
+      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "medium",
+      "-c:a", "aac", ...audioBitrateArgs("aac"), "-movflags", "+faststart");
+  } else {
+    const ext = path.extname(outPath).slice(1).toLowerCase();
+    const codec = AUDIO_FORMATS[ext];
+    if (!codec) throw new MediaKitError(`audio-only input needs an audio output format (.mp3/.aac/.wav/.ogg/.opus/.flac), got .${ext || "(none)"}`, "INVALID_ARG");
+    args.push("-map", "[aout]", "-c:a", codec, ...audioBitrateArgs(codec));
+  }
+  args.push(outPath);
+  if (dryRun) {
+    // The plan is read-only, so the printed command is exact;
+    // duration_after/size are measured on the real output, so they
+    // report null here. Dimensions do not change when cutting, so the
+    // expected value is the input's display size.
+    return {
+      ...base, dry_run: true, output: outPath,
+      duration_after: null, stream_copy: false, size_bytes: null,
+      dimensions: meta.video ? `${meta.video.display_width}x${meta.video.display_height}` : null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. duration_after/size are measured on the real output, so they report null here.",
+    };
+  }
+  await run(FFMPEG, args);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  return {
+    ...base, output: outPath,
+    duration_after: out.duration_seconds,
+    ...info,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+  };
+}
+
 // ---------------------------------------------------------------- search_words
 // Search-first editing (burningion/video-editing-mcp's search-first
 // idea, idea only — no code copied): find WHERE a phrase is said,
@@ -9536,6 +9808,7 @@ const TOOL_REQUIREMENTS = {
   silence: { filters: ["silencedetect", "trim", "atrim", "concat", "afade"], encoders: ["libx264", "aac"] },
   cut_words: { filters: ["trim", "atrim", "concat", "setpts", "asetpts", "afade"], encoders: ["libx264", "aac"] },
   remove_retakes: { filters: ["trim", "atrim", "concat", "setpts", "asetpts", "afade"], encoders: ["libx264", "aac"] },
+  smart_cut: { filters: ["trim", "atrim", "concat", "setpts", "asetpts", "afade"], encoders: ["libx264", "aac"] },
   cropdetect: { filters: ["cropdetect"] },
   package: {},
   publish_kit: {},
@@ -12877,6 +13150,17 @@ export const BATCH_OPERATIONS = {
     }),
     extraHash: async (input, a) => hashSidecar(cutWordsFileFor(input, a.words_dir)),
   },
+  // smart_cut in batch: same words-file-by-convention as cut_words.
+  smart_cut: {
+    args: ["words_dir", "min_gap", "aggressiveness", "fillers", "min_keep"],
+    run: (input, output, a) => smartCut({
+      input, output,
+      wordsFile: cutWordsFileFor(input, a.words_dir),
+      minGap: a.min_gap ?? 0.45, aggressiveness: a.aggressiveness ?? 0.5,
+      fillers: a.fillers ?? null, minKeep: a.min_keep ?? 0.2,
+    }),
+    extraHash: async (input, a) => hashSidecar(cutWordsFileFor(input, a.words_dir)),
+  },
   // hook in batch is the first PROBE-ONLY batch operation: it writes
   // no file, so there is no output path, no suffix and no output to
   // verify in the cache — the ranked windows come back in the row's
@@ -13511,6 +13795,15 @@ export const MANIFEST_STEPS = {
       minWords: a.min_words ?? 3, maxGapWords: a.max_gap_words ?? 8, maxGapSeconds: a.max_gap_seconds ?? 5,
       keep: a.keep ?? "last",
       padBefore: a.pad_before ?? 0.06, padAfter: a.pad_after ?? 0.12, minKeep: a.min_keep ?? 0.2,
+    }),
+  },
+  // Same override for smart_cut: one words file for the one input.
+  smart_cut: {
+    args: ["words_file", "min_gap", "aggressiveness", "fillers", "min_keep"],
+    run: (input, output, a) => smartCut({
+      input, output, wordsFile: a.words_file,
+      minGap: a.min_gap ?? 0.45, aggressiveness: a.aggressiveness ?? 0.5,
+      fillers: a.fillers ?? null, minKeep: a.min_keep ?? 0.2,
     }),
   },
   // Same override for search_words: one words file for the one

@@ -14,7 +14,7 @@ import { createCanvas } from "canvas";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { compareDeterminismRuns, estimateDecodedWork, estimateJobRemaining, estimateTempo, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, parseFfmpegProgress, runFfmpegWithProgress, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, SHORTS_STYLE_IDS } from "../src/core.js";
+import { compareDeterminismRuns, estimateDecodedWork, estimateJobRemaining, estimateTempo, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, parseFfmpegProgress, parseSmartCutFillers, planSmartCuts, runFfmpegWithProgress, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import bounceTpl from "../src/canvas-scene-lib/templates/bounce.cjs";
 import slideInTpl from "../src/canvas-scene-lib/templates/slide-in.cjs";
@@ -187,10 +187,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 78 tools present");
-checkOk(missing.length === 0, "tools/list has all 78 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 79 tools present");
+checkOk(missing.length === 0, "tools/list has all 79 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -6244,6 +6244,32 @@ checkOk(rtBadKeepRes.isError === true && /keep/.test(rtBadKeepRes.content[0].tex
 const rtCliDetect = await runCli(["remove-retakes", path.join(root, "test/source.mp4"), "--words-file", path.join(root, "test/retakes-words.json"), "--detect-only"]);
 checkOk(rtCliDetect.code === 0 && /"detect_only": true/.test(rtCliDetect.out) && /"removed_count": 10/.test(rtCliDetect.out), "CLI remove-retakes --detect-only needs no -o and reports 10 words", rtCliDetect.out.slice(0, 200));
 
+// smart_cut: tighten a take on the transcript — fixture
+// test/smartcut-words.json is 10 words (0-7.5s): a 0.9s gap, a
+// 0.45s "um", a 1.1s stretched "so", a 0.8s gap, and a short 0.1s
+// "um" that must survive. Defaults cut 3.05s, keep 6.95s.
+const scWords = path.join(root, "test/smartcut-words.json");
+const scDetectRes = await client.callTool({ name: "smart_cut", arguments: { input: path.join(root, "test/source.mp4"), words_file: scWords, detect_only: true } });
+const scDetectJson = JSON.parse(scDetectRes.content[0].text);
+console.log("smart_cut detect-only:", JSON.stringify(scDetectJson.removed.map((r) => `${r.reason}@${r.start}-${r.end}`)), "| keep", JSON.stringify(scDetectJson.keep_segments));
+checkOk(scDetectRes.isError !== true && scDetectJson.detect_only === true && !("output" in scDetectJson) && scDetectJson.removed_count === 4 && near(scDetectJson.removed_seconds, 3.05, 0.01) && JSON.stringify(scDetectJson.removed.map((r) => r.reason)) === JSON.stringify(["gap", "filler", "stretched", "gap"]) && JSON.stringify(scDetectJson.thresholds) === JSON.stringify({ gap_threshold: 0.405, filler_min_duration: 0.275, stretch_min_duration: 0.75 }) && JSON.stringify(scDetectJson.keep_segments) === JSON.stringify([{ start: 0, end: 0.45, duration: 0.45 }, { start: 1.75, end: 2.65, duration: 0.9 }, { start: 3.7, end: 5.25, duration: 1.55 }, { start: 5.95, end: 10, duration: 4.05 }]) && scDetectJson.cut_check.swallowed.length === 0, "smart_cut detect-only finds gap + long um + stretched so + gap (3.05s) and spares the 0.1s um", JSON.stringify(scDetectJson.removed.map((r) => `${r.reason}:${r.text}`)));
+const scRes = await client.callTool({ name: "smart_cut", arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-smartcut.mp4"), words_file: scWords } });
+const scJson = JSON.parse(scRes.content[0].text);
+checkOk(scRes.isError !== true && scJson.removed_count === 4 && near(scJson.duration_after, 6.95, 0.05) && JSON.stringify(scJson.keep_segments) === JSON.stringify([{ start: 0, end: 0.45, duration: 0.45 }, { start: 1.75, end: 2.65, duration: 0.9 }, { start: 3.7, end: 5.25, duration: 1.55 }, { start: 5.95, end: 10, duration: 4.05 }]), "smart_cut cuts to 6.95s on disk", JSON.stringify({ removed: scJson.removed_count, after: scJson.duration_after }));
+const scGapRes = await client.callTool({ name: "smart_cut", arguments: { input: path.join(root, "test/source.mp4"), words_file: scWords, min_gap: 1, detect_only: true } });
+const scGapJson = JSON.parse(scGapRes.content[0].text);
+checkOk(scGapRes.isError !== true && scGapJson.removed_count === 3 && near(scGapJson.removed_seconds, 2.35, 0.01) && JSON.stringify(scGapJson.keep_segments) === JSON.stringify([{ start: 0, end: 0.45, duration: 0.45 }, { start: 1.75, end: 2.65, duration: 0.9 }, { start: 3.7, end: 10, duration: 6.3 }]), "smart_cut min_gap 1.0 keeps the 0.8s gap (7.65s kept)", JSON.stringify(scGapJson.keep_segments));
+const scNoneRes = await client.callTool({ name: "smart_cut", arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-smartcut-none.mp4"), words_file: path.join(root, "test/smartcut-clean-words.json") } });
+const scNoneJson = JSON.parse(scNoneRes.content[0].text);
+checkOk(scNoneRes.isError !== true && scNoneJson.removed_count === 0 && scNoneJson.stream_copy === true && near(scNoneJson.duration_after, 10, 0.05), "smart_cut with nothing to cut stream-copies unchanged", JSON.stringify(scNoneJson).slice(0, 200));
+const scBadAggRes = await client.callTool({ name: "smart_cut", arguments: { input: path.join(root, "test/source.mp4"), words_file: scWords, aggressiveness: 2 } });
+checkOk(scBadAggRes.isError === true && /aggressiveness/.test(scBadAggRes.content[0].text), "smart_cut refuses aggressiveness above 1", scBadAggRes.content[0].text.slice(0, 200));
+// smart_cut through the CLI: --detect-only needs no -o; --dry-run prints the command.
+const scCliDetect = await runCli(["smart-cut", path.join(root, "test/source.mp4"), "--words-file", path.join(root, "test/smartcut-words.json"), "--detect-only"]);
+checkOk(scCliDetect.code === 0 && /"detect_only": true/.test(scCliDetect.out) && /"removed_count": 4/.test(scCliDetect.out), "CLI smart-cut --detect-only needs no -o and reports 4 removals", scCliDetect.out.slice(0, 200));
+const scCliDry = await runCli(["smart-cut", path.join(root, "test/source.mp4"), "--words-file", path.join(root, "test/smartcut-words.json"), "-o", path.join(root, "outputs/mcp-smartcut-dry.mp4"), "--dry-run"]);
+checkOk(scCliDry.code === 0 && /"dry_run": true/.test(scCliDry.out) && /ffmpeg/.test(scCliDry.out), "CLI smart-cut --dry-run prints the ffmpeg command and writes no file", scCliDry.out.slice(0, 200));
+
 // search_words: search-first editing on the transcript — fixture
 // test/search-words.json is 14 words: "the quick brown fox jumps
 // over the lazy dog the quick brown fox again" (word times 0-7.4s).
@@ -6276,6 +6302,35 @@ checkOk(swMergeRes.isError !== true && swMergeJson.match_count === 3 && JSON.str
 // matches once (non-overlapping scan), a 1-word phrase 3 times.
 const haWords = [0, 1, 2].map((i) => ({ start: i, end: i + 0.5, word: "ha" }));
 checkOk(JSON.stringify(findPhraseMatches(haWords, ["ha", "ha"])) === JSON.stringify([{ word_start_index: 0, word_end_index: 1 }]) && findPhraseMatches(haWords, ["ha"]).length === 3 && findPhraseMatches(haWords, ["ha", "ha", "ha", "ha"]).length === 0, "findPhraseMatches: 'ha ha' in 'ha ha ha' matches once at 0, 'ha' 3 times, 4-word phrase never", JSON.stringify(findPhraseMatches(haWords, ["ha", "ha"])));
+// planSmartCuts is pure: thresholds + reasons on the smart_cut
+// fixture words (same times as test/smartcut-words.json) — a 0.9s
+// gap, a 0.45s "um", a 1.1s stretched "so", a 0.8s gap, and a short
+// 0.1s "um" that must survive the duration gate.
+const scUnitWords = [
+  { start: 0, end: 0.4, word: "hello" }, { start: 1.3, end: 1.75, word: "um" },
+  { start: 2, end: 2.4, word: "world" }, { start: 2.6, end: 3.7, word: "so" },
+  { start: 4, end: 4.3, word: "we" }, { start: 4.4, end: 4.7, word: "are" },
+  { start: 4.8, end: 5.2, word: "here" }, { start: 6, end: 6.4, word: "now" },
+  { start: 6.6, end: 6.7, word: "um" }, { start: 7, end: 7.5, word: "done" },
+];
+const scPlan = planSmartCuts(scUnitWords, 10);
+checkOk(JSON.stringify(scPlan.thresholds) === JSON.stringify({ gap_threshold: 0.405, filler_min_duration: 0.275, stretch_min_duration: 0.75 }) && scPlan.removed_count === 4 && JSON.stringify(scPlan.removed.map((r) => r.reason)) === JSON.stringify(["gap", "filler", "stretched", "gap"]) && JSON.stringify(scPlan.removed) === JSON.stringify([{ start: 0.45, end: 1.25, duration: 0.8, reason: "gap", text: "" }, { start: 1.3, end: 1.75, duration: 0.45, reason: "filler", text: "um" }, { start: 2.65, end: 3.7, duration: 1.05, reason: "stretched", text: "so" }, { start: 5.25, end: 5.95, duration: 0.7, reason: "gap", text: "" }]) && JSON.stringify(scPlan.keep) === JSON.stringify([{ start: 0, end: 0.45, duration: 0.45 }, { start: 1.75, end: 2.65, duration: 0.9 }, { start: 3.7, end: 5.25, duration: 1.55 }, { start: 5.95, end: 10, duration: 4.05 }]) && scPlan.swallowed.length === 0, "planSmartCuts: 0.9s gap + 0.45s um + stretched so + 0.8s gap cut (3.05s), short 0.1s um survives, 6.95s kept in 4 segments", JSON.stringify(scPlan.removed.map((r) => r.reason)));
+const scPlanAgg0 = planSmartCuts(scUnitWords, 10, { aggressiveness: 0 });
+checkOk(JSON.stringify(scPlanAgg0.thresholds) === JSON.stringify({ gap_threshold: 0.54, filler_min_duration: 0.35, stretch_min_duration: 0.9 }) && scPlanAgg0.removed_count === 4, "planSmartCuts aggressiveness 0 is gentle (gap x1.2, filler >= 0.35s, stretch >= 0.9s) and still cuts the same 4", JSON.stringify(scPlanAgg0.thresholds));
+const scPlanAgg1 = planSmartCuts(scUnitWords, 10, { aggressiveness: 1 });
+checkOk(JSON.stringify(scPlanAgg1.thresholds) === JSON.stringify({ gap_threshold: 0.27, filler_min_duration: 0.2, stretch_min_duration: 0.6 }) && scPlanAgg1.removed_count === 6 && !scPlanAgg1.removed.some((r) => r.reason === "filler" && r.text === "um" && r.start === 6.6) && near(scPlanAgg1.keep.reduce((s, k) => s + k.duration, 0), 6.5, 0.01), "planSmartCuts aggressiveness 1 is tight (gap x0.6, filler >= 0.2s, stretch >= 0.6s): 6 removals (the two 0.3s gaps clear 0.27 too) but the 0.1s um is still spared as a filler — 6.5s kept", JSON.stringify(scPlanAgg1.removed.map((r) => `${r.reason}@${r.start}`)));
+const scPlanGap = planSmartCuts(scUnitWords, 10, { minGap: 1 });
+checkOk(scPlanGap.removed_count === 3 && near(scPlanGap.keep.reduce((s, k) => s + k.duration, 0), 7.65, 0.01) && JSON.stringify(scPlanGap.keep) === JSON.stringify([{ start: 0, end: 0.45, duration: 0.45 }, { start: 1.75, end: 2.65, duration: 0.9 }, { start: 3.7, end: 10, duration: 6.3 }]), "planSmartCuts min_gap 1.0 keeps the 0.8s gap (threshold 0.9) but still cuts the 0.9s one — 7.65s kept", JSON.stringify(scPlanGap.keep));
+// Phrase matching really matches phrases: VidMCP lists "you know"
+// but checks per single token, so it can never match — here the
+// two tokens together are one 0.9s filler removal.
+const scPhraseWords = [{ start: 0, end: 0.3, word: "you" }, { start: 0.3, end: 0.9, word: "know" }, { start: 1.2, end: 1.6, word: "ok" }];
+const scPhrasePlan = planSmartCuts(scPhraseWords, 2);
+checkOk(scPhrasePlan.removed_count === 1 && scPhrasePlan.removed[0].reason === "filler" && scPhrasePlan.removed[0].text === "you know" && JSON.stringify(scPhrasePlan.keep) === JSON.stringify([{ start: 0.9, end: 2, duration: 1.1 }]), "planSmartCuts matches the phrase 'you know' across two tokens as one filler removal", JSON.stringify(scPhrasePlan.removed));
+checkOk(JSON.stringify(parseSmartCutFillers("um,uh,you know")) === JSON.stringify([["um"], ["uh"], ["you", "know"]]) && JSON.stringify(parseSmartCutFillers(null).slice(0, 3)) === JSON.stringify([["um"], ["umm"], ["uh"]]), "parseSmartCutFillers splits a comma string into phrases and defaults to the built-in list", JSON.stringify(parseSmartCutFillers("um,uh,you know")));
+let scBadAgg = false;
+try { planSmartCuts(scUnitWords, 10, { aggressiveness: 1.5 }); } catch { scBadAgg = true; }
+checkOk(scBadAgg, "planSmartCuts refuses aggressiveness above 1", "no throw");
 // Validation: empty query, missing words file, a JSON file with no
 // words array (test/cues.json is a bare cues array).
 const swEmptyRes = await client.callTool({ name: "search_words", arguments: { words_file: swWords, query: "" } });
@@ -6345,6 +6400,37 @@ const swManifestDryRes = await client.callTool({
 });
 const swManifestDryJson = JSON.parse(swManifestDryRes.content[0].text);
 checkOk(swManifestDryJson.dry_run === true && swManifestDryJson.steps[0].output === swManifestDryJson.input && swManifestDryJson.steps[1].input === swManifestDryJson.input, "manifest search_words dry-run plans the search step as a pass-through (output = input)", JSON.stringify(swManifestDryJson.steps.map((s) => s.output)));
+
+// smart_cut in batch + manifest: same words-file convention as
+// cut_words (one words file per clip in batch, a single
+// words_file in a manifest step). The batch input dir reuses the
+// search_words layout (source.mp4 has words, hook-source.mp4 does
+// not) with the smart_cut words file swapped in.
+await rm(path.join(root, "outputs/mcp-batch-sc-in"), { recursive: true, force: true });
+await rm(path.join(root, "outputs/mcp-batch-sc-out"), { recursive: true, force: true });
+await mkdir(path.join(root, "outputs/mcp-batch-sc-in"), { recursive: true });
+await copyFile(path.join(root, "test/source.mp4"), path.join(root, "outputs/mcp-batch-sc-in/source.mp4"));
+await copyFile(path.join(root, "test/smartcut-words.json"), path.join(root, "outputs/mcp-batch-sc-in/source.words.json"));
+await copyFile(path.join(root, "test/hook-source.mp4"), path.join(root, "outputs/mcp-batch-sc-in/hook-source.mp4"));
+const scBatchRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "smart_cut", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-sc-in"), output_dir: path.join(root, "outputs/mcp-batch-sc-out"), args: {}, jobs: 2 },
+});
+const scBatchJson = JSON.parse(scBatchRes.content[0].text);
+console.log("batch smart_cut:", JSON.stringify(scBatchJson.results.map((r) => ({ status: r.status, output: r.output, removed: r.result?.removed_count }))), "| suffix", scBatchJson.output_suffix);
+const scBatchRow = (name) => scBatchJson.results.find((r) => r.input.endsWith(`/${name}`));
+checkOk(scBatchJson.succeeded === 1 && scBatchJson.failed === 1 && scBatchJson.output_suffix === "-smart_cut" && scBatchRow("source.mp4").status === "ok" && scBatchRow("source.mp4").result.removed_count === 4 && scBatchRow("hook-source.mp4").status === "error", "batch smart_cut: 1 ok (4 removals) + 1 error row for the clip with no words file", JSON.stringify(scBatchJson.results.map((r) => r.status)));
+const { stdout: scBatchDurOut } = await execFileAsync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path.join(root, "outputs/mcp-batch-sc-out/source-smart_cut.mp4")]);
+checkOk(near(parseFloat(scBatchDurOut), 6.95, 0.05), "batch smart_cut output is 6.95s on disk", scBatchDurOut.trim());
+await rm(path.join(root, "outputs/mcp-manifest-smartcut.mp4"), { force: true });
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const scManifestRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-smartcut.json") },
+});
+const scManifestJson = JSON.parse(scManifestRes.content[0].text);
+console.log("manifest smart_cut:", JSON.stringify(scManifestJson.steps.map((s) => ({ tool: s.tool, status: s.status, removed: s.result?.removed_count }))), "| final", scManifestJson.final?.duration_seconds);
+checkOk(scManifestJson.steps_run === 1 && scManifestJson.steps[0].tool === "smart_cut" && scManifestJson.steps[0].status === "ok" && scManifestJson.steps[0].result.removed_count === 4 && near(scManifestJson.final.duration_seconds, 6.95, 0.05), "manifest smart_cut step cuts 4 hesitations, final 6.95s", JSON.stringify(scManifestJson.steps.map((s) => s.result?.removed_count)));
 
 // No engine at all (both disabled): doctor must report engine
 // "none" with a fix carrying BOTH install lines.
@@ -6571,7 +6657,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 78 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 78 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 79 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 79 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -8925,7 +9011,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 78 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 79 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -8985,11 +9071,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 78, "GET /mcp reports name/version/transport and 78 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 79, "GET /mcp reports name/version/transport and 79 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 78 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 78 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 79 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 79 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -9060,7 +9146,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 78, "JSON-RPC tools/list returns the same 78 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 79, "JSON-RPC tools/list returns the same 79 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

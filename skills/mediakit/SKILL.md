@@ -1650,6 +1650,33 @@ search. `--max-matches` (default 10) caps the returned matches;
 clip, `<words_dir>/<stem>.words.json`) and `manifest` (a single
 `words_file` arg).
 
+### 58c. Tighten a take with `smart_cut` — cut hesitation, not words
+`smart_cut` cuts the hesitation out of a talking-head take on the
+same words file `cut_words` uses (rule 43), in one pass: long
+pauses between words, long filler words, and words held so long
+they became a stall. The three cut rules, all scaled at once by
+one `--aggressiveness` knob (0-1, default 0.5): a gap between two
+words at or over `--min-gap` (default 0.45s) x (1.2 - 0.6 x
+aggressiveness), kept with 0.05s on each side; a filler word held
+at least 0.35s - 0.15 x aggressiveness (a quick 0.1s "um" survives,
+a stretched "ummm" does not); a word in the filler set plus
+"this"/"so"/"and" held at least 0.9s - 0.3 x aggressiveness, cut
+from 0.05s in so its attack survives. That duration gate is what
+makes "like" / "you know" / "basically" / "actually" safe in the
+default filler list — `cut_words --fillers` cuts every filler and
+deliberately excludes them, `smart_cut` includes them because a
+0.1s "like" (verb) is below the gate while a 0.6s "liiiike"
+(filler) is above it. `--fillers "um,uh,you know"` overrides the
+list; a phrase matches consecutive words. This is deterministic,
+not a judge: a dramatic pause looks exactly like a hesitation to
+the detector — always run `--detect-only` first and read the
+`removed` list (reason filler/stretched/gap + text) before
+cutting. Nothing to cut stream-copies the input unchanged. In
+batch and manifest it follows the same words-file convention as
+`cut_words` (rule 44). Not the same as `trim --smart-cut` — that
+one is keyframe-exact stream-copy cutting, this one cuts on the
+transcript.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.
