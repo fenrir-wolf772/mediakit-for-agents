@@ -1248,9 +1248,12 @@ export const TOOL_DEFS = [
 
   {
     name: "keyframes",
-    description: "List the keyframe (I-frame) timestamps of a video (probe-only, writes no file), plus GOP min/max/avg interval. Check this before a stream-copy trim — cutting between keyframes silently shifts the cut. Pair with trim snap_to_keyframe=true to snap the cut onto keyframes.",
-    schema: { input: pathSchema },
-    handler: async (a) => safe(() => core.listKeyframes(a)),
+    description: "List the keyframe (I-frame) timestamps of a video (probe-only, writes no file), plus GOP min/max/avg interval. Check this before a stream-copy trim — cutting between keyframes silently shifts the cut. Pair with trim snap_to_keyframe=true to snap the cut onto keyframes. Set nearest (seconds) to also get the keyframe nearest one cut point: before (largest keyframe <= t), after (smallest >= t), closest, distance_seconds and direction (before/after/exact) — the snap target for a single cut without scanning the whole list.",
+    schema: {
+      input: pathSchema,
+      nearest: z.number().nonnegative().optional().describe("Time in seconds: also report the keyframe nearest this cut point (before/after/closest + distance). Must be within the clip"),
+    },
+    handler: async (a) => safe(() => core.listKeyframes({ input: a.input, nearest: a.nearest })),
   },
 
 

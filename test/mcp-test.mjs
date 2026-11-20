@@ -3398,6 +3398,40 @@ const keyframesRes = await client.callTool({
 const keyframesJson = JSON.parse(keyframesRes.content[0].text);
 console.log("keyframes call: count", keyframesJson.count, "| timestamps", keyframesJson.keyframe_timestamps.join(","), "| gop", JSON.stringify(keyframesJson.gop_seconds));
 checkOk(keyframesJson.count === 2 && keyframesJson.keyframe_timestamps[0] === 0 && near(keyframesJson.keyframe_timestamps[1], 8.333, 0.01), "keyframes are [0, 8.333]", keyframesJson.keyframe_timestamps.join(","));
+checkOk(keyframesJson.nearest === null, "keyframes without nearest reports nearest null (backwards compatible)", JSON.stringify(keyframesJson.nearest));
+
+// keyframes --nearest (lượt 118, idea: bariswha/losslesscut-mcp):
+// the keyframe nearest one cut point, so a caller picks a snap
+// target without scanning the whole list. Fixture source.mp4:
+// keyframes [0, 8.333], duration 10s.
+const kfNear35Res = await client.callTool({
+  name: "keyframes",
+  arguments: { input: path.join(root, "test/source.mp4"), nearest: 3.5 },
+});
+const kfNear35Json = JSON.parse(kfNear35Res.content[0].text);
+console.log("keyframes nearest 3.5:", JSON.stringify(kfNear35Json.nearest));
+checkOk(kfNear35Json.nearest?.before === 0 && near(kfNear35Json.nearest?.after, 8.333, 0.01) && kfNear35Json.nearest?.closest === 0 && kfNear35Json.nearest?.distance_seconds === 3.5 && kfNear35Json.nearest?.direction === "before", "keyframes nearest 3.5: before 0, after 8.333, closest 0, distance 3.5, direction before", JSON.stringify(kfNear35Json.nearest));
+const kfNear5Res = await client.callTool({
+  name: "keyframes",
+  arguments: { input: path.join(root, "test/source.mp4"), nearest: 5 },
+});
+const kfNear5Json = JSON.parse(kfNear5Res.content[0].text);
+checkOk(kfNear5Json.nearest?.before === 0 && near(kfNear5Json.nearest?.after, 8.333, 0.01) && near(kfNear5Json.nearest?.closest, 8.333, 0.01) && near(kfNear5Json.nearest?.distance_seconds, 3.333, 0.01) && kfNear5Json.nearest?.direction === "after", "keyframes nearest 5: closest is 8.333 (3.333 away vs 5 to 0), direction after", JSON.stringify(kfNear5Json.nearest));
+const kfNearExactRes = await client.callTool({
+  name: "keyframes",
+  arguments: { input: path.join(root, "test/source.mp4"), nearest: 8.333 },
+});
+const kfNearExactJson = JSON.parse(kfNearExactRes.content[0].text);
+checkOk(near(kfNearExactJson.nearest?.before, 8.333, 0.01) && near(kfNearExactJson.nearest?.after, 8.333, 0.01) && near(kfNearExactJson.nearest?.closest, 8.333, 0.01) && kfNearExactJson.nearest?.distance_seconds === 0 && kfNearExactJson.nearest?.direction === "exact", "keyframes nearest 8.333: exact hit on the keyframe, distance 0", JSON.stringify(kfNearExactJson.nearest));
+const kfNearPastEnd = await callExpectThrow("keyframes", { input: path.join(root, "test/source.mp4"), nearest: 10.5 });
+checkOk(/past the end/.test(kfNearPastEnd), "keyframes nearest past the end is refused", kfNearPastEnd.slice(0, 120));
+const kfNearNegative = await callExpectThrow("keyframes", { input: path.join(root, "test/source.mp4"), nearest: -1 });
+checkOk(/greater than or equal to 0/i.test(kfNearNegative), "keyframes nearest refuses a negative time", kfNearNegative.slice(0, 120));
+// CLI wiring: --nearest is an accepted option (validateOpts would
+// exit 2 on an unknown flag) and accepts MM:SS.
+const kfCliNear = await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "keyframes", path.join(root, "test/source.mp4"), "--nearest", "0:05"]);
+const kfCliNearJson = JSON.parse(kfCliNear.stdout);
+checkOk(near(kfCliNearJson.nearest?.closest, 8.333, 0.01) && kfCliNearJson.nearest?.direction === "after" && kfCliNearJson.nearest?.requested_seconds === 5, "CLI keyframes --nearest 0:05 parses MM:SS and reports closest 8.333", kfCliNear.stdout.slice(0, 200));
 
 // Regression: MCP snake_case params must reach core (round 7 bug fix).
 // stream_copy=true must actually stream-copy, and snap_to_keyframe must

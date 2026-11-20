@@ -725,10 +725,12 @@ const COMMANDS = {
     ],
   },
   keyframes: {
-    usage: "mediakit keyframes <input>",
-    desc: "List keyframe (I-frame) timestamps + GOP intervals. Probe-only, writes no file. Check before a stream-copy trim.",
+    usage: "mediakit keyframes <input> [--nearest <seconds|MM:SS>]",
+    desc: "List keyframe (I-frame) timestamps + GOP intervals. Probe-only, writes no file. Check before a stream-copy trim. --nearest <t> also reports the keyframe nearest one cut point: before/after/closest + distance + direction (before/after/exact).",
     args: [{ name: "input", required: true }],
-    options: [],
+    options: [
+      ["--nearest", "Time (seconds or MM:SS): report the keyframe nearest this cut point — before (largest <= t), after (smallest >= t), closest, distance, direction"],
+    ],
   },
   motion: {
     usage: "mediakit motion <input> [--threshold 0.001] [--min-still-seconds 2] [--window 1] [--lag-seconds 0] [--adaptive [--adaptive-factor 2] [--adaptive-cap 0.005]]",
@@ -1881,7 +1883,7 @@ async function main() {
         });
         break;
       case "keyframes":
-        result = await core.listKeyframes({ input: needInput() });
+        result = await core.listKeyframes({ input: needInput(), nearest: opts.nearest });
         break;
       case "motion":
         result = await core.measureMotion({

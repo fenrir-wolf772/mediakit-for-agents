@@ -12244,10 +12244,16 @@ export async function measureMotion({ input, threshold = 0.001, minStillSeconds 
 // Probe-only: no file is written. Needed before any lossless
 // stream-copy trim — cutting between keyframes silently shifts the cut.
 
-export async function listKeyframes({ input }) {
+export async function listKeyframes({ input, nearest }) {
   const inPath = await requireInput(input);
   const meta = await probe(inPath);
   if (!meta.video) throw new MediaKitError("keyframes needs a video input", "INVALID_ARG");
+  const nearestSeconds = nearest === undefined || nearest === null
+    ? null
+    : parseTime(nearest, "nearest");
+  if (nearestSeconds !== null && nearestSeconds > meta.duration_seconds) {
+    throw new MediaKitError(`nearest ${nearestSeconds}s is past the end of the clip (${meta.duration_seconds}s)`, "INVALID_ARG");
+  }
   const { stdout } = await run(FFPROBE, [
     "-v", "quiet", "-print_format", "json",
     "-skip_frame", "nokey", "-select_streams", "v:0",
@@ -12272,6 +12278,29 @@ export async function listKeyframes({ input }) {
     max_seconds: Math.max(...gaps),
     avg_seconds: +(gaps.reduce((a, b) => a + b, 0) / gaps.length).toFixed(3),
   } : null;
+  // nearest (bariswha/losslesscut-mcp's keyframes idea): the keyframe
+  // before/after one cut point, so a caller can pick a snap target
+  // without scanning the whole list. before = largest kf <= t,
+  // after = smallest kf >= t; exact when t lands on a keyframe
+  // (within 1ms, the timestamp rounding of this tool).
+  let nearestOut = null;
+  if (nearestSeconds !== null) {
+    if (!ts.length) throw new MediaKitError("keyframes found no keyframes in the input", "PROBE_FAILED");
+    const before = [...ts].reverse().find((v) => v <= nearestSeconds + 0.001) ?? null;
+    const after = ts.find((v) => v >= nearestSeconds - 0.001) ?? null;
+    const exact = before !== null && after !== null && before === after;
+    const distBefore = before === null ? Infinity : Math.abs(nearestSeconds - before);
+    const distAfter = after === null ? Infinity : Math.abs(after - nearestSeconds);
+    const closest = distBefore <= distAfter ? before : after;
+    nearestOut = {
+      requested_seconds: +nearestSeconds.toFixed(3),
+      before,
+      after,
+      closest,
+      distance_seconds: +(Math.min(distBefore, distAfter)).toFixed(3),
+      direction: exact ? "exact" : (closest === before ? "before" : "after"),
+    };
+  }
   return {
     operation: "keyframes",
     input: inPath,
@@ -12281,6 +12310,7 @@ export async function listKeyframes({ input }) {
     first_keyframe_seconds: ts.length ? ts[0] : null,
     starts_with_keyframe: ts.length ? ts[0] === 0 : false,
     gop_seconds: gop,
+    nearest: nearestOut,
   };
 }
 

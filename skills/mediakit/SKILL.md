@@ -282,7 +282,10 @@ opens or closes on black — it reports the fade type, the full ramp
 A lossless `--stream-copy` trim can only start/end on keyframes — ask
 for 1s–3s on a clip whose keyframes are at 0s and 8.33s and ffmpeg
 silently widens the cut. Run `keyframes` first (probe-only: timestamps
-+ GOP interval), then `trim --stream-copy --snap` to move the start
++ GOP interval) — for a single cut point, `keyframes --nearest <t>`
+reports the keyframe before/after that point plus the closest one and
+its distance, so you can pick the snap target without scanning the
+whole list. Then `trim --stream-copy --snap` to move the start
 down and the end up to the nearest keyframes; the result reports the
 requested range and the actual range — read both, don't assume. If the
 snapped range is wider than you can accept, re-encode instead
