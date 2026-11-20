@@ -716,7 +716,13 @@ display matrix survives, so the player rotates the already-rotated
 picture again. The re-encode drops the matrix and any `rotate` tag,
 so the output reports `rotation: null` — check `input_rotation` vs
 `output_rotation` in the result instead of trusting the command
-line. 180° is `hflip,vflip`, not two transposes. Works in `batch`
+line. 180° is `hflip,vflip`, not two transposes. `--metadata-only`
+rewrites only the display-matrix metadata instead (stream copy, no
+re-encode — instant and lossless, coded video packets verified identical
+on disk): the angle ADDS to the rotation the input already carries
+(90° on a rotation-90 clip gives 180°; 270° on it strips the matrix
+to null). mp4/mov/mkv only (webm has nowhere to store the matrix),
+angle only, no flip. Works in `batch`
 and `manifest` like any other op; audio-only input is refused
 (nothing to rotate).
 

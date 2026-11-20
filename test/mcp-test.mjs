@@ -20,6 +20,7 @@ import bounceTpl from "../src/canvas-scene-lib/templates/bounce.cjs";
 import slideInTpl from "../src/canvas-scene-lib/templates/slide-in.cjs";
 import springInTpl from "../src/canvas-scene-lib/templates/spring-in.cjs";
 import fxLib from "../src/canvas-scene-lib/fx.cjs";
+import camLib from "../src/canvas-scene-lib/camera.cjs";
 
 const execFileAsync = promisify(execFile);
 // Independent loudness measurement: run ffmpeg's loudnorm analysis
@@ -1125,6 +1126,43 @@ const rotNeither = await callExpectThrow("rotate", { input: path.join(root, "tes
 checkOk(/exactly one of angle or flip/.test(rotNeither), "rotate refuses neither angle nor flip", rotNeither.slice(0, 200));
 const rotAudioOnly = await callExpectThrow("rotate", { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-rotate-bad4.mp4"), angle: 90 });
 checkOk(/needs a video input/.test(rotAudioOnly), "rotate refuses audio-only input", rotAudioOnly.slice(0, 200));
+// rotate --metadata-only (turn 120): rewrite only the display
+// matrix, no re-encode. The angle ADDS to the input's existing
+// rotation; 270 on a rotation-90 clip strips the matrix to null.
+// video_identical is the frame-digest proof the copy was lossless,
+// and the size must stay within 2 KB of the input (only tkhd bytes
+// move — a re-encode would land far away from 6.5 KB).
+const rotMeta90Res = await client.callTool({
+  name: "rotate",
+  arguments: { input: path.join(root, "test/rotate-source.mp4"), output: path.join(root, "outputs/mcp-rotate-meta90.mp4"), angle: 90, metadata_only: true },
+});
+const rotMeta90Json = JSON.parse(rotMeta90Res.content[0].text);
+console.log("rotate metadata-only 90 call:", JSON.stringify(rotMeta90Json));
+const rotMeta90InSize = statSync(path.join(root, "test/rotate-source.mp4")).size;
+checkOk(rotMeta90Json.method === "metadata-only" && rotMeta90Json.metadata_only === true && rotMeta90Json.filter === null && rotMeta90Json.input_rotation === null && rotMeta90Json.output_rotation === 90 && rotMeta90Json.dimensions === "360x640" && rotMeta90Json.video_identical === true && near(rotMeta90Json.duration_seconds, 5, 0.1), "rotate --metadata-only 90 sets rotation 90, display 360x640, decoded frames identical", JSON.stringify(rotMeta90Json));
+checkOk(Math.abs(rotMeta90Json.size_bytes - rotMeta90InSize) < 2048, "rotate --metadata-only 90 is a stream copy: output size within 2 KB of the input", `in=${rotMeta90InSize} out=${rotMeta90Json.size_bytes}`);
+const rotMetaPhoneRes = await client.callTool({
+  name: "rotate",
+  arguments: { input: path.join(root, "test/rotated.mp4"), output: path.join(root, "outputs/mcp-rotate-meta-phone90.mp4"), angle: 90, metadata_only: true },
+});
+const rotMetaPhoneJson = JSON.parse(rotMetaPhoneRes.content[0].text);
+checkOk(rotMetaPhoneJson.input_rotation === 90 && rotMetaPhoneJson.output_rotation === 180 && rotMetaPhoneJson.dimensions === "1280x720" && rotMetaPhoneJson.video_identical === true, "rotate --metadata-only 90 on a rotation-90 clip ADDS to 180 (not overwrite to 90); 180 keeps the stored axes, so display is 1280x720", JSON.stringify(rotMetaPhoneJson));
+const rotMetaStripRes = await client.callTool({
+  name: "rotate",
+  arguments: { input: path.join(root, "test/rotated.mp4"), output: path.join(root, "outputs/mcp-rotate-meta-strip.mp4"), angle: 270, metadata_only: true },
+});
+const rotMetaStripJson = JSON.parse(rotMetaStripRes.content[0].text);
+checkOk(rotMetaStripJson.input_rotation === 90 && rotMetaStripJson.output_rotation === null && rotMetaStripJson.dimensions === "1280x720" && rotMetaStripJson.video_identical === true, "rotate --metadata-only 270 on a rotation-90 clip strips the matrix (90+270=360), display 1280x720", JSON.stringify(rotMetaStripJson));
+const rotMetaDryRes = await client.callTool({
+  name: "rotate",
+  arguments: { input: path.join(root, "test/rotate-source.mp4"), output: path.join(root, "outputs/mcp-rotate-meta-dry.mp4"), angle: 90, metadata_only: true, dry_run: true },
+});
+const rotMetaDryJson = JSON.parse(rotMetaDryRes.content[0].text);
+checkOk(rotMetaDryJson.dry_run === true && rotMetaDryJson.method === "metadata-only" && rotMetaDryJson.output_rotation === 90 && rotMetaDryJson.dimensions === "360x640" && rotMetaDryJson.video_identical === null && rotMetaDryJson.commands[0].includes("-display_rotation") && rotMetaDryJson.commands[0].includes("-c copy") && !existsSync(path.join(root, "outputs/mcp-rotate-meta-dry.mp4")), "rotate --metadata-only dry-run prints the display_rotation stream-copy command and writes no file", JSON.stringify(rotMetaDryJson));
+const rotMetaFlip = await callExpectThrow("rotate", { input: path.join(root, "test/rotate-source.mp4"), output: path.join(root, "outputs/mcp-rotate-meta-bad.mp4"), flip: "horizontal", metadata_only: true });
+checkOk(/cannot flip/.test(rotMetaFlip), "rotate --metadata-only refuses flip (no metadata for a mirror)", rotMetaFlip.slice(0, 200));
+const rotMetaWebm = await callExpectThrow("rotate", { input: path.join(root, "test/rotate-source.mp4"), output: path.join(root, "outputs/mcp-rotate-meta-bad.webm"), angle: 90, metadata_only: true });
+checkOk(/only works on mp4\/mov\/mkv/.test(rotMetaWebm), "rotate --metadata-only refuses webm (no display matrix there)", rotMetaWebm.slice(0, 200));
 // Batch + manifest pass-through: rotate is a per-file batch op and a
 // manifest step like reverse.
 await rm(path.join(root, "outputs/mcp-batch-rot-in"), { recursive: true, force: true });
@@ -1146,6 +1184,17 @@ const rotManifestRes = await client.callTool({
 });
 const rotManifestJson = JSON.parse(rotManifestRes.content[0].text);
 checkOk(rotManifestJson.steps_run === 1 && rotManifestJson.steps.every((s) => s.status === "ok") && rotManifestJson.final.dimensions === "360x640", "manifest rotate step runs and final is 360x640", JSON.stringify(rotManifestJson.final?.dimensions));
+// Manifest: a rotate step carries metadata_only through (turn 120)
+// — the manifest run is a stream copy, not a re-encode.
+await rm(path.join(root, "outputs/mcp-manifest-rotate-meta.mp4"), { force: true });
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const rotMetaManifestRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-rotate-meta.json") },
+});
+const rotMetaManifestJson = JSON.parse(rotMetaManifestRes.content[0].text);
+const rotMetaManifestStep = rotMetaManifestJson.steps?.[0]?.result;
+checkOk(rotMetaManifestJson.steps_run === 1 && rotMetaManifestJson.steps.every((s) => s.status === "ok") && rotMetaManifestStep?.method === "metadata-only" && rotMetaManifestStep?.video_identical === true && rotMetaManifestStep?.output_rotation === 90 && rotMetaManifestStep?.dimensions === "360x640" && rotMetaManifestJson.final.dimensions === "640x360", "manifest rotate metadata_only step runs as a stream copy (method metadata-only, frames identical, rotation 90, display 360x640; final.dimensions is the stored 640x360, not display)", JSON.stringify({ step: rotMetaManifestStep, final: rotMetaManifestJson.final }));
 // Manifest: a burn_captions step carries max_lines + platform through
 // (the narrower tiktok safe-rect budget 952px shrinks one px further
 // than the plain 972px budget: 45px, not 46px; margin is tiktok's 520).
@@ -1172,6 +1221,9 @@ checkOk(proofManifestJson.steps_run === 1 && proofManifestStep?.quality_proof?.a
 // CLI: rotate --angle 180 keeps 640x360.
 const rotCliJson = await runCliJson(["rotate", path.join(root, "test/rotate-source.mp4"), "-o", path.join(root, "outputs/mcp-rotate-cli.mp4"), "--angle", "180"]);
 checkOk(rotCliJson.dimensions === "640x360" && rotCliJson.angle === 180 && rotCliJson.output_rotation === null, "CLI rotate --angle 180 keeps 640x360, no rotation left", JSON.stringify(rotCliJson));
+// CLI: rotate --metadata-only --angle 90 is a stream copy (turn 120).
+const rotMetaCliJson = await runCliJson(["rotate", path.join(root, "test/rotate-source.mp4"), "-o", path.join(root, "outputs/mcp-rotate-meta-cli.mp4"), "--angle", "90", "--metadata-only"]);
+checkOk(rotMetaCliJson.method === "metadata-only" && rotMetaCliJson.output_rotation === 90 && rotMetaCliJson.dimensions === "360x640" && rotMetaCliJson.video_identical === true, "CLI rotate --metadata-only --angle 90 sets rotation 90, frames identical", JSON.stringify(rotMetaCliJson));
 // rotate --dry-run (lượt 105): dimensions is the EXPECTED display
 // size (90/270 swaps the axes, flip keeps them); output_rotation /
 // duration / size are measured on the real output, so null.
@@ -8010,6 +8062,28 @@ checkOk(springThrowCount === 3, "fx.spring rejects non-positive mass/stiffness a
 const sceneTemplatesDoc = JSON.parse(await readFile(path.join(root, "skills/shorts-video/scene-templates.json"), "utf8"));
 const slideInEnum = sceneTemplatesDoc.templates.find((t) => t.id === "slide-in")?.params?.ease?.enum ?? [];
 checkOk(slideInEnum.length === Object.keys(fxLib.ease).length && slideInEnum.every((n) => typeof fxLib.ease[n] === "function") && Object.keys(fxLib.ease).every((n) => slideInEnum.includes(n)), "slide-in ease enum lists exactly the 35 fx.ease names (registry and code cannot drift)", `enum=${slideInEnum.length} ease keys=${Object.keys(fxLib.ease).length}`);
+// Camera shares fx.ease (turn 120): cam.shot({ease}) accepts every
+// fx.ease name, not just the 4 legacy short names the camera used
+// to keep in its own table. The legacy names are exact aliases in
+// fx.ease (pinned above), so old scenes do not move; an unknown
+// name still falls back to inOut. Values are hand-computed from
+// the pinned easeOutBounce(0.5)=0.765625: a shot from cx 0.5 to 0.3
+// with zoom 1->2 sits at cx 0.346875 / z 1.765625 mid-shot on
+// easeOutBounce, and at 0.4 / 1.5 on linear or on the inOut
+// fallback (easeInOutQuad(0.5)=0.5).
+checkOk(Object.keys(camLib.EASE).length === Object.keys(fxLib.ease).length && Object.keys(camLib.EASE).every((n) => camLib.EASE[n] === fxLib.ease[n]), "camera EASE is exactly the fx.ease table (35 curves, same functions)", `keys=${Object.keys(camLib.EASE).length}`);
+const camBounce = camLib.shot({ t0: 0, t1: 2, from: [0.5, 0.5], to: [0.3, 0.5], zoom: [1, 2], ease: "easeOutBounce" });
+const camBounceTr = camLib.at([camBounce], 1);
+checkOk(near(camBounceTr.cx, 0.346875, 1e-6) && near(camBounceTr.z, 1.765625, 1e-6), "cam.shot easeOutBounce moves the camera on the bounce curve (mid-shot cx 0.346875, z 1.765625)", JSON.stringify(camBounceTr));
+const camLinear = camLib.shot({ t0: 0, t1: 2, from: [0.5, 0.5], to: [0.3, 0.5], zoom: [1, 2], ease: "linear" });
+const camLinearTr = camLib.at([camLinear], 1);
+checkOk(near(camLinearTr.cx, 0.4, 1e-9) && near(camLinearTr.z, 1.5, 1e-9), "cam.shot linear is the straight midpoint (cx 0.4, z 1.5)", JSON.stringify(camLinearTr));
+const camUnknown = camLib.shot({ t0: 0, t1: 2, from: [0.5, 0.5], to: [0.3, 0.5], zoom: [1, 2], ease: "no-such-ease" });
+const camUnknownTr = camLib.at([camUnknown], 1);
+checkOk(near(camUnknownTr.cx, 0.4, 1e-9) && near(camUnknownTr.z, 1.5, 1e-9), "cam.shot with an unknown ease name falls back to inOut (midpoint, like the default)", JSON.stringify(camUnknownTr));
+const camLegacy = camLib.shot({ t0: 0, t1: 2, from: [0.5, 0.5], to: [0.3, 0.5], zoom: [1, 2], ease: "in" });
+const camLegacyTr = camLib.at([camLegacy], 1);
+checkOk(near(camLegacyTr.cx, 0.475, 1e-9) && near(camLegacyTr.z, 1.125, 1e-9), "cam.shot legacy ease 'in' is still easeInCubic (mid-shot cx 0.475, z 1.125)", JSON.stringify(camLegacyTr));
 // Pixel proof the templates move the way the curves say: on a
 // 540x960 canvas the slide-in card at t=0.35 is 425px wide with the
 // default easeOutCubic, 372px with easeOutBounce, 243px with linear;

@@ -350,12 +350,13 @@ const COMMANDS = {
     ],
   },
   rotate: {
-    usage: "mediakit rotate <input> -o <output> [--angle 90|180|270 | --flip horizontal|vertical] [--crf 23] [--dry-run]",
-    desc: "Rotate a clip 90/180/270 degrees clockwise, or flip it horizontally/vertically. The angle applies to the frame the viewer sees (a phone clip coded 1280x720 with rotation 90 rotates from its 720x1280 display size); the output carries no rotation metadata, so no player double-rotates it. Reports input_rotation vs output_rotation measured on disk. --dry-run prints the exact ffmpeg command and writes no file (dimensions is the expected display size after the rotation).",
+    usage: "mediakit rotate <input> -o <output> [--angle 90|180|270 | --flip horizontal|vertical] [--crf 23] [--metadata-only] [--dry-run]",
+    desc: "Rotate a clip 90/180/270 degrees clockwise, or flip it horizontally/vertically. The angle applies to the frame the viewer sees (a phone clip coded 1280x720 with rotation 90 rotates from its 720x1280 display size); the output carries no rotation metadata, so no player double-rotates it. --metadata-only rewrites only the display-matrix metadata (stream copy, no re-encode — instant, lossless, coded video packets verified identical on disk); the angle adds to the input's existing rotation (90 on a rotation-90 clip gives 180; 270 on it strips the matrix). mp4/mov/mkv only, angle only, no flip. Reports input_rotation vs output_rotation measured on disk. --dry-run prints the exact ffmpeg command and writes no file (dimensions is the expected display size after the rotation).",
     options: [
       ["--angle", "Clockwise degrees: 90, 180 or 270 (exactly one of --angle/--flip)"],
       ["--flip", "Flip: horizontal or vertical (use instead of --angle)"],
       ["--crf", "CRF quality 0-51 (default 23)"],
+      ["--metadata-only", "Rewrite only the display-matrix metadata (stream copy, no re-encode): instant and lossless. mp4/mov/mkv only, angle only"],
       ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file path"],
     ],
@@ -1509,6 +1510,7 @@ async function main() {
           flip: opts.flip ?? null,
           crf: numOpt(opts, "crf") ?? 23,
           dryRun: opts.dry_run === true,
+          metadataOnly: opts.metadata_only === true,
         });
         break;
       case "boomerang":

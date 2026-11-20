@@ -22,12 +22,13 @@
 //   ctx.restore();
 //   ... draw HUD / subtitles in screen space ...
 
-const EASE = {
-  linear: k => k,
-  inOut: k => k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2,
-  out: k => 1 - Math.pow(1 - k, 3),
-  in: k => k * k * k,
-};
+// The easing table is shared with fx.cjs (lượt 120): cam.shot({ease})
+// accepts every fx.ease name (the full easings.net set, 35 curves)
+// plus the 4 legacy short names, which fx.ease already defines as
+// exact aliases (in=easeInCubic, out=easeOutCubic,
+// inOut=easeInOutQuad, outBack=easeOutBack) — old scenes do not move.
+// Unknown names still fall back to inOut, as before.
+const { ease: EASE } = require("./fx.cjs");
 
 function shot(o) {
   return {

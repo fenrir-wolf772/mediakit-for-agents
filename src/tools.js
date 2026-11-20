@@ -523,13 +523,14 @@ export const TOOL_DEFS = [
 
   {
     name: "rotate",
-    description: "Rotate or flip a clip: angle 90/180/270 clockwise, or flip horizontal/vertical (exactly one of angle/flip). The angle applies to the frame the viewer sees — ffmpeg autorotates on decode, so a phone clip coded 1280x720 with rotation 90 rotates from its 720x1280 display size (rotate 90 gives 1280x720, rotate 180 keeps 720x1280). The re-encode strips the display-matrix/rotate metadata, so the output reports rotation null and no player double-rotates it (yuan66-hub's rotate has no such guard). Re-encodes video (libx264, crf 23 default), AAC pinned 192k. The result reports input_rotation vs output_rotation plus the display dimensions before and after, measured on disk. Set dry_run=true to print the exact ffmpeg command and write no file (dimensions is the expected display size after the rotation; output_rotation/duration/size report null — measured on the real output).",
+    description: "Rotate or flip a clip: angle 90/180/270 clockwise, or flip horizontal/vertical (exactly one of angle/flip). The angle applies to the frame the viewer sees — ffmpeg autorotates on decode, so a phone clip coded 1280x720 with rotation 90 rotates from its 720x1280 display size (rotate 90 gives 1280x720, rotate 180 keeps 720x1280). The re-encode strips the display-matrix/rotate metadata, so the output reports rotation null and no player double-rotates it (yuan66-hub's rotate has no such guard). Re-encodes video (libx264, crf 23 default), AAC pinned 192k. Set metadata_only=true to rotate WITHOUT re-encoding: only the display-matrix metadata is rewritten (stream copy, coded video packets byte-identical — verified with a packet MD5 on disk), so it is instant and lossless; the angle ADDS to any rotation the input already carries (90 on a rotation-90 clip gives 180; 270 on it strips the matrix to null). Only mp4/mov/mkv (the matrix is a QuickTime/Matroska feature — webm refuses it), angle only, no flip. The result reports input_rotation vs output_rotation plus the display dimensions before and after, measured on disk. Set dry_run=true to print the exact ffmpeg command and write no file (dimensions is the expected display size after the rotation; output_rotation/duration/size report null — measured on the real output).",
     schema: {
     input: pathSchema,
     output: pathSchema,
     angle: z.number().int().optional().describe("Clockwise degrees: 90, 180 or 270 (exactly one of angle/flip)"),
     flip: z.enum(["horizontal", "vertical"]).optional().describe("Flip direction (exactly one of angle/flip)"),
     crf: z.number().int().min(0).max(51).default(23),
+    metadata_only: z.boolean().default(false).describe("Rewrite only the display-matrix metadata (stream copy, no re-encode): instant and lossless. mp4/mov/mkv only, angle only, no flip; the angle adds to the input's existing rotation"),
     dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
     handler: async (a) => safe(() => core.rotateClip({
@@ -539,6 +540,7 @@ export const TOOL_DEFS = [
     flip: a.flip ?? null,
     crf: a.crf,
     dryRun: a.dry_run,
+    metadataOnly: a.metadata_only,
   })),
   },
 

@@ -240,8 +240,11 @@ still image cannot do, with no AI video account and no browser.
   `M.lib.fx` (`ease`/`prog`/`fade`/`pop`/`slide`, `spring`/`springPop`,
   `makeParticles`/`positions`, `transition`/`drawTransition`,
   `glow`) are vendored into MediaKit from the pipeline skill —
-  the scene works with no other dependency. `fx.ease` holds the full
-  easings.net set — `easeIn`/`easeOut`/`easeInOut` × Sine, Quad,
+  the scene works with no other dependency. `cam.shot({ease})`
+  takes any `fx.ease` name (the full set below), so a camera move
+  can use `easeOutBounce` or `easeInOutElastic`, not just the four
+  legacy names `linear`/`in`/`out`/`inOut` the camera used to know.
+  `fx.ease` holds the full easings.net set — `easeIn`/`easeOut`/`easeInOut` × Sine, Quad,
   Cubic, Quart, Quint, Expo, Circ, Back, Elastic, Bounce (30 names),
   plus the legacy short names `linear`, `in`, `out`, `inOut`,
   `outBack` (unchanged behavior: `in` = `easeInCubic`,

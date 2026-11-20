@@ -5765,7 +5765,43 @@ export async function reverseClip({ input, output, audio = true, crf = 23, dryRu
 // same pixels. Audio is re-encoded by output extension with the
 // AAC 192k pin (reverseClip's rule: hardcoding aac wrote AAC into
 // an .mp3 container once).
-export async function rotateClip({ input, output, angle = null, flip = null, crf = 23, dryRun = false }) {
+//
+// --metadata-only (EncodeX's idea, lượt 118): rotate WITHOUT
+// re-encoding, by rewriting only the Display Matrix side data.
+// Verified by hand on ffmpeg 8.1.2 before shipping:
+//   * `-metadata:s:v rotate=90` does NOT write the matrix into an
+//     mp4 (output had no side data at all) — the working knob is
+//     the INPUT option `-display_rotation`, which the muxer copies
+//     into the tkhd matrix on stream copy.
+//   * `-display_rotation` is counter-clockwise positive (its doc
+//     says so, and the matrix it wrote is the mirror of the
+//     rotation-90 fixture), so a clockwise angle A is passed as -A.
+//   * It OVERRIDES the input matrix, it does not add to it — so
+//     the new rotation is (existing + angle) % 360, computed here,
+//     and `-display_rotation 0` strips the matrix entirely.
+//   * Works on mp4/mov/mkv; the webm muxer refuses the copy
+//     outright ("Could not write header"), so those are refused
+//     with a clear error instead of a cryptic ffmpeg failure.
+//   * Flip has no metadata equivalent — it needs a re-encode.
+// The result proves no re-encode happened on disk: the MD5 of the
+// coded video packets (stream copy) must match input vs output.
+// frameDigest is the WRONG proof here — it hashes DECODED frames,
+// and decode autorotates, so a 90-degree matrix change alone flips
+// the digest even though not one coded byte moved (caught by the
+// first CLI probe of this feature, 2026-11-20).
+const METADATA_ROTATE_CONTAINERS = ["mp4", "mov", "mkv"];
+// MD5 of the coded video packets only: null when the file has no
+// video stream or ffmpeg cannot read it.
+async function videoStreamMd5(file) {
+  try {
+    const { stdout } = await run(FFMPEG, ["-v", "error", "-i", file, "-map", "0:v", "-c", "copy", "-f", "md5", "-"]);
+    const m = stdout.match(/MD5=([0-9a-f]+)/);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+export async function rotateClip({ input, output, angle = null, flip = null, crf = 23, dryRun = false, metadataOnly = false }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const c = num(crf, "crf", { min: 0, max: 51, integer: true });
@@ -5791,6 +5827,52 @@ export async function rotateClip({ input, output, angle = null, flip = null, crf
     filter = f === "horizontal" ? "hflip" : "vflip";
   }
   const ext = path.extname(outPath).slice(1).toLowerCase();
+  if (metadataOnly) {
+    if (hasFlip) throw new MediaKitError("rotate --metadata-only cannot flip (there is no metadata for a mirror — flip needs a re-encode)", "INVALID_ARG");
+    if (!METADATA_ROTATE_CONTAINERS.includes(ext)) throw new MediaKitError(`rotate --metadata-only only works on mp4/mov/mkv (the display matrix is a QuickTime/Matroska feature — got .${ext || "(no extension)"})`, "INVALID_ARG");
+    const inRotation = meta.video.rotation ?? 0;
+    const newRotation = (inRotation + angleOut) % 360;
+    const expectedRotation = newRotation === 0 ? null : newRotation;
+    const swap = newRotation === 90 || newRotation === 270;
+    const dw = meta.video.display_width, dh = meta.video.display_height;
+    const expectedDims = swap ? `${dh}x${dw}` : `${dw}x${dh}`;
+    // -display_rotation is an INPUT option (before -i) and
+    // counter-clockwise positive: clockwise A is passed as -A.
+    const args = ["-y", "-display_rotation", String(-newRotation), "-i", inPath, "-c", "copy", outPath];
+    if (dryRun) {
+      return {
+        operation: "rotate", dry_run: true, input: inPath, output: outPath,
+        angle: angleOut, flip: null, filter: null, method: "metadata-only", metadata_only: true,
+        input_rotation: meta.video.rotation ?? null,
+        input_dimensions: `${dw}x${dh}`,
+        output_rotation: expectedRotation,
+        dimensions: expectedDims,
+        duration_seconds: null, size_bytes: null, video_identical: null,
+        commands: [formatCommand(args)],
+        note: "Dry run: no file written. The rotation is applied by rewriting only the display-matrix metadata (stream copy, no re-encode); output_rotation/dimensions are the expected values, video_identical is measured on the real output.",
+      };
+    }
+    const digestBefore = await videoStreamMd5(inPath);
+    await run(FFMPEG, args);
+    const info = await fileInfo(outPath);
+    const out = await probe(outPath);
+    const gotRotation = out.video?.rotation ?? null;
+    if (gotRotation !== expectedRotation) throw new MediaKitError(`rotate --metadata-only wrote rotation ${gotRotation ?? "null"}, expected ${expectedRotation ?? "null"} — the container did not keep the display matrix`, "VERIFY_FAILED");
+    const digestAfter = await videoStreamMd5(outPath);
+    const videoIdentical = digestBefore !== null && digestBefore === digestAfter;
+    if (!videoIdentical) throw new MediaKitError("rotate --metadata-only changed the decoded frames (frame digest mismatch) — the copy was not lossless", "VERIFY_FAILED");
+    return {
+      operation: "rotate", input: inPath, output: outPath,
+      angle: angleOut, flip: null, filter: null, method: "metadata-only", metadata_only: true,
+      input_rotation: meta.video.rotation ?? null,
+      input_dimensions: `${dw}x${dh}`,
+      output_rotation: gotRotation,
+      dimensions: out.video ? `${out.video.display_width}x${out.video.display_height}` : null,
+      duration_seconds: out.duration_seconds,
+      size_bytes: info.size_bytes,
+      video_identical: videoIdentical,
+    };
+  }
   const audioCodec = AUDIO_FORMATS[ext] ?? VIDEO_CONTAINER_AUDIO[ext] ?? "aac";
   const args = ["-y", "-i", inPath, "-vf", filter, "-c:v", "libx264", "-crf", String(c), "-preset", "medium"];
   if (meta.audio) args.push("-c:a", audioCodec, ...audioBitrateArgs(audioCodec));
@@ -5805,7 +5887,7 @@ export async function rotateClip({ input, output, angle = null, flip = null, crf
     const dw = meta.video.display_width, dh = meta.video.display_height;
     return {
       operation: "rotate", dry_run: true, input: inPath, output: outPath,
-      angle: angleOut, flip: flipOut, filter,
+      angle: angleOut, flip: flipOut, filter, method: "reencode", metadata_only: false,
       input_rotation: meta.video.rotation ?? null,
       input_dimensions: `${dw}x${dh}`,
       output_rotation: null,
@@ -5820,7 +5902,7 @@ export async function rotateClip({ input, output, angle = null, flip = null, crf
   const out = await probe(outPath);
   return {
     operation: "rotate", input: inPath, output: outPath,
-    angle: angleOut, flip: flipOut, filter,
+    angle: angleOut, flip: flipOut, filter, method: "reencode", metadata_only: false,
     input_rotation: meta.video.rotation ?? null,
     input_dimensions: `${meta.video.display_width}x${meta.video.display_height}`,
     output_rotation: out.video?.rotation ?? null,
@@ -12564,8 +12646,8 @@ export const BATCH_OPERATIONS = {
     run: (input, output, a) => reverseClip({ input, output, audio: a.audio ?? true, crf: a.crf ?? 23 }),
   },
   rotate: {
-    args: ["angle", "flip", "crf"],
-    run: (input, output, a) => rotateClip({ input, output, angle: a.angle ?? null, flip: a.flip ?? null, crf: a.crf ?? 23 }),
+    args: ["angle", "flip", "crf", "metadata_only"],
+    run: (input, output, a) => rotateClip({ input, output, angle: a.angle ?? null, flip: a.flip ?? null, crf: a.crf ?? 23, metadataOnly: a.metadata_only ?? false }),
   },
   boomerang: {
     args: ["audio", "crf"],
