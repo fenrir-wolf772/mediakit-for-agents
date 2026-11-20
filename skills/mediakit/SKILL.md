@@ -522,7 +522,15 @@ When a call fails, the error ends with the exact retry command: the
 CLI prints `Retry: mediakit <the command you ran>` on stderr, and an
 MCP error carries `retry: {tool, arguments}` with the identical call.
 Re-issue that call (after fixing the flagged argument) instead of
-reconstructing the command from memory.
+reconstructing the command from memory. But first read `retryable`:
+every error carries it — `true` means the identical call has a real
+chance of succeeding (a transient failure: HTTP 429/5xx or a timeout
+on download, the render-job gate), `false` means repeating the call
+unchanged cannot help (bad arguments, a missing file, a bad filter, a
+corrupt input — fix the call instead). When the failure named a wait,
+`retry_after_seconds` carries it (the server's `Retry-After`, or the
+admission gate's computed wait); the CLI prints it as
+`(retryable: true — retry in ~7s)`.
 
 ### 27. Cap fps with `fit --max-fps`, and read `doctor`'s fix line
 Speeding a clip up also raises its frame rate — a 2x speed-up turns

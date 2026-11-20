@@ -2216,7 +2216,13 @@ async function main() {
       status: "error", errorCode: err.code ?? "ERROR",
       durationMs: Date.now() - cliStartedAt,
     });
-    if (err instanceof core.MediaKitError) fail(`${err.message} [${err.code}]`, 2);
+    if (err instanceof core.MediaKitError) {
+      // Same retry guidance as the MCP/HTTP envelope: whether the
+      // identical call can help, and how long to wait when known.
+      const info = core.errorRetryInfo(err);
+      const wait = info.retry_after_seconds != null ? ` — retry in ~${info.retry_after_seconds}s` : "";
+      fail(`${err.message} [${err.code}] (retryable: ${info.retryable}${wait})`, 2);
+    }
     fail(err.message, 2);
   }
   // The CLI is short-lived, so the record is awaited here (unlike

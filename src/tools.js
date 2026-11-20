@@ -21,8 +21,14 @@ async function safe(fn) {
   try {
     return result(await fn());
   } catch (err) {
+    // The error envelope carries the retry guidance with it:
+    // `retryable` (always — false means re-issuing the identical
+    // call cannot help) and `retry_after_seconds` (only when the
+    // failure named a wait: a server Retry-After, the admission
+    // gate). Both transports surface this same body.
+    const body = { error: err.message, code: err.code ?? "ERROR", ...core.errorRetryInfo(err) };
     return {
-      content: [{ type: "text", text: JSON.stringify({ error: err.message, code: err.code ?? "ERROR" }, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(body, null, 2) }],
       isError: true,
     };
   }

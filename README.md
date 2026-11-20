@@ -75,10 +75,19 @@ curl -X POST http://127.0.0.1:3000/ \
        "params": {"name": "trim", "arguments": {"input": "clip.mp4", "output": "cut.mp4", "start": 2, "duration": 5}}}'
 ```
 
-Errors are JSON (`{error, code, retry}`) with an HTTP status that
+Errors are JSON (`{error, code, retryable, retry_after_seconds?, retry}`) with an HTTP status that
 matches the failure — `400` for bad arguments, `404` for an unknown
 tool or job, `429` for a refused job start (`JOB_ADMISSION_LIMIT` — the render-job gate: 2 active jobs / 10 starts per minute by default), `500` for a failed run — and `retry: {tool, arguments}` on
 every tool error, so a caller can re-issue the identical call.
+`retryable` is always present: `true` means the identical call has a
+real chance of succeeding (a transient failure — HTTP 429/5xx or a
+timeout on download, the admission gate), `false` means it cannot
+help (bad arguments, a missing file, a bad filter, a corrupt input —
+fix the call instead of repeating it). When the failure named a wait,
+`retry_after_seconds` carries it (the server's `Retry-After`, or the
+admission gate's computed wait); the CLI prints the same guidance
+(`(retryable: true — retry in ~7s)`) on its error line. The same
+fields ride the HTTP error body and the JSON-RPC `isError` result.
 JSON-RPC errors use the standard codes (`-32700` parse error,
 `-32601` unknown method, `-32602` unknown tool / bad params); a tool
 that runs and fails reports `isError: true` in the result, exactly

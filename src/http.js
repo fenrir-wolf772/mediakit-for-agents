@@ -215,6 +215,7 @@ export async function invokeTool(name, args) {
     const err = new Error(`unknown tool: ${name}`);
     err.code = "TOOL_NOT_FOUND";
     err.status = 404;
+    err.retryable = false;
     record(null, "error", "TOOL_NOT_FOUND");
     throw err;
   }
@@ -225,6 +226,7 @@ export async function invokeTool(name, args) {
     err.code = "INVALID_ARG";
     err.status = 400;
     err.retry = { tool: name, arguments: args ?? {} };
+    err.retryable = false;
     record(null, "error", "INVALID_ARG");
     throw err;
   }
@@ -235,6 +237,8 @@ export async function invokeTool(name, args) {
     err.code = body.code ?? "ERROR";
     err.status = STATUS_BY_CODE[err.code] ?? 500;
     err.retry = { tool: name, arguments: parsed.data };
+    err.retryable = body.retryable === true;
+    if (body.retry_after_seconds != null) err.retry_after_seconds = body.retry_after_seconds;
     record(body, "error", err.code);
     throw err;
   }
@@ -252,6 +256,8 @@ function sendError(res, err) {
   const status = err.status ?? STATUS_BY_CODE[err.code] ?? 500;
   const body = { error: err.message, code: err.code ?? "ERROR" };
   if (err.retry) body.retry = err.retry;
+  if (err.retryable !== undefined) body.retryable = err.retryable;
+  if (err.retry_after_seconds != null) body.retry_after_seconds = err.retry_after_seconds;
   sendJson(res, status, body);
 }
 
@@ -349,11 +355,13 @@ async function handleJsonRpc(body) {
     // over stdio), not a JSON-RPC error — the caller still gets the
     // failure detail, with the retry attached.
     if (err.retry) {
+      const body = { error: err.message, code: err.code, retry: err.retry, retryable: err.retryable === true };
+      if (err.retry_after_seconds != null) body.retry_after_seconds = err.retry_after_seconds;
       return respond({
         jsonrpc: "2.0",
         id,
         result: {
-          content: [{ type: "text", text: JSON.stringify({ error: err.message, code: err.code, retry: err.retry }, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify(body, null, 2) }],
           isError: true,
         },
       });

@@ -20,7 +20,11 @@ const server = new McpServer({
 // Errors end with the exact retry command (kinocut's eyes-free design
 // law, backlog since turn 2): every tool error carries
 // `retry: {tool, arguments}` so an agent can re-issue the identical
-// call instead of reconstructing it from the message. One choke point
+// call instead of reconstructing it from the message. Since turn 121
+// the body also carries `retryable` (always — false means the
+// identical call cannot help) and `retry_after_seconds` (only when
+// the failure named a wait), computed in core.errorRetryInfo and
+// added by safe() in tools.js. One choke point
 // here — the per-tool handlers keep calling safe() unchanged, and this
 // wrapper enriches any isError result with the tool name + the exact
 // arguments the call carried (zod defaults already applied).

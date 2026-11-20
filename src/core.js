@@ -95,11 +95,39 @@ async function assertInsideWorkdir(abs, label) {
 }
 
 export class MediaKitError extends Error {
-  constructor(message, code = "MEDIAKIT_ERROR") {
+  constructor(message, code = "MEDIAKIT_ERROR", opts = {}) {
     super(message);
     this.name = "MediaKitError";
     this.code = code;
+    // Structured retry guidance (backlog, idea: oh-my-cassette's
+    // BridgeError + EncodeX explain_error, lượt 121): a caller that
+    // re-issues the identical call must know whether that can help
+    // and how long to wait. `retryable` is carried on the error
+    // itself when the throw site knows (download marks transient
+    // failures); `retryAfterSeconds` is the server's Retry-After or
+    // the admission gate's computed wait, in whole seconds.
+    if (opts.retryable === true) this.retryable = true;
+    if (opts.retryAfterSeconds != null) this.retryAfterSeconds = opts.retryAfterSeconds;
   }
+}
+
+// Which error codes are transient by construction — a caller that
+// re-issues the identical call has a real chance of succeeding, so
+// the envelope says retryable even when the throw site did not set
+// the flag itself. Everything else defaults to retryable: false:
+// a deterministic refusal (bad args, missing file, bad filter,
+// corrupt input) cannot be fixed by calling again unchanged.
+// Playlist-fetch failures stay non-retryable: ffmpeg's error text
+// does not say whether the cause was transient, so guessing true
+// would burn retries on a 404.
+const RETRYABLE_ERROR_CODES = new Set(["DOWNLOAD_TIMEOUT", "JOB_ADMISSION_LIMIT"]);
+
+export function errorRetryInfo(err) {
+  const retryable = err?.retryable === true || RETRYABLE_ERROR_CODES.has(err?.code ?? "");
+  const out = { retryable };
+  const secs = err?.retryAfterSeconds ?? (err?.retryAfterMs != null ? Math.ceil(err.retryAfterMs / 1000) : null);
+  if (retryable && Number.isFinite(secs) && secs > 0) out.retry_after_seconds = secs;
+  return out;
 }
 
 function runCapture(cmd, args, { timeoutMs = ffmpegTimeoutMs() } = {}) {
@@ -7372,7 +7400,16 @@ export async function downloadMedia({ url, output, maxSizeMb = DOWNLOAD_DEFAULT_
       break;
     } catch (err) {
       if (attempt >= retriesMax || !err?.retryable) {
-        if (retries > 0) throw new MediaKitError(`${err.message} (after ${attempts} attempts)`, err.code ?? "DOWNLOAD_FAILED");
+        if (retries > 0) {
+          // Keep the transient classification (and the server's
+          // Retry-After, when it sent one) on the rethrown error —
+          // the envelope reports retryable / retry_after_seconds
+          // from these fields, and a fresh Error would lose them.
+          throw new MediaKitError(`${err.message} (after ${attempts} attempts)`, err.code ?? "DOWNLOAD_FAILED", {
+            retryable: err?.retryable === true,
+            retryAfterSeconds: err?.retryAfterMs != null ? Math.ceil(err.retryAfterMs / 1000) : undefined,
+          });
+        }
         throw err;
       }
       const waitMs = downloadBackoffMs(attempt, err.retryAfterMs ?? null);
@@ -17474,7 +17511,7 @@ export async function getJobAdmission() {
 export async function checkJobAdmission() {
   const a = await getJobAdmission();
   if (a.admitted) return a;
-  throw new MediaKitError(`job admission limit: ${a.reason} — retry in ~${a.retry_after_seconds}s`, "JOB_ADMISSION_LIMIT");
+  throw new MediaKitError(`job admission limit: ${a.reason} — retry in ~${a.retry_after_seconds}s`, "JOB_ADMISSION_LIMIT", { retryable: true, retryAfterSeconds: a.retry_after_seconds });
 }
 
 export async function startAssembleJob({ manifestPath, outputDir, force = false }) {

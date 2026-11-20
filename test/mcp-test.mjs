@@ -8400,7 +8400,7 @@ await admCancel(admJobD.job_id);
 // 127.0.0.1, so the sandbox proxy is bypassed for these calls.
 const downloadFixture = await readFile(path.join(root, "test/source.mp4"));
 // Hit counters for the retry/cache endpoints below (lượt 85).
-const dlHits = { flaky: 0, always503: 0, cacheable: 0, counted: 0 };
+const dlHits = { flaky: 0, always503: 0, always429: 0, cacheable: 0, counted: 0 };
 // HLS/DASH fixtures, generated on the fly from the same source clip
 // (stream copy, so the segments carry the source's own streams —
 // no re-encode, and the suite stays network-free).
@@ -8452,6 +8452,11 @@ const downloadServer = createServer(async (req, res) => {
   } else if (req.url === "/always-503") {
     dlHits.always503++;
     res.writeHead(503); res.end();
+  } else if (req.url === "/always-429") {
+    // Always rate-limited, with a Retry-After the envelope must
+    // surface: the error (not the retry loop) is the assertion.
+    dlHits.always429++;
+    res.writeHead(429, { "retry-after": "7" }); res.end();
   } else if (req.url === "/cacheable.mp4") {
     dlHits.cacheable++;
     res.writeHead(200, { "content-type": "video/mp4", "content-length": downloadFixture.length }); res.end(downloadFixture);
@@ -8594,6 +8599,19 @@ checkOk(dlFlaky.attempts === 3 && dlFlaky.retries === 2 && dlFlaky.retry_wait_ms
 checkOk(dlHits.flaky === 3, "flaky endpoint was hit exactly 3 times (no extra requests)", `hits=${dlHits.flaky}`);
 const dlA503Text = await callExpectThrow("download", { url: `${dlBase}/always-503`, output: path.join(root, "outputs/mcp-download-a503.mp4"), max_retries: 2 });
 checkOk(/HTTP 503/.test(dlA503Text ?? "") && /after 3 attempts/.test(dlA503Text ?? "") && dlHits.always503 === 3, "download gives up after 1 + 2 retries on a permanent 503 and says so (after 3 attempts)", dlA503Text ?? "");
+// Error envelope (lượt 121): every tool error carries retryable +
+// retry_after_seconds (when the failure named a wait). A permanent
+// 503 that exhausts retries stays retryable (the cause is
+// transient) but names no wait — this server sent no Retry-After;
+// a 429 with Retry-After 7 names exactly 7s, on the first attempt.
+const dlA503Json = JSON.parse(dlA503Text ?? "{}");
+checkOk(dlA503Json.code === "DOWNLOAD_FAILED" && dlA503Json.retryable === true && dlA503Json.retry_after_seconds === undefined && dlA503Json.retry?.tool === "download", "a permanent 503 that exhausts retries reports retryable=true with no retry_after_seconds (the server sent none)", dlA503Text ?? "");
+const dlA429Text = await callExpectThrow("download", { url: `${dlBase}/always-429`, output: path.join(root, "outputs/mcp-download-a429.mp4"), max_retries: 0 });
+const dlA429Json = JSON.parse(dlA429Text ?? "{}");
+checkOk(dlA429Json.code === "DOWNLOAD_FAILED" && dlA429Json.retryable === true && dlA429Json.retry_after_seconds === 7 && dlHits.always429 === 1, "a 429 with Retry-After 7 reports retryable=true + retry_after_seconds=7 on the first attempt (max_retries 0)", dlA429Text ?? "");
+const probeMissingText = await callExpectThrow("probe", { input: path.join(root, "test/no-such-file.mp4") });
+const probeMissingJson = JSON.parse(probeMissingText ?? "{}");
+checkOk(probeMissingJson.code === "INPUT_NOT_FOUND" && probeMissingJson.retryable === false && probeMissingJson.retry_after_seconds === undefined, "a missing input reports retryable=false and no retry_after_seconds (re-issuing the identical call cannot help)", probeMissingText ?? "");
 const dlCacheDir = path.join(root, "outputs/dl-cache");
 const dlCache1Res = await client.callTool({ name: "download", arguments: { url: `${dlBase}/cacheable.mp4`, output: path.join(root, "outputs/mcp-download-cache1.mp4"), cache: true, cache_dir: dlCacheDir } });
 const dlCache1 = JSON.parse(dlCache1Res.content[0].text);
@@ -8808,6 +8826,19 @@ const httpBadArgs = await httpCall("POST", "/mcp/tools/probe/invoke", { argument
 checkOk(httpBadArgs.status === 400 && httpBadArgs.json?.code === "INVALID_ARG" && httpBadArgs.json?.retry?.tool === "probe", "POST invoke with missing required args is a 400 with code INVALID_ARG and a retry", JSON.stringify(httpBadArgs.json));
 const httpWrongType = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: 123 } });
 checkOk(httpWrongType.status === 400 && httpWrongType.json?.code === "INVALID_ARG", "POST invoke with a wrong-typed arg is a 400 (zod validates on the HTTP path too)", JSON.stringify(httpWrongType.json));
+// The HTTP error body carries the same retry guidance as stdio:
+// a 429 download names retryable=true + the server's Retry-After.
+// (The download fixture server is already closed by this point in
+// the file, so this check gets its own tiny 429 server — pointing
+// it at the closed fixture port would only prove a refused
+// connection, which is retryable but names no wait.)
+const httpA429Server = createServer((req, res) => { res.writeHead(429, { "retry-after": "7" }); res.end(); });
+await new Promise((r) => httpA429Server.listen(0, "127.0.0.1", r));
+const httpA429Base = `http://127.0.0.1:${httpA429Server.address().port}`;
+const httpA429 = await httpCall("POST", "/mcp/tools/download/invoke", { arguments: { url: `${httpA429Base}/always-429`, output: path.join(root, "outputs/mcp-download-a429-http.mp4"), max_retries: 0 } });
+httpA429Server.closeAllConnections();
+httpA429Server.close();
+checkOk(httpA429.status === 500 && httpA429.json?.code === "DOWNLOAD_FAILED" && httpA429.json?.retryable === true && httpA429.json?.retry_after_seconds === 7 && httpA429.json?.retry?.tool === "download", "POST download/invoke on a 429 returns retryable=true + retry_after_seconds=7 in the HTTP error body", JSON.stringify(httpA429.json));
 const httpGetInvoke = await httpCall("GET", "/mcp/tools/probe/invoke");
 checkOk(httpGetInvoke.status === 405, "GET on an invoke endpoint is a 405 (invoke is POST-only)", `status=${httpGetInvoke.status}`);
 const httpRpcInit = await httpCall("POST", "/", { jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
