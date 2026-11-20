@@ -1068,7 +1068,10 @@ order — each op addresses the list as the previous ops left it): `set` a scala
 step); `replace_step`. Before anything is written the patched
 manifest is validated with a real `manifest --dry-run`, so a patch
 that names an unknown tool or arg key fails and leaves the file
-byte-identical; the write itself is atomic (`.partial` + rename)
+byte-identical; before the write, the pre-patch bytes are copied to
+`<manifest>.bak` (always the revision just before the current one —
+a bad patch you only notice later is one `cp` away from undo), and
+the write itself is atomic (`.partial` + rename)
 and bumps `revision` by 1. The result lists every change in words
 (`set steps.2.args.target_lufs = -16 (was -14)`) plus the dry-run
 validation — read it before running the manifest. Note the
@@ -1589,6 +1592,28 @@ minutes or under 8s are refused (the analysis window alone is
 ~4–9s); use `bpm` for a single number on a short clip. Like the
 other tempo tools it is a probe-only step in `batch` and
 `manifest`.
+
+### 58a. See the shape of the loudness before you cut — `audio_levels`
+`check --content` tells you whether anything clips; it does not tell
+you WHERE the clip gets loud. `audio_levels <clip>` draws the
+loudness curve (probe-only, writes no file): one decode pass, per-frame
+astats Peak + RMS bucketed into `--bucket` windows (default 1s),
+RMS averaged in the linear domain so each bucket's `rms_db` is the
+true energy mean. Every bucket comes back `{start, end, rms_db,
+peak_db}` — a bucket of true digital silence reports nulls, never a
+fake -inf — plus a summary (`max_peak_db`, energy-mean `mean_rms_db`,
+`min/max_rms_db`, `dynamic_range_db`, `silent_buckets`,
+`loudest_bucket`) and the `--top` loudest moments (default 5) kept at
+least `--min-gap` apart (default 2s, so a 3s shout does not fill the
+list with its own neighbours; near-equal peaks tie at 0.1 dB and the
+earliest wins). Use it to pick the loudest moment to feature, to
+find the quietest stretch to cut on, or to check a mix's dynamic
+range before publishing. A 12s fixture with a quiet / loud / silent /
+medium tone reads buckets -51.5 / -21.1 / null / -31.5 dB RMS and
+peaks at 2s, 4s, 9s (the 2s bucket is the frame straddling the 3s
+switch, so its peak already reads loud while its RMS is still mixed). Cap: at most 3600 buckets — a long file needs a
+wider `--bucket`. Like the other audio probes it is a probe-only step
+in `batch` and `manifest`.
 
 ## Workflow: vertical captioned clip from a landscape source
 

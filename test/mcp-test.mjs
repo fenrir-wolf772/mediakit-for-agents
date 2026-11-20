@@ -186,10 +186,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 76 tools present");
-checkOk(missing.length === 0, "tools/list has all 76 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 77 tools present");
+checkOk(missing.length === 0, "tools/list has all 77 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -893,10 +893,16 @@ checkOk(/segments\[0\]\.speed/.test(ffManifestBadText), "manifest refuses a fast
 // patching the repo's own test/manifest.json would mutate a shared
 // fixture.
 const pmPath = path.join(root, "outputs/mcp-manifest-patch.json");
-await writeFile(pmPath, JSON.stringify({ version: 1, input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-manifest-patch-out.mp4"), steps: [{ tool: "trim", args: { start: 2, end: 8 } }, { tool: "reframe", args: { mode: "blur", width: 1080, height: 1920 } }, { tool: "loudness", args: { target_lufs: -14 } }], qa: "tiktok" }, null, 2), "utf8");
+const pmOriginal = JSON.stringify({ version: 1, input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-manifest-patch-out.mp4"), steps: [{ tool: "trim", args: { start: 2, end: 8 } }, { tool: "reframe", args: { mode: "blur", width: 1080, height: 1920 } }, { tool: "loudness", args: { target_lufs: -14 } }], qa: "tiktok" }, null, 2);
+await writeFile(pmPath, pmOriginal, "utf8");
 const pmRes = await client.callTool({ name: "patch_manifest", arguments: { manifest_path: pmPath, expected_revision: 0, patch: [{ op: "set", path: "steps.2.args.target_lufs", value: -16 }, { op: "add_step", step: { tool: "trim", args: { start: 0, end: 2 } } }] } });
 const pmJson = JSON.parse(pmRes.content[0].text);
 checkOk(pmJson.revision_before === 0 && pmJson.revision_after === 1 && pmJson.ops_applied === 2 && pmJson.validated?.dry_run === true && pmJson.validated?.steps === 4, "patch_manifest applies set + add_step, revision 0 -> 1, dry-run validates 4 steps", JSON.stringify(pmJson));
+// .bak backup (lượt 119, idea: bariswha/losslesscut-mcp
+// set_segments): the pre-patch bytes are copied to <manifest>.bak
+// before the atomic rename, so .bak is always the revision just
+// before the current one.
+checkOk(pmJson.backup === `${pmPath}.bak` && (await readFile(`${pmPath}.bak`, "utf8")) === pmOriginal, "patch_manifest writes the pre-patch bytes to <manifest>.bak and reports the backup path", pmJson.backup ?? "");
 const pmDoc = JSON.parse(await readFile(pmPath, "utf8"));
 checkOk(pmDoc.revision === 1 && pmDoc.steps.length === 4 && pmDoc.steps[2].args.target_lufs === -16 && pmDoc.steps[3].tool === "trim", "patched file on disk carries revision 1, the new loudness target and the appended trim step", JSON.stringify(pmDoc.steps.map((s) => s.tool)));
 // The patched manifest still plans: a dry-run lists 4 steps.
@@ -908,6 +914,7 @@ const pmBefore = await readFile(pmPath, "utf8");
 const pmMismatchText = await callExpectThrow("patch_manifest", { manifest_path: pmPath, expected_revision: 0, patch: [{ op: "set", path: "output", value: "x.mp4" }] });
 checkOk(/REVISION_MISMATCH/.test(pmMismatchText) && /revision is 1, expected 0/.test(pmMismatchText), "patch_manifest refuses a stale expected_revision with REVISION_MISMATCH", pmMismatchText.slice(0, 200));
 checkOk((await readFile(pmPath, "utf8")) === pmBefore, "stale revision leaves the file byte-identical", "");
+checkOk((await readFile(`${pmPath}.bak`, "utf8")) === pmOriginal, "stale revision also leaves the .bak backup untouched (still the pre-patch bytes)", "");
 // Bad patch (unknown tool in replace_step): the dry-run validation
 // fails, file byte-identical, revision still 1.
 const pmBadText = await callExpectThrow("patch_manifest", { manifest_path: pmPath, expected_revision: 1, patch: [{ op: "replace_step", index: 0, step: { tool: "nope", args: {} } }] });
@@ -918,6 +925,7 @@ checkOk((await readFile(pmPath, "utf8")) === pmBefore, "rejected patch leaves th
 const pmBatchRes = await client.callTool({ name: "patch_manifest", arguments: { manifest_path: pmPath, expected_revision: 1, patch: [{ op: "remove_step", index: 3 }, { op: "replace_step", index: 0, step: { tool: "trim", args: { start: 0, end: 5 } } }, { op: "set", path: "output", value: path.join(root, "outputs/mcp-manifest-patch-out2.mp4") }] } });
 const pmBatchJson = JSON.parse(pmBatchRes.content[0].text);
 checkOk(pmBatchJson.revision_after === 2 && pmBatchJson.ops_applied === 3 && pmBatchJson.validated?.steps === 3, "patch_manifest batch remove + replace + set: revision 1 -> 2, 3 steps left", JSON.stringify(pmBatchJson));
+checkOk((await readFile(`${pmPath}.bak`, "utf8")) === pmBefore, "second patch overwrites .bak with the revision-1 bytes (the revision just before the current one)", "");
 const pmDoc2 = JSON.parse(await readFile(pmPath, "utf8"));
 checkOk(pmDoc2.steps.length === 3 && pmDoc2.steps[0].tool === "trim" && pmDoc2.steps[0].args.end === 5 && pmDoc2.output.endsWith("mcp-manifest-patch-out2.mp4"), "batch patch on disk: first step replaced, appended trim removed, output set", JSON.stringify(pmDoc2.steps.map((s) => s.tool)));
 // Refusals: set revision directly, unknown op, remove the last step.
@@ -3433,6 +3441,74 @@ const kfCliNear = await execFileAsync("node", [path.join(root, "bin/mediakit.js"
 const kfCliNearJson = JSON.parse(kfCliNear.stdout);
 checkOk(near(kfCliNearJson.nearest?.closest, 8.333, 0.01) && kfCliNearJson.nearest?.direction === "after" && kfCliNearJson.nearest?.requested_seconds === 5, "CLI keyframes --nearest 0:05 parses MM:SS and reports closest 8.333", kfCliNear.stdout.slice(0, 200));
 
+// audio_levels (lượt 119, ideas: WyattBlue/auto-editor `levels` +
+// bariswha/losslesscut-mcp audio_levels): loudness curve per bucket
+// + pickPeaks. Fixture levels-source.wav, 12s: quiet [0,3) / loud
+// [3,6) / silent [6,9) / medium [9,12) — a 4096-sample frame
+// straddles each switch, so bucket [2,3) is mixed (rms -34.42, peak
+// already loud) and buckets [6,7)/[7,8)/[8,9) are true silence
+// (astats -inf -> nulls). Values below are measured ground truth
+// (volumedetect cross-check per second: -51.5 / -21.1 / -91 / -31.5).
+const levelsRes = await client.callTool({
+  name: "audio_levels",
+  arguments: { input: path.join(root, "test/levels-source.wav"), top_n: 3 },
+});
+const levelsJson = JSON.parse(levelsRes.content[0].text);
+console.log("audio_levels:", JSON.stringify(levelsJson.summary), "| peaks", JSON.stringify(levelsJson.peaks.map((p) => p.start)));
+checkOk(levelsJson.bucket_count === 12 && levelsJson.duration_seconds === 12 && levelsJson.buckets.length === 12, "audio_levels returns 12 one-second buckets for the 12s fixture", JSON.stringify(levelsJson.buckets.length));
+checkOk(near(levelsJson.buckets[0].rms_db, -51.53, 0.5) && near(levelsJson.buckets[0].peak_db, -48.51, 0.5), "audio_levels bucket 0 (quiet tone): rms -51.53, peak -48.51", JSON.stringify(levelsJson.buckets[0]));
+checkOk(near(levelsJson.buckets[2].rms_db, -34.42, 2) && near(levelsJson.buckets[2].peak_db, -18.06, 0.5), "audio_levels bucket 2 (frame straddling the 3s switch): mixed rms -34.42, peak already loud -18.06", JSON.stringify(levelsJson.buckets[2]));
+checkOk(near(levelsJson.buckets[3].rms_db, -21.07, 0.5) && near(levelsJson.buckets[9].rms_db, -31.53, 0.5), "audio_levels buckets 3 (loud) and 9 (medium): rms -21.07 / -31.53", JSON.stringify([levelsJson.buckets[3], levelsJson.buckets[9]]));
+checkOk(levelsJson.buckets[6].rms_db === null && levelsJson.buckets[6].peak_db === null && levelsJson.buckets[7].rms_db === null && levelsJson.buckets[8].rms_db === null, "audio_levels silent buckets 6-8 report nulls, never a fake -inf", JSON.stringify(levelsJson.buckets.slice(6, 9)));
+checkOk(near(levelsJson.summary.max_peak_db, -18.06, 0.5) && near(levelsJson.summary.mean_rms_db, -25.51, 1.5) && near(levelsJson.summary.dynamic_range_db, 30.46, 1.5) && levelsJson.summary.silent_buckets === 3 && levelsJson.summary.loudest_bucket?.start === 2, "audio_levels summary: max peak -18.06, mean rms -25.51, dynamic range 30.46, 3 silent buckets, loudest bucket starts at 2", JSON.stringify(levelsJson.summary));
+checkOk(levelsJson.peaks.map((p) => p.start).join(",") === "2,4,9" && near(levelsJson.peaks[0].peak_db, -18.06, 0.5) && near(levelsJson.peaks[2].peak_db, -28.52, 0.5), "audio_levels peaks (top 3, min_gap 2): 2, 4, 9 — the loud run contributes 2 and 4, not 2, 3, 4", JSON.stringify(levelsJson.peaks));
+// top_n 0: curve only, no peaks. Half-second buckets: 24 buckets.
+const levelsTop0Res = await client.callTool({ name: "audio_levels", arguments: { input: path.join(root, "test/levels-source.wav"), top_n: 0 } });
+const levelsTop0Json = JSON.parse(levelsTop0Res.content[0].text);
+checkOk(levelsTop0Json.peaks.length === 0 && levelsTop0Json.buckets.length === 12, "audio_levels top_n 0 returns the curve with no peaks", JSON.stringify(levelsTop0Json.peaks));
+const levelsHalfRes = await client.callTool({ name: "audio_levels", arguments: { input: path.join(root, "test/levels-source.wav"), bucket_seconds: 0.5 } });
+const levelsHalfJson = JSON.parse(levelsHalfRes.content[0].text);
+checkOk(levelsHalfJson.bucket_count === 24 && near(levelsHalfJson.buckets[6].rms_db, -21.07, 0.5) && levelsHalfJson.buckets[6].start === 3, "audio_levels bucket 0.5s: 24 buckets, bucket [3,3.5) rms -21.07", JSON.stringify(levelsHalfJson.buckets[6]));
+// Refusals: no audio stream; bucket cap (400s file at 0.1s = 4000 buckets).
+const levelsNoAudio = await callExpectThrow("audio_levels", { input: path.join(root, "test/broll-blue-noaudio.mp4") });
+checkOk(/needs an audio stream/.test(levelsNoAudio), "audio_levels refuses an input with no audio stream", levelsNoAudio.slice(0, 120));
+const levelsCap = await callExpectThrow("audio_levels", { input: path.join(root, "test/levels-long.mp3"), bucket_seconds: 0.1 });
+checkOk(/cap 3600/.test(levelsCap), "audio_levels refuses a bucket grid over the 3600 cap (400s at 0.1s)", levelsCap.slice(0, 120));
+// CLI wiring: kebab-case command, --bucket/--top/--min-gap options,
+// min_gap 0 keeps adjacent buckets (peaks 2.5, 3).
+const levelsCli = await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "audio-levels", path.join(root, "test/levels-source.wav"), "--bucket", "0.5", "--top", "2", "--min-gap", "0"]);
+const levelsCliJson = JSON.parse(levelsCli.stdout);
+checkOk(levelsCliJson.bucket_count === 24 && levelsCliJson.peaks.map((p) => p.start).join(",") === "2.5,3", "CLI audio-levels --bucket 0.5 --top 2 --min-gap 0: peaks 2.5, 3 (adjacent buckets kept)", levelsCli.stdout.slice(0, 200));
+// audio_levels in batch (lượt 119): probe-only like hook — no output
+// file, the curve comes back in the row's result, and the cache
+// stores that result.
+await rm(path.join(root, "outputs/mcp-batch-levels-in"), { recursive: true, force: true });
+await rm(path.join(root, "outputs/mcp-batch-levels-out"), { recursive: true, force: true });
+await mkdir(path.join(root, "outputs/mcp-batch-levels-in"), { recursive: true });
+await copyFile(path.join(root, "test/levels-source.wav"), path.join(root, "outputs/mcp-batch-levels-in/levels-source.wav"));
+const levelsBatchRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "audio_levels", pattern: "*.wav", input_dir: path.join(root, "outputs/mcp-batch-levels-in"), output_dir: path.join(root, "outputs/mcp-batch-levels-out"), args: { bucket_seconds: 1, top_n: 2 }, jobs: 1 },
+});
+const levelsBatchJson = JSON.parse(levelsBatchRes.content[0].text);
+checkOk(levelsBatchJson.succeeded === 1 && levelsBatchJson.failed === 0 && levelsBatchJson.results[0].output === null && levelsBatchJson.results[0].result.peaks.map((p) => p.start).join(",") === "2,4", "batch audio_levels: one row, no output file, peaks 2, 4 in the row result", JSON.stringify(levelsBatchJson.results.map((r) => r.result?.peaks)));
+const levelsBatchCacheRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "audio_levels", pattern: "*.wav", input_dir: path.join(root, "outputs/mcp-batch-levels-in"), output_dir: path.join(root, "outputs/mcp-batch-levels-out"), args: { bucket_seconds: 1, top_n: 2 }, jobs: 1 },
+});
+const levelsBatchCacheJson = JSON.parse(levelsBatchCacheRes.content[0].text);
+checkOk(levelsBatchCacheJson.cached === 1 && levelsBatchCacheJson.results[0].status === "cached" && levelsBatchCacheJson.results[0].result.peaks.length === 2, "batch audio_levels second run serves the row from the result cache", JSON.stringify(levelsBatchCacheJson.results.map((r) => r.status)));
+// audio_levels in manifest (lượt 119): probe-only step records the
+// curve and passes the chain file through, then trim cuts the
+// loudest bucket's window.
+const levelsManifestPath = path.join(root, "outputs", "manifest-levels.json");
+await writeFile(levelsManifestPath, JSON.stringify({ version: 1, input: path.join(root, "test/levels-source.wav"), output: path.join(root, "outputs/mcp-manifest-levels.wav"), steps: [{ tool: "audio_levels", args: { bucket_seconds: 1, top_n: 2 } }, { tool: "trim", args: { start: 2, end: 3 } }] }), "utf8");
+await rm(path.join(root, "outputs/mcp-manifest-levels.wav"), { force: true });
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const levelsManifestRes = await client.callTool({ name: "manifest", arguments: { manifest_path: levelsManifestPath } });
+const levelsManifestJson = JSON.parse(levelsManifestRes.content[0].text);
+checkOk(levelsManifestJson.steps_run === 2 && levelsManifestJson.steps.every((s) => s.status === "ok") && levelsManifestJson.steps[0].tool === "audio_levels" && levelsManifestJson.steps[0].output === levelsManifestJson.input && levelsManifestJson.steps[0].result.peaks.map((p) => p.start).join(",") === "2,4" && near(levelsManifestJson.final.duration_seconds, 1, 0.05), "manifest audio_levels step records peaks 2, 4 and passes the file through, then trim cuts 1s (final 1s)", JSON.stringify(levelsManifestJson.steps.map((s) => s.result?.peaks ?? s.result?.duration_seconds)));
+
 // Regression: MCP snake_case params must reach core (round 7 bug fix).
 // stream_copy=true must actually stream-copy, and snap_to_keyframe must
 // move 1s..3s onto keyframes 0..8.333 (source GOP is 250 frames).
@@ -5131,7 +5207,7 @@ const findSourceRes = await client.callTool({
   arguments: { directory: path.join(root, "test"), name: "source" },
 });
 const findSourceJson = JSON.parse(findSourceRes.content[0].text);
-checkOk(findSourceJson.total_matches === 14, "find 'source' matches 14 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source, hook-source, hook-motion-source, hook-snap-source, sharpness-source, rotate-source, noisy-source, beat-trim-source)", `got ${findSourceJson.total_matches}`);
+checkOk(findSourceJson.total_matches === 15, "find 'source' matches 15 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source, hook-source, hook-motion-source, hook-snap-source, sharpness-source, rotate-source, noisy-source, beat-trim-source, levels-source)", `got ${findSourceJson.total_matches}`);
 
 const findMp3Res = await client.callTool({
   name: "find",
@@ -6341,7 +6417,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 76 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 76 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 77 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 77 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -8577,7 +8653,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 76 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 77 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -8637,11 +8713,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 76, "GET /mcp reports name/version/transport and 76 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 77, "GET /mcp reports name/version/transport and 77 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 76 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 76 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 77 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 77 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -8665,7 +8741,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 76, "JSON-RPC tools/list returns the same 76 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 77, "JSON-RPC tools/list returns the same 77 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

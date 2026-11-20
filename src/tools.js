@@ -1258,6 +1258,24 @@ export const TOOL_DEFS = [
 
 
   {
+    name: "audio_levels",
+    description: "Loudness curve + loudest moments of an audio stream (WyattBlue/auto-editor's `levels` idea: one value per timebase chunk, no threshold — the curve IS the data; bariswha/losslesscut-mcp's audio_levels adds buckets + pickPeaks). One decode pass: per-frame astats Peak + RMS bucketed into bucket_seconds windows (default 1s), RMS averaged in the linear domain so each bucket's rms_db is the true energy mean. Returns every bucket {start, end, rms_db, peak_db} (a bucket of true digital silence reports nulls, never a fake -inf), a summary (max_peak_db, energy-mean mean_rms_db, min/max bucket RMS, dynamic_range_db, silent_buckets, loudest_bucket) and the top N peaks (default 5) ranked by peak_db and kept at least min_gap_seconds apart (default 2s — a 3s shout does not fill the whole list with its own neighbours; near-equal peaks tie at 0.1 dB and the earliest wins). Probe-only, writes no file — also available as a probe-only batch operation and manifest step. Cap: at most 3600 buckets (raise bucket_seconds for long files).",
+    schema: {
+      input: pathSchema,
+      bucket_seconds: z.number().min(0.1).max(60).default(1).describe("Bucket width in seconds (0.1-60, default 1). At most 3600 buckets — a long file needs a wider bucket"),
+      top_n: z.number().int().min(0).max(50).default(5).describe("How many loudest moments to return (0-50, default 5; 0 = curve only, no peaks)"),
+      min_gap_seconds: z.number().min(0).max(3600).default(2).describe("Minimum gap between two returned peaks in seconds (default 2; 0 keeps adjacent buckets)"),
+    },
+    handler: async (a) => safe(() => core.audioLevels({
+      input: a.input,
+      bucketSeconds: a.bucket_seconds ?? 1,
+      topN: a.top_n ?? 5,
+      minGapSeconds: a.min_gap_seconds ?? 2,
+    })),
+  },
+
+
+  {
     name: "fit",
     description: "Fit a media file to an exact target duration in seconds. method speed (default) speeds it up/down with setpts + chained atempo (factor must stay in 0.25-4x); trim cuts a longer source down; loop repeats a shorter source until it reaches the target. max_fps caps the output frame rate (e.g. 15 for a smaller file) — it only ever lowers the fps, never raises it by duplicating frames. Returns the output duration and fps actually measured with ffprobe, plus duration_error_seconds. Set dry_run=true to print the exact ffmpeg command and write no file (speed_factor/loops/fps_capped are computed from the probe, so they are exact; duration_actual/duration_error/fps/size report null — measured on the real output).",
     schema: {
@@ -1429,7 +1447,7 @@ export const TOOL_DEFS = [
     name: "batch",
     description: "Apply ONE operation to many files matching a glob under a folder, in one call: loudness, resize, reframe, compress, convert, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, trim, silence, chroma_key, cut_words, remove_retakes, slideshow, hook, bpm, beat_grid or tempo_drift — the same args for every file. Outputs are named <stem>-<operation>.<ext> under the output directory, mirroring the input tree. Returns one row per file (input order) with status ok/error/cached/skipped plus counts, so a failure in one file never hides the rest. Unchanged files are skipped via a content-hash cache (.mediakit-batch-cache.json in the output dir, verified against the output's size + sha256); jobs runs up to 8 files at once under one shared timeout_seconds budget; dry_run lists the planned outputs and writes nothing. cut_words and remove_retakes find each clip's words file by convention (<words_dir>/<stem>.words.json, default the input's own folder) — a clip with no words file fails its own row only. slideshow is the exception: a SET operation — the whole matched set of images (2-32) becomes ONE slideshow video (output_name, default slideshow.mp4) instead of one output per file, and the per-file cache does not apply. hook, bpm, beat_grid and tempo_drift are the probe-only exceptions: they write no file (output is null, output_suffix is null) — the measurement comes back in each row's result, and the cache stores that result instead of a file.",
     schema: {
-    operation: z.enum(["loudness", "resize", "reframe", "compress", "convert", "extract_audio", "reverse", "rotate", "boomerang", "make_loopable", "freeze", "grade", "fit", "trim", "silence", "chroma_key", "cut_words", "remove_retakes", "slideshow", "hook", "bpm", "beat_grid", "tempo_drift"]).describe("The operation to apply to every matched file"),
+    operation: z.enum(["loudness", "resize", "reframe", "compress", "convert", "extract_audio", "reverse", "rotate", "boomerang", "make_loopable", "freeze", "grade", "fit", "trim", "silence", "chroma_key", "cut_words", "remove_retakes", "slideshow", "hook", "bpm", "beat_grid", "tempo_drift", "audio_levels"]).describe("The operation to apply to every matched file"),
     pattern: z.string().min(1).describe("Glob matched against paths under input_dir: **/*.mp4 for every mp4 at any depth, sub/*.mp4 for one folder, or a bare *.mp4 (matches the basename at any depth)"),
     input_dir: pathSchema.describe("Folder to search under (recursive; hidden dirs, .git, node_modules and .next are skipped)"),
     output_dir: pathSchema.describe("Directory to write outputs + batch-manifest.json into (created if needed; files under it are never treated as inputs)"),
@@ -1481,7 +1499,7 @@ export const TOOL_DEFS = [
 
   {
     name: "patch_manifest",
-    description: "Edit a manifest JSON file under a revision guard (AH64-dll/OpenEdit's revision-guard idea: a write against a stale revision is refused instead of silently overwriting newer work). A manifest carries an optional top-level `revision` (absent = 0); the call requires `expected_revision` to match the file's current revision, applies 1-32 ops, proves the patched manifest still lints and plans (a real manifest --dry-run on a temp copy), then writes atomically (.partial + rename) with revision + 1. A revision mismatch, a bad op, or a patched manifest that no longer validates all refuse with an error code (REVISION_MISMATCH / INVALID_ARG) and leave the file byte-identical — nothing is written. Ops: set {path: input|output|qa|steps.N.tool|steps.N.args.KEY, value: scalar} (version/revision are managed, not settable); add_step {step: {tool, args?}, index?} (append, or insert at index); remove_step {index} (never the last step); replace_step {index, step: {tool, args?}}. Ops apply in order — each op addresses the step list as the previous ops left it (JSON Patch semantics). Returns revision_before/after, a human-readable changes list, and the dry-run validation (steps + planned output).",
+    description: "Edit a manifest JSON file under a revision guard (AH64-dll/OpenEdit's revision-guard idea: a write against a stale revision is refused instead of silently overwriting newer work). A manifest carries an optional top-level `revision` (absent = 0); the call requires `expected_revision` to match the file's current revision, applies 1-32 ops, proves the patched manifest still lints and plans (a real manifest --dry-run on a temp copy), then writes atomically (.partial + rename) with revision + 1 — and first copies the pre-patch bytes to `<manifest>.bak` (bariswha/losslesscut-mcp's set_segments idea), so .bak is always the revision just before the current one. A revision mismatch, a bad op, or a patched manifest that no longer validates all refuse with an error code (REVISION_MISMATCH / INVALID_ARG) and leave the file byte-identical — nothing is written. Ops: set {path: input|output|qa|steps.N.tool|steps.N.args.KEY, value: scalar} (version/revision are managed, not settable); add_step {step: {tool, args?}, index?} (append, or insert at index); remove_step {index} (never the last step); replace_step {index, step: {tool, args?}}. Ops apply in order — each op addresses the step list as the previous ops left it (JSON Patch semantics). Returns revision_before/after, the backup path, a human-readable changes list, and the dry-run validation (steps + planned output).",
     schema: {
     manifest_path: pathSchema.describe("Path to the manifest JSON file to patch"),
     expected_revision: z.number().int().min(0).describe("The revision the caller last read from the file (absent = 0). Must match the file's current revision or the call is refused with REVISION_MISMATCH and nothing is written"),

@@ -732,6 +732,16 @@ const COMMANDS = {
       ["--nearest", "Time (seconds or MM:SS): report the keyframe nearest this cut point — before (largest <= t), after (smallest >= t), closest, distance, direction"],
     ],
   },
+  "audio-levels": {
+    usage: "mediakit audio-levels <input> [--bucket 1] [--top 5] [--min-gap 2]",
+    desc: "Loudness curve + loudest moments of an audio stream. One decode pass: per-frame astats Peak + RMS bucketed into --bucket windows (default 1s), RMS averaged in the linear domain. Returns every bucket {start, end, rms_db, peak_db} (true digital silence reports nulls), a summary (max peak, energy-mean RMS, min/max bucket RMS, dynamic range, silent buckets, loudest bucket) and the --top loudest moments kept at least --min-gap apart (default 2s). Probe-only, writes no file.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--bucket", "Bucket width in seconds, 0.1-60 (default 1; at most 3600 buckets)"],
+      ["--top", "How many loudest moments to return, 0-50 (default 5; 0 = curve only)"],
+      ["--min-gap", "Minimum gap between two returned peaks in seconds (default 2; 0 keeps adjacent buckets)"],
+    ],
+  },
   motion: {
     usage: "mediakit motion <input> [--threshold 0.001] [--min-still-seconds 2] [--window 1] [--lag-seconds 0] [--adaptive [--adaptive-factor 2] [--adaptive-cap 0.005]]",
     desc: "Measure real movement: per-second curve of the fraction of pixels that changed between adjacent frames, still intervals, and a verdict (moving / mostly-static / static). --lag-seconds N compares frames N seconds apart instead, catching motion too slow for one frame step (a slow fade, a creeping zoom). --adaptive calibrates the still threshold to the clip instead of the fixed 0.001 (floor = 25th percentile of the curve × --adaptive-factor, capped at --adaptive-cap). Probe-only, writes no file. The director's motion gate for a shot.",
@@ -986,7 +996,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 76 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 77 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -1885,6 +1895,14 @@ async function main() {
       case "keyframes":
         result = await core.listKeyframes({ input: needInput(), nearest: opts.nearest });
         break;
+      case "audio-levels":
+        result = await core.audioLevels({
+          input: needInput(),
+          bucketSeconds: numOpt(opts, "bucket") ?? 1,
+          topN: numOpt(opts, "top") ?? 5,
+          minGapSeconds: numOpt(opts, "min_gap") ?? 2,
+        });
+        break;
       case "motion":
         result = await core.measureMotion({
           input: needInput(),
@@ -1978,7 +1996,7 @@ async function main() {
         break;
       }
       case "batch": {
-        if (!positional[0]) fail("missing operation: loudness|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|slideshow|hook");
+        if (!positional[0]) fail("missing operation: loudness|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|slideshow|hook|audio-levels");
         if (!opts.pattern) fail("missing required option: --pattern <glob>");
         if (!opts.input_dir) fail("missing required option: --input-dir <dir>");
         const opName = positional[0].replace(/-/g, "_");

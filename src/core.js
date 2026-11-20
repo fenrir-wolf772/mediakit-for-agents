@@ -9330,6 +9330,9 @@ const TOOL_REQUIREMENTS = {
   overlay: { filters: ["overlay", "format", "scale", "colorchannelmixer"], encoders: ["libx264"] },
   scenes: { filters: ["select", "signalstats"] },
   hook: { filters: ["astats", "ametadata", "silencedetect", "select", "tblend", "geq", "signalstats", "scale"] },
+  // audio_levels decodes once with per-frame astats (Peak + RMS) —
+  // the same two filters the content check's audio_peaks uses.
+  audio_levels: { filters: ["astats", "ametadata"] },
   // bpm decodes to raw PCM with -ac/-ar (the resampler, not a filter)
   // and does the analysis in pure Node — no ffmpeg capability needed.
   bpm: {},
@@ -12314,6 +12317,121 @@ export async function listKeyframes({ input, nearest }) {
   };
 }
 
+// ---------------------------------------------------------------- audio_levels
+// Loudness curve + loudest moments (WyattBlue/auto-editor's `levels`
+// idea: one value per timebase chunk, no threshold — the curve IS the
+// data; bariswha/losslesscut-mcp's audio_levels adds buckets +
+// pickPeaks on top). One decode pass: per-frame astats Peak + RMS
+// (the same parse the content check uses for audio_peaks), bucketed
+// in JS. RMS is averaged in the linear domain, so a bucket's rms_db
+// is the true energy mean, not a mean of dB numbers. Peaks are
+// ranked by peak_db with a 0.1 dB quantization tie-break (earliest
+// first), so near-equal buckets rank deterministically, then kept
+// greedily min_gap_seconds apart — a 3s shout does not fill the
+// whole top-N list with its own neighbours. A bucket with no finite
+// frame (true digital silence: astats reports -inf) reports
+// rms_db/peak_db null instead of a fake -inf. Probe-only: no file
+// is written.
+export async function audioLevels({ input, bucketSeconds = 1, topN = 5, minGapSeconds = 2 }) {
+  const inPath = await requireInput(input);
+  const meta = await probe(inPath);
+  if (!meta.audio) throw new MediaKitError("audio_levels needs an audio stream", "INVALID_ARG");
+  const duration = meta.duration_seconds;
+  if (!Number.isFinite(duration)) throw new MediaKitError("audio_levels could not read the input duration", "PROBE_FAILED");
+  const bucket = num(bucketSeconds, "bucket_seconds", { min: 0.1, max: 60 });
+  const top = num(topN, "top_n", { min: 0, max: 50, integer: true });
+  const minGap = num(minGapSeconds, "min_gap_seconds", { min: 0, max: 3600 });
+  const bucketCount = Math.ceil(duration / bucket);
+  if (bucketCount > 3600) {
+    throw new MediaKitError(`bucket_seconds ${bucket} would make ${bucketCount} buckets for a ${duration}s file (cap 3600) — raise bucket_seconds`, "INVALID_ARG");
+  }
+  const { stderr } = await run(FFMPEG, ["-hide_banner", "-nostats", "-i", inPath,
+    "-af", "astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.Peak_level,ametadata=print:key=lavfi.astats.Overall.RMS_level",
+    "-f", "null", "-"]);
+  // Per-frame stats: each ametadata block prints its own pts_time
+  // line, then the level line — the same parse the content check
+  // uses for audio_peaks. The two blocks of one frame carry the
+  // same pts_time, so both levels land in the same slot.
+  const frames = new Map(); // pts_time -> {peak?, rms?}
+  const slot = (t) => { let s = frames.get(t); if (!s) { s = {}; frames.set(t, s); } return s; };
+  let curT = null;
+  for (const line of stderr.split("\n")) {
+    let m;
+    if ((m = line.match(/pts_time:\s*([\d.]+)/))) { curT = parseFloat(m[1]); continue; }
+    if (curT === null) continue;
+    if ((m = line.match(/lavfi\.astats\.Overall\.Peak_level=(-?inf|[-\d.]+)/))) {
+      const v = m[1] === "-inf" ? null : parseFloat(m[1]);
+      if (v !== null && Number.isFinite(v)) slot(curT).peak = v;
+      continue;
+    }
+    if ((m = line.match(/lavfi\.astats\.Overall\.RMS_level=(-?inf|[-\d.]+)/))) {
+      const v = m[1] === "-inf" ? null : parseFloat(m[1]);
+      if (v !== null && Number.isFinite(v)) slot(curT).rms = v;
+    }
+  }
+  const buckets = [];
+  for (let i = 0; i < bucketCount; i++) {
+    buckets.push({
+      start: +(i * bucket).toFixed(3),
+      end: +Math.min((i + 1) * bucket, duration).toFixed(3),
+      rms_db: null, peak_db: null, _power: 0, _frames: 0,
+    });
+  }
+  let maxPeak = null;
+  let totalPower = 0;
+  let totalFrames = 0;
+  for (const [t, f] of frames) {
+    const b = buckets[Math.min(Math.floor(t / bucket), bucketCount - 1)];
+    if (f.peak !== undefined) {
+      if (b.peak_db === null || f.peak > b.peak_db) b.peak_db = f.peak;
+      if (maxPeak === null || f.peak > maxPeak) maxPeak = f.peak;
+    }
+    if (f.rms !== undefined) {
+      const p = Math.pow(10, f.rms / 10);
+      b._power += p; b._frames++;
+      totalPower += p; totalFrames++;
+    }
+  }
+  for (const b of buckets) {
+    if (b._frames) b.rms_db = +(10 * Math.log10(b._power / b._frames)).toFixed(2);
+    if (b.peak_db !== null) b.peak_db = +b.peak_db.toFixed(2);
+    delete b._power; delete b._frames;
+  }
+  const finiteRms = buckets.filter((b) => b.rms_db !== null).map((b) => b.rms_db);
+  const loudest = buckets.reduce((best, b) => (b.peak_db !== null && (best === null || b.peak_db > best.peak_db)) ? b : best, null);
+  // pickPeaks (losslesscut-mcp's idea): rank by peak, keep the top N
+  // at least min_gap apart. Ranking quantizes to 0.1 dB so buckets
+  // that are only a rounding apart tie and the earliest wins.
+  const ranked = buckets
+    .filter((b) => b.peak_db !== null)
+    .map((b) => ({ ...b, _rank: Math.round(b.peak_db * 10) }))
+    .sort((a, b) => b._rank - a._rank || a.start - b.start);
+  const peaks = [];
+  for (const c of ranked) {
+    if (peaks.length >= top) break;
+    if (peaks.some((p) => Math.abs(p.start - c.start) < minGap - 1e-9)) continue;
+    peaks.push({ rank: peaks.length + 1, start: c.start, end: c.end, peak_db: c.peak_db, rms_db: c.rms_db });
+  }
+  return {
+    operation: "audio_levels",
+    input: inPath,
+    duration_seconds: duration,
+    bucket_seconds: bucket,
+    bucket_count: bucketCount,
+    buckets,
+    summary: {
+      max_peak_db: maxPeak === null ? null : +maxPeak.toFixed(2),
+      mean_rms_db: totalFrames ? +(10 * Math.log10(totalPower / totalFrames)).toFixed(2) : null,
+      min_rms_db: finiteRms.length ? Math.min(...finiteRms) : null,
+      max_rms_db: finiteRms.length ? Math.max(...finiteRms) : null,
+      dynamic_range_db: finiteRms.length ? +(Math.max(...finiteRms) - Math.min(...finiteRms)).toFixed(2) : null,
+      silent_buckets: buckets.filter((b) => b.rms_db === null).length,
+      loudest_bucket: loudest ? { start: loudest.start, end: loudest.end, peak_db: loudest.peak_db, rms_db: loudest.rms_db } : null,
+    },
+    peaks,
+  };
+}
+
 // ---------------------------------------------------------------- mux
 // Replace a video's audio track with an external one, stream-copying
 // both (idea: Ashutos1997's mux_media). No re-encode, so it is fast
@@ -12564,6 +12682,15 @@ export const BATCH_OPERATIONS = {
     probeOnly: true,
     args: ["min_bpm", "max_bpm"],
     run: (input, output, a) => detectTempoDrift({ input, minBpm: a.min_bpm ?? 40, maxBpm: a.max_bpm ?? 240 }),
+  },
+  // audio_levels in batch/manifest is probe-only like bpm/beat_grid:
+  // the loudness curve + peaks come back in the row's `result`
+  // (batch) or the step's result (manifest) and the cache stores
+  // that result — no file is written, so there is no output path.
+  audio_levels: {
+    probeOnly: true,
+    args: ["bucket_seconds", "top_n", "min_gap_seconds"],
+    run: (input, output, a) => audioLevels({ input, bucketSeconds: a.bucket_seconds ?? 1, topN: a.top_n ?? 5, minGapSeconds: a.min_gap_seconds ?? 2 }),
   },
   // slideshow in batch is a SET operation, not a per-file one: the
   // whole matched set becomes ONE slideshow (batch() branches on it
@@ -13755,9 +13882,21 @@ export async function patchManifest({ manifestPath, patch, expectedRevision }) {
     await rm(tmpValidate, { force: true }).catch(() => {});
   }
 
-  // Atomic write: .partial + rename, after the writability pre-check
-  // fails fast on a read-only directory instead of after the work.
+  // Backup (bariswha/losslesscut-mcp's set_segments idea: rename
+  // the old file to .bak before writing the new one). The original
+  // bytes go to <manifest>.bak — overwritten on every successful
+  // patch, so .bak is always the revision just before the current
+  // one. Written after validation passes and before the atomic
+  // rename, so a failed patch leaves both the manifest and the old
+  // .bak untouched; a failed backup aborts the patch instead of
+  // writing without a safety net.
   await prepareOutput(manifestAbs, []);
+  const backupPath = `${manifestAbs}.bak`;
+  try {
+    await writeFile(backupPath, raw, "utf8");
+  } catch (e) {
+    throw new MediaKitError(`cannot write manifest backup ${backupPath}: ${e.message}`, "WRITE_FAILED");
+  }
   const partial = `${manifestAbs}.partial-${process.pid}-${randomBytes(4).toString("hex")}`;
   try {
     await writeFile(partial, `${JSON.stringify(next, null, 2)}\n`, "utf8");
@@ -13769,6 +13908,7 @@ export async function patchManifest({ manifestPath, patch, expectedRevision }) {
   return {
     operation: "patch_manifest",
     manifest: manifestAbs,
+    backup: backupPath,
     revision_before: currentRevision,
     revision_after: currentRevision + 1,
     ops_applied: patch.length,
