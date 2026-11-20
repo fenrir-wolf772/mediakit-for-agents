@@ -104,7 +104,16 @@ async function handleJobEvents(res, jobId, searchParams) {
     connection: "keep-alive",
     "x-accel-buffering": "no",
   });
-  let lastSent = JSON.stringify(first);
+  // The estimate fields move with the wall clock (elapsed-progress
+  // grows every second) even when the job itself did not — comparing
+  // the full record would emit a `job` event on every 500 ms poll.
+  // The change check therefore strips them; the events still carry
+  // the live estimate.
+  const comparable = (rec) => {
+    const { estimate_remaining_seconds: _e, estimate_basis: _b, ...rest } = rec;
+    return JSON.stringify(rest);
+  };
+  let lastSent = comparable(first);
   sseEvent(res, "job", first);
   if (JOB_TERMINAL_STATUSES.has(first.status)) {
     res.end();
@@ -120,10 +129,13 @@ async function handleJobEvents(res, jobId, searchParams) {
     clearInterval(timer);
     clearTimeout(deadline);
   };
+  // lastRecord keeps the full last-seen record (with estimate) for
+  // the timeout event; lastSent is the comparable form only.
+  let lastRecord = first;
   deadline = setTimeout(() => {
     if (closed) return;
     try {
-      sseEvent(res, "timeout", JSON.parse(lastSent));
+      sseEvent(res, "timeout", lastRecord);
       res.end();
     } catch { /* client already gone — cleanup below is enough */ }
     cleanup();
@@ -145,7 +157,8 @@ async function handleJobEvents(res, jobId, searchParams) {
         cleanup();
         return;
       }
-      const text = JSON.stringify(record);
+      const text = comparable(record);
+      lastRecord = record;
       if (text !== lastSent) {
         lastSent = text;
         sseEvent(res, "job", record);

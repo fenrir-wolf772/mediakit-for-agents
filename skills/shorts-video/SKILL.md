@@ -185,7 +185,10 @@ is gated: at most 2 render jobs may be queued-or-running and at
 most 10 may start per minute (env `MEDIAKIT_MAX_JOBS` /
 `MEDIAKIT_MAX_JOB_STARTS_PER_MINUTE`) — a refused start creates
 no job, so check `mediakit job --admission` first when renders
-are already running. Long renders on a busy machine can also
+are already running. While a job runs, `mediakit job <id>` also
+reports `estimate_remaining_seconds` (rough upper-bound ETA, null
+when too early to tell) with `estimate_basis` naming how it was
+derived — a guide for the user, never a promise. Long renders on a busy machine can also
 hit the 300s ffmpeg timeout — raise it with
 `MEDIAKIT_FFMPEG_TIMEOUT_MS` (60000–3600000). A shot after the first may carry
 `transition: {type, duration}` (one of the 58 xfade names — see the

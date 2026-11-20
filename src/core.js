@@ -17582,8 +17582,59 @@ export async function startAssembleJob({ manifestPath, outputDir, force = false 
     jobs_root: root, manifest: manifestAbs, output_dir: outDirAbs,
     title: plan.title, total_seconds: plan.total_seconds, total_frames: plan.total_frames,
     approval: approvalStatus,
+    estimate_remaining_seconds: null, estimate_basis: "not-started",
     hint: `poll with: mediakit job ${jobId}`,
   };
+}
+
+// Estimate remaining time for a durable async render job (idea:
+// EncodeX src/shared/estimate.ts, lượt 119 — an ETA from the live
+// job's own progress, shown as a rough upper bound, never as a
+// promise). Pure + deterministic: the caller passes nowMs so tests
+// can pin it. Computed on read (getJob/listJobs/cancelJob), never
+// stored — a stored value would go stale between polls.
+//   done              -> 0, "complete"
+//   failed/cancelled  -> null, "terminal"
+//   queued            -> null, "not-started"
+//   running, percent < 5 or no usable timestamps -> null, "too-early"
+//   running, else ceil((100 - percent) / rate) from the whole-run
+//   average rate in progress_history when it spans >= 1s with a
+//   percent gain ("progress-rate"), else from elapsed time since
+//   created_at ("elapsed-progress"). Capped at 24h: a render that
+//   claims longer than that is lying about something else.
+const ESTIMATE_MAX_SECONDS = 86400;
+export function estimateJobRemaining(record, nowMs = Date.now()) {
+  const status = record?.status;
+  if (status === "done") return { estimate_remaining_seconds: 0, estimate_basis: "complete" };
+  if (status === "failed" || status === "cancelled") return { estimate_remaining_seconds: null, estimate_basis: "terminal" };
+  if (status !== "running") return { estimate_remaining_seconds: null, estimate_basis: "not-started" };
+  const percent = record?.progress?.percent;
+  if (typeof percent !== "number" || !Number.isFinite(percent)) return { estimate_remaining_seconds: null, estimate_basis: "too-early" };
+  if (percent >= 100) return { estimate_remaining_seconds: 0, estimate_basis: "complete" };
+  if (percent < 5) return { estimate_remaining_seconds: null, estimate_basis: "too-early" };
+  const history = Array.isArray(record.progress_history) ? record.progress_history : [];
+  const usable = history.filter((h) => typeof h?.percent === "number" && Number.isFinite(Date.parse(h.at ?? "")));
+  if (usable.length >= 2) {
+    const first = usable[0];
+    const last = usable[usable.length - 1];
+    const dt = (Date.parse(last.at) - Date.parse(first.at)) / 1000;
+    const dp = last.percent - first.percent;
+    if (dt >= 1 && dp > 0) {
+      const rate = dp / dt; // percent per second
+      return { estimate_remaining_seconds: Math.min(ESTIMATE_MAX_SECONDS, Math.ceil((100 - percent) / rate)), estimate_basis: "progress-rate" };
+    }
+    // dt < 1s (history too compressed to trust) or dp <= 0 (percent
+    // held at a stage boundary while a long encode runs): fall
+    // through to the elapsed-time estimate below.
+  }
+  const created = Date.parse(record.created_at ?? "");
+  if (Number.isFinite(created)) {
+    const elapsed = (nowMs - created) / 1000;
+    if (elapsed > 0) {
+      return { estimate_remaining_seconds: Math.min(ESTIMATE_MAX_SECONDS, Math.ceil(elapsed * (100 - percent) / percent)), estimate_basis: "elapsed-progress" };
+    }
+  }
+  return { estimate_remaining_seconds: null, estimate_basis: "too-early" };
 }
 
 export async function getJob(jobId) {
@@ -17594,7 +17645,8 @@ export async function getJob(jobId) {
   } catch {
     throw new MediaKitError(`unknown job id: ${jobId} (jobs live under ${root})`, "JOB_NOT_FOUND");
   }
-  return JSON.parse(raw);
+  const record = JSON.parse(raw);
+  return { ...record, ...estimateJobRemaining(record) };
 }
 
 export async function listJobs({ limit = 50 } = {}) {
@@ -17608,9 +17660,13 @@ export async function listJobs({ limit = 50 } = {}) {
     if (!JOB_ID_RE.test(name)) continue;
     try {
       const rec = JSON.parse(await readFile(path.join(root, name, "job.json"), "utf8"));
+      // The estimate is computed from the full record (it needs
+      // progress_history for the "progress-rate" basis), then the
+      // history is stripped from the summary row as before.
+      const withEstimate = { ...rec, ...estimateJobRemaining(rec) };
       // List is a summary: the per-entry progress_history (up to
       // 1000 points) stays on the status view, not in every row.
-      const { progress_history: _history, ...summary } = rec;
+      const { progress_history: _history, ...summary } = withEstimate;
       jobs.push(summary);
     } catch { /* skip unreadable entries */ }
     if (jobs.length >= limit) break;
@@ -17638,5 +17694,5 @@ export async function cancelJob(jobId) {
   }
   const cancelled = { ...record, status: "cancelled", updated_at: new Date().toISOString(), error: { message: "cancelled by user", code: "JOB_CANCELLED" } };
   await writeJobRecord(root, cancelled);
-  return cancelled;
+  return { ...cancelled, ...estimateJobRemaining(cancelled) };
 }

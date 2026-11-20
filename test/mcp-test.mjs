@@ -14,7 +14,7 @@ import { createCanvas } from "canvas";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { compareDeterminismRuns, estimateDecodedWork, estimateTempo, findQuietSnap, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, parseFfmpegProgress, runFfmpegWithProgress, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, SHORTS_STYLE_IDS } from "../src/core.js";
+import { compareDeterminismRuns, estimateDecodedWork, estimateJobRemaining, estimateTempo, findQuietSnap, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, parseFfmpegProgress, runFfmpegWithProgress, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import bounceTpl from "../src/canvas-scene-lib/templates/bounce.cjs";
 import slideInTpl from "../src/canvas-scene-lib/templates/slide-in.cjs";
@@ -8393,6 +8393,42 @@ const admJobD = JSON.parse((await client.callTool({ name: "assemble", arguments:
 checkOk(typeof admJobD.job_id === "string", "cancelling both jobs re-opens the gate (fourth start admitted)", admJobD.job_id ?? "");
 await admCancel(admJobD.job_id);
 
+// Lượt 122: estimate_remaining — pure estimator, deterministic
+// (nowMs pinned, so no wall-clock flake). Terminal/queued shapes
+// first, then the two live bases and their fallbacks.
+const estNowMs = Date.parse("2026-11-20T10:00:00.000Z");
+const estCreatedIso = "2026-11-20T09:59:00.000Z"; // 60s before estNowMs
+const estBase = { status: "running", progress: { stage: "shots", percent: 50, detail: null }, created_at: estCreatedIso, progress_history: [] };
+checkOk(JSON.stringify(estimateJobRemaining({ status: "done" }, estNowMs)) === JSON.stringify({ estimate_remaining_seconds: 0, estimate_basis: "complete" }), "estimate: done job has 0 remaining / complete", JSON.stringify(estimateJobRemaining({ status: "done" }, estNowMs)));
+checkOk(JSON.stringify(estimateJobRemaining({ status: "failed" }, estNowMs)) === JSON.stringify({ estimate_remaining_seconds: null, estimate_basis: "terminal" }), "estimate: failed job is null / terminal", JSON.stringify(estimateJobRemaining({ status: "failed" }, estNowMs)));
+checkOk(JSON.stringify(estimateJobRemaining({ status: "cancelled" }, estNowMs)) === JSON.stringify({ estimate_remaining_seconds: null, estimate_basis: "terminal" }), "estimate: cancelled job is null / terminal", JSON.stringify(estimateJobRemaining({ status: "cancelled" }, estNowMs)));
+checkOk(JSON.stringify(estimateJobRemaining({ status: "queued", progress: { percent: 0 } }, estNowMs)) === JSON.stringify({ estimate_remaining_seconds: null, estimate_basis: "not-started" }), "estimate: queued job is null / not-started", JSON.stringify(estimateJobRemaining({ status: "queued" }, estNowMs)));
+checkOk(JSON.stringify(estimateJobRemaining({ ...estBase, progress: { stage: "shots", percent: 0 } }, estNowMs)) === JSON.stringify({ estimate_remaining_seconds: null, estimate_basis: "too-early" }), "estimate: running at 0% is null / too-early", JSON.stringify(estimateJobRemaining({ ...estBase, progress: { percent: 0 } }, estNowMs)));
+checkOk(JSON.stringify(estimateJobRemaining({ ...estBase, progress: { stage: "shots", percent: 3 } }, estNowMs)) === JSON.stringify({ estimate_remaining_seconds: null, estimate_basis: "too-early" }), "estimate: running at 3% is null / too-early", JSON.stringify(estimateJobRemaining({ ...estBase, progress: { percent: 3 } }, estNowMs)));
+checkOk(JSON.stringify(estimateJobRemaining({ ...estBase, progress: { stage: "done", percent: 100 } }, estNowMs)) === JSON.stringify({ estimate_remaining_seconds: 0, estimate_basis: "complete" }), "estimate: running at 100% is 0 / complete", JSON.stringify(estimateJobRemaining({ ...estBase, progress: { percent: 100 } }, estNowMs)));
+// progress-rate: history 10% -> 50% over 40s = 1%/s, 50 left -> 50s.
+const estRate = estimateJobRemaining({ ...estBase, progress_history: [{ at: estCreatedIso, stage: "shots", percent: 10 }, { at: "2026-11-20T09:59:40.000Z", stage: "shots", percent: 50 }] }, estNowMs);
+checkOk(estRate.estimate_remaining_seconds === 50 && estRate.estimate_basis === "progress-rate", "estimate: history 10->50% in 40s gives 50s / progress-rate", JSON.stringify(estRate));
+// progress-rate, slow job: 80% -> 90% over 100s = 0.1%/s, 10 left -> 100s.
+const estSlow = estimateJobRemaining({ ...estBase, progress: { stage: "shots", percent: 90 }, progress_history: [{ at: "2026-11-20T09:57:20.000Z", stage: "shots", percent: 80 }, { at: "2026-11-20T09:59:00.000Z", stage: "shots", percent: 90 }] }, estNowMs);
+checkOk(estSlow.estimate_remaining_seconds === 100 && estSlow.estimate_basis === "progress-rate", "estimate: history 80->90% in 100s gives 100s / progress-rate", JSON.stringify(estSlow));
+// elapsed-progress: no history, 50% in 60s -> 60s left.
+const estElapsed = estimateJobRemaining(estBase, estNowMs);
+checkOk(estElapsed.estimate_remaining_seconds === 60 && estElapsed.estimate_basis === "elapsed-progress", "estimate: no history, 50% in 60s gives 60s / elapsed-progress", JSON.stringify(estElapsed));
+// Held percent falls back to elapsed: history 50% -> 50% over 40s
+// (a long encode inside one stage) + created 120s ago -> 120s.
+const estHeld = estimateJobRemaining({ ...estBase, created_at: "2026-11-20T09:58:00.000Z", progress_history: [{ at: "2026-11-20T09:59:00.000Z", stage: "shots", percent: 50 }, { at: "2026-11-20T09:59:40.000Z", stage: "shots", percent: 50 }] }, estNowMs);
+checkOk(estHeld.estimate_remaining_seconds === 120 && estHeld.estimate_basis === "elapsed-progress", "estimate: held percent falls back to elapsed-progress (120s)", JSON.stringify(estHeld));
+// History compressed under 1s falls back to elapsed too.
+const estCompressed = estimateJobRemaining({ ...estBase, progress_history: [{ at: "2026-11-20T09:59:59.500Z", stage: "shots", percent: 10 }, { at: "2026-11-20T09:59:59.900Z", stage: "shots", percent: 50 }] }, estNowMs);
+checkOk(estCompressed.estimate_remaining_seconds === 60 && estCompressed.estimate_basis === "elapsed-progress", "estimate: sub-second history falls back to elapsed-progress (60s)", JSON.stringify(estCompressed));
+// No timestamps at all: no history, no created_at -> null / too-early.
+const estNoTime = estimateJobRemaining({ status: "running", progress: { stage: "shots", percent: 50 } }, estNowMs);
+checkOk(estNoTime.estimate_remaining_seconds === null && estNoTime.estimate_basis === "too-early", "estimate: no timestamps anywhere is null / too-early", JSON.stringify(estNoTime));
+// Cap: 50% after 200000s elapsed would claim 200000s — capped at 24h.
+const estCap = estimateJobRemaining({ ...estBase, created_at: "2026-11-18T02:26:40.000Z" }, estNowMs);
+checkOk(estCap.estimate_remaining_seconds === 86400 && estCap.estimate_basis === "elapsed-progress", "estimate: absurd elapsed time caps at 86400s (24h)", JSON.stringify(estCap));
+
 // download: a local HTTP server stands in for the internet, so the
 // suite never depends on the network — every guard (redirect, size
 // cap mid-stream, content-type, 404, timeout) is exercised against a
@@ -8826,6 +8862,40 @@ const httpBadArgs = await httpCall("POST", "/mcp/tools/probe/invoke", { argument
 checkOk(httpBadArgs.status === 400 && httpBadArgs.json?.code === "INVALID_ARG" && httpBadArgs.json?.retry?.tool === "probe", "POST invoke with missing required args is a 400 with code INVALID_ARG and a retry", JSON.stringify(httpBadArgs.json));
 const httpWrongType = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: 123 } });
 checkOk(httpWrongType.status === 400 && httpWrongType.json?.code === "INVALID_ARG", "POST invoke with a wrong-typed arg is a 400 (zod validates on the HTTP path too)", JSON.stringify(httpWrongType.json));
+// Lượt 122: estimate_remaining on the read paths. A fake running
+// job record is written straight into the hermetic jobs dir (the
+// record a worker would have written): 50% done, history 10% ->
+// 50% over 40s, so the progress-rate estimate is ceil(50/1) = 50s.
+// MCP status, HTTP status and the HTTP list row must all carry it;
+// cancelling the fake job then proves the terminal shape (null /
+// "terminal") and leaves no active job behind for later assertions.
+const estJobId = "job-20261120-165800-abcdef01";
+const estJobsDir = process.env.MEDIAKIT_JOBS_DIR;
+const estLiveNow = Date.now();
+const estLiveCreated = new Date(estLiveNow - 120_000).toISOString();
+await mkdir(path.join(estJobsDir, estJobId), { recursive: true });
+await writeFile(path.join(estJobsDir, estJobId, "job.json"), JSON.stringify({
+  job_id: estJobId, operation: "assemble", status: "running",
+  manifest: "fake", output_dir: "fake", mode: "render", force: true,
+  approval: "forced", title: "estimate fixture", total_seconds: 10, total_frames: 300,
+  pid: null, progress: { stage: "shots", percent: 50, detail: null },
+  progress_history: [
+    { at: estLiveCreated, stage: "shots", percent: 10 },
+    { at: new Date(estLiveNow - 80_000).toISOString(), stage: "shots", percent: 50 },
+  ],
+  created_at: estLiveCreated, updated_at: new Date().toISOString(), result: null, error: null,
+}, null, 2));
+const estStatusRes = await client.callTool({ name: "job", arguments: { job_id: estJobId, action: "status" } });
+const estStatusJson = JSON.parse(estStatusRes.content[0].text);
+checkOk(estStatusJson.estimate_remaining_seconds === 50 && estStatusJson.estimate_basis === "progress-rate" && estStatusJson.progress_history?.length === 2, "job status carries estimate_remaining_seconds 50 + progress-rate from the percent history", JSON.stringify({ estimate_remaining_seconds: estStatusJson.estimate_remaining_seconds, estimate_basis: estStatusJson.estimate_basis }));
+const estHttp = await httpCall("GET", `/mcp/jobs/${estJobId}`);
+checkOk(estHttp.status === 200 && estHttp.json?.estimate_remaining_seconds === 50 && estHttp.json?.estimate_basis === "progress-rate", "GET /mcp/jobs/<id> carries the same estimate", JSON.stringify({ estimate_remaining_seconds: estHttp.json?.estimate_remaining_seconds, estimate_basis: estHttp.json?.estimate_basis }));
+const estList = await httpCall("GET", "/mcp/jobs?limit=200");
+const estRow = estList.json?.jobs?.find((j) => j.job_id === estJobId);
+checkOk(estRow?.estimate_remaining_seconds === 50 && estRow?.estimate_basis === "progress-rate" && !("progress_history" in estRow), "GET /mcp/jobs list row carries the estimate but still omits progress_history", JSON.stringify({ estimate_remaining_seconds: estRow?.estimate_remaining_seconds, estimate_basis: estRow?.estimate_basis }));
+const estCancelRes = await client.callTool({ name: "job", arguments: { job_id: estJobId, action: "cancel" } });
+const estCancelJson = JSON.parse(estCancelRes.content[0].text);
+checkOk(estCancelJson.status === "cancelled" && estCancelJson.estimate_remaining_seconds === null && estCancelJson.estimate_basis === "terminal", "cancelling a job returns the terminal estimate shape (null / terminal)", JSON.stringify({ estimate_remaining_seconds: estCancelJson.estimate_remaining_seconds, estimate_basis: estCancelJson.estimate_basis }));
 // The HTTP error body carries the same retry guidance as stdio:
 // a 429 download names retryable=true + the server's Retry-After.
 // (The download fixture server is already closed by this point in
