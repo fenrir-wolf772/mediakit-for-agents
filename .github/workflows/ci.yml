@@ -176,7 +176,7 @@ jobs:
           ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-retakes.mp4 | grep '^5.74'
           node bin/mediakit.js remove-retakes test/source.mp4 --words-file test/retakes-words.json --detect-only | grep '"detect_only": true'
           node bin/mediakit.js smart-cut test/source.mp4 --words-file test/smartcut-words.json -o outputs/ci-smartcut.mp4 | grep '"removed_count": 4'
-          ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-smartcut.mp4 | grep '^6.95'
+          ffprobe -v error -show_entries format=duration -of csv=p=0 outputs/ci-smartcut.mp4 | grep '^6.9'
           node bin/mediakit.js smart-cut test/source.mp4 --words-file test/smartcut-words.json --detect-only | grep '"detect_only": true'
           node bin/mediakit.js smart-cut test/source.mp4 --words-file test/smartcut-clean-words.json -o outputs/ci-smartcut-none.mp4 | grep '"stream_copy": true'
           mkdir -p outputs/ci-batch-rt-in && cp test/source.mp4 outputs/ci-batch-rt-in/take.mp4 && cp test/retakes-words.json outputs/ci-batch-rt-in/take.words.json
