@@ -14,7 +14,7 @@ import { createCanvas } from "canvas";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { applyContentBaseline, compareDeterminismRuns, countClippedRuns, diagnoseVoice, estimateDecodedWork, estimateJobRemaining, estimateTempo, findDensestSpeechWindow, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
+import { applyContentBaseline, compareDeterminismRuns, countClippedRuns, diagnoseVoice, estimateDecodedWork, estimateJobRemaining, estimateTempo, findDensestSpeechWindow, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import bounceTpl from "../src/canvas-scene-lib/templates/bounce.cjs";
 import slideInTpl from "../src/canvas-scene-lib/templates/slide-in.cjs";
@@ -187,10 +187,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut", "clean_voice"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut", "clean_voice", "measure_pace"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 80 tools present");
-checkOk(missing.length === 0, "tools/list has all 80 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 81 tools present");
+checkOk(missing.length === 0, "tools/list has all 81 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -562,6 +562,43 @@ const baselineNoContent = await callExpectThrow("check", { input: path.join(root
 checkOk(/needs --content/.test(baselineNoContent), "MCP baseline without content=true is refused", baselineNoContent.slice(0, 200));
 const contentBaselineCli = await runCli(["check", path.join(root, "test/content-black.mp4"), "--content", "--baseline", path.join(root, "test/content-baseline-black.json")], {});
 checkOk(contentBaselineCli.code === 0 && /pre-existing/.test(contentBaselineCli.out), "CLI check --content --baseline works and reports pre-existing spans", contentBaselineCli.out.slice(0, 300));
+
+// Style pace (lượt 133, idea: marvtub/takes-public measure_pace /
+// check_edit): pure numbers first — paceNumbers is Takes'
+// pace_numbers, same shape and rounding; scoreStylePace is their
+// chk_style_pace with the PACE_OFF tolerances kept verbatim (cuts
+// within 2x either way, longest hold over style x1.5 AND +2s).
+const paceNums = paceNumbers([5, 10, 15], 20);
+checkOk(paceNums.seconds === 20 && paceNums.cuts === 3 && paceNums.cuts_per_min === 9 && paceNums.avg_shot_s === 5 && paceNums.longest_hold_s === 5 && paceNums.longest_at === 0, "paceNumbers([5,10,15], 20) is 3 cuts, 9/min, avg 5s, longest 5s at 0s", JSON.stringify(paceNums));
+const paceOneShot = paceNumbers([], 20);
+checkOk(paceOneShot.cuts === 0 && paceOneShot.cuts_per_min === 0 && paceOneShot.avg_shot_s === 20 && paceOneShot.longest_hold_s === 20 && paceOneShot.longest_at === 0, "paceNumbers with no cuts is one 20s hold", JSON.stringify(paceOneShot));
+const paceLongestMid = paceNumbers([5, 15], 20);
+checkOk(paceLongestMid.longest_hold_s === 10 && paceLongestMid.longest_at === 5 && paceLongestMid.cuts_per_min === 6, "paceNumbers finds the longest hold mid-film (10s from 5s) and 6 cuts/min", JSON.stringify(paceLongestMid));
+const scoreSlow = scoreStylePace({ cuts_per_min: 3, longest_hold_s: 10, longest_at: 0 }, { cuts_per_min: 12, longest_hold_s: 8 }, "warm-story");
+checkOk(scoreSlow.length === 2 && scoreSlow[0].severity === "warn" && /cuts 3 times a minute; warm-story cuts 12/.test(scoreSlow[0].message) && /Fewer cuts/.test(scoreSlow[0].fix ?? "") && scoreSlow[1].severity === "pass", "scoreStylePace warns on 3 cuts/min vs a 12/min style (hold 10s inside the 12s limit passes)", JSON.stringify(scoreSlow));
+const scoreFast = scoreStylePace({ cuts_per_min: 30, longest_hold_s: 2, longest_at: 0 }, { cuts_per_min: 12, longest_hold_s: 8 }, "warm-story");
+checkOk(scoreFast[0].severity === "warn" && /More cuts/.test(scoreFast[0].fix ?? ""), "scoreStylePace warns on 30 cuts/min vs a 12/min style (over the 2x ceiling)", JSON.stringify(scoreFast));
+const scoreHold = scoreStylePace({ cuts_per_min: 6, longest_hold_s: 10, longest_at: 5 }, { cuts_per_min: 12, longest_hold_s: 4 }, "tight");
+checkOk(scoreHold.length === 2 && scoreHold[0].severity === "pass" && scoreHold[1].severity === "warn" && /holds 10 s from 5 s; tight holds at most 4 s/.test(scoreHold[1].message) && /Cut a pause/.test(scoreHold[1].fix ?? ""), "scoreStylePace warns when the 10s hold beats the 6s limit (max(4x1.5, 4+2)) while 6 cuts/min passes at the 2x floor", JSON.stringify(scoreHold));
+const scoreBoundary = scoreStylePace({ cuts_per_min: 6, longest_hold_s: 12, longest_at: 0 }, { cuts_per_min: 12, longest_hold_s: 8 }, "warm-story");
+checkOk(scoreBoundary.every((f) => f.severity === "pass"), "scoreStylePace passes exactly at both boundaries (6 = 12/2, hold 12 = max(8x1.5, 8+2))", JSON.stringify(scoreBoundary));
+const scorePartial = scoreStylePace({ cuts_per_min: 3, longest_hold_s: 10, longest_at: 0 }, { cuts_per_min: 12 }, "warm-story");
+checkOk(scorePartial.length === 1 && scorePartial[0].metric === "cuts_per_min", "scoreStylePace scores only the metrics the style carries (no longest_hold_s = no hold finding)", JSON.stringify(scorePartial));
+const styleParsed = parseStyleFile({ version: 1, name: "warm-story", pace: { cuts_per_min: 12, longest_hold_s: 8 }, notes: "keep me" });
+checkOk(styleParsed.name === "warm-story" && styleParsed.pace.cuts_per_min === 12 && styleParsed.pace.longest_hold_s === 8, "parseStyleFile accepts a full style file", JSON.stringify(styleParsed));
+checkOk(parseStyleFile({ version: 1, name: "no-pace" }).pace === null, "parseStyleFile accepts a style with no pace block (pace null)", JSON.stringify(parseStyleFile({ version: 1, name: "no-pace" })));
+let styleBadVersion = null;
+try { parseStyleFile({ version: 2, pace: { cuts_per_min: 12 } }); } catch (e) { styleBadVersion = e.message; }
+checkOk(/version must be 1/.test(styleBadVersion ?? ""), "parseStyleFile refuses a version other than 1", styleBadVersion ?? "");
+let styleBadCpm = null;
+try { parseStyleFile({ pace: { cuts_per_min: 0 } }); } catch (e) { styleBadCpm = e.message; }
+checkOk(/cuts_per_min.*over 0/.test(styleBadCpm ?? ""), "parseStyleFile refuses cuts_per_min 0", styleBadCpm ?? "");
+let styleEmptyPace = null;
+try { parseStyleFile({ pace: {} }); } catch (e) { styleEmptyPace = e.message; }
+checkOk(/at least one of/.test(styleEmptyPace ?? ""), "parseStyleFile refuses a pace block with neither metric", styleEmptyPace ?? "");
+let styleBadShape = null;
+try { parseStyleFile([1, 2]); } catch (e) { styleBadShape = e.message; }
+checkOk(/JSON object/.test(styleBadShape ?? ""), "parseStyleFile refuses a non-object style file", styleBadShape ?? "");
 const contentBaselineCliNoContent = await runCli(["check", path.join(root, "test/content-black.mp4"), "--baseline", path.join(root, "test/content-baseline-black.json")], {});
 checkOk(contentBaselineCliNoContent.code !== 0 && /needs --content/.test(contentBaselineCliNoContent.out), "CLI --baseline without --content is refused", contentBaselineCliNoContent.out.slice(0, 200));
 
@@ -2009,6 +2046,12 @@ const initValidate = await runCliJson(["assemble", path.join(initDir, "film.json
 checkOk(initValidate.mode === "validate" && initValidate.total_seconds === 4 && initValidate.total_frames === 120 && initValidate.voice?.duration_seconds === 3 && initValidate.captions?.cue_count === 2, "the scaffolded film validates through assemble (4s/120 frames, 3s voice, 2 caption cues)", JSON.stringify({ total_seconds: initValidate.total_seconds, voice: initValidate.voice, captions: initValidate.captions }));
 const initClaude = await readFile(path.join(initDir, "CLAUDE.md"), "utf8");
 checkOk(/PLACEHOLDER voice/.test(initClaude) && /validate → diagnose → preview → approve → render → verify → verify-cuts/.test(initClaude) && /Do not approve your own checks/.test(initClaude), "init_project CLAUDE.md names the placeholder voice and the full lifecycle", initClaude.split("\n").slice(0, 8).join(" | "));
+// Turn 133: the scaffold also writes style.json — the starter
+// channel pace (10 cuts/min, longest hold 12s) diagnose scores the
+// film against — and CLAUDE.md says how to measure a real one.
+const initStyle = JSON.parse(await readFile(path.join(initDir, "style.json"), "utf8"));
+checkOk(initStyle.version === 1 && initStyle.name === "default" && initStyle.pace.cuts_per_min === 10 && initStyle.pace.longest_hold_s === 12 && initStyle.pace.source === "default" && initJson.style === path.join(initDir, "style.json") && initJson.created.length === 5, "init_project scaffolds style.json with the starter pace (10 cuts/min, hold 12s) and lists it in created", JSON.stringify(initStyle.pace));
+checkOk(/style\.json/.test(initClaude) && /measure-pace/.test(initClaude), "init_project CLAUDE.md names style.json and how to measure a real pace into it", initClaude.split("\n").filter((l) => /style\.json/.test(l)).join(" | "));
 // A second init refuses to clobber the project; force replaces it.
 const initAgain = await callExpectThrow("init_project", { dir: initDir, title: "Second" });
 checkOk(/refuses to overwrite/.test(initAgain) && /film\.json/.test(initAgain), "init_project refuses a second scaffold without force", initAgain.slice(0, 200));
@@ -2668,6 +2711,48 @@ const scenesHueFfmpegRes = await client.callTool({
 });
 const scenesHueFfmpegJson = JSON.parse(scenesHueFfmpegRes.content[0].text);
 checkOk(scenesHueFfmpegJson.detector === "ffmpeg" && scenesHueFfmpegJson.threshold === 0.3 && scenesHueFfmpegJson.count === 0, "scenes ffmpeg misses the hue-only cut (luma-driven metric)", JSON.stringify(scenesHueFfmpegJson.scene_changes));
+
+// measure_pace (lượt 133, idea: marvtub/takes-public measure_pace):
+// the 20s fixture is 4x5s colour blocks by construction, so the
+// measured pace is exact — 3 cuts, 9/min, avg 5s, longest 5s at 0s.
+// With --style-file the numbers are kept in the style.json; a
+// second run keeps the file's other keys and only replaces pace.
+const paceRes = await client.callTool({
+  name: "measure_pace",
+  arguments: { input: path.join(root, "test/pace-source.mp4") },
+});
+const paceJson = JSON.parse(paceRes.content[0].text);
+checkOk(paceJson.operation === "measure_pace" && paceJson.detector === "content" && paceJson.seconds === 20 && paceJson.cuts === 3 && paceJson.cuts_per_min === 9 && paceJson.avg_shot_s === 5 && paceJson.longest_hold_s === 5 && paceJson.longest_at === 0 && paceJson.too_short_to_compare === false && paceJson.style_written === undefined, "measure_pace on the 4x5s fixture is 3 cuts, 9/min, avg 5s, longest 5s at 0s (content detector by default), and writes nothing without --style-file", JSON.stringify(paceJson));
+const paceStylePath = path.join(root, "outputs/mcp-pace-style.json");
+await rm(paceStylePath, { force: true });
+const paceStyleRes = await client.callTool({
+  name: "measure_pace",
+  arguments: { input: path.join(root, "test/pace-source.mp4"), style_file: paceStylePath, style_name: "warm-story" },
+});
+const paceStyleJson = JSON.parse(paceStyleRes.content[0].text);
+checkOk(paceStyleJson.style_written === true && paceStyleJson.style_file === paceStylePath && paceStyleJson.style_name === "warm-story", "measure_pace --style-file reports the written style file and name", JSON.stringify({ style_written: paceStyleJson.style_written, style_file: paceStyleJson.style_file }));
+const paceStyleDoc = JSON.parse(await readFile(paceStylePath, "utf8"));
+checkOk(paceStyleDoc.version === 1 && paceStyleDoc.name === "warm-story" && paceStyleDoc.pace.cuts_per_min === 9 && paceStyleDoc.pace.longest_hold_s === 5 && paceStyleDoc.pace.avg_shot_s === 5 && paceStyleDoc.pace.source === "pace-source.mp4" && typeof paceStyleDoc.pace.measured === "string", "the written style.json keeps the measured pace (9/min, hold 5s) with source + measured stamp", JSON.stringify(paceStyleDoc.pace));
+// Other keys survive a re-measure: the pace block is replaced,
+// the rest of the file is kept.
+paceStyleDoc.notes = "keep me";
+await writeFile(paceStylePath, JSON.stringify(paceStyleDoc, null, 2), "utf8");
+const paceStyleRes2 = await client.callTool({
+  name: "measure_pace",
+  arguments: { input: path.join(root, "test/pace-source.mp4"), style_file: paceStylePath },
+});
+const paceStyleDoc2 = JSON.parse(await readFile(paceStylePath, "utf8"));
+checkOk(JSON.parse(paceStyleRes2.content[0].text).style_name === "mcp-pace-style" && paceStyleDoc2.notes === "keep me" && paceStyleDoc2.pace.cuts_per_min === 9, "re-measuring into the same style file keeps other keys and defaults the name to the file stem", JSON.stringify({ name: paceStyleDoc2.name, notes: paceStyleDoc2.notes }));
+const paceShortRes = await client.callTool({
+  name: "measure_pace",
+  arguments: { input: path.join(root, "test/scenes-source.mp4") },
+});
+const paceShortJson = JSON.parse(paceShortRes.content[0].text);
+checkOk(paceShortJson.cuts === 1 && paceShortJson.too_short_to_compare === true && /under 15s/.test(paceShortJson.note ?? ""), "measure_pace still measures a 10s file (1 cut) but says it is too short to compare a style against", JSON.stringify({ cuts: paceShortJson.cuts, too_short: paceShortJson.too_short_to_compare }));
+const paceMissing = await callExpectThrow("measure_pace", { input: path.join(root, "test/no-such-video.mp4") });
+checkOk(/not found|no such file/i.test(paceMissing), "measure_pace on a missing file fails loudly", paceMissing.slice(0, 200));
+const paceCli = await runCliJson(["measure-pace", path.join(root, "test/pace-source.mp4")]);
+checkOk(paceCli.cuts === 3 && paceCli.cuts_per_min === 9 && paceCli.longest_hold_s === 5, "CLI measure-pace reports the same 3 cuts / 9 per minute / 5s hold", JSON.stringify(paceCli));
 const scenesFlashRes = await client.callTool({
   name: "scenes",
   arguments: { input: path.join(root, "test/scenes-flash.mp4"), detector: "content" },
@@ -2979,6 +3064,30 @@ const hookManifestDryRes = await client.callTool({
 });
 const hookManifestDryJson = JSON.parse(hookManifestDryRes.content[0].text);
 checkOk(hookManifestDryJson.dry_run === true && hookManifestDryJson.steps[0].output === hookManifestDryJson.input && hookManifestDryJson.steps[1].input === hookManifestDryJson.input, "manifest hook dry-run plans the hook step as a pass-through (output = input)", JSON.stringify(hookManifestDryJson.steps.map((s) => s.output)));
+// measure_pace in batch + manifest (lượt 133): probe-only like
+// hook — no file is written, the pace numbers come back in the
+// row's result / the step's result, and the cache stores that
+// result. The style-file write is deliberately not exposed here.
+await rm(path.join(root, "outputs/mcp-batch-pace-in"), { recursive: true, force: true });
+await rm(path.join(root, "outputs/mcp-batch-pace-out"), { recursive: true, force: true });
+await mkdir(path.join(root, "outputs/mcp-batch-pace-in"), { recursive: true });
+await copyFile(path.join(root, "test/pace-source.mp4"), path.join(root, "outputs/mcp-batch-pace-in/pace-source.mp4"));
+const paceBatchRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "measure_pace", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-pace-in"), output_dir: path.join(root, "outputs/mcp-batch-pace-out") },
+});
+const paceBatchJson = JSON.parse(paceBatchRes.content[0].text);
+checkOk(paceBatchJson.succeeded === 1 && paceBatchJson.failed === 0 && paceBatchJson.output_suffix === null && paceBatchJson.results[0].status === "ok" && paceBatchJson.results[0].output === null && paceBatchJson.results[0].result.cuts === 3 && paceBatchJson.results[0].result.cuts_per_min === 9, "batch measure_pace succeeds with no output file and the pace numbers in the row's result", JSON.stringify(paceBatchJson.results.map((r) => r.result)));
+await rm(path.join(root, "outputs/mcp-manifest-pace.mp4"), { force: true });
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const paceManifestPath = path.join(root, "outputs", "manifest-pace.json");
+await writeFile(paceManifestPath, JSON.stringify({ version: 1, input: path.join(root, "test/pace-source.mp4"), output: path.join(root, "outputs/mcp-manifest-pace.mp4"), steps: [{ tool: "measure_pace" }, { tool: "trim", args: { start: 5, end: 10 } }] }), "utf8");
+const paceManifestRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: paceManifestPath },
+});
+const paceManifestJson = JSON.parse(paceManifestRes.content[0].text);
+checkOk(paceManifestJson.steps_run === 2 && paceManifestJson.steps.every((s) => s.status === "ok") && paceManifestJson.steps[0].tool === "measure_pace" && paceManifestJson.steps[0].result.cuts === 3 && paceManifestJson.steps[0].result.cuts_per_min === 9 && paceManifestJson.steps[0].output === paceManifestJson.input && near(paceManifestJson.final.duration_seconds, 5, 0.05), "manifest measure_pace step records the 3-cut pace, passes the chain through, then trim cuts 5-10s (final 5s)", JSON.stringify(paceManifestJson.steps.map((s) => s.result?.cuts_per_min ?? s.result?.duration_seconds)));
 // The manifest validator takes the new snap args too (same args
 // list as batch): a dry-run manifest with snap_quiet:false validates
 // without rendering anything.
@@ -5524,7 +5633,7 @@ const findSourceRes = await client.callTool({
   arguments: { directory: path.join(root, "test"), name: "source" },
 });
 const findSourceJson = JSON.parse(findSourceRes.content[0].text);
-checkOk(findSourceJson.total_matches === 15, "find 'source' matches 15 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source, hook-source, hook-motion-source, hook-snap-source, sharpness-source, rotate-source, noisy-source, beat-trim-source, levels-source)", `got ${findSourceJson.total_matches}`);
+checkOk(findSourceJson.total_matches === 16, "find 'source' matches 16 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source, hook-source, hook-motion-source, hook-snap-source, sharpness-source, rotate-source, noisy-source, beat-trim-source, levels-source, pace-source)", `got ${findSourceJson.total_matches}`);
 
 const findMp3Res = await client.callTool({
   name: "find",
@@ -7053,7 +7162,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 80 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 80 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 81 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 81 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -8303,6 +8412,63 @@ await writeFile(diagBounceApexStage.manifestPath, JSON.stringify(diagBounceApexD
 const diagBounceApexRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagBounceApexStage.manifestPath } });
 const diagBounceApexJson = JSON.parse(diagBounceApexRes.content[0].text);
 checkOk(diagBounceApexJson.verdict === "pass" && diagBounceApexJson.warnings === 0 && !diagBounceApexJson.checks?.some((c) => c.id === "text_layer" && c.severity === "warn"), "diagnose passes the same film with bounce apex 0.35 (ball clears the top text band)", JSON.stringify({ verdict: diagBounceApexJson.verdict, warnings: diagBounceApexJson.warnings }));
+// Style pace in diagnose (lượt 133, idea: Takes check_edit): the
+// 20s style fixtures are 4 canvas shots (no source files, so no
+// geometry/motion checks fire) — only the style_pace checks differ.
+// Pass: 4x5s = 9 cuts/min vs style 12, longest hold 5s vs 8s.
+const diagStylePassStage = await stageAssembleManifest("assemble-style-pass.json");
+const diagStylePassRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagStylePassStage.manifestPath, style_file: path.join(root, "test/style-warm.json") } });
+const diagStylePassJson = JSON.parse(diagStylePassRes.content[0].text);
+checkOk(diagStylePassJson.verdict === "pass" && diagStylePassJson.warnings === 0 && diagStylePassJson.checks?.filter((c) => c.id === "style_pace").length === 2 && diagStylePassJson.checks?.filter((c) => c.id === "style_pace").every((c) => c.severity === "pass"), "diagnose scores the 4x5s film against the warm-story style: 9 cuts/min + 5s hold both pass, verdict pass", JSON.stringify(diagStylePassJson.checks?.filter((c) => c.id === "style_pace")));
+// Slow: 2x10s = 3 cuts/min vs style 12 — under the 2x floor, warn
+// with the Takes fix; the 10s hold is inside max(8x1.5, 8+2) = 12.
+const diagStyleSlowStage = await stageAssembleManifest("assemble-style-slow.json");
+const diagStyleSlowRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagStyleSlowStage.manifestPath, style_file: path.join(root, "test/style-warm.json") } });
+const diagStyleSlowJson = JSON.parse(diagStyleSlowRes.content[0].text);
+checkOk(diagStyleSlowJson.verdict === "warn" && diagStyleSlowJson.warnings === 1 && diagStyleSlowJson.checks?.some((c) => c.id === "style_pace" && c.severity === "warn" && /cuts 3 times a minute; warm-story cuts 12/.test(c.message) && /Fewer cuts/.test(c.fix ?? "")), "diagnose warns on the 2x10s film: 3 cuts/min is fewer than the style, with the fix attached", JSON.stringify(diagStyleSlowJson.checks?.filter((c) => c.id === "style_pace")));
+// Hold: 5/10/5 = 6 cuts/min (in range) but the 10s hold beats the
+// tight style's 6s limit — warn with the shot's start time.
+const diagStyleHoldStage = await stageAssembleManifest("assemble-style-hold.json");
+const diagStyleHoldRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagStyleHoldStage.manifestPath, style_file: path.join(root, "test/style-hold4.json") } });
+const diagStyleHoldJson = JSON.parse(diagStyleHoldRes.content[0].text);
+checkOk(diagStyleHoldJson.verdict === "warn" && diagStyleHoldJson.warnings === 1 && diagStyleHoldJson.checks?.some((c) => c.id === "style_pace" && c.severity === "warn" && c.metric === "longest_hold_s" && /holds 10 s from 5 s; tight holds at most 4 s/.test(c.message) && /Cut a pause/.test(c.fix ?? "")), "diagnose warns when the 10s hold beats the tight style's 6s limit, naming the shot start", JSON.stringify(diagStyleHoldJson.checks?.filter((c) => c.id === "style_pace")));
+// Under 15s the film is too short to compare: info, not a score.
+const diagStyleShortStage = await stageAssembleManifest("assemble-diagnose-pass.json");
+const diagStyleShortRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagStyleShortStage.manifestPath, style_file: path.join(root, "test/style-warm.json") } });
+const diagStyleShortJson = JSON.parse(diagStyleShortRes.content[0].text);
+checkOk(diagStyleShortJson.checks?.some((c) => c.id === "style_pace" && c.severity === "info" && /too short to compare/.test(c.message)), "diagnose reports info (not a score) for a 10s film under the 15s pace minimum", JSON.stringify(diagStyleShortJson.checks?.filter((c) => c.id === "style_pace")));
+// A broken style file is an error, not a silent skip; a style with
+// no pace block is an info telling the director to measure one.
+const diagStyleBadStage = await stageAssembleManifest("assemble-style-pass.json");
+const diagStyleBadRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagStyleBadStage.manifestPath, style_file: path.join(root, "test/style-bad.json") } });
+const diagStyleBadJson = JSON.parse(diagStyleBadRes.content[0].text);
+checkOk(diagStyleBadJson.verdict === "fail" && diagStyleBadJson.errors === 1 && diagStyleBadJson.checks?.some((c) => c.id === "style_pace" && c.severity === "error" && /not usable/.test(c.message)), "diagnose fails when the style file is broken (cuts_per_min 0)", JSON.stringify(diagStyleBadJson.checks?.filter((c) => c.id === "style_pace")));
+const diagStyleNoPaceStage = await stageAssembleManifest("assemble-style-pass.json");
+const diagStyleNoPaceRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagStyleNoPaceStage.manifestPath, style_file: path.join(root, "test/style-nopace.json") } });
+const diagStyleNoPaceJson = JSON.parse(diagStyleNoPaceRes.content[0].text);
+checkOk(diagStyleNoPaceJson.checks?.some((c) => c.id === "style_pace" && c.severity === "info" && /has no pace block/.test(c.message)), "diagnose reports info when the style carries no pace block", JSON.stringify(diagStyleNoPaceJson.checks?.filter((c) => c.id === "style_pace")));
+// Auto-load: a style.json sitting next to the film is used without
+// a flag; without one, no style_pace check appears at all.
+const diagStyleAutoDir = path.join(root, "outputs/mcp-style-auto");
+await rm(diagStyleAutoDir, { recursive: true, force: true });
+await mkdir(diagStyleAutoDir, { recursive: true });
+await copyFile(path.join(root, "test/assemble-style-pass.json"), path.join(diagStyleAutoDir, "film.json"));
+await copyFile(path.join(root, "test/style-warm.json"), path.join(diagStyleAutoDir, "style.json"));
+await copyFile(path.join(root, "test/mix-voice.mp3"), path.join(diagStyleAutoDir, "mix-voice.mp3"));
+const diagStyleAutoRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: path.join(diagStyleAutoDir, "film.json") } });
+const diagStyleAutoJson = JSON.parse(diagStyleAutoRes.content[0].text);
+checkOk(diagStyleAutoJson.verdict === "pass" && diagStyleAutoJson.checks?.filter((c) => c.id === "style_pace").length === 2 && diagStyleAutoJson.checks?.find((c) => c.id === "style_pace")?.style_source === "auto", "diagnose auto-loads the style.json next to the film (style_source auto, both metrics pass)", JSON.stringify(diagStyleAutoJson.checks?.filter((c) => c.id === "style_pace")));
+const diagStyleNoneDir = path.join(root, "outputs/mcp-style-none");
+await rm(diagStyleNoneDir, { recursive: true, force: true });
+await mkdir(diagStyleNoneDir, { recursive: true });
+await copyFile(path.join(root, "test/assemble-style-pass.json"), path.join(diagStyleNoneDir, "film.json"));
+await copyFile(path.join(root, "test/mix-voice.mp3"), path.join(diagStyleNoneDir, "mix-voice.mp3"));
+const diagStyleNoneRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: path.join(diagStyleNoneDir, "film.json") } });
+const diagStyleNoneJson = JSON.parse(diagStyleNoneRes.content[0].text);
+checkOk(!diagStyleNoneJson.checks?.some((c) => c.id === "style_pace"), "diagnose adds no style_pace check when there is no style file anywhere", JSON.stringify(diagStyleNoneJson.checks?.map((c) => c.id)));
+// The same pass film through the CLI with --style-file.
+const diagStyleCli = await runCliJson(["diagnose", diagStylePassStage.manifestPath, "--style-file", path.join(root, "test/style-warm.json")]);
+checkOk(diagStyleCli.verdict === "pass" && diagStyleCli.checks?.filter((c) => c.id === "style_pace").length === 2, "CLI diagnose --style-file scores the film the same way", JSON.stringify(diagStyleCli.checks?.filter((c) => c.id === "style_pace")));
 const diagDoctorRes = await client.callTool({ name: "doctor", arguments: {} });
 const diagDoctorJson = JSON.parse(diagDoctorRes.content[0].text);
 checkOk(diagDoctorJson.tools?.diagnose?.available === true, "doctor reports diagnose as available", JSON.stringify(diagDoctorJson.tools?.diagnose));
@@ -9462,7 +9628,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 80 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 81 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -9522,11 +9688,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 80, "GET /mcp reports name/version/transport and 80 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 81, "GET /mcp reports name/version/transport and 81 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 80 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 80 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 81 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 81 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -9597,7 +9763,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 80, "JSON-RPC tools/list returns the same 80 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 81, "JSON-RPC tools/list returns the same 81 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

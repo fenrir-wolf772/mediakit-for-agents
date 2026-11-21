@@ -873,7 +873,9 @@ adds nothing — a cut would do), voice loudness (warns below −30 or
 above −8 LUFS), caption coverage and gaps, music loop count (over 3x
 the seam will be heard), sfx tails past the film end, chapters that
 land mid-shot, and text layers that wrap past 4 lines or sit at the
-bottom in the burned-caption band. Probe-only, writes nothing. A
+bottom in the burned-caption band. It also scores style pace when a
+`style.json` is present — cuts per minute + longest hold of the film's
+planned shots, against the pace the style keeps (see §33h). Probe-only, writes nothing. A
 broken manifest returns verdict `fail` with `format_error` instead of
 throwing, so fix the manifest and re-run diagnose in a loop — a `warn`
 verdict is still renderable, a `fail` is not.
@@ -905,6 +907,31 @@ every `download` writes `<output>.provenance.json` next to the file
 the license is the caller's `--license` declaration, or `unknown`
 when none was given, never guessed from a filename or a domain;
 check the source before publishing.
+
+### 33h. A style keeps its pace as numbers — measure it, then let diagnose score the edit
+A channel's cutting rhythm is not a feeling: it is cuts per minute
+and longest hold, measured from a video whose cutting the channel
+already likes. `measure_pace <reference.mp4>` counts the reference's
+hard cuts (content detector by default — the hue/sat/luma split, so
+hue-only cuts count too) and reports `{seconds, cuts, cuts_per_min,
+avg_shot_s, longest_hold_s, longest_at}`; `--style-file style.json`
+keeps those numbers as that style's pace (created if missing, pace
+block replaced, other keys kept). `diagnose` then scores the film's
+*planned* pace — cuts per minute from the shot boundaries, longest
+hold from the longest shot — against it: cuts within 2x of the style
+either way, longest hold over style x1.5 *and* +2s, each a warning
+with a fix ("Tighten the pauses, or cut to B-roll" / "Cut a pause in
+it, or cut to B-roll for part of it"). The style file is found by an
+explicit `--style-file`, or the `style.json` sitting next to the
+film — `init_project` scaffolds one with starter defaults (10
+cuts/min, longest hold 12s, the same bar as `qa_report`'s avg-shot
+≤6s rule). Films under 15s are too short to compare — diagnose says
+so instead of scoring noise — and a style with no pace block says so
+instead of passing silently. A broken style file fails diagnose: a
+style that cannot be read must not silently score nothing.
+`measure_pace` is also a probe-only batch operation and manifest step
+(measure only — the style-file write is not exposed there, so a batch
+never last-wins one style file).
 
 ### 34. Resources are the map, tools are the hands — and the map never leaves the workspace
 Before guessing a path, read `videos://list` (every media file under

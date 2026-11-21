@@ -773,6 +773,17 @@ const COMMANDS = {
       ["--min-fade-frames", "A dark run shorter than this many frames is not a fade (default 2)"],
     ],
   },
+  "measure-pace": {
+    usage: "mediakit measure-pace <input> [--detector content|ffmpeg] [--threshold 0.05] [--style-file <style.json>] [--style-name <name>]",
+    desc: "Measure a reference video's cutting pace: count its hard cuts with the scenes detector, then report {seconds, cuts, cuts_per_min, avg_shot_s, longest_hold_s, longest_at}. Detector defaults to content (hue/sat/luma split scoring, catches hue-only cuts the ffmpeg metric misses). With --style-file, keep the measured pace in that style's style.json (created if missing, pace block replaced, other keys kept) so diagnose scores every film in the project against it; --style-name sets the name stored (default: the style file's name without .json). Without --style-file nothing is written. A file under 15s still measures, but the result says it is too short to compare a style against.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--detector", "content (default) or ffmpeg"],
+      ["--threshold", "Scene sensitivity 0-1, lower = more sensitive (default 0.05 content / 0.3 ffmpeg)"],
+      ["--style-file", "Style file to keep the measured pace in (created if missing) — omit to measure without writing"],
+      ["--style-name", "Name stored in the style file (default: the style file's name without .json)"],
+    ],
+  },
   keyframes: {
     usage: "mediakit keyframes <input> [--nearest <seconds|MM:SS>]",
     desc: "List keyframe (I-frame) timestamps + GOP intervals. Probe-only, writes no file. Check before a stream-copy trim. --nearest <t> also reports the keyframe nearest one cut point: before/after/closest + distance + direction (before/after/exact).",
@@ -927,7 +938,7 @@ const COMMANDS = {
   },
   init: {
     usage: "mediakit init <dir> [--title <name>] [--preset vertical|horizontal|square|cinematic|vertical-60] [--brand <id>] [--force]",
-    desc: "Scaffold a new assemble video project: a film.json that already validates (preset vertical by default, two template shots, 4s total), a placeholder voice (440 Hz tone WAV, 3s — replace it with the real narration before delivery), placeholder captions, an assets/ layout (shots/, music/) and a CLAUDE.md with the project lifecycle (validate → diagnose → preview → approve → render → verify). Refuses when film.json or CLAUDE.md already exists unless --force.",
+    desc: "Scaffold a new assemble video project: a film.json that already validates (preset vertical by default, two template shots, 4s total), a style.json with the starter channel pace (10 cuts/min, longest hold 12s — diagnose scores the film against it), a placeholder voice (440 Hz tone WAV, 3s — replace it with the real narration before delivery), placeholder captions, an assets/ layout (shots/, music/) and a CLAUDE.md with the project lifecycle (validate → diagnose → preview → approve → render → verify). Refuses when film.json, CLAUDE.md or style.json already exists unless --force.",
     args: [{ name: "dir", required: true }],
     options: [
       ["--title", "Film title (default: the directory name)"],
@@ -967,10 +978,12 @@ const COMMANDS = {
     ],
   },
   diagnose: {
-    usage: "mediakit diagnose <film.json>",
-    desc: "Director preflight for an assemble film manifest: validate the manifest, then measure what validation cannot — real motion inside each video shot's exact window (a frozen video is an error), source geometry vs the film frame (upscale over 2x or a low fps warns), the visual seam across each transition, voice loudness, caption coverage and gaps, music loop count, sfx tails past the film end, chapter alignment to cuts, and text layers that are too tall or sit in the burned-caption band. Probe-only, writes nothing. A broken manifest reports verdict fail with format_error instead of exiting 2. Run it after writing a film.json and before approve/render; run verify after the render.",
+    usage: "mediakit diagnose <film.json> [--style-file <style.json>]",
+    desc: "Director preflight for an assemble film manifest: validate the manifest, then measure what validation cannot — real motion inside each video shot's exact window (a frozen video is an error), source geometry vs the film frame (upscale over 2x or a low fps warns), the visual seam across each transition, voice loudness, caption coverage and gaps, music loop count, sfx tails past the film end, chapter alignment to cuts, text layers that are too tall or sit in the burned-caption band, and style pace (cuts per minute + longest hold scored against the style.json — an explicit --style-file, or the style.json sitting next to the film; films under 15s are too short to compare). Probe-only, writes nothing. A broken manifest reports verdict fail with format_error instead of exiting 2. Run it after writing a film.json and before approve/render; run verify after the render.",
     args: [{ name: "manifest", required: true }],
-    options: [],
+    options: [
+      ["--style-file", "Style file to score the film's pace against (default: style.json next to the film manifest, when it exists)"],
+    ],
   },
   chapters: {
     usage: "mediakit chapters [--words-file <words.json> | <input>] [--min-gap 2] [--title-words 4] [--max-chapters 32] [-o <chapters.json>]",
@@ -1989,6 +2002,15 @@ async function main() {
           minFadeFrames: numOpt(opts, "min_fade_frames") ?? 2,
         });
         break;
+      case "measure-pace":
+        result = await core.measurePace({
+          input: needInput(),
+          detector: opts.detector ?? "content",
+          threshold: numOpt(opts, "threshold") ?? null,
+          styleFile: opts.style_file ?? null,
+          styleName: opts.style_name ?? null,
+        });
+        break;
       case "keyframes":
         result = await core.listKeyframes({ input: needInput(), nearest: opts.nearest });
         break;
@@ -2203,6 +2225,7 @@ async function main() {
         if (!positional[0]) fail("missing manifest file: mediakit diagnose <film.json>");
         result = await core.diagnoseFilm({
           manifestPath: positional[0],
+          styleFile: opts.style_file ?? null,
         });
         break;
       }

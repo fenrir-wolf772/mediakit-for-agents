@@ -10972,6 +10972,9 @@ const TOOL_REQUIREMENTS = {
   // search_words reads a transcript JSON in pure Node — no ffmpeg
   // capability needed either.
   search_words: {},
+  // measure_pace is detectScenes with a different detector default
+  // (content) — same two filters as scenes.
+  measure_pace: { filters: ["select", "signalstats"] },
   // clean_voice decodes to raw PCM for the diagnosis (pure Node),
   // then runs the pre-steps + the EQ/compressor/limiter chain in
   // ffmpeg and measures with loudnorm. Output is pcm_f32le WAV.
@@ -12711,6 +12714,179 @@ export async function detectScenes({
   return result;
 }
 
+// ---------------------------------------------------------------- pace
+// Style pace (marvtub/takes-public `measure_pace` / `check_edit`
+// idea, ported faithfully, lượt 133): a style made from a video keeps
+// that video's pace — cuts per minute and longest hold, measured, not
+// remembered — and every edit in that style is scored against it.
+// Takes measures cuts with its own frame-diff method (ffmpeg's scene
+// score misses a jump cut at the same angle); MediaKit reuses its own
+// `scenes` content detector instead, which already catches hue-only
+// cuts the ffmpeg detector misses (red->blue scores 0.4 on ffmpeg,
+// red->green 0; the content detector finds both) — same numbers out,
+// different detector in. The comparison tolerances are Takes' own
+// PACE_OFF, kept verbatim: cuts within 2x either way of the style,
+// longest hold over style x 1.5 AND + 2s. Edits under 15s have too
+// few cuts to compare (PACE_MIN_S) — the check reports that instead
+// of scoring noise. The planned pace of an assemble film uses the
+// same math on declared shot boundaries (cuts = shots - 1), so
+// diagnose scores the edit before a single frame renders.
+const PACE_MIN_SECONDS = 15;
+const PACE_CUTS_FACTOR = 2.0;
+const PACE_HOLD_FACTOR = 1.5;
+const PACE_HOLD_SECONDS = 2.0;
+const STYLE_FILE_VERSION = 1;
+
+// {seconds, cuts, cuts_per_min, avg_shot_s, longest_hold_s,
+// longest_at} of one video — Takes' pace_numbers, same shape and
+// same rounding, so a style.json written by either side reads the
+// same. cuts is the list of cut timestamps in seconds.
+export function paceNumbers(cuts, dur) {
+  const list = [...cuts].sort((a, b) => a - b);
+  const shots = [];
+  let prev = 0;
+  for (const c of list) { if (c > prev) shots.push(c - prev); prev = c; }
+  if (dur > prev) shots.push(dur - prev);
+  const longest = shots.length ? Math.max(...shots) : dur;
+  const at = shots.length ? [0, ...list][shots.indexOf(longest)] : 0;
+  return {
+    seconds: +dur.toFixed(1),
+    cuts: list.length,
+    cuts_per_min: +(list.length / Math.max(dur, 1) * 60).toFixed(1),
+    avg_shot_s: +(dur / (list.length + 1)).toFixed(1),
+    longest_hold_s: +longest.toFixed(1),
+    longest_at: +at.toFixed(1),
+  };
+}
+
+// A style file is {version: 1, name, pace: {cuts_per_min,
+// longest_hold_s?, avg_shot_s?, source?, measured?}} — other keys
+// are kept, never scored. pace may carry only one of cuts_per_min /
+// longest_hold_s (the missing metric is simply not scored); a pace
+// block with neither is refused, so a typo never silently disables
+// the whole check.
+export function parseStyleFile(doc, label = "style file") {
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
+    throw new MediaKitError(`${label} must be a JSON object with a "pace" block, got: ${JSON.stringify(doc)?.slice(0, 80) ?? String(doc)}`, "INVALID_ARG");
+  }
+  if (doc.version !== undefined && doc.version !== STYLE_FILE_VERSION) {
+    throw new MediaKitError(`${label} version must be ${STYLE_FILE_VERSION}, got: ${JSON.stringify(doc.version)}`, "INVALID_ARG");
+  }
+  const name = doc.name === undefined || doc.name === null ? null : doc.name;
+  if (name !== null && (typeof name !== "string" || !name.trim())) {
+    throw new MediaKitError(`${label} "name" must be a non-empty string, got: ${JSON.stringify(doc.name)}`, "INVALID_ARG");
+  }
+  if (doc.pace === undefined || doc.pace === null) return { name, pace: null };
+  const p = doc.pace;
+  if (typeof p !== "object" || Array.isArray(p)) {
+    throw new MediaKitError(`${label} "pace" must be an object {cuts_per_min, longest_hold_s}, got: ${JSON.stringify(p)}`, "INVALID_ARG");
+  }
+  const out = {};
+  for (const key of ["cuts_per_min", "longest_hold_s"]) {
+    if (p[key] === undefined || p[key] === null) continue;
+    if (typeof p[key] !== "number" || !Number.isFinite(p[key]) || p[key] <= 0) {
+      throw new MediaKitError(`${label} "pace.${key}" must be a number over 0, got: ${JSON.stringify(p[key])}`, "INVALID_ARG");
+    }
+    out[key] = p[key];
+  }
+  if (Object.keys(out).length === 0) {
+    throw new MediaKitError(`${label} "pace" needs at least one of cuts_per_min / longest_hold_s`, "INVALID_ARG");
+  }
+  return { name, pace: out };
+}
+
+// Score measured pace against a style's pace — Takes'
+// chk_style_pace, same messages and same fixes, adapted to
+// MediaKit's wording. Returns one finding per scored metric
+// (pass when inside tolerance, warn + fix when outside); an empty
+// array means the style carries no pace metric to score.
+export function scoreStylePace(measured, stylePace, styleName = null) {
+  const findings = [];
+  const who = styleName ? `${styleName} cuts` : "the style cuts";
+  if (stylePace.cuts_per_min !== undefined && stylePace.cuts_per_min !== null) {
+    const w = stylePace.cuts_per_min;
+    const got = measured.cuts_per_min;
+    if (got < w / PACE_CUTS_FACTOR) {
+      findings.push({ metric: "cuts_per_min", severity: "warn", measured: got, style: w,
+        message: `It cuts ${got} times a minute; ${who} ${w}.`,
+        fix: "Fewer cuts than the style. Tighten the pauses, or cut to a page or B-roll where the words show something." });
+    } else if (got > Math.max(w, 1) * PACE_CUTS_FACTOR) {
+      findings.push({ metric: "cuts_per_min", severity: "warn", measured: got, style: w,
+        message: `It cuts ${got} times a minute; ${who} ${w}.`,
+        fix: "More cuts than the style. Let shots run longer and join cuts that split one thought." });
+    } else {
+      findings.push({ metric: "cuts_per_min", severity: "pass", measured: got, style: w,
+        message: `Pace matches the style: ${got} cuts a minute (style ${w}).` });
+    }
+  }
+  if (stylePace.longest_hold_s !== undefined && stylePace.longest_hold_s !== null) {
+    const w = stylePace.longest_hold_s;
+    const got = measured.longest_hold_s;
+    const limit = Math.max(w * PACE_HOLD_FACTOR, w + PACE_HOLD_SECONDS);
+    if (got > limit) {
+      findings.push({ metric: "longest_hold_s", severity: "warn", measured: got, style: w,
+        message: `One shot holds ${got} s from ${measured.longest_at} s; ${styleName ?? "the style"} holds at most ${w} s.`,
+        fix: `The shot from ${measured.longest_at} s runs ${got} s. Cut a pause in it, or cut to a page or B-roll for part of it.` });
+    } else {
+      findings.push({ metric: "longest_hold_s", severity: "pass", measured: got, style: w,
+        message: `Longest hold ${got} s is inside the style (at most ${w} s).` });
+    }
+  }
+  return findings;
+}
+
+// Measure a reference video's pace and, with --style-file, keep it
+// in that style's style.json (Takes' t_measure_pace: meta["pace"]
+// = {…pace, source, measured}). Without a style file nothing is
+// written — the numbers come back for the caller to look at first.
+// A file under 15s still measures (the MIN only gates the
+// comparison), but the result says so, so nobody mistakes a 3-cut
+// toy for a style.
+export async function measurePace({ input, detector = "content", threshold = null, styleFile = null, styleName = null }) {
+  const inPath = await requireInput(input, "video input");
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("measure_pace needs a video input", "INVALID_ARG");
+  const scenes = await detectScenes({ input: inPath, detector, threshold });
+  const dur = meta.duration_seconds ?? scenes.duration_seconds;
+  if (!Number.isFinite(dur) || dur <= 0) throw new MediaKitError("measure_pace could not read the input duration", "PROBE_FAILED");
+  const pace = paceNumbers(scenes.scene_changes, dur);
+  const result = {
+    operation: "measure_pace",
+    input: inPath,
+    detector: scenes.detector,
+    duration_seconds: dur,
+    ...pace,
+    too_short_to_compare: dur < PACE_MIN_SECONDS,
+    note: dur < PACE_MIN_SECONDS
+      ? `Only ${dur}s — under ${PACE_MIN_SECONDS}s, too few cuts to compare a style against; the numbers above are still the measured pace.`
+      : undefined,
+  };
+  if (styleFile === null || styleFile === undefined) return result;
+  const stylePath = await prepareOutput(styleFile, "style file");
+  const name = (typeof styleName === "string" && styleName.trim())
+    ? styleName.trim()
+    : path.basename(stylePath).replace(/\.json$/i, "");
+  if (!name) throw new MediaKitError("measure_pace needs a style name: pass --style-name, or give the style file a name", "INVALID_ARG");
+  let doc = {};
+  try {
+    doc = JSON.parse(await readFile(stylePath, "utf8"));
+    if (!doc || typeof doc !== "object" || Array.isArray(doc)) throw new Error("not an object");
+  } catch (e) {
+    if (e.code !== "ENOENT") throw new MediaKitError(`measure_pace cannot update ${stylePath}: ${e.message}`, "INVALID_ARG");
+  }
+  doc.version = STYLE_FILE_VERSION;
+  doc.name = name;
+  doc.pace = {
+    cuts_per_min: pace.cuts_per_min,
+    longest_hold_s: pace.longest_hold_s,
+    avg_shot_s: pace.avg_shot_s,
+    source: path.basename(inPath),
+    measured: new Date().toISOString(),
+  };
+  await writeFile(stylePath, `${JSON.stringify(doc, null, 2)}\n`, "utf8");
+  return { ...result, style_file: stylePath, style_name: name, style_written: true };
+}
+
 // ---------------------------------------------------------------- hook
 // Find the best hook window in a clip (sonic-match-mcp's hook_window
 // idea, measured from the footage instead of a script): slide a
@@ -14367,6 +14543,18 @@ export const BATCH_OPERATIONS = {
       maxMatches: a.max_matches ?? 10, contextWords: a.context_words ?? 5,
     }),
     extraHash: async (input, a) => hashSidecar(cutWordsFileFor(input, a.words_dir)),
+  },
+  // measure_pace in batch/manifest is probe-only like hook: the
+  // pace numbers come back in the row's `result` (batch) or the
+  // step's result (manifest) and the cache stores that result — no
+  // file is written. The style-file write is deliberately NOT
+  // exposed here: a batch row writing the same style.json per file
+  // would be last-wins noise; measure the reference with the tool
+  // itself, then diagnose the film against the style it keeps.
+  measure_pace: {
+    probeOnly: true,
+    args: ["detector", "threshold"],
+    run: (input, output, a) => measurePace({ input, detector: a.detector ?? "content", threshold: a.threshold ?? null }),
   },
   // slideshow in batch is a SET operation, not a per-file one: the
   // whole matched set becomes ONE slideshow (batch() branches on it
@@ -17792,12 +17980,13 @@ export async function initProject({ dir, title = null, preset = "vertical", bran
     : path.basename(absDir);
   const filmPath = path.join(absDir, "film.json");
   const claudePath = path.join(absDir, "CLAUDE.md");
+  const stylePath = path.join(absDir, "style.json");
   // Refuse to clobber an existing project unless force says so —
   // silently overwriting a film.json someone edited would destroy
   // their film. The check runs before any directory is created, so a
   // refusal writes nothing.
   if (!force) {
-    for (const p of [filmPath, claudePath]) {
+    for (const p of [filmPath, claudePath, stylePath]) {
       try {
         await access(p, fsConstants.F_OK);
         throw new MediaKitError(`init_project refuses to overwrite existing ${path.basename(p)} in ${absDir} (pass force:true to replace it)`, "ALREADY_EXISTS");
@@ -17846,6 +18035,20 @@ export async function initProject({ dir, title = null, preset = "vertical", bran
     ],
   };
   await writeFile(filmPath, `${JSON.stringify(film, null, 2)}\n`, "utf8");
+  // Starter style (Takes measure_pace / check_edit, lượt 133): the
+  // pace this project's edits are scored against — 10 cuts a minute
+  // with no shot over 12s, the same bar as qa_report's avg-shot
+  // ≤6s rule, so the scaffold's own diagnose agrees with the
+  // delivery gate. These are starter defaults, not measurements:
+  // run `mediakit measure-pace <reference.mp4> --style-file
+  // style.json` on a video whose cutting the channel already likes
+  // to replace them with measured pace.
+  const style = {
+    version: 1,
+    name: "default",
+    pace: { cuts_per_min: 10, longest_hold_s: 12, source: "default" },
+  };
+  await writeFile(stylePath, `${JSON.stringify(style, null, 2)}\n`, "utf8");
   const captions = [
     "1",
     "00:00:00,500 --> 00:00:02,000",
@@ -17867,6 +18070,7 @@ export async function initProject({ dir, title = null, preset = "vertical", bran
     "## Layout",
     "",
     "- `film.json` — the film manifest (assemble schema). The voice is the master clock.",
+    "- `style.json` — the channel pace this project's edits are scored against (10 cuts/min, longest hold 12s — starter defaults; `mediakit measure-pace <reference.mp4> --style-file style.json` replaces them with measured pace, and `diagnose` scores the film against them).",
     "- `assets/voice.wav` — PLACEHOLDER voice (440 Hz tone, 3s). Replace it with the real narration before delivery.",
     "- `assets/captions.srt` — placeholder captions; rewrite them to match the real voice.",
     "- `assets/shots/` — still images / video clips referenced by shots.",
@@ -17903,6 +18107,7 @@ export async function initProject({ dir, title = null, preset = "vertical", bran
     preset: presetDoc.id,
     ...(brandDoc ? { brand } : {}),
     film: filmPath,
+    style: stylePath,
     voice: voicePath,
     voice_seconds: voiceMeta.duration_seconds,
     captions: captionsPath,
@@ -17910,7 +18115,7 @@ export async function initProject({ dir, title = null, preset = "vertical", bran
     total_seconds: totalSeconds,
     total_frames: Math.round(totalSeconds * fps),
     shots: film.shots.map((s) => ({ id: s.id, template: s.template, duration: s.duration })),
-    created: [filmPath, voicePath, captionsPath, claudePath],
+    created: [filmPath, stylePath, voicePath, captionsPath, claudePath],
     next_steps: [
       "mediakit assemble film.json --mode validate",
       "mediakit diagnose film.json",
@@ -18371,7 +18576,7 @@ async function diagnoseFrameMeanDiff(aPng, bPng) {
   return +(+m[1]).toFixed(2);
 }
 
-export async function diagnoseFilm({ manifestPath }) {
+export async function diagnoseFilm({ manifestPath, styleFile = null }) {
   const manifestAbs = await requireInput(manifestPath, "film manifest");
   let doc;
   try {
@@ -18436,6 +18641,56 @@ export async function diagnoseFilm({ manifestPath }) {
       }
     } else if (roles.some((r) => r.role === "hook")) {
       add("hook_slot", "info", "a shot carries role \"hook\" but no film-level hook window is set — add hook {shot, start?, end?} to pin the exact opening segment");
+    }
+
+    // Style pace (Takes measure_pace / check_edit, lượt 133): a film
+    // IS an edit, so its planned pace — cuts per minute from the
+    // shot boundaries, longest hold from the longest shot — is scored
+    // against the style.json the project keeps. An explicit
+    // --style-file wins; otherwise the style.json sitting next to
+    // the film is used, so a project scaffolded by init_project
+    // scores itself without flags. Under 15s the film has too few
+    // cuts to compare (Takes' PACE_MIN_S) — that is an info, not a
+    // pass. A broken style file is an error: a style that cannot be
+    // read must not silently score nothing.
+    let stylePath = null;
+    let styleSource = null;
+    if (styleFile) {
+      stylePath = await requireInput(styleFile, "style file");
+      styleSource = "explicit";
+    } else {
+      const sibling = path.join(path.dirname(manifestAbs), "style.json");
+      try {
+        await access(sibling, fsConstants.R_OK);
+        stylePath = sibling;
+        styleSource = "auto";
+      } catch {
+        // No style.json next to the film: no style check at all.
+      }
+    }
+    if (stylePath) {
+      let styleDoc = null;
+      let styleError = null;
+      try {
+        styleDoc = parseStyleFile(JSON.parse(await readFile(stylePath, "utf8")), stylePath);
+      } catch (e) {
+        styleError = e instanceof MediaKitError ? e.message : `cannot read style file: ${e.message}`;
+      }
+      if (styleError) {
+        add("style_pace", "error", `style file ${stylePath} is not usable: ${styleError}`);
+      } else if (!styleDoc.pace) {
+        add("style_pace", "info", `style "${styleDoc.name ?? "unnamed"}" (${styleSource}: ${path.basename(stylePath)}) has no pace block — run measure_pace on a reference video to keep its pace in style.json`);
+      } else if (plan.total_seconds < PACE_MIN_SECONDS) {
+        add("style_pace", "info", `film is ${plan.total_seconds}s — under ${PACE_MIN_SECONDS}s, too short to compare pace against the "${styleDoc.name ?? "unnamed"}" style (${styleDoc.pace.cuts_per_min} cuts/min, longest hold ${styleDoc.pace.longest_hold_s ?? "—"}s)`);
+      } else {
+        const boundaries = [];
+        let acc = 0;
+        for (const s of plan.shots.slice(0, -1)) { acc += s.duration; boundaries.push(+acc.toFixed(3)); }
+        const measured = paceNumbers(boundaries, plan.total_seconds);
+        for (const f of scoreStylePace(measured, styleDoc.pace, styleDoc.name)) {
+          add("style_pace", f.severity, f.message, { metric: f.metric, measured: f.measured, style: f.style, ...(f.fix ? { fix: f.fix } : {}), style_file: stylePath, style_source: styleSource });
+        }
+      }
     }
 
     // Voice loudness: the master clock should sit in a range the

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "warm-story",
+  "pace": {
+    "cuts_per_min": 12,
+    "longest_hold_s": 8
+  }
+}

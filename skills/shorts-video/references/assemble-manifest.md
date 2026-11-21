@@ -131,6 +131,15 @@ pictures — pictures fit the voice:
   that does not open the film warns at validate (and again in
   `diagnose`); so does a hook slot on a shot whose `role` is not
   `"hook"`.
+- `style.json` (next to the film, not inside it) is optional:
+  `{version: 1, name, pace: {cuts_per_min, longest_hold_s?}}` —
+  the channel pace `diagnose` scores the film's planned cuts per
+  minute + longest hold against (Takes' `measure_pace` /
+  `check_edit`). `measure_pace <reference.mp4> --style-file
+  style.json` writes measured pace into it; `init_project`
+  scaffolds starter defaults (10 cuts/min, hold 12s). Films under
+  15s are too short to compare; a style with no pace block, or a
+  broken one, is reported, never silently skipped.
 - `shots`: 1–64, each with a unique `id` and a `duration` of
   0.5–600s:
   - Every shot may carry `role` — `hook`, `context`, `core` or

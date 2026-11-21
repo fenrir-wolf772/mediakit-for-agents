@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "name": "tight",
+  "pace": {
+    "cuts_per_min": 12,
+    "longest_hold_s": 4
+  }
+}
