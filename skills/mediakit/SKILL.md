@@ -107,6 +107,15 @@ spans it covers are reported as `pre_existing` and do not fail the
 gate, so only NEW spans fail. A detected interval counts as
 pre-existing when it overlaps a baseline span of the same kind by
 >= 50% of its own duration.
+QC policy tiers (`--policy`, `policy` over MCP, env
+`MEDIAKIT_QC_POLICY` as the default): `full` (default) runs every
+detector you asked for; `light` runs probe-based rules only and
+refuses `--content`/`--baseline`/`--palette` — use it for a fast
+pre-flight on a proxy render, and read `complete: false` +
+`skipped: ["content", "palette"]` for what it did NOT verify (a light
+pass is not a full verification); `skip` runs nothing at all (no
+probe, no decode) and returns `pass: true, complete: false` with the
+skipped list — the stamp for a cache-hit proxy render, not a check.
 Add `--decoded-work` (`decoded_work: true` over MCP) before running a
 heavy tool on a big input: it estimates the decode load from the probe
 (video pixel-frames + audio sample-channels) and warns when it is over

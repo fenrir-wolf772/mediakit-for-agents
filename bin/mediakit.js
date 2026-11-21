@@ -263,8 +263,8 @@ const COMMANDS = {
     ],
   },
   check: {
-    usage: "mediakit check <input> [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin] [--expected-duration <s|MM:SS>] [--content] [--start <s|MM:SS>] [--end <s|MM:SS>] [--peak-threshold <dB>] [--baseline <file.json>] [--faststart] [--decoded-work] [--palette \"#hex,#hex,#hex\"] [--palette-brand amber-teal|warm-story|minimal-line]",
-    desc: "Verify a file against a platform delivery spec (dimensions, codecs, duration, loudness). --expected-duration fails when the measured duration is more than 0.5s off the brief. --content also scans for black/frozen frames, silence and audio peaks; --start/--end scan only that time range. --baseline <file.json> (needs --content) forgives spans already in the source: a previous check --content result (or a plain {black,freeze,silence,peaks} span list) — spans it covers are reported as pre-existing and do not fail the gate, so only NEW spans fail. --decoded-work also estimates the decode load and warns when it is over the ceiling. Video and audio stream durations must agree within ±0.2s (audio_sync, always checked when both durations are measurable). --palette (2-6 hex colors) or --palette-brand measures frames at 2 fps against a locked look: per-color shares, off-palette share, mean luma, crushed/blown share, luma swing — crushed or blown past 2% fails.",
+    usage: "mediakit check <input> [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin] [--expected-duration <s|MM:SS>] [--content] [--start <s|MM:SS>] [--end <s|MM:SS>] [--peak-threshold <dB>] [--baseline <file.json>] [--faststart] [--decoded-work] [--palette \"#hex,#hex,#hex\"] [--palette-brand amber-teal|warm-story|minimal-line] [--policy skip|light|full]",
+    desc: "Verify a file against a platform delivery spec (dimensions, codecs, duration, loudness). --expected-duration fails when the measured duration is more than 0.5s off the brief. --content also scans for black/frozen frames, silence and audio peaks; --start/--end scan only that time range. --baseline <file.json> (needs --content) forgives spans already in the source: a previous check --content result (or a plain {black,freeze,silence,peaks} span list) — spans it covers are reported as pre-existing and do not fail the gate, so only NEW spans fail. --decoded-work also estimates the decode load and warns when it is over the ceiling. Video and audio stream durations must agree within ±0.2s (audio_sync, always checked when both durations are measurable). --palette (2-6 hex colors) or --palette-brand measures frames at 2 fps against a locked look: per-color shares, off-palette share, mean luma, crushed/blown share, luma swing — crushed or blown past 2% fails. --policy sets the QC tier (idea: OpenEdit qc/policy.py): full (default) runs every requested detector; light runs probe-based rules only and refuses --content/--baseline/--palette (decode-heavy detectors are skipped, reported in `skipped` with complete:false — a light pass is not a full verification); skip runs nothing at all (no probe, no decode) and returns pass:true, complete:false with the skipped list. Env MEDIAKIT_QC_POLICY is the default when --policy is absent.",
     args: [{ name: "input", required: true }],
     options: [
       ["--platform", "Delivery platform (default tiktok)"],
@@ -278,6 +278,7 @@ const COMMANDS = {
       ["--decoded-work", "Also estimate the decoded work (video pixel-frames + audio sample-channels) and warn when it is over the ceiling (250B pixel-frames / 6B sample-channels, plus 3600s, 8192px, 120fps, 8ch, 192kHz)"],
       ["--palette", "Locked look as 2-6 comma-separated hex colors, e.g. \"#DCC0A0,#A02D19,#1B2740\" (mutually exclusive with --palette-brand)"],
       ["--palette-brand", "Locked look as a brand id: amber-teal | warm-story | minimal-line (same registry as assemble; mutually exclusive with --palette)"],
+      ["--policy", "QC policy tier: full (default, every requested detector runs), light (probe-based rules only — refuses --content/--baseline/--palette, reports skipped + complete:false), skip (no probe or decode — pass:true, complete:false, skipped list; env MEDIAKIT_QC_POLICY is the default when --policy is absent)"],
     ],
   },
   "qa-report": {
@@ -1467,6 +1468,7 @@ async function main() {
           decodedWork: opts.decoded_work === true,
           palette: opts.palette ?? null,
           paletteBrand: opts.palette_brand ?? null,
+          policy: opts.policy ?? null,
         });
         break;
       }

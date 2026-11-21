@@ -14,7 +14,7 @@ import { createCanvas } from "canvas";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { applyContentBaseline, compareDeterminismRuns, estimateDecodedWork, estimateJobRemaining, estimateTempo, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, planSmartCuts, runFfmpegWithProgress, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, SHORTS_STYLE_IDS } from "../src/core.js";
+import { applyContentBaseline, compareDeterminismRuns, estimateDecodedWork, estimateJobRemaining, estimateTempo, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import bounceTpl from "../src/canvas-scene-lib/templates/bounce.cjs";
 import slideInTpl from "../src/canvas-scene-lib/templates/slide-in.cjs";
@@ -617,6 +617,58 @@ const paletteCli = await runCli(["check", path.join(root, "test/palette-grey.mp4
 checkOk(paletteCli.code === 0, "CLI check --palette works", paletteCli.out.slice(0, 200));
 const paletteCliBoth = await runCli(["check", path.join(root, "test/palette-grey.mp4"), "--palette", "#808080,#FFFFFF", "--palette-brand", "warm-story"], {});
 checkOk(paletteCliBoth.code !== 0 && /mutually exclusive/.test(paletteCliBoth.out), "CLI --palette + --palette-brand together are refused", paletteCliBoth.out.slice(0, 200));
+
+// check --policy (lượt 129, idea: OpenEdit qc/policy.py): skip/light/
+// full tiers — a light pass is an honest partial gate (complete:false
+// + skipped list), never a silent partial pass; skip runs nothing.
+const savedQcEnv = process.env.MEDIAKIT_QC_POLICY;
+delete process.env.MEDIAKIT_QC_POLICY;
+checkOk(resolveQcPolicy(null) === "full", "resolveQcPolicy defaults to full with no flag and no env", `got ${resolveQcPolicy(null)}`);
+checkOk(resolveQcPolicy("light") === "light" && resolveQcPolicy("SKIP") === "skip", "resolveQcPolicy accepts light/skip (case-insensitive)", "light/SKIP");
+let qcBadArg = null;
+try { resolveQcPolicy("bogus"); } catch (e) { qcBadArg = e.message; }
+checkOk(/unknown QC policy/.test(qcBadArg ?? ""), "resolveQcPolicy refuses an unknown tier", qcBadArg ?? "");
+process.env.MEDIAKIT_QC_POLICY = "light";
+checkOk(resolveQcPolicy(null) === "light", "MEDIAKIT_QC_POLICY sets the default when the flag is absent", `got ${resolveQcPolicy(null)}`);
+checkOk(resolveQcPolicy("full") === "full", "an explicit --policy wins over MEDIAKIT_QC_POLICY", `got ${resolveQcPolicy("full")}`);
+let qcBadEnv = null;
+try { process.env.MEDIAKIT_QC_POLICY = "bogus"; resolveQcPolicy(null); } catch (e) { qcBadEnv = e.message; }
+checkOk(/unknown QC policy/.test(qcBadEnv ?? ""), "an invalid MEDIAKIT_QC_POLICY fails loudly instead of silently defaulting", qcBadEnv ?? "");
+if (savedQcEnv === undefined) delete process.env.MEDIAKIT_QC_POLICY; else process.env.MEDIAKIT_QC_POLICY = savedQcEnv;
+async function checkPolicy(file, extra) {
+  const r = await client.callTool({ name: "check", arguments: { input: path.join(root, file), platform: "youtube", ...extra } });
+  return JSON.parse(r.content[0].text);
+}
+const policyFull = await checkPolicy("test/content-black.mp4", {});
+checkOk(policyFull.policy === "full" && policyFull.complete === true, "default check reports policy full, complete true", JSON.stringify({ policy: policyFull.policy, complete: policyFull.complete }));
+const policyLight = await checkPolicy("test/content-black.mp4", { policy: "light" });
+console.log("check policy light:", JSON.stringify({ policy: policyLight.policy, complete: policyLight.complete, skipped: policyLight.skipped, pass: policyLight.pass, rules: policyLight.checks.map((c) => c.name) }));
+checkOk(policyLight.policy === "light" && policyLight.complete === false, "light reports policy light, complete false", JSON.stringify({ policy: policyLight.policy, complete: policyLight.complete }));
+checkOk(JSON.stringify(policyLight.skipped) === JSON.stringify(["content", "palette"]) && /decode-heavy/.test(policyLight.reason ?? ""), "light lists the skipped decode-heavy detectors and says so in reason", JSON.stringify(policyLight.skipped));
+checkOk(!policyLight.checks.some((c) => c.name.startsWith("content_")) && policyLight.checks.some((c) => c.name === "dimensions") && policyLight.checks.some((c) => c.name === "loudness") && policyLight.checks.some((c) => c.name === "audio_sync"), "light runs probe-based rules (dimensions, loudness, audio_sync) and no content_* rule", JSON.stringify(policyLight.checks.map((c) => c.name)));
+checkOk(policyLight.pass === false && policyLight.issues?.some((i) => i.startsWith("dimensions")), "light still fails honestly on a probe rule (1280x720 vs youtube 1920x1080)", JSON.stringify(policyLight.issues));
+checkOk(!("content" in policyLight) && !("palette" in policyLight), "light carries no content/palette section (nothing was measured)", Object.keys(policyLight).join(","));
+const policySkip = await checkPolicy("test/content-black.mp4", { policy: "skip" });
+checkOk(policySkip.policy === "skip" && policySkip.pass === true && policySkip.complete === false && policySkip.checks.length === 0, "skip returns pass:true, complete:false, no rules at all", JSON.stringify({ policy: policySkip.policy, pass: policySkip.pass, complete: policySkip.complete, checks: policySkip.checks }));
+checkOk(JSON.stringify(policySkip.skipped) === JSON.stringify(["probe", "loudness", "audio_sync", "content", "palette"]) && /policy=skip/.test(policySkip.reason ?? ""), "skip lists every skipped group and names the policy in reason", JSON.stringify(policySkip.skipped));
+const policyLightContent = await callExpectThrow("check", { input: path.join(root, "test/content-black.mp4"), platform: "youtube", policy: "light", content: true });
+checkOk(/policy light/.test(policyLightContent), "light + content=true is refused instead of silently dropping the scan", policyLightContent.slice(0, 200));
+const policyLightPalette = await callExpectThrow("check", { input: path.join(root, "test/content-black.mp4"), platform: "youtube", policy: "light", palette: "#808080,#FFFFFF" });
+checkOk(/policy light/.test(policyLightPalette), "light + palette is refused", policyLightPalette.slice(0, 200));
+const policyLightBaseline = await callExpectThrow("check", { input: path.join(root, "test/content-black.mp4"), platform: "youtube", policy: "light", content: true, baseline: path.join(root, "test/content-baseline-black.json") });
+checkOk(/policy light/.test(policyLightBaseline), "light + baseline is refused", policyLightBaseline.slice(0, 200));
+const policyBad = await callExpectThrow("check", { input: path.join(root, "test/content-black.mp4"), platform: "youtube", policy: "bogus" });
+checkOk(/Invalid enum value|unknown QC policy/.test(policyBad), "an unknown policy tier is refused (zod enum)", policyBad.slice(0, 200));
+const policyLightCli = await runCli(["check", path.join(root, "test/content-black.mp4"), "--platform", "youtube", "--policy", "light"], {});
+checkOk(policyLightCli.code === 0 && /"policy": "light"/.test(policyLightCli.out) && /"complete": false/.test(policyLightCli.out), "CLI check --policy light works and reports light + complete:false", policyLightCli.out.slice(0, 300));
+const policySkipCli = await runCli(["check", path.join(root, "test/content-black.mp4"), "--policy", "skip"], {});
+checkOk(policySkipCli.code === 0 && /"policy": "skip"/.test(policySkipCli.out) && /"complete": false/.test(policySkipCli.out), "CLI check --policy skip works", policySkipCli.out.slice(0, 300));
+const policyBogusCli = await runCli(["check", path.join(root, "test/content-black.mp4"), "--policy", "bogus"], {});
+checkOk(policyBogusCli.code !== 0 && /unknown QC policy/.test(policyBogusCli.out), "CLI --policy bogus is refused", policyBogusCli.out.slice(0, 200));
+const policyLightContentCli = await runCli(["check", path.join(root, "test/content-black.mp4"), "--policy", "light", "--content"], {});
+checkOk(policyLightContentCli.code !== 0 && /policy light/.test(policyLightContentCli.out), "CLI --policy light --content is refused", policyLightContentCli.out.slice(0, 200));
+const policyEnvCli = await runCli(["check", path.join(root, "test/content-black.mp4"), "--platform", "youtube"], { MEDIAKIT_QC_POLICY: "skip" });
+checkOk(policyEnvCli.code === 0 && /"policy": "skip"/.test(policyEnvCli.out), "CLI honors MEDIAKIT_QC_POLICY=skip when --policy is absent", policyEnvCli.out.slice(0, 300));
 
 // grade: named presets + custom filter, verified on pixels.
 // Source mid-frame is near-neutral (R 122, G 128, B 127).

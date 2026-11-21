@@ -5067,13 +5067,57 @@ export function estimateDecodedWork(meta) {
   };
 }
 
-export async function check({ input, platform = "tiktok", content = false, contentStart = null, contentEnd = null, peakThresholdDb = -1, expectedDuration = null, faststart = false, decodedWork = false, palette = null, paletteBrand = null, baseline = null }) {
+// QC policy tiers (idea: AH64-dll/OpenEdit open_edit/qc/policy.py —
+// skip/light/full, skipped checks recorded explicitly instead of
+// failing). `full` runs every detector the caller asked for. `light`
+// runs probe-based rules only (dimensions, codec, fps, duration,
+// loudness, audio_sync, faststart, decoded-work) and refuses the
+// decode-heavy detectors --content/--baseline/--palette/--palette-brand:
+// a light result is honest about what it did NOT verify
+// (complete:false + a `skipped` list), never a silent partial pass.
+// `skip` runs nothing at all — no probe, no decode — and returns
+// pass:true with complete:false and the skipped list: the stamp a
+// cache-hit proxy render gets, not a verification. Explicit --policy
+// wins; MEDIAKIT_QC_POLICY is the default when the flag is absent.
+export const QC_POLICIES = ["skip", "light", "full"];
+export function resolveQcPolicy(policy) {
+  const raw = policy ?? (process.env.MEDIAKIT_QC_POLICY?.trim() || null);
+  if (raw === null || raw === undefined || String(raw).trim() === "") return "full";
+  const mode = String(raw).trim().toLowerCase();
+  if (!QC_POLICIES.includes(mode)) {
+    throw new MediaKitError(`unknown QC policy: ${mode} (supported: skip, light, full) — set --policy or MEDIAKIT_QC_POLICY to one of these`, "INVALID_ARG");
+  }
+  return mode;
+}
+
+export async function check({ input, platform = "tiktok", content = false, contentStart = null, contentEnd = null, peakThresholdDb = -1, expectedDuration = null, faststart = false, decodedWork = false, palette = null, paletteBrand = null, baseline = null, policy = null }) {
+  const qcPolicy = resolveQcPolicy(policy);
   const inPath = await requireInput(input);
   if (baseline !== null && baseline !== undefined && !content) {
     throw new MediaKitError("--baseline needs --content (it only forgives spans the content scan found)", "INVALID_ARG");
   }
   const spec = PLATFORMS[platform];
   if (!spec) throw new MediaKitError(`unknown platform: ${platform} (supported: ${Object.keys(PLATFORMS).join(", ")})`, "INVALID_ARG");
+  // Policy skip: no probe, no decode — the OpenEdit skipped_qc_report
+  // shape. The file must exist (requireInput above), but nothing about
+  // it is measured; pass:true here means "nothing failed because
+  // nothing ran", and complete:false says so on the face of it.
+  if (qcPolicy === "skip") {
+    return {
+      operation: "check", input: inPath, platform, platform_label: spec.label,
+      policy: "skip", pass: true, complete: false, checks: [],
+      skipped: ["probe", "loudness", "audio_sync", "content", "palette"],
+      reason: "skipped by policy=skip: no probe or decode ran — this result does not verify the file",
+      safe_zone: spec.safeZone,
+    };
+  }
+  // Policy light: probe-based rules only. The decode-heavy detectors
+  // are refused, not silently dropped — a caller who explicitly asked
+  // for --content gets an error telling them to use --policy full,
+  // instead of a light result that quietly never scanned.
+  if (qcPolicy === "light" && (content || (baseline !== null && baseline !== undefined) || palette !== null || paletteBrand !== null)) {
+    throw new MediaKitError("policy light skips the decode-heavy detectors --content/--baseline/--palette/--palette-brand — use --policy full for them", "INVALID_ARG");
+  }
   // Same ±0.5s tolerance as qa_report's expected_duration: a render
   // that lands within half a second of the brief is on-spec; beyond
   // that the cut is wrong (trimmed short, looped long) and the check
@@ -5320,7 +5364,16 @@ export async function check({ input, platform = "tiktok", content = false, conte
   const warnings = checks.filter((c) => !c.pass && c.severity === "warn");
   return {
     operation: "check", input: inPath, platform, platform_label: spec.label,
-    pass: failed.length === 0,
+    policy: qcPolicy, pass: failed.length === 0,
+    // A light result is a partial gate by design: the decode-heavy
+    // detectors never ran, so complete:false + the skipped list say
+    // what is still unverified — pass:true must never be read as
+    // "fully checked" under light.
+    complete: qcPolicy === "full",
+    ...(qcPolicy === "light" ? {
+      skipped: ["content", "palette"],
+      reason: "policy=light: decode-heavy detectors (content, palette) skipped — this result does not verify black/frozen frames, silence, peaks or palette",
+    } : {}),
     checks,
     safe_zone: spec.safeZone,
     ...(decodedWorkResult ? { decoded_work: decodedWorkResult } : {}),
