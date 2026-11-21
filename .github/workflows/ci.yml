@@ -67,6 +67,14 @@ jobs:
         # Proves the suite can fail: 4 hand-written mutants, each tied
         # to one named suite assertion; a survivor fails the job.
         run: npm run mutation-smoke
+      - name: Mutation ratchet gate
+        # Compares the smoke run against the committed baseline
+        # (scripts/mutation-baseline.json): fails if the killed count
+        # drops below the floor or a baseline-KILLED mutant regresses.
+        # Catches a shrunk mutant registry, which the smoke alone
+        # cannot see. Record a new floor only from a green run:
+        # `npm run mutation-smoke -- --generate-baseline`.
+        run: npm run mutation-ratchet
       - name: CLI smoke test
         run: |
           node bin/mediakit.js probe test/source.mp4

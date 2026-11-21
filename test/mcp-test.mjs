@@ -16,6 +16,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { applyContentBaseline, compareDeterminismRuns, countClippedRuns, diagnoseVoice, estimateDecodedWork, estimateJobRemaining, estimateTempo, findDensestSpeechWindow, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
+import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import bounceTpl from "../src/canvas-scene-lib/templates/bounce.cjs";
 import slideInTpl from "../src/canvas-scene-lib/templates/slide-in.cjs";
 import springInTpl from "../src/canvas-scene-lib/templates/spring-in.cjs";
@@ -9393,6 +9394,31 @@ checkOk(estNoTime.estimate_remaining_seconds === null && estNoTime.estimate_basi
 // Cap: 50% after 200000s elapsed would claim 200000s — capped at 24h.
 const estCap = estimateJobRemaining({ ...estBase, created_at: "2026-11-18T02:26:40.000Z" }, estNowMs);
 checkOk(estCap.estimate_remaining_seconds === 86400 && estCap.estimate_basis === "elapsed-progress", "estimate: absurd elapsed time caps at 86400s (24h)", JSON.stringify(estCap));
+
+// Lượt 135: mutation ratchet — pure gate, no ffmpeg, no files.
+// The gate's real teeth at this scale is the killed-count floor:
+// the plain smoke already fails on any survivor, so what the
+// ratchet adds is catching a SHRUNK registry (a mutant deleted to
+// make the smoke pass) and naming per-mutant regressions.
+const ratchetBaseline = { version: 1, mutants: { a: "KILLED", b: "KILLED", c: "KILLED", d: "KILLED" }, killed: 4, total: 4 };
+const ratchetAll = [{ id: "a", status: "KILLED" }, { id: "b", status: "KILLED" }, { id: "c", status: "KILLED" }, { id: "d", status: "KILLED" }];
+const ratchetGreen = evaluateRatchet(ratchetAll, ratchetBaseline);
+checkOk(ratchetGreen.failed === false && ratchetGreen.armed === true && ratchetGreen.killed === 4 && ratchetGreen.floor === 4 && ratchetGreen.regressions.length === 0, "ratchet: all killed vs all-killed baseline passes, floor 4 held", JSON.stringify(ratchetGreen));
+const ratchetNoBase = evaluateRatchet(ratchetAll, null);
+checkOk(ratchetNoBase.failed === false && ratchetNoBase.armed === false && ratchetNoBase.floor === null && ratchetNoBase.newMutants.length === 4, "ratchet: missing baseline never fails — gate unarmed, record first", JSON.stringify(ratchetNoBase));
+const ratchetSurvivor = evaluateRatchet([{ id: "a", status: "SURVIVED" }, { id: "b", status: "KILLED" }, { id: "c", status: "KILLED" }, { id: "d", status: "KILLED" }], ratchetBaseline);
+checkOk(ratchetSurvivor.failed === true && ratchetSurvivor.regressions.length === 1 && ratchetSurvivor.regressions[0] === "a" && ratchetSurvivor.killed === 3, "ratchet: one survivor fails and names the regression (a)", JSON.stringify(ratchetSurvivor));
+const ratchetShrunk = evaluateRatchet([{ id: "a", status: "KILLED" }, { id: "b", status: "KILLED" }, { id: "c", status: "KILLED" }], ratchetBaseline);
+checkOk(ratchetShrunk.failed === true && ratchetShrunk.killed === 3 && ratchetShrunk.floor === 4 && ratchetShrunk.removedMutants.length === 1 && ratchetShrunk.removedMutants[0] === "d", "ratchet: registry shrunk 4->3 mutants fails the floor even though all run mutants killed", JSON.stringify(ratchetShrunk));
+const ratchetMasked = evaluateRatchet([{ id: "a", status: "SURVIVED" }, { id: "b", status: "KILLED" }, { id: "c", status: "KILLED" }, { id: "d", status: "KILLED" }, { id: "e", status: "KILLED" }], ratchetBaseline);
+checkOk(ratchetMasked.failed === true && ratchetMasked.regressions[0] === "a" && ratchetMasked.newMutants[0] === "e", "ratchet: a new kill does NOT mask a regression on a (count level, behaviour regressed)", JSON.stringify(ratchetMasked));
+const ratchetImproved = evaluateRatchet([{ id: "a", status: "KILLED" }, { id: "b", status: "KILLED" }, { id: "c", status: "KILLED" }, { id: "d", status: "KILLED" }], { version: 1, mutants: { a: "KILLED", b: "SURVIVED", c: "KILLED", d: "KILLED" }, killed: 3, total: 4 });
+checkOk(ratchetImproved.failed === false && ratchetImproved.killed === 4 && ratchetImproved.floor === 3, "ratchet: a baseline SURVIVED mutant now killed passes (improvement above the floor)", JSON.stringify(ratchetImproved));
+const ratchetError = evaluateRatchet([{ id: "a", status: "ERROR" }, { id: "b", status: "KILLED" }, { id: "c", status: "KILLED" }, { id: "d", status: "KILLED" }], ratchetBaseline);
+checkOk(ratchetError.failed === true && ratchetError.regressions[0] === "a", "ratchet: ERROR on a baseline-killed mutant counts as a regression", JSON.stringify(ratchetError));
+const ratchetDoc = buildBaseline(ratchetAll, { commit: "abc123" });
+checkOk(ratchetDoc.version === 1 && ratchetDoc.killed === 4 && ratchetDoc.total === 4 && ratchetDoc.commit === "abc123" && ratchetDoc.mutants.a === "KILLED" && typeof ratchetDoc.generated_at === "string", "ratchet: buildBaseline records per-mutant statuses + killed/total + commit", JSON.stringify({ killed: ratchetDoc.killed, total: ratchetDoc.total, commit: ratchetDoc.commit }));
+checkOk(formatRatchetReport(ratchetSurvivor).includes("FAILED") && formatRatchetReport(ratchetSurvivor).includes("regressions: a") && formatRatchetReport(ratchetGreen).includes("PASSED"), "ratchet: report prints FAILED + regression list, PASSED when green", formatRatchetReport(ratchetSurvivor).split("\n")[0]);
 
 // download: a local HTTP server stands in for the internet, so the
 // suite never depends on the network — every guard (redirect, size

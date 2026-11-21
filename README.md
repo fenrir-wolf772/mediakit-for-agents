@@ -559,6 +559,20 @@ full script → captioned vertical-video workflow.
   `mediakit <command> --help` lists exactly the options that command
   accepts.
 
+### Mutation smoke + ratchet (proving the tests can fail)
+
+`npm run mutation-smoke` flips one literal/operator at a time in
+`src/core.js` (4 hand-written mutants, each tied to one named suite
+assertion) and checks the suite's probe catches it — a mutant the
+suite misses fails the run. `npm run mutation-ratchet` additionally
+gates that run against the committed baseline
+`scripts/mutation-baseline.json`: it fails when the killed count drops
+below the baseline floor, or when a mutant that was KILLED regresses.
+That catches a shrunk mutant registry (deleting a mutant to make the
+smoke pass), which the smoke alone cannot see. A missing baseline
+never fails — record one only from a fully green run with
+`npm run mutation-smoke -- --generate-baseline`, then commit it.
+
 ## Skills included
 
 - [`skills/mediakit/SKILL.md`](skills/mediakit/SKILL.md) — agent-facing

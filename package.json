@@ -41,7 +41,8 @@
     "check": "node --check src/core.js && node --check src/server.js && node --check bin/mediakit.js && node --input-type=module -e \"await import('./src/tools.js'); await import('./src/http.js')\" && node scripts/check-docs.mjs",
     "start": "node bin/mediakit.js mcp",
     "test": "node test/mcp-test.mjs",
-    "mutation-smoke": "node scripts/mutation-smoke.mjs"
+    "mutation-smoke": "node scripts/mutation-smoke.mjs",
+    "mutation-ratchet": "node scripts/mutation-smoke.mjs --ratchet"
   },
   "type": "module",
   "version": "0.1.0"

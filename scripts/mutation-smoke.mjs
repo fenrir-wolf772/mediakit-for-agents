@@ -28,6 +28,17 @@
 //
 // Run: node scripts/mutation-smoke.mjs  (also `npm run mutation-smoke`,
 // and CI runs it after the syntax check)
+//
+// Ratchet (lượt 135, ý từ EncodeX `mutation-ratchet.yml` +
+// `mutation-delta.mjs`): `--ratchet` compares this run against the
+// committed baseline `scripts/mutation-baseline.json` and fails when
+// the killed count drops below the baseline floor or a mutant that
+// was KILLED regresses to SURVIVED/ERROR. A missing baseline never
+// fails — it only leaves the gate unarmed. `--generate-baseline`
+// writes a fresh baseline, but ONLY from a fully green run (all
+// mutants KILLED); a red run refuses. The two flags are exclusive.
+// The pure gate lives in `scripts/mutation-ratchet.mjs` (unit-tested
+// in test/mcp-test.mjs); this script only wires CLI flags to it.
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -35,6 +46,29 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  STATUS_ERROR,
+  STATUS_KILLED,
+  STATUS_SURVIVED,
+  buildBaseline,
+  evaluateRatchet,
+  formatRatchetReport,
+  loadBaseline,
+  writeBaseline,
+} from "./mutation-ratchet.mjs";
+
+const argv = process.argv.slice(2);
+const flagRatchet = argv.includes("--ratchet");
+const flagGenerate = argv.includes("--generate-baseline");
+const unknownFlags = argv.filter((a) => a !== "--ratchet" && a !== "--generate-baseline");
+if (unknownFlags.length > 0) {
+  console.error(`mutation-smoke: unknown flag(s): ${unknownFlags.join(" ")} (known: --ratchet, --generate-baseline)`);
+  process.exit(2);
+}
+if (flagRatchet && flagGenerate) {
+  console.error("mutation-smoke: --ratchet and --generate-baseline are exclusive — gate one run, record another.");
+  process.exit(2);
+}
 
 const execFileAsync = promisify(execFile);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -122,6 +156,7 @@ const MUTANTS = [
 
 const tmp = await mkdtemp(path.join(tmpdir(), "mediakit-mutation-"));
 let failures = 0;
+const results = [];
 try {
   // Guard: never mutate a file with uncommitted changes.
   const { stdout: dirty } = await execFileAsync("git", ["status", "--porcelain", "--", "src/core.js"], { cwd: root }).catch((e) => {
@@ -141,6 +176,7 @@ try {
     if (occurrences !== 1) {
       console.error(`MUTANT ${m.id}: 'from' occurs ${occurrences}x in ${m.file} (need exactly 1) — update the registry.`);
       failures++;
+      results.push({ id: m.id, status: STATUS_ERROR });
       continue;
     }
     // Baseline: the probe must pass on the clean tree, or it proves
@@ -151,11 +187,13 @@ try {
     } catch (e) {
       console.error(`MUTANT ${m.id}: probe ERRORED on the clean tree — fix the probe, not the code: ${String(e).split("\n")[0]}`);
       failures++;
+      results.push({ id: m.id, status: STATUS_ERROR });
       continue;
     }
     if (!baseline) {
       console.error(`MUTANT ${m.id}: probe FAILED on the clean tree — the suite assertion it mirrors ("${m.suite}") is already failing. Fix that first.`);
       failures++;
+      results.push({ id: m.id, status: STATUS_ERROR });
       continue;
     }
     // Apply, probe, restore — restore always runs, even on probe error.
@@ -176,6 +214,7 @@ try {
       }
     }
     console.log(`MUTANT ${m.id}: ${killed ? "KILLED" : "SURVIVED"} (suite: "${m.suite}")`);
+    results.push({ id: m.id, status: killed ? STATUS_KILLED : STATUS_SURVIVED });
     if (!killed) failures++;
   }
 } finally {
@@ -187,3 +226,26 @@ if (failures > 0) {
   process.exit(1);
 }
 console.log(`mutation-smoke: all ${MUTANTS.length} mutants KILLED — the suite really checks what it claims to.`);
+
+// Ratchet: record a new floor, or gate this run against the floor.
+// Both run only after a fully green smoke run (failures === 0 above).
+const scriptsDir = path.dirname(fileURLToPath(import.meta.url));
+if (flagGenerate) {
+  let commit = null;
+  try {
+    const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root });
+    commit = stdout.trim();
+  } catch { /* best-effort: baseline without a commit is still a floor */ }
+  const doc = buildBaseline(results, { commit });
+  const file = await writeBaseline(scriptsDir, doc);
+  console.log(`mutation-smoke: baseline recorded (${doc.killed}/${doc.total} KILLED) → ${file}`);
+  console.log("mutation-smoke: commit the baseline file so the next --ratchet run is armed.");
+} else if (flagRatchet) {
+  const baseline = await loadBaseline(scriptsDir);
+  const ev = evaluateRatchet(results, baseline);
+  console.log(formatRatchetReport(ev));
+  if (ev.failed) {
+    console.error("mutation-smoke: ratchet gate FAILED — mutation resistance regressed below the committed baseline. Restore the assertion, then re-run.");
+    process.exit(1);
+  }
+}

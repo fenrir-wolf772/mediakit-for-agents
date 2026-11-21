@@ -178,6 +178,16 @@ reports `compressor` (settings) and `compressed_lufs`.
 only has raw text, write the SRT yourself first (format below), then burn.
 Hardcoded captions cannot be turned off later — keep an uncaptioned master.
 
+### 8. Mutation smoke + ratchet (for contributors, not for callers)
+`npm run mutation-smoke` proves the test suite can fail: 4 hand-written
+mutants in `src/core.js`, each tied to one named suite assertion. A
+survivor fails the run. `npm run mutation-ratchet` gates that run
+against the committed baseline `scripts/mutation-baseline.json` — it
+fails if the killed count drops below the floor, which is how a mutant
+quietly deleted from the registry gets caught. Record a new baseline
+only from a fully green run (`--generate-baseline`), then commit it.
+Hardcoded captions cannot be turned off later — keep an uncaptioned master.
+
 SRT format (timestamps `HH:MM:SS,mmm`):
 ```
 1

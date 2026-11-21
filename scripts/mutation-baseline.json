@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "generated_at": "2026-11-21T20:07:13.157Z",
+  "commit": "f2aa043c3fb5012b24f72f7c96564e4c17c3f12c",
+  "mutants": {
+    "titlecard-default-font": "KILLED",
+    "displaydims-ignores-rotation": "KILLED",
+    "loudness-default-target": "KILLED",
+    "denoise-strength-scale": "KILLED"
+  },
+  "killed": 4,
+  "total": 4
+}
