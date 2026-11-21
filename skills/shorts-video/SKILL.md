@@ -197,7 +197,14 @@ centered on the cut, video-only — the audio never moves); a
 video shot needs the handle footage in its source. For real
 animation (not a still with a zoom), use a `canvas_scene` shot:
 a JS module that draws every frame in code at 30fps — the
-director's path, no AI video account needed. Reach for a
+director's path, no AI video account needed. A shot may carry a
+`role` (`hook`/`context`/`core`/`payoff` — which beat of the arc
+it carries) and alternate takes: `variants` (A/B/C, same kind,
+each with its own source fields and an optional `hook` label) with
+`selected` (index or label, default 0) picking the one that
+renders; a film-level `hook: {shot, start?, end?}` pins the
+opening segment, and `diagnose` checks the arc (hook first,
+payoff last). Reach for a
 built-in scene template first (`"template": "bounce"` +
 `params`, registry in `scene-templates.json`: `title-card`,
 `bounce`, `slide-in`, `rings`) and write a custom scene file

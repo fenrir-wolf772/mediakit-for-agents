@@ -15792,6 +15792,16 @@ const ASSEMBLE_TEXT_EM_PER_CHAR = 0.75;
 const ASSEMBLE_MAX_SHOTS = 64;
 const ASSEMBLE_MOTION_GATE_SECONDS = 2.5;
 const ASSEMBLE_CANVAS_MAX_SECONDS = 60;
+// Shot roles (Outtake's cut-plan structure, lượt 132): the director's
+// arc for the film — hook opens, context sets up, core carries the
+// value, payoff closes. A role is annotation only: it changes no
+// render, but diagnose checks the arc (hook first, payoff last).
+const ASSEMBLE_ROLES = ["hook", "context", "core", "payoff"];
+// Shot variants (marvtub/takes-public set_storyboard, lượt 132):
+// every take tried for one shot, A/B/C — the director picks one
+// with `selected`. Cap 8: a shot with more takes than that is a
+// storyboard problem, not a film.
+const ASSEMBLE_MAX_VARIANTS = 8;
 const ASSEMBLE_CACHE_DIRNAME = ".mediakit-assemble-cache";
 
 // Locked style values, read from skills/shorts-video/styles.json (the
@@ -16329,6 +16339,162 @@ function parseAssembleTextLayers(raw, label, id, duration, width, height, brandD
 // return the build plan (frame-exact). Probes the voice and every
 // asset; nothing is written. Throws MediaKitError on the first
 // problem, naming the shot/field.
+// Resolve one assemble take's source fields — the per-kind half of
+// the shot loop, factored out so a shot variant (an alternate take
+// of the same shot) is validated by exactly the same rules as the
+// primary take: probe + hash + motion-gate + zoom + template/brand
+// + canvas cap. `label` names the take in errors (e.g. `shot 2 (s2)`
+// or `shot 2 (s2) variant B`). Returns the normalized fields the
+// render reads (source/start/zoom/scene/template/params/assets/
+// color/assetHash). ctx carries the shot duration plus the film's
+// resolveRel/brand bookkeeping.
+async function resolveAssembleTakeSource(kind, raw, label, ctx) {
+  const { duration, resolveRel, brand, brandApplied, brandOverrides } = ctx;
+  const out = {};
+  if (kind === "image") {
+    if (typeof raw.source !== "string" || !raw.source.trim()) throw new MediaKitError(`${label}: image shot needs a source`, "INVALID_ARG");
+    const srcPath = await requireInput(resolveRel(raw.source), `${label} source`);
+    const meta = await probe(srcPath);
+    if (!meta.video) throw new MediaKitError(`${label}: image source ${raw.source} has no video stream`, "INVALID_ARG");
+    if (meta.audio || meta.duration_seconds !== null) {
+      throw new MediaKitError(`${label}: image source must be a still image, not a video (extract a frame first)`, "INVALID_ARG");
+    }
+    out.source = srcPath;
+    out.assetHash = await hashFile(srcPath);
+    if (raw.zoom !== undefined && raw.zoom !== null) {
+      if (typeof raw.zoom !== "object" || Array.isArray(raw.zoom)) {
+        throw new MediaKitError(`${label}: zoom must be an object {from, to, focus?, focus_end?}`, "INVALID_ARG");
+      }
+      const focus = raw.zoom.focus ?? [0.5, 0.5];
+      const focusEnd = raw.zoom.focus_end ?? focus;
+      for (const [name, v] of [["focus", focus], ["focus_end", focusEnd]]) {
+        if (!Array.isArray(v) || v.length !== 2 || v.some((x) => typeof x !== "number" || x < 0 || x > 1)) {
+          throw new MediaKitError(`${label}: zoom.${name} must be [x, y] with each 0-1`, "INVALID_ARG");
+        }
+      }
+      out.zoom = {
+        from: assembleOptNum(raw.zoom.from, 1, `${label} zoom.from`, { min: 1, max: 10 }),
+        to: assembleOptNum(raw.zoom.to, 1.15, `${label} zoom.to`, { min: 1, max: 10 }),
+        focus, focus_end: focusEnd,
+      };
+    } else if (duration > ASSEMBLE_MOTION_GATE_SECONDS) {
+      throw new MediaKitError(
+        `${label}: motion-gate — a still image without zoom may last at most ${ASSEMBLE_MOTION_GATE_SECONDS}s, got ${duration}s (add a zoom, or split the shot)`,
+        "INVALID_ARG",
+      );
+    }
+  } else if (kind === "video") {
+    if (typeof raw.source !== "string" || !raw.source.trim()) throw new MediaKitError(`${label}: video shot needs a source`, "INVALID_ARG");
+    const srcPath = await requireInput(resolveRel(raw.source), `${label} source`);
+    const meta = await probe(srcPath);
+    if (!meta.video) throw new MediaKitError(`${label}: video source ${raw.source} has no video stream`, "INVALID_ARG");
+    if (!Number.isFinite(meta.duration_seconds)) throw new MediaKitError(`${label}: could not measure the video source duration`, "PROBE_FAILED");
+    const start = assembleOptNum(raw.start, 0, `${label} start`, { min: 0 });
+    out.source = srcPath;
+    out.start = start;
+    out.sourceDuration = meta.duration_seconds;
+    out.assetHash = await hashFile(srcPath);
+  } else if (kind === "canvas_scene") {
+    const hasScene = typeof raw.scene === "string" && raw.scene.trim();
+    const hasTemplate = typeof raw.template === "string" && raw.template.trim();
+    if (hasScene && hasTemplate) {
+      throw new MediaKitError(`${label}: canvas_scene shot takes either scene or template, not both`, "INVALID_ARG");
+    }
+    let scenePath;
+    if (hasTemplate) {
+      const tpl = await resolveSceneTemplate(raw.template.trim());
+      out.template = tpl.id;
+      scenePath = tpl.file;
+      // A template shot is self-contained: it draws everything in
+      // code, so no external assets are accepted.
+      if (raw.assets !== undefined && raw.assets !== null) {
+        throw new MediaKitError(`${label}: template "${tpl.id}" takes no assets (it draws everything in code)`, "INVALID_ARG");
+      }
+      out.params = resolveSceneTemplateParams(tpl, raw.params, `${label}`);
+      // Brand palette fills the template's color params the shot
+      // did not pass explicitly (explicit params win, like the
+      // preset rule) — recorded in brand_applied/overrides.
+      if (brand) {
+        const colorMap = BRAND_TEMPLATE_COLOR_MAP[tpl.id] ?? {};
+        const passed = raw.params ?? {};
+        for (const [param, key] of Object.entries(colorMap)) {
+          const brandValue = `#${brand.palette[key]}`;
+          if (passed[param] === undefined || passed[param] === null) {
+            out.params[param] = brandValue;
+            brandApplied.push(`${label} template.${tpl.id}.${param}`);
+          } else if (String(passed[param]).replace(/^#/, "").toUpperCase() !== brand.palette[key]) {
+            brandOverrides.push(`${label} template.${tpl.id}.${param}`);
+          }
+        }
+      }
+    } else {
+      if (!hasScene) throw new MediaKitError(`${label}: canvas_scene shot needs a scene (JS module path) or a template (one of ${SCENE_TEMPLATE_IDS.join(", ")})`, "INVALID_ARG");
+      scenePath = await requireInput(resolveRel(raw.scene), `${label} scene`);
+      if (!/\.(cjs|js|mjs)$/i.test(path.extname(scenePath))) {
+        throw new MediaKitError(`${label}: scene must be a .js/.cjs/.mjs module, got ${path.extname(scenePath) || "(no extension)"}`, "INVALID_ARG");
+      }
+      if (raw.params !== undefined && raw.params !== null) {
+        if (typeof raw.params !== "object" || Array.isArray(raw.params)) {
+          throw new MediaKitError(`${label}: params must be a plain JSON object`, "INVALID_ARG");
+        }
+        out.params = raw.params;
+      }
+    }
+    // Loading the module runs its top-level code — same trust as
+    // rendering it. Validate fails here, not mid-render, if the
+    // module cannot load or has no draw export.
+    await loadCanvasSceneModule(scenePath, `${label}`);
+    out.scene = scenePath;
+    out.sceneHash = await hashFile(scenePath);
+    const assetHashes = {};
+    out.assets = {};
+    if (raw.assets !== undefined && raw.assets !== null) {
+      if (typeof raw.assets !== "object" || Array.isArray(raw.assets)) {
+        throw new MediaKitError(`${label}: assets must be an object {name: path}`, "INVALID_ARG");
+      }
+      for (const [name, assetRaw] of Object.entries(raw.assets)) {
+        if (typeof assetRaw !== "string" || !assetRaw.trim()) throw new MediaKitError(`${label}: assets.${name} needs a path`, "INVALID_ARG");
+        const assetPath = await requireInput(resolveRel(assetRaw), `${label} assets.${name}`);
+        const meta = await probe(assetPath);
+        if (!meta.video) throw new MediaKitError(`${label}: assets.${name} ${assetRaw} has no video stream`, "INVALID_ARG");
+        if (meta.audio || meta.duration_seconds !== null) {
+          throw new MediaKitError(`${label}: assets.${name} must be a still image, not a video (extract a frame first)`, "INVALID_ARG");
+        }
+        out.assets[name] = assetPath;
+        assetHashes[name] = await hashFile(assetPath);
+      }
+    }
+    if (duration > ASSEMBLE_CANVAS_MAX_SECONDS) {
+      throw new MediaKitError(`${label}: canvas_scene duration ${duration}s exceeds the ${ASSEMBLE_CANVAS_MAX_SECONDS}s cap (render cost is one PNG per frame — split the shot)`, "INVALID_ARG");
+    }
+    // One hash covers the scene code + its assets + its params, so
+    // the segment cache and the fingerprint both see any of them change.
+    out.assetHash = createHash("sha256").update(stableStringify({ scene: out.sceneHash, assets: assetHashes, params: out.params ?? null })).digest("hex");
+  } else {
+    if (typeof raw.color !== "string" || !/^[0-9a-fA-F]{6}$/.test(raw.color.trim())) {
+      throw new MediaKitError(`${label}: color shot needs a 6-digit hex color (RRGGBB), got: ${raw.color}`, "INVALID_ARG");
+    }
+    out.color = raw.color.trim().toUpperCase();
+    if (duration > ASSEMBLE_MOTION_GATE_SECONDS) {
+      throw new MediaKitError(
+        `${label}: motion-gate — a solid color card may last at most ${ASSEMBLE_MOTION_GATE_SECONDS}s, got ${duration}s (split the shot)`,
+        "INVALID_ARG",
+      );
+    }
+  }
+  return out;
+}
+
+// The take fields that travel with a variant entry (plan + receipt):
+// every render field the take resolved to, minus the undefined ones.
+function pickTakeFields(f) {
+  const out = {};
+  for (const k of ["source", "start", "sourceDuration", "zoom", "scene", "sceneHash", "template", "params", "assets", "color", "assetHash"]) {
+    if (f[k] !== undefined) out[k] = f[k];
+  }
+  return out;
+}
+
 async function validateAssembleManifest(doc, manifestAbs) {
   if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
     throw new MediaKitError("assemble manifest must be a JSON object", "INVALID_ARG");
@@ -16498,141 +16664,79 @@ async function validateAssembleManifest(doc, manifestAbs) {
     if (shot.audio_level === 0) {
       warnings.push(`${label} (${id}): audio_level 0 mutes the whole mix during this shot`);
     }
-    if (kind === "image") {
-      if (typeof raw.source !== "string" || !raw.source.trim()) throw new MediaKitError(`${label} (${id}): image shot needs a source`, "INVALID_ARG");
-      const srcPath = await requireInput(resolveRel(raw.source), `${label} (${id}) source`);
-      const meta = await probe(srcPath);
-      if (!meta.video) throw new MediaKitError(`${label} (${id}): image source ${raw.source} has no video stream`, "INVALID_ARG");
-      if (meta.audio || meta.duration_seconds !== null) {
-        throw new MediaKitError(`${label} (${id}): image source must be a still image, not a video (extract a frame first)`, "INVALID_ARG");
+    // Role (Outtake's cut-plan structure): which beat of the arc
+    // this shot carries. Annotation only — the render does not
+    // move — but diagnose checks hook-first / payoff-last.
+    if (raw.role !== undefined && raw.role !== null) {
+      if (typeof raw.role !== "string" || !ASSEMBLE_ROLES.includes(raw.role)) {
+        throw new MediaKitError(`${label} (${id}): role must be one of ${ASSEMBLE_ROLES.join(", ")}, got: ${raw.role}`, "INVALID_ARG");
       }
-      shot.source = srcPath;
-      shot.assetHash = await hashFile(srcPath);
-      if (raw.zoom !== undefined && raw.zoom !== null) {
-        if (typeof raw.zoom !== "object" || Array.isArray(raw.zoom)) {
-          throw new MediaKitError(`${label} (${id}): zoom must be an object {from, to, focus?, focus_end?}`, "INVALID_ARG");
-        }
-        const focus = raw.zoom.focus ?? [0.5, 0.5];
-        const focusEnd = raw.zoom.focus_end ?? focus;
-        for (const [name, v] of [["focus", focus], ["focus_end", focusEnd]]) {
-          if (!Array.isArray(v) || v.length !== 2 || v.some((x) => typeof x !== "number" || x < 0 || x > 1)) {
-            throw new MediaKitError(`${label} (${id}): zoom.${name} must be [x, y] with each 0-1`, "INVALID_ARG");
-          }
-        }
-        shot.zoom = {
-          from: assembleOptNum(raw.zoom.from, 1, `${label} (${id}) zoom.from`, { min: 1, max: 10 }),
-          to: assembleOptNum(raw.zoom.to, 1.15, `${label} (${id}) zoom.to`, { min: 1, max: 10 }),
-          focus, focus_end: focusEnd,
-        };
-      } else if (duration > ASSEMBLE_MOTION_GATE_SECONDS) {
-        throw new MediaKitError(
-          `${label} (${id}): motion-gate — a still image without zoom may last at most ${ASSEMBLE_MOTION_GATE_SECONDS}s, got ${duration}s (add a zoom, or split the shot)`,
-          "INVALID_ARG",
-        );
-      }
-    } else if (kind === "video") {
-      if (typeof raw.source !== "string" || !raw.source.trim()) throw new MediaKitError(`${label} (${id}): video shot needs a source`, "INVALID_ARG");
-      const srcPath = await requireInput(resolveRel(raw.source), `${label} (${id}) source`);
-      const meta = await probe(srcPath);
-      if (!meta.video) throw new MediaKitError(`${label} (${id}): video source ${raw.source} has no video stream`, "INVALID_ARG");
-      if (!Number.isFinite(meta.duration_seconds)) throw new MediaKitError(`${label} (${id}): could not measure the video source duration`, "PROBE_FAILED");
-      const start = assembleOptNum(raw.start, 0, `${label} (${id}) start`, { min: 0 });
-      shot.source = srcPath;
-      shot.start = start;
-      shot.sourceDuration = meta.duration_seconds;
-      shot.assetHash = await hashFile(srcPath);
-    } else if (kind === "canvas_scene") {
-      const hasScene = typeof raw.scene === "string" && raw.scene.trim();
-      const hasTemplate = typeof raw.template === "string" && raw.template.trim();
-      if (hasScene && hasTemplate) {
-        throw new MediaKitError(`${label} (${id}): canvas_scene shot takes either scene or template, not both`, "INVALID_ARG");
-      }
-      let scenePath;
-      if (hasTemplate) {
-        const tpl = await resolveSceneTemplate(raw.template.trim());
-        shot.template = tpl.id;
-        scenePath = tpl.file;
-        // A template shot is self-contained: it draws everything in
-        // code, so no external assets are accepted.
-        if (raw.assets !== undefined && raw.assets !== null) {
-          throw new MediaKitError(`${label} (${id}): template "${tpl.id}" takes no assets (it draws everything in code)`, "INVALID_ARG");
-        }
-        shot.params = resolveSceneTemplateParams(tpl, raw.params, `${label} (${id})`);
-        // Brand palette fills the template's color params the shot
-        // did not pass explicitly (explicit params win, like the
-        // preset rule) — recorded in brand_applied/overrides.
-        if (brand) {
-          const colorMap = BRAND_TEMPLATE_COLOR_MAP[tpl.id] ?? {};
-          const passed = raw.params ?? {};
-          for (const [param, key] of Object.entries(colorMap)) {
-            const brandValue = `#${brand.palette[key]}`;
-            if (passed[param] === undefined || passed[param] === null) {
-              shot.params[param] = brandValue;
-              brandApplied.push(`${label} (${id}) template.${tpl.id}.${param}`);
-            } else if (String(passed[param]).replace(/^#/, "").toUpperCase() !== brand.palette[key]) {
-              brandOverrides.push(`${label} (${id}) template.${tpl.id}.${param}`);
-            }
-          }
-        }
-      } else {
-        if (!hasScene) throw new MediaKitError(`${label} (${id}): canvas_scene shot needs a scene (JS module path) or a template (one of ${SCENE_TEMPLATE_IDS.join(", ")})`, "INVALID_ARG");
-        scenePath = await requireInput(resolveRel(raw.scene), `${label} (${id}) scene`);
-        if (!/\.(cjs|js|mjs)$/i.test(path.extname(scenePath))) {
-          throw new MediaKitError(`${label} (${id}): scene must be a .js/.cjs/.mjs module, got ${path.extname(scenePath) || "(no extension)"}`, "INVALID_ARG");
-        }
-        if (raw.params !== undefined && raw.params !== null) {
-          if (typeof raw.params !== "object" || Array.isArray(raw.params)) {
-            throw new MediaKitError(`${label} (${id}): params must be a plain JSON object`, "INVALID_ARG");
-          }
-          shot.params = raw.params;
-        }
-      }
-      // Loading the module runs its top-level code — same trust as
-      // rendering it. Validate fails here, not mid-render, if the
-      // module cannot load or has no draw export.
-      await loadCanvasSceneModule(scenePath, `${label} (${id})`);
-      shot.scene = scenePath;
-      shot.sceneHash = await hashFile(scenePath);
-      const assetHashes = {};
-      shot.assets = {};
-      if (raw.assets !== undefined && raw.assets !== null) {
-        if (typeof raw.assets !== "object" || Array.isArray(raw.assets)) {
-          throw new MediaKitError(`${label} (${id}): assets must be an object {name: path}`, "INVALID_ARG");
-        }
-        for (const [name, assetRaw] of Object.entries(raw.assets)) {
-          if (typeof assetRaw !== "string" || !assetRaw.trim()) throw new MediaKitError(`${label} (${id}): assets.${name} needs a path`, "INVALID_ARG");
-          const assetPath = await requireInput(resolveRel(assetRaw), `${label} (${id}) assets.${name}`);
-          const meta = await probe(assetPath);
-          if (!meta.video) throw new MediaKitError(`${label} (${id}): assets.${name} ${assetRaw} has no video stream`, "INVALID_ARG");
-          if (meta.audio || meta.duration_seconds !== null) {
-            throw new MediaKitError(`${label} (${id}): assets.${name} must be a still image, not a video (extract a frame first)`, "INVALID_ARG");
-          }
-          shot.assets[name] = assetPath;
-          assetHashes[name] = await hashFile(assetPath);
-        }
-      }
-      if (duration > ASSEMBLE_CANVAS_MAX_SECONDS) {
-        throw new MediaKitError(`${label} (${id}): canvas_scene duration ${duration}s exceeds the ${ASSEMBLE_CANVAS_MAX_SECONDS}s cap (render cost is one PNG per frame — split the shot)`, "INVALID_ARG");
-      }
-      // One hash covers the scene code + its assets + its params, so
-      // the segment cache and the fingerprint both see any of them change.
-      shot.assetHash = createHash("sha256").update(stableStringify({ scene: shot.sceneHash, assets: assetHashes, params: shot.params ?? null })).digest("hex");
-    } else {
-      if (typeof raw.color !== "string" || !/^[0-9a-fA-F]{6}$/.test(raw.color.trim())) {
-        throw new MediaKitError(`${label} (${id}): color shot needs a 6-digit hex color (RRGGBB), got: ${raw.color}`, "INVALID_ARG");
-      }
-      shot.color = raw.color.trim().toUpperCase();
-      if (duration > ASSEMBLE_MOTION_GATE_SECONDS) {
-        throw new MediaKitError(
-          `${label} (${id}): motion-gate — a solid color card may last at most ${ASSEMBLE_MOTION_GATE_SECONDS}s, got ${duration}s (split the shot)`,
-          "INVALID_ARG",
-        );
-      }
+      shot.role = raw.role;
     }
-    // Per-shot text layers (any kind): parsed + validated here so
-    // a bad layer fails validate, not mid-render. The brand fills
-    // a layer's missing color/size with its palette text / text
-    // size; an explicit value that differs is a brand override.
+    // Variants (Takes set_storyboard): every take tried for this
+    // shot, A/B/C — `selected` (index or label, default 0) picks
+    // the one that renders. The shot's own source fields must be
+    // absent when variants carry the takes: two places naming the
+    // clip is an ambiguity, not a default. Each variant may carry a
+    // `hook` label — which hook this take opens with — so the hook
+    // tool's output feeds straight into the storyboard.
+    if (raw.variants !== undefined && raw.variants !== null) {
+      if (!Array.isArray(raw.variants) || raw.variants.length < 1 || raw.variants.length > ASSEMBLE_MAX_VARIANTS) {
+        throw new MediaKitError(`${label} (${id}): variants must be an array of 1-${ASSEMBLE_MAX_VARIANTS} takes, got: ${Array.isArray(raw.variants) ? raw.variants.length : "not an array"}`, "INVALID_ARG");
+      }
+      const topSourceKeys = ["source", "start", "zoom", "scene", "template", "params", "assets", "color"].filter((k) => raw[k] !== undefined && raw[k] !== null);
+      if (topSourceKeys.length) {
+        throw new MediaKitError(`${label} (${id}): shot has both variants and shot-level ${topSourceKeys.join(", ")} — put every take inside variants`, "INVALID_ARG");
+      }
+      const seenLabels = new Set();
+      const entries = [];
+      for (const [vi, vraw] of raw.variants.entries()) {
+        if (!vraw || typeof vraw !== "object" || Array.isArray(vraw)) {
+          throw new MediaKitError(`${label} (${id}): variants[${vi}] must be an object {label?, hook?, <source fields for ${kind}>}`, "INVALID_ARG");
+        }
+        const vlabel = typeof vraw.label === "string" && vraw.label.trim() ? vraw.label.trim() : String.fromCharCode(65 + vi);
+        if (vlabel.length > 32) throw new MediaKitError(`${label} (${id}): variants[${vi}] label must be 1-32 characters`, "INVALID_ARG");
+        if (seenLabels.has(vlabel)) throw new MediaKitError(`${label} (${id}): duplicate variant label "${vlabel}"`, "INVALID_ARG");
+        seenLabels.add(vlabel);
+        let vhook = null;
+        if (vraw.hook !== undefined && vraw.hook !== null) {
+          if (typeof vraw.hook !== "string" || !vraw.hook.trim() || vraw.hook.trim().length > 128) {
+            throw new MediaKitError(`${label} (${id}): variants[${vi}] hook must be a label (1-128 characters)`, "INVALID_ARG");
+          }
+          vhook = vraw.hook.trim();
+        }
+        const fields = await resolveAssembleTakeSource(kind, vraw, `${label} (${id}) variant ${vlabel}`, { duration, resolveRel, brand, brandApplied, brandOverrides });
+        entries.push({ label: vlabel, hook: vhook, ...pickTakeFields(fields) });
+      }
+      let selected = 0;
+      if (raw.selected !== undefined && raw.selected !== null) {
+        if (typeof raw.selected === "number") {
+          if (!Number.isInteger(raw.selected) || raw.selected < 0 || raw.selected >= entries.length) {
+            throw new MediaKitError(`${label} (${id}): selected ${raw.selected} is out of range (0..${entries.length - 1} for ${entries.length} variants)`, "INVALID_ARG");
+          }
+          selected = raw.selected;
+        } else if (typeof raw.selected === "string") {
+          const idx = entries.findIndex((v) => v.label === raw.selected);
+          if (idx < 0) throw new MediaKitError(`${label} (${id}): selected "${raw.selected}" matches no variant label (${entries.map((v) => v.label).join(", ")})`, "INVALID_ARG");
+          selected = idx;
+        } else {
+          throw new MediaKitError(`${label} (${id}): selected must be a variant index or label, got: ${typeof raw.selected}`, "INVALID_ARG");
+        }
+      }
+      const chosen = entries[selected];
+      Object.assign(shot, pickTakeFields(chosen));
+      shot.variants = entries.map((v, i) => ({ ...v, selected: i === selected }));
+      shot.selected = selected;
+      shot.selected_label = chosen.label;
+    } else {
+      if (raw.selected !== undefined && raw.selected !== null) {
+        throw new MediaKitError(`${label} (${id}): selected needs variants (this shot has a single take)`, "INVALID_ARG");
+      }
+      Object.assign(shot, await resolveAssembleTakeSource(kind, raw, `${label} (${id})`, { duration, resolveRel, brand, brandApplied, brandOverrides }));
+      shot.variants = [{ label: "A", hook: null, selected: true, ...pickTakeFields(shot) }];
+      shot.selected = 0;
+      shot.selected_label = "A";
+    }
     shot.textLayers = parseAssembleTextLayers(raw.text, label, id, duration, width, height, brand ? { color: brand.palette.text, size: brand.text_size } : null);
     if (brand && raw.text !== undefined && raw.text !== null) {
       const rawLayers = Array.isArray(raw.text) ? raw.text : [raw.text];
@@ -16739,6 +16843,52 @@ async function validateAssembleManifest(doc, manifestAbs) {
       chapters.push({ title: entry.title.trim(), at_seconds: +at.toFixed(3) });
     }
   }
+  // Hook slot (Takes set_storyboard + Outtake cut plan, lượt 132):
+  // the opening segment the whole film is built around — one shot
+  // (or a window inside it), pinned here so the director, the `hook`
+  // tool and later edits all mean the same segment. The window is
+  // echoed with its film-time position; a hook that does not open
+  // the film warns (validate), and diagnose flags it again.
+  let hook = null;
+  if (doc.hook !== undefined && doc.hook !== null) {
+    if (!doc.hook || typeof doc.hook !== "object" || Array.isArray(doc.hook)) {
+      throw new MediaKitError("assemble hook must be an object {shot, start?, end?}", "INVALID_ARG");
+    }
+    if (typeof doc.hook.shot !== "string" || !doc.hook.shot.trim()) {
+      throw new MediaKitError("assemble hook needs a shot id", "INVALID_ARG");
+    }
+    const hookShot = shots.find((s) => s.id === doc.hook.shot.trim());
+    if (!hookShot) {
+      throw new MediaKitError(`assemble hook points at unknown shot "${doc.hook.shot.trim()}" (shots: ${shots.map((s) => s.id).join(", ")})`, "INVALID_ARG");
+    }
+    const hookStart = parseTime(doc.hook.start ?? doc.hook.start_seconds ?? 0, "hook.start");
+    const hookEnd = parseTime(doc.hook.end ?? doc.hook.end_seconds ?? hookShot.duration, "hook.end");
+    if (!(hookStart >= 0 && hookStart < hookShot.duration)) {
+      throw new MediaKitError(`assemble hook.start ${hookStart}s is outside shot ${hookShot.id} (0..${hookShot.duration}s)`, "INVALID_ARG");
+    }
+    if (!(hookEnd > hookStart && hookEnd <= hookShot.duration)) {
+      throw new MediaKitError(`assemble hook.end ${hookEnd}s must be after hook.start (${hookStart}s) and within shot ${hookShot.id} (${hookShot.duration}s)`, "INVALID_ARG");
+    }
+    let filmStartFrames = Math.round(hookStart * fps);
+    for (const s of shots) {
+      if (s.id === hookShot.id) break;
+      filmStartFrames += s.frames;
+    }
+    const filmEndFrames = filmStartFrames + Math.round((hookEnd - hookStart) * fps);
+    hook = {
+      shot: hookShot.id,
+      start_seconds: +hookStart.toFixed(3),
+      end_seconds: +hookEnd.toFixed(3),
+      film_start_seconds: +(filmStartFrames / fps).toFixed(3),
+      film_end_seconds: +(filmEndFrames / fps).toFixed(3),
+    };
+    if (hookShot.role !== undefined && hookShot.role !== "hook") {
+      warnings.push(`hook slot points at shot ${hookShot.id} whose role is "${hookShot.role}", not "hook" — set its role to "hook" or move the slot`);
+    }
+    if (shots[0].id !== hookShot.id) {
+      warnings.push(`hook slot points at shot ${hookShot.id}, not the first shot (${shots[0].id}) — the hook should open the film`);
+    }
+  }
   const manifestHash = await hashFile(manifestAbs);
   const voiceHash = await hashFile(voicePath);
   const musicHash = music ? await hashFile(music.path) : null;
@@ -16770,7 +16920,7 @@ async function validateAssembleManifest(doc, manifestAbs) {
     brand: brand ? brand.id : null, brand_applied: brandApplied, brand_overrides: brandOverrides,
     voice: { path: voicePath, lead, tail, duration_seconds: voiceDuration },
     total_seconds: totalSeconds, total_frames: totalFrames,
-    music, sfx, captions, shots, chapters, warnings, fingerprint,
+    music, sfx, captions, shots, chapters, hook, warnings, fingerprint,
     fingerprint_parts: { manifest: manifestHash, voice: voiceHash, music: musicHash, sfx: sfxHashes, captions: captionsHash, assets: assetHashes, brand: brandResolved ? stableStringify(brandResolved) : null },
   };
 }
@@ -17269,7 +17419,8 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       sfx_count: plan.sfx.length,
       captions: plan.captions,
       chapters: plan.chapters,
-      shots: plan.shots.map((s) => ({ id: s.id, kind: s.kind, duration: s.duration, frames: s.frames, ...(s.audio_level !== undefined && s.audio_level !== 1 ? { audio_level: s.audio_level } : {}), ...(s.template ? { template: s.template, params: s.params ?? null } : {}), ...(s.transition ? { transition: { type: s.transition.type, duration_seconds: s.transition.duration_seconds, frames: s.transition.frames } } : {}), ...(s.textLayers?.length ? { text_layers: s.textLayers.map((t) => ({ text: t.text, lines: t.lines, position: t.position, size: t.size, color: t.color, box: t.box, start_seconds: t.start_seconds, end_seconds: t.end_seconds })) } : {}) })),
+      hook: plan.hook,
+      shots: plan.shots.map((s) => ({ id: s.id, kind: s.kind, duration: s.duration, frames: s.frames, ...(s.role ? { role: s.role } : {}), ...(s.audio_level !== undefined && s.audio_level !== 1 ? { audio_level: s.audio_level } : {}), ...(s.template ? { template: s.template, params: s.params ?? null } : {}), ...(s.transition ? { transition: { type: s.transition.type, duration_seconds: s.transition.duration_seconds, frames: s.transition.frames } } : {}), ...(s.textLayers?.length ? { text_layers: s.textLayers.map((t) => ({ text: t.text, lines: t.lines, position: t.position, size: t.size, color: t.color, box: t.box, start_seconds: t.start_seconds, end_seconds: t.end_seconds })) } : {}), variants: s.variants.map((v) => ({ label: v.label, selected: v.selected, ...(v.hook ? { hook: v.hook } : {}), ...(v.source ? { source: v.source } : {}), ...(v.start !== undefined ? { start: v.start } : {}), ...(v.scene ? { scene: v.scene } : {}), ...(v.template ? { template: v.template } : {}), ...(v.color ? { color: v.color } : {}) })), selected_label: s.selected_label })),
     };
   }
   if (!["preview", "approve", "render"].includes(mode)) {
@@ -17547,12 +17698,14 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
           ...(s.assets ? { assets: s.assets } : {}),
           ...(s.color ? { color: s.color } : {}),
           ...(s.audio_level !== undefined && s.audio_level !== 1 ? { audio_level: s.audio_level } : {}),
+          ...(s.variants?.length > 1 ? { variants: s.variants.map((v) => ({ label: v.label, selected: v.selected, ...(v.hook ? { hook: v.hook } : {}), ...(v.source ? { source: v.source } : {}), ...(v.scene ? { scene: v.scene } : {}), ...(v.assets ? { assets: v.assets } : {}), ...(v.color ? { color: v.color } : {}) })) } : {}),
         }])),
       },
       mediakit_version: MEDIAKIT_VERSION,
       ffmpeg_version: await ffmpegVersionString(),
       cache_hits: cacheHits,
       chapters: plan.chapters,
+      hook: plan.hook,
       shots_run: renderShots.length,
       ...(audioLevelsApplied.length ? { audio_levels: audioLevelsApplied } : {}),
       joins: joins.map((j) => ({ into_shot: renderShotsBuilt[j.index]?.id ?? null, type: j.type, duration_seconds: j.durationSeconds, offset_seconds: j.offsetSeconds })),
@@ -17905,6 +18058,11 @@ export async function verifyRender({ receipt, rerender = false, outputDir = null
         [`asset:${id}`, s.source ?? null],
         [`asset:${id}`, s.scene ?? null],
         ...Object.entries(s.assets ?? {}).map(([n, p]) => [`asset:${id}:${n}`, p]),
+        ...((s.variants ?? []).flatMap((v) => [
+          [`asset:${id}:${v.label}`, v.source ?? null],
+          [`asset:${id}:${v.label}`, v.scene ?? null],
+          ...Object.entries(v.assets ?? {}).map(([n, p]) => [`asset:${id}:${v.label}:${n}`, p]),
+        ])),
       ]),
     ];
     for (const [name, p] of checkPaths) {
@@ -18246,6 +18404,39 @@ export async function diagnoseFilm({ manifestPath }) {
     add("timeline", "info",
       `${plan.shots.length} shots cover ${plan.total_seconds}s (${plan.total_frames} frames @${plan.fps}fps, ${plan.width}x${plan.height}) on a voice of ${plan.voice.duration_seconds}s + ${plan.voice.lead}s lead + ${plan.voice.tail}s tail`,
       { total_seconds: plan.total_seconds, total_frames: plan.total_frames, shots: plan.shots.length });
+
+    // Structure (Outtake cut plan, lượt 132): roles + hook slot are
+    // annotation, but a film whose hook is not first, or whose
+    // payoff is not last, was storyboarded wrong — flag it before
+    // the render, not after.
+    const roles = plan.shots.filter((s) => s.role).map((s) => ({ id: s.id, role: s.role }));
+    if (!roles.length && !plan.hook) {
+      add("structure_roles", "info", "no shot roles or hook slot set — add role hook/context/core/payoff per shot and a film-level hook {shot, start?, end?} to make the structure legible to the next director pass");
+    } else {
+      const hookRoles = roles.filter((r) => r.role === "hook");
+      if (hookRoles.length > 1) {
+        add("structure_roles", "warn", `multiple shots carry role "hook" (${hookRoles.map((r) => r.id).join(", ")}) — one hook opens the film; the rest are core`, { hook_shots: hookRoles.map((r) => r.id) });
+      } else if (hookRoles.length === 1 && plan.shots[0].id !== hookRoles[0].id) {
+        add("structure_roles", "warn", `role "hook" is on shot ${hookRoles[0].id}, not the first shot (${plan.shots[0].id}) — the hook should open the film`, { hook_shot: hookRoles[0].id });
+      } else if (hookRoles.length === 1) {
+        add("structure_roles", "pass", `role "hook" opens the film on shot ${hookRoles[0].id}`, { hook_shot: hookRoles[0].id });
+      }
+      const payoffRoles = roles.filter((r) => r.role === "payoff");
+      if (payoffRoles.length > 1) {
+        add("structure_roles", "warn", `multiple shots carry role "payoff" (${payoffRoles.map((r) => r.id).join(", ")}) — one payoff closes the film`, { payoff_shots: payoffRoles.map((r) => r.id) });
+      } else if (payoffRoles.length === 1 && plan.shots[plan.shots.length - 1].id !== payoffRoles[0].id) {
+        add("structure_roles", "warn", `role "payoff" is on shot ${payoffRoles[0].id}, not the last shot (${plan.shots[plan.shots.length - 1].id}) — the payoff should close the film`, { payoff_shot: payoffRoles[0].id });
+      }
+    }
+    if (plan.hook) {
+      if (plan.shots[0].id === plan.hook.shot) {
+        add("hook_slot", "pass", `hook slot opens the film: shot ${plan.hook.shot} ${plan.hook.start_seconds}–${plan.hook.end_seconds}s (film ${plan.hook.film_start_seconds}–${plan.hook.film_end_seconds}s)`, { ...plan.hook });
+      } else {
+        add("hook_slot", "warn", `hook slot is on shot ${plan.hook.shot} (${plan.hook.film_start_seconds}–${plan.hook.film_end_seconds}s in the film) — the hook should open the film`, { ...plan.hook });
+      }
+    } else if (roles.some((r) => r.role === "hook")) {
+      add("hook_slot", "info", "a shot carries role \"hook\" but no film-level hook window is set — add hook {shot, start?, end?} to pin the exact opening segment");
+    }
 
     // Voice loudness: the master clock should sit in a range the
     // -14 LUFS master can reach without strain. A whisper-quiet

@@ -122,8 +122,42 @@ pictures — pictures fit the voice:
   so chapter times would not line up. Titles are 1–128
   characters; `= ; # \` and newlines in a title become spaces
   (ffmetadata syntax).
+- `hook` is optional: `{shot, start?, end?}` — the hook slot, the
+  opening segment the whole film is built around. `shot` is a shot
+  id; `start`/`end` are seconds (or `MM:SS`) inside that shot
+  (default the whole shot). Validate echoes it with
+  `film_start_seconds`/`film_end_seconds`, so the director, the
+  `hook` tool and later edits all mean the same segment. A hook
+  that does not open the film warns at validate (and again in
+  `diagnose`); so does a hook slot on a shot whose `role` is not
+  `"hook"`.
 - `shots`: 1–64, each with a unique `id` and a `duration` of
   0.5–600s:
+  - Every shot may carry `role` — `hook`, `context`, `core` or
+    `payoff` (Outtake's cut-plan structure): which beat of the arc
+    the shot carries. Annotation only — the render does not move —
+    but `diagnose` checks the arc: more than one `hook` role warns,
+    a `hook` role past the first shot warns, a `payoff` role before
+    the last shot warns.
+  - Every shot may carry `variants` — alternate takes A/B/C of the
+    same shot (Takes' `set_storyboard`): an array of 1–8 takes,
+    each with the same kind's source fields (`source`/`start` for
+    video, `source`/`zoom` for image, `scene`/`template`/`params`/
+    `assets` for `canvas_scene`, `color` for color) plus an optional
+    `label` (default A, B, C… — must be unique) and an optional
+    `hook` label naming which hook this take opens with, so the
+    `hook` tool's output feeds straight into the storyboard.
+    `selected` (index or label, default 0) picks the take that
+    renders. When `variants` is present the shot's own source
+    fields must be absent — two places naming the clip is an
+    ambiguity, not a default. Every take is validated by the same
+    rules as a primary take (probe + hash + motion-gate + template/
+    brand); unselected takes are still probed and hashed and are
+    listed in the receipt, so switching `selected` re-renders only
+    that shot (the segment cache key is the selected take's hash
+    + start). Validate echoes `variants` (label, selected, hook,
+    source/start) and `selected_label` per shot; a single-take shot
+    reports one variant, label `"A"`.
   - `image`: `source` is a still. With `zoom` it renders through
     `zoom_pan` (`from`/`to` 1–10, `focus`/`focus_end` as [x, y] in
     0–1). Without `zoom` it holds still through `image_to_video`.

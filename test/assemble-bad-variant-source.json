@@ -1,0 +1,79 @@
+{
+  "captions": "captions.srt",
+  "fps": 30,
+  "height": 1920,
+  "hook": {
+    "end": 2,
+    "shot": "s1",
+    "start": 0
+  },
+  "music": {
+    "duck_db": 12,
+    "path": "mix-music.mp3",
+    "volume": 0.3
+  },
+  "sfx": [
+    {
+      "at": 2.0,
+      "file": "sfx-beep.mp3",
+      "volume": 1
+    }
+  ],
+  "shots": [
+    {
+      "duration": 4.0,
+      "id": "s1",
+      "kind": "image",
+      "role": "hook",
+      "source": "kenburns.png",
+      "zoom": {
+        "from": 1.0,
+        "to": 1.15
+      }
+    },
+    {
+      "duration": 4.0,
+      "id": "s2",
+      "kind": "video",
+      "role": "core",
+      "selected": "B",
+      "variants": [
+        {
+          "hook": "bold claim",
+          "label": "A",
+          "source": "source.mp4",
+          "start": 1
+        },
+        {
+          "hook": "mid-sentence cut",
+          "label": "B",
+          "source": "no-such-file.mp4",
+          "start": 4
+        }
+      ]
+    },
+    {
+      "duration": 1.0,
+      "id": "s3",
+      "kind": "image",
+      "role": "core",
+      "source": "kenburns.png"
+    },
+    {
+      "color": "111111",
+      "duration": 1.0,
+      "id": "s4",
+      "kind": "color",
+      "role": "payoff"
+    }
+  ],
+  "style": "clean-bold",
+  "title": "Variants + hook slot",
+  "version": 1,
+  "voice": {
+    "lead": 0.5,
+    "path": "mix-voice.mp3",
+    "tail": 0.5
+  },
+  "width": 1080
+}

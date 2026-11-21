@@ -7812,6 +7812,14 @@ async function stageAssembleManifest(name) {
     if (s.source) out.source = abs(s.source);
     if (s.scene) out.scene = abs(s.scene);
     if (s.assets) out.assets = Object.fromEntries(Object.entries(s.assets).map(([k, v]) => [k, abs(v)]));
+    // Turn 132: variant takes carry their own source/scene/assets.
+    if (s.variants) out.variants = s.variants.map((v) => {
+      const vv = { ...v };
+      if (v.source) vv.source = abs(v.source);
+      if (v.scene) vv.scene = abs(v.scene);
+      if (v.assets) vv.assets = Object.fromEntries(Object.entries(v.assets).map(([k, val]) => [k, abs(val)]));
+      return vv;
+    });
     return out;
   });
   const manifestPath = path.join(dir, name);
@@ -7837,6 +7845,53 @@ const assembleStyleText = await callExpectThrow("assemble", { manifest_path: pat
 checkOk(/must be one of clean-bold, minimal-line, warm-story/.test(assembleStyleText ?? ""), "assemble validate refuses an unknown style id", assembleStyleText ?? "");
 const assembleMissingText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-missing.json"), mode: "validate" });
 checkOk(/nope\.png/.test(assembleMissingText ?? ""), "assemble validate refuses a missing shot asset", assembleMissingText ?? "");
+// Turn 132: shot variants + hook slot for assemble.
+// Fixture test/assemble-variants.json: the same 10s film, s1 role
+// hook + film hook {s1, 0-2s}, s2 role core with takes A (source.mp4
+// start 1, hook "bold claim") / B (start 4, hook "mid-sentence cut"),
+// selected B; s3 core, s4 payoff.
+const variantsStage = await stageAssembleManifest("assemble-variants.json");
+const variantsRes = await client.callTool({ name: "assemble", arguments: { manifest_path: variantsStage.manifestPath, mode: "validate" } });
+const variantsJson = JSON.parse(variantsRes.content[0].text);
+const variantsS2 = variantsJson.shots?.find((s) => s.id === "s2");
+checkOk(variantsJson.hook?.shot === "s1" && variantsJson.hook?.start_seconds === 0 && variantsJson.hook?.end_seconds === 2 && variantsJson.hook?.film_start_seconds === 0 && variantsJson.hook?.film_end_seconds === 2 && variantsJson.warnings?.length === 0, "assemble validate echoes the hook slot: s1 0-2s at film 0-2s, no warnings", JSON.stringify(variantsJson.hook));
+checkOk(JSON.stringify(variantsJson.shots?.map((s) => `${s.id}:${s.role}`)) === JSON.stringify(["s1:hook", "s2:core", "s3:core", "s4:payoff"]), "assemble validate echoes shot roles hook/core/core/payoff", JSON.stringify(variantsJson.shots?.map((s) => s.role)));
+checkOk(variantsS2?.variants?.length === 2 && variantsS2?.selected_label === "B" && variantsS2?.variants?.[0]?.label === "A" && variantsS2?.variants?.[0]?.hook === "bold claim" && variantsS2?.variants?.[0]?.selected === false && variantsS2?.variants?.[1]?.label === "B" && variantsS2?.variants?.[1]?.hook === "mid-sentence cut" && variantsS2?.variants?.[1]?.selected === true, "assemble validate lists s2 takes A/B with B selected and their hook labels", JSON.stringify(variantsS2?.variants?.map((v) => `${v.label}:${v.hook}:${v.selected}`)));
+checkOk(variantsS2?.variants?.[1]?.start === 4, "selected variant B resolves: s2 renders from start 4s", JSON.stringify(variantsS2?.variants?.[1]));
+// No `selected` means the first take (A).
+const variantsDefaultStage = await stageAssembleManifest("assemble-variants-default.json");
+const variantsDefaultRes = await client.callTool({ name: "assemble", arguments: { manifest_path: variantsDefaultStage.manifestPath, mode: "validate" } });
+const variantsDefaultJson = JSON.parse(variantsDefaultRes.content[0].text);
+const variantsDefaultS2 = variantsDefaultJson.shots?.find((s) => s.id === "s2");
+checkOk(variantsDefaultS2?.selected_label === "A" && variantsDefaultS2?.variants?.[0]?.start === 1 && variantsDefaultS2?.variants?.[0]?.selected === true, "no selected means take A (start 1s)", JSON.stringify(variantsDefaultS2?.variants?.map((v) => `${v.label}:${v.start}:${v.selected}`)));
+// Bad films fail at validate, naming the fault.
+const variantsBadCases = [
+  ["assemble-bad-variant-selected.json", /out of range \(0\.\.1 for 2 variants\)/, "selected 5 out of range"],
+  ["assemble-bad-variant-label.json", /duplicate variant label \\"A\\"/, "duplicate variant label"],
+  ["assemble-bad-variant-top.json", /both variants and shot-level source/, "variants + shot-level source"],
+  ["assemble-bad-hook-shot.json", /unknown shot \\"s9\\"/, "hook points at an unknown shot"],
+  ["assemble-bad-hook-window.json", /hook\.end 9s must be after hook\.start/, "hook window past the shot"],
+  ["assemble-bad-role.json", /role must be one of hook, context, core, payoff/, "unknown role"],
+  ["assemble-bad-variant-source.json", /variant B source not found/, "missing variant source"],
+];
+for (const [file, re, label] of variantsBadCases) {
+  const text = await callExpectThrow("assemble", { manifest_path: path.join(root, "test", file), mode: "validate" });
+  checkOk(re.test(text ?? ""), `assemble validate refuses ${label}`, (text ?? "").slice(0, 160));
+}
+// Diagnose: the structure checks pass on the well-formed film.
+const variantsDiagRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: variantsStage.manifestPath } });
+const variantsDiagJson = JSON.parse(variantsDiagRes.content[0].text);
+const variantsDiagById = Object.fromEntries((variantsDiagJson.checks ?? []).map((c) => [c.id, c]));
+checkOk(variantsDiagById.structure_roles?.severity === "pass" && variantsDiagById.hook_slot?.severity === "pass", "diagnose passes structure_roles (hook opens on s1) and hook_slot (s1 0-2s)", JSON.stringify(variantsDiagJson.checks?.filter((c) => ["structure_roles", "hook_slot"].includes(c.id)).map((c) => `${c.id}:${c.severity}`)));
+// Render proof: preview with take B vs take A renders different
+// bytes — the pick really changes the film (same file, start 1 vs 4).
+const variantsPreviewBDir = path.join(variantsStage.dir, "preview-b");
+const variantsPreviewADir = path.join(variantsDefaultStage.dir, "preview-a");
+await client.callTool({ name: "assemble", arguments: { manifest_path: variantsStage.manifestPath, mode: "preview", output_dir: variantsPreviewBDir, preview_seconds: 10 } });
+await client.callTool({ name: "assemble", arguments: { manifest_path: variantsDefaultStage.manifestPath, mode: "preview", output_dir: variantsPreviewADir, preview_seconds: 10 } });
+const variantsPreviewBHash = createHash("sha256").update(await readFile(path.join(variantsPreviewBDir, "preview.mp4"))).digest("hex");
+const variantsPreviewAHash = createHash("sha256").update(await readFile(path.join(variantsPreviewADir, "preview.mp4"))).digest("hex");
+checkOk(variantsPreviewBHash !== variantsPreviewAHash, "preview with take B selected renders different bytes than take A (start 4 vs 1)", `${variantsPreviewBHash.slice(0, 12)} vs ${variantsPreviewAHash.slice(0, 12)}`);
 // Turn 107: export_timeline — film manifest -> OpenTimelineIO .otio.
 // Fixture test/assemble-film-transitions.json (10s / 300 frames @30fps;
 // image 4s + video 4s (start 2s) + image 1s + color 1s; transitions
