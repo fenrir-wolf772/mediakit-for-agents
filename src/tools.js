@@ -47,7 +47,7 @@ export const TOOL_DEFS = [
 
   {
     name: "trim",
-    description: "Cut a clip out of a media file. Give start (seconds) plus duration OR end. Re-encodes by default for frame-accurate cuts; set stream_copy=true for fast lossless cuts (keyframe boundaries only). With stream_copy, set snap_to_keyframe=true to move start down / end up to the nearest keyframes so the cut lands exactly (see the keyframes tool first), or smart_cut=true to keep the exact start instead: only the head up to the next keyframe is re-encoded (source bitrate x1.2), the rest is stream-copied — exact start, near-lossless speed. Set snap_to_beat=true to move start down / end up to the nearest beats of the music instead (see the beat_grid tool first): the grid is measured from the audio, and the cut refuses when the grid is unreliable (speech, tone, drone — no steady beat to snap to). snap_to_beat works on re-encode cuts too, and refuses snap_to_keyframe and smart_cut. Every video trim verifies the cut by default: check_frames compares 3 frames of the output (head/middle/tail) against the source at the requested times and reports cut_verified plus mean_abs_diff per frame (threshold max(5, normal_step)); a snap that moved the cut shows up as mismatched frames. Set check_frames=false to skip the verification. Set dry_run=true to print the exact ffmpeg command(s) that would run and write no file.",
+    description: "Cut a clip out of a media file. Give start (seconds) plus duration OR end. Re-encodes by default for frame-accurate cuts; set stream_copy=true for fast lossless cuts (keyframe boundaries only). With stream_copy, set snap_to_keyframe=true to move start down / end up to the nearest keyframes so the cut lands exactly (see the keyframes tool first), or smart_cut=true to keep the exact start instead: only the head up to the next keyframe is re-encoded (source bitrate x1.2), the rest is stream-copied — exact start, near-lossless speed. Set snap_to_beat=true to move start down / end up to the nearest beats of the music instead (see the beat_grid tool first): the grid is measured from the audio, and the cut refuses when the grid is unreliable (speech, tone, drone — no steady beat to snap to). snap_to_beat works on re-encode cuts too, and refuses snap_to_keyframe and smart_cut. Set edge_buffer (0-1s, default 0) to widen the requested window by that much on both sides, clamped to the file edges — Outtake's 0.1s clip-edge buffer, so the cut never lands exactly on a word or action onset; the result reports requested_start/requested_end plus edge_buffer_applied (how much each side actually grew — less at the file edges). It composes with snap_to_keyframe/snap_to_beat (the buffer widens first, then the snap moves the buffered window) and refuses smart_cut (which lands the start exactly). Every video trim verifies the cut by default: check_frames compares 3 frames of the output (head/middle/tail) against the source at the requested times and reports cut_verified plus mean_abs_diff per frame (threshold max(5, normal_step)); a snap that moved the cut shows up as mismatched frames, but a buffer-only trim checks against the buffered start, so it verifies. Set check_frames=false to skip the verification. Set dry_run=true to print the exact ffmpeg command(s) that would run and write no file.",
     schema: {
     input: pathSchema,
     output: pathSchema.describe("Output file path"),
@@ -59,6 +59,7 @@ export const TOOL_DEFS = [
     snap_to_beat: z.boolean().default(false).describe("Snap start/end to the nearest beats of the music (start down, end up; see beat_grid first). Works on re-encode cuts too; refuses snap_to_keyframe and smart_cut, and refuses when the measured beat grid is unreliable"),
     snap_beat_method: z.enum(["grid", "dp"]).default("grid").describe("Which beat grid snap_to_beat snaps to: grid (one steady tempo for the whole file) or dp (the DP tracker follows real onset peaks, so it stays on the beat when the tempo drifts — see beat_grid)"),
     smart_cut: z.boolean().default(false).describe("With stream_copy only: exact start by re-encoding only the head up to the next keyframe (source bitrate x1.2); refuses snap_to_keyframe"),
+    edge_buffer: z.number().min(0).max(1).default(0).describe("Seconds of handle kept past each edge of the requested window (default 0): start moves earlier and end later by this much, clamped to the file edges — Outtake's 0.1s clip-edge buffer, so a cut never lands exactly on a word or action onset. Composes with snap_to_keyframe/snap_to_beat (buffer first, then snap); refuses smart_cut"),
     check_frames: z.boolean().default(true).describe("Verify the cut: compare 3 output frames against the source at the requested times (default true; false skips the check, audio-only inputs have nothing to check)"),
     dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command(s) that would run (one for a plain cut, three for smart_cut: head re-encode, tail copy, concat) and write no file"),
   },
@@ -73,6 +74,7 @@ export const TOOL_DEFS = [
     snapToBeat: a.snap_to_beat,
     snapBeatMethod: a.snap_beat_method ?? "grid",
     smartCut: a.smart_cut,
+    edgeBuffer: a.edge_buffer ?? 0,
     checkFrames: a.check_frames ?? true,
     dryRun: a.dry_run,
   })),
@@ -994,7 +996,7 @@ export const TOOL_DEFS = [
 
   {
     name: "cut_words",
-    description: "Cut words out of a talking-head clip by transcript: filler words (um/uh), false starts and restarts, using word timings from transcribe --word-timestamps. Give a words file (the JSON transcribe prints — save its stdout — or a hand-written {words:[{start,end,word}]}), then select by word text (--remove 'um,uh'), the built-in filler set (--fillers), or 0-based word-index ranges (--indices '0-5,96-98', as printed by transcribe); --keep rescues indices even when auto-flagged. Keep runs are padded 0.06s before / 0.12s after, clamped so a cut never keeps a fragment of the word it removed, and kept words that end up mostly cut out are reported in cut_check.swallowed — play them before trusting the cut. Every kept segment gets a 12ms fade out + 15ms fade in at the join, so a cut mid-word has no click. --dry-run returns the plan (cut intervals + keep segments) without writing a file. No match stream-copies the input unchanged.",
+    description: "Cut words out of a talking-head clip by transcript: filler words (um/uh), false starts and restarts, using word timings from transcribe --word-timestamps. Give a words file (the JSON transcribe prints — save its stdout — or a hand-written {words:[{start,end,word}]}), then select by word text (--remove 'um,uh'), the built-in filler set (--fillers), or 0-based word-index ranges (--indices '0-5,96-98', as printed by transcribe); --keep rescues indices even when auto-flagged. Keep runs are padded 0.06s before / 0.12s after, clamped so a cut never keeps a fragment of the word it removed, and kept words that end up mostly cut out are reported in cut_check.swallowed — play them before trusting the cut. Set edge_buffer (0-1s, default 0) to widen every keep segment past its pads, clamped only to the file edges — Outtake's 0.1s clip-edge buffer, so a cut never lands exactly on a kept word's onset; it deliberately keeps up to that much of the neighbouring removed word's edge, and a buffer wider than the gap between two kept runs merges them (the cut between them disappears). Every kept segment gets a 12ms fade out + 15ms fade in at the join, so a cut mid-word has no click. --dry-run returns the plan (cut intervals + keep segments) without writing a file. No match stream-copies the input unchanged.",
     schema: {
     input: pathSchema.describe("Audio or video file with a speech track"),
     output: pathSchema.optional().describe("Output media file path (not needed with dry_run=true)"),
@@ -1006,6 +1008,7 @@ export const TOOL_DEFS = [
     pad_before: z.number().min(0).max(1).default(0.06).describe("Seconds kept before each kept-word run (default 0.06, clamped to the gap to the neighbouring cut word)"),
     pad_after: z.number().min(0).max(1).default(0.12).describe("Seconds kept after each kept-word run (default 0.12, clamped the same way)"),
     min_keep: z.number().min(0.05).max(5).default(0.2).describe("Drop keep segments shorter than this many seconds (default 0.2); words lost that way are reported in cut_check.swallowed"),
+    edge_buffer: z.number().min(0).max(1).default(0).describe("Seconds of handle kept past each edge of every keep segment (default 0), clamped only to the file edges — Outtake's 0.1s clip-edge buffer, so a cut never lands exactly on a kept word's onset. It deliberately keeps up to that much of the neighbouring removed word's edge; a buffer wider than the gap between two kept runs merges them"),
     dry_run: z.boolean().default(false).describe("Return the cut plan (removed words, keep segments, cut_check) without writing any file"),
   },
     handler: async (a) => safe(() => core.cutWords({
@@ -1019,6 +1022,7 @@ export const TOOL_DEFS = [
     padBefore: a.pad_before ?? 0.06,
     padAfter: a.pad_after ?? 0.12,
     minKeep: a.min_keep ?? 0.2,
+    edgeBuffer: a.edge_buffer ?? 0,
     dryRun: a.dry_run ?? false,
   })),
   },

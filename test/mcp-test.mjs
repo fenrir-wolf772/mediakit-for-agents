@@ -268,6 +268,81 @@ console.log("trim call:", trimRes.content[0].text.replace(/\n/g, " "));
 const trimJson = JSON.parse(trimRes.content[0].text);
 checkOk(near(trimJson.duration_actual, 2, 0.05), "trim duration_actual is 2s", `got ${trimJson.duration_actual}`);
 checkOk(trimJson.stream_copy === false, "trim re-encodes by default", `got stream_copy=${trimJson.stream_copy}`);
+// --edge-buffer (Outtake's 0.1s clip-edge buffer): the requested
+// window 2-6s widens to 1.9-6.1s, reported against the request.
+const trimEbRes = await client.callTool({
+  name: "trim",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    output: path.join(root, "outputs/mcp-trim-edge.mp4"),
+    start: 2,
+    duration: 4,
+    edge_buffer: 0.1,
+  },
+});
+const trimEbJson = JSON.parse(trimEbRes.content[0].text);
+checkOk(trimEbRes.isError !== true && trimEbJson.start === 1.9 && near(trimEbJson.duration_seconds, 4.2, 0.001) && near(trimEbJson.duration_actual, 4.2, 0.05) && trimEbJson.requested_start === 2 && trimEbJson.requested_end === 6 && trimEbJson.edge_buffer === 0.1 && trimEbJson.edge_buffer_applied?.start === 0.1 && trimEbJson.edge_buffer_applied?.end === 0.1, "trim --edge-buffer 0.1 widens 2-6s to 1.9-6.1s (4.2s) and reports requested vs applied", JSON.stringify({ start: trimEbJson.start, dur: trimEbJson.duration_seconds, req: [trimEbJson.requested_start, trimEbJson.requested_end], applied: trimEbJson.edge_buffer_applied }));
+checkOk(trimEbJson.cut_verified === true, "trim --edge-buffer verifies (the buffered start IS the requested cut, so frames align)", JSON.stringify(trimEbJson.check_frames));
+// The buffer clamps to the file edges: start 0.05s only grows 0.05s.
+const trimEbClampRes = await client.callTool({
+  name: "trim",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    output: path.join(root, "outputs/mcp-trim-edge-clamp.mp4"),
+    start: 0.05,
+    duration: 2,
+    edge_buffer: 0.1,
+  },
+});
+const trimEbClampJson = JSON.parse(trimEbClampRes.content[0].text);
+checkOk(trimEbClampRes.isError !== true && trimEbClampJson.start === 0 && near(trimEbClampJson.duration_actual, 2.15, 0.05) && trimEbClampJson.edge_buffer_applied?.start === 0.05 && trimEbClampJson.edge_buffer_applied?.end === 0.1, "trim --edge-buffer clamps at the file start (applied start 0.05, end 0.1, 2.15s)", JSON.stringify(trimEbClampJson.edge_buffer_applied));
+// Buffer + snap composes (dry-run): the buffered window 1.9-6.1s
+// snaps to the keyframes 0-8.333s; the request stays 2-6s.
+const trimEbSnapRes = await client.callTool({
+  name: "trim",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    output: path.join(root, "outputs/mcp-trim-edge-snap.mp4"),
+    start: 2,
+    duration: 4,
+    edge_buffer: 0.1,
+    stream_copy: true,
+    snap_to_keyframe: true,
+    dry_run: true,
+  },
+});
+const trimEbSnapJson = JSON.parse(trimEbSnapRes.content[0].text);
+checkOk(trimEbSnapRes.isError !== true && trimEbSnapJson.dry_run === true && trimEbSnapJson.start === 0 && near(trimEbSnapJson.duration_seconds, 8.333, 0.01) && trimEbSnapJson.snapped === true && trimEbSnapJson.requested_start === 2 && trimEbSnapJson.requested_end === 6 && trimEbSnapJson.edge_buffer === 0.1, "trim --edge-buffer + --snap snaps the buffered window (1.9-6.1s -> keyframes 0-8.333s)", JSON.stringify({ start: trimEbSnapJson.start, dur: trimEbSnapJson.duration_seconds, snapped: trimEbSnapJson.snapped }));
+// Buffer refuses smart_cut (exact start) and > 1s.
+const trimEbScRes = await client.callTool({
+  name: "trim",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    output: path.join(root, "outputs/mcp-trim-edge-sc.mp4"),
+    start: 2,
+    duration: 4,
+    edge_buffer: 0.1,
+    stream_copy: true,
+    smart_cut: true,
+  },
+});
+const trimEbScJson = JSON.parse(trimEbScRes.content[0].text);
+checkOk(trimEbScRes.isError === true && /edge_buffer.*smart_cut|smart_cut.*edge_buffer/.test(trimEbScJson.error ?? ""), "trim --edge-buffer refuses --smart-cut", JSON.stringify(trimEbScJson));
+const trimEbBigRes = await client.callTool({
+  name: "trim",
+  arguments: {
+    input: path.join(root, "test/source.mp4"),
+    output: path.join(root, "outputs/mcp-trim-edge-big.mp4"),
+    start: 2,
+    duration: 4,
+    edge_buffer: 2,
+  },
+});
+const trimEbBigText = trimEbBigRes.content[0].text;
+// Zod rejects edge_buffer > 1 before the handler runs, so the
+// result is a plain-text MCP validation error, not JSON — parse it
+// as text (the same trap as the mux offset-9999 assert, lượt 16).
+checkOk(trimEbBigRes.isError === true && /edge_buffer/.test(trimEbBigText), "trim --edge-buffer 2 (over the 1s cap) refuses", trimEbBigText.slice(0, 200));
 
 const reframeRes = await client.callTool({
   name: "reframe",
@@ -6585,6 +6660,49 @@ const cwCliDry = await runCli(["cut-words", path.join(root, "test/source.mp4"), 
 checkOk(cwCliDry.code === 0 && /"dry_run": true/.test(cwCliDry.out), "CLI cut-words --dry-run needs no -o and prints the plan", cwCliDry.out.slice(0, 200));
 const cwCliNoSel = await runCli(["cut-words", path.join(root, "test/source.mp4"), "--words-file", path.join(root, "test/cut-words.json"), "-o", path.join(root, "outputs/cli-cutwords-nosel.mp4")]);
 checkOk(cwCliNoSel.code !== 0 && /selector/.test(cwCliNoSel.out), "CLI cut-words with no selector refuses", cwCliNoSel.out.slice(0, 200));
+// --edge-buffer (Outtake's 0.1s clip-edge buffer): every keep segment
+// grows 0.1s past its pads — [0,1.12] -> [0,1.22] (start clamped at
+// the file edge), [3.94,5.12] -> [3.84,5.22], [7.94,9.12] ->
+// [7.84,9.22] — 3.48s becomes 3.98s.
+const cwEbRes = await client.callTool({ name: "cut_words", arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-cutwords-edge.mp4"), words_file: cwWords, remove: "um,uh", edge_buffer: 0.1 } });
+const cwEbJson = JSON.parse(cwEbRes.content[0].text);
+checkOk(cwEbRes.isError !== true && cwEbJson.edge_buffer === 0.1 && near(cwEbJson.duration_after, 3.98, 0.05) && JSON.stringify(cwEbJson.keep_segments) === JSON.stringify([{ start: 0, end: 1.22, duration: 1.22 }, { start: 3.84, end: 5.22, duration: 1.38 }, { start: 7.84, end: 9.22, duration: 1.38 }]), "cut_words --edge-buffer 0.1 widens every keep segment 0.1s past its pads (3.98s)", JSON.stringify(cwEbJson.keep_segments));
+// Merge: test/edge-buffer-words.json has 0.1s gaps between kept
+// runs (a[0,1] um[1.1,1.5] b[1.6,2.6] uh[2.7,3.1] c[3.2,4.2]) — a
+// 0.1s buffer keeps 3 segments, a 0.5s buffer bridges every gap and
+// merges them into one [0,4.82] segment (the cuts disappear).
+const ebWords = path.join(root, "test/edge-buffer-words.json");
+const cwEbSmallRes = await client.callTool({ name: "cut_words", arguments: { input: path.join(root, "test/source.mp4"), words_file: ebWords, remove: "um,uh", edge_buffer: 0.1, dry_run: true } });
+const cwEbSmallJson = JSON.parse(cwEbSmallRes.content[0].text);
+checkOk(cwEbSmallRes.isError !== true && cwEbSmallJson.keep_segments.length === 3 && JSON.stringify(cwEbSmallJson.keep_segments) === JSON.stringify([{ start: 0, end: 1.2, duration: 1.2 }, { start: 1.44, end: 2.8, duration: 1.36 }, { start: 3.04, end: 4.42, duration: 1.38 }]), "cut_words --edge-buffer 0.1 on tight gaps keeps 3 segments, none merged", JSON.stringify(cwEbSmallJson.keep_segments));
+const cwEbMergeRes = await client.callTool({ name: "cut_words", arguments: { input: path.join(root, "test/source.mp4"), words_file: ebWords, remove: "um,uh", edge_buffer: 0.5, dry_run: true } });
+const cwEbMergeJson = JSON.parse(cwEbMergeRes.content[0].text);
+checkOk(cwEbMergeRes.isError !== true && cwEbMergeJson.keep_segments.length === 1 && JSON.stringify(cwEbMergeJson.keep_segments) === JSON.stringify([{ start: 0, end: 4.82, duration: 4.82 }]), "cut_words --edge-buffer 0.5 bridges the 0.1s gaps and merges all 3 runs into [0,4.82]", JSON.stringify(cwEbMergeJson.keep_segments));
+const cwEbCli = await runCli(["cut-words", path.join(root, "test/source.mp4"), "--words-file", path.join(root, "test/cut-words.json"), "--remove", "um,uh", "--edge-buffer", "0.1", "--dry-run"]);
+checkOk(cwEbCli.code === 0 && /"edge_buffer": 0.1/.test(cwEbCli.out) && /"end": 1.22/.test(cwEbCli.out), "CLI cut-words --edge-buffer 0.1 --dry-run reports the widened plan", cwEbCli.out.slice(0, 200));
+// Batch + manifest pass-through: trim with edge_buffer runs through
+// the batch table and the manifest step table like any other arg.
+await rm(path.join(root, "outputs/mcp-batch-trim-edge-in"), { recursive: true, force: true });
+await rm(path.join(root, "outputs/mcp-batch-trim-edge-out"), { recursive: true, force: true });
+await mkdir(path.join(root, "outputs/mcp-batch-trim-edge-in"), { recursive: true });
+await copyFile(path.join(root, "test/source.mp4"), path.join(root, "outputs/mcp-batch-trim-edge-in/source.mp4"));
+await copyFile(path.join(root, "test/source2.mp4"), path.join(root, "outputs/mcp-batch-trim-edge-in/source2.mp4"));
+const ebBatchRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "trim", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-trim-edge-in"), output_dir: path.join(root, "outputs/mcp-batch-trim-edge-out"), args: { start: 1, duration: 2, edge_buffer: 0.1 }, jobs: 2 },
+});
+const ebBatchJson = JSON.parse(ebBatchRes.content[0].text);
+checkOk(ebBatchJson.succeeded === 2 && ebBatchJson.failed === 0 && ebBatchJson.results.every((r) => r.status === "ok" && near(r.result?.duration_actual, 2.2, 0.05) && r.result?.edge_buffer === 0.1), "batch trim --edge-buffer 0.1 widens both clips to 2.2s", JSON.stringify(ebBatchJson.results.map((r) => r.result?.duration_actual)));
+const ebManifestPath = path.join(root, "outputs/mcp-manifest-edge-buffer.json");
+await writeFile(ebManifestPath, JSON.stringify({ version: 1, input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-manifest-edge-buffer.mp4"), steps: [{ tool: "trim", args: { start: 2, duration: 4, edge_buffer: 0.1 } }] }), "utf8");
+await rm(path.join(root, "outputs/mcp-manifest-edge-buffer.mp4"), { force: true });
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const ebManifestRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: ebManifestPath },
+});
+const ebManifestJson = JSON.parse(ebManifestRes.content[0].text);
+checkOk(ebManifestJson.steps_run === 1 && ebManifestJson.steps.every((s) => s.status === "ok") && near(ebManifestJson.final.duration_seconds, 4.2, 0.05), "manifest trim step with edge_buffer 0.1 runs and final is 4.2s", JSON.stringify(ebManifestJson.final?.duration_seconds));
 
 // remove_retakes: repeated takes on the word timings — fixture
 // test/retakes-words.json plants a 5-word repeat ("we shipped in

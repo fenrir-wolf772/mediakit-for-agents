@@ -327,6 +327,16 @@ result reports `mode` (`smart-cut` / `keyframe-exact` /
 `--snap-beat` is the musical cousin (see §57): it snaps to beats
 instead of keyframes, works with or without `--stream-copy`, and
 refuses `--snap` and `--smart-cut`.
+`--edge-buffer` (0–1s, default 0, Outtake's 0.1s clip-edge buffer)
+widens the requested window by that much on both sides, clamped to
+the file edges, so a cut never lands exactly on a word or action
+onset — the kept clip carries handles instead. It runs before snap,
+so a snapped cut snaps the buffered window, and it refuses
+`--smart-cut` (which lands the start exactly). The result reports
+`requested_start`/`requested_end` plus `edge_buffer_applied` per
+side, so you can see how much each edge actually grew (less at the
+file edges). A buffer-only trim still verifies: the check compares
+against the buffered start, because that IS the requested cut.
 Verify it by frame count (exactly round(duration×fps)) and by pixel:
 the head frame must match the source at the same content time
 (PSNR > 30 dB), the tail frame must be bit-identical. Supported video
@@ -1211,7 +1221,13 @@ deliberately NOT fillers: they are ambiguous in context, so they are
 cut only when named in `--remove`. Keep runs are padded 0.06s
 before / 0.12s after the kept words, clamped to the gap to the
 neighbouring cut word, so a cut never keeps a fragment of the word
-it removed. Read `cut_check.swallowed` before trusting the cut: a
+it removed. `--edge-buffer` (0–1s, default 0, Outtake's 0.1s
+clip-edge buffer) widens every keep segment past its pads, clamped
+only to the file edges — so a cut never lands exactly on a kept
+word's onset. It deliberately keeps up to that much of the
+neighbouring removed word's edge, and a buffer wider than the gap
+between two kept runs merges them (the cut between them disappears).
+Read `cut_check.swallowed` before trusting the cut: a
 kept word listed there ended up mostly outside the keep segments
 (usually a `--min-keep` sliver) — play it, then pass `--keep` for
 its index. `--dry-run` prints the plan first (removed words, keep

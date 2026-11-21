@@ -18,8 +18,8 @@ const COMMANDS = {
     options: [],
   },
   trim: {
-    usage: "mediakit trim <input> --start <s|MM:SS> (--duration <s|MM:SS> | --end <s|MM:SS>) -o <output> [--stream-copy] [--snap] [--snap-beat [--snap-beat-method grid|dp]] [--smart-cut] [--no-check-frames] [--dry-run]",
-    desc: "Cut a clip. Re-encodes by default (frame-accurate); --stream-copy is fast but keyframe-only. --snap (with --stream-copy) moves start/end onto the nearest keyframes. --snap-beat moves start/end onto the nearest beats of the music instead (start down, end up; refuses --snap and --smart-cut, and refuses when the measured beat grid is unreliable — see beat_grid). --snap-beat-method dp snaps to the DP tracker's beats, which follow real onsets when the tempo drifts; grid (default) snaps to the one-tempo grid. --smart-cut (with --stream-copy) keeps the exact start: only the head up to the next keyframe is re-encoded, the rest is copied. Every video trim verifies the cut by default: 3 output frames (head/middle/tail) are compared against the source at the requested times and the result reports cut_verified plus mean_abs_diff per frame; --no-check-frames skips the verification (audio-only inputs have nothing to check). --dry-run prints the exact ffmpeg command(s) that would run (three for --smart-cut) and writes no file. Times accept seconds or MM:SS.",
+    usage: "mediakit trim <input> --start <s|MM:SS> (--duration <s|MM:SS> | --end <s|MM:SS>) -o <output> [--stream-copy] [--snap] [--snap-beat [--snap-beat-method grid|dp]] [--smart-cut] [--edge-buffer 0.1] [--no-check-frames] [--dry-run]",
+    desc: "Cut a clip. Re-encodes by default (frame-accurate); --stream-copy is fast but keyframe-only. --snap (with --stream-copy) moves start/end onto the nearest keyframes. --snap-beat moves start/end onto the nearest beats of the music instead (start down, end up; refuses --snap and --smart-cut, and refuses when the measured beat grid is unreliable — see beat_grid). --snap-beat-method dp snaps to the DP tracker's beats, which follow real onsets when the tempo drifts; grid (default) snaps to the one-tempo grid. --smart-cut (with --stream-copy) keeps the exact start: only the head up to the next keyframe is re-encoded, the rest is copied. --edge-buffer (0-1s, default 0) widens the requested window by that much on both sides, clamped to the file edges — Outtake's 0.1s clip-edge buffer, so a cut never lands exactly on a word or action onset; composes with --snap/--snap-beat (buffer first, then snap) and refuses --smart-cut. Every video trim verifies the cut by default: 3 output frames (head/middle/tail) are compared against the source at the requested times and the result reports cut_verified plus mean_abs_diff per frame; --no-check-frames skips the verification (audio-only inputs have nothing to check). --dry-run prints the exact ffmpeg command(s) that would run (three for --smart-cut) and writes no file. Times accept seconds or MM:SS.",
     args: [{ name: "input", required: true }],
     options: [
       ["--start", "Start time in seconds or MM:SS (default 0)"],
@@ -30,6 +30,7 @@ const COMMANDS = {
       ["--snap-beat", "Snap start/end to the nearest beats of the music (start down, end up; refuses --snap and --smart-cut)"],
       ["--snap-beat-method", "Which beat grid --snap-beat snaps to: grid (default, one steady tempo) or dp (DP tracker, follows real onsets when the tempo drifts)"],
       ["--smart-cut", "Exact start with stream copy: re-encode only the head up to the next keyframe (needs --stream-copy, refuses --snap)"],
+      ["--edge-buffer", "Seconds of handle kept past each edge of the requested window (0-1, default 0) — widens the cut, clamped to the file edges; composes with --snap/--snap-beat, refuses --smart-cut"],
       ["--no-check-frames", "Skip the 3-frame cut verification"],
       ["--dry-run", "Print the exact ffmpeg command(s) and write no file"],
       ["-o, --output", "Output file (required)"],
@@ -615,8 +616,8 @@ const COMMANDS = {
     ],
   },
   "cut-words": {
-    usage: "mediakit cut-words <input> --words-file <words.json> -o <output> [--remove um,uh | --fillers | --indices 0-5,96-98] [--keep 3,7-9] [--pad-before 0.06] [--pad-after 0.12] [--min-keep 0.2] [--dry-run]",
-    desc: "Cut words out of a talking-head clip by transcript: filler words (um/uh), false starts and restarts, using word timings from transcribe --word-timestamps (save its printed JSON and pass it as --words-file). Select by word text (--remove 'um,uh'), the built-in filler set (--fillers: um, umm, uh, uhh, uhm, erm, er, hmm, mm, mhm, ah, eh), or 0-based word-index ranges (--indices '0-5,96-98'); --keep rescues indices even when matched. Keep runs are padded 0.06s before / 0.12s after, clamped so a cut never keeps a fragment of the word it removed; kept words that end up mostly cut out are reported in cut_check.swallowed. --dry-run prints the plan and writes nothing. No match copies the input unchanged.",
+    usage: "mediakit cut-words <input> --words-file <words.json> -o <output> [--remove um,uh | --fillers | --indices 0-5,96-98] [--keep 3,7-9] [--pad-before 0.06] [--pad-after 0.12] [--min-keep 0.2] [--edge-buffer 0.1] [--dry-run]",
+    desc: "Cut words out of a talking-head clip by transcript: filler words (um/uh), false starts and restarts, using word timings from transcribe --word-timestamps (save its printed JSON and pass it as --words-file). Select by word text (--remove 'um,uh'), the built-in filler set (--fillers: um, umm, uh, uhh, uhm, erm, er, hmm, mm, mhm, ah, eh), or 0-based word-index ranges (--indices '0-5,96-98'); --keep rescues indices even when matched. Keep runs are padded 0.06s before / 0.12s after, clamped so a cut never keeps a fragment of the word it removed; kept words that end up mostly cut out are reported in cut_check.swallowed. --edge-buffer (0-1s, default 0) widens every keep segment past its pads, clamped only to the file edges — Outtake's 0.1s clip-edge buffer, so a cut never lands exactly on a kept word's onset; it deliberately keeps up to that much of the neighbouring removed word's edge, and a buffer wider than the gap between two kept runs merges them. --dry-run prints the plan and writes nothing. No match copies the input unchanged.",
     args: [{ name: "input", required: true }],
     options: [
       ["--words-file", "Transcript JSON with a words array (required) — the stdout of `transcribe --word-timestamps` saved to a file"],
@@ -627,6 +628,7 @@ const COMMANDS = {
       ["--pad-before", "Seconds kept before each kept-word run (default 0.06)"],
       ["--pad-after", "Seconds kept after each kept-word run (default 0.12)"],
       ["--min-keep", "Drop keep segments shorter than this many seconds (default 0.2)"],
+      ["--edge-buffer", "Seconds of handle kept past each edge of every keep segment (0-1, default 0), clamped only to the file edges — a buffer wider than the gap between two kept runs merges them"],
       ["--dry-run", "Print the cut plan (removed words, keep segments, cut_check) and write no file"],
       ["-o, --output", "Output file (required unless --dry-run)"],
     ],
@@ -1331,6 +1333,7 @@ async function main() {
           snapToBeat: opts.snap_beat === true,
           snapBeatMethod: opts.snap_beat_method ?? "grid",
           smartCut: opts.smart_cut === true,
+          edgeBuffer: numOpt(opts, "edge_buffer") ?? 0,
           checkFrames: opts.check_frames !== false,
           dryRun: opts.dry_run === true,
         });
@@ -1821,6 +1824,7 @@ async function main() {
           padBefore: numOpt(opts, "pad_before") ?? 0.06,
           padAfter: numOpt(opts, "pad_after") ?? 0.12,
           minKeep: numOpt(opts, "min_keep") ?? 0.2,
+          edgeBuffer: numOpt(opts, "edge_buffer") ?? 0,
           dryRun: opts.dry_run === true,
         });
         break;

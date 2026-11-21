@@ -1087,10 +1087,10 @@ async function smartCutTrim({ inPath, outPath, s, dur, dryRun = false, checkFram
   }, { inPath, outPath, requestedStart: s, checkFrames, outMeta: out });
 }
 
-export async function trim({ input, output, start = 0, duration = null, end = null, streamCopy = false, snapToKeyframe = false, smartCut = false, snapToBeat = false, snapBeatMethod = "grid", dryRun = false, checkFrames = true }) {
+export async function trim({ input, output, start = 0, duration = null, end = null, streamCopy = false, snapToKeyframe = false, smartCut = false, snapToBeat = false, snapBeatMethod = "grid", edgeBuffer = 0, dryRun = false, checkFrames = true }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
-  const s = parseTime(start, "start");
+  let s = parseTime(start, "start");
   let dur = null;
   if (duration !== null && duration !== undefined) dur = parseTime(duration, "duration");
   if (dur !== null && !(dur > 0)) throw new MediaKitError(`duration must be > 0, got: ${duration}`, "INVALID_ARG");
@@ -1114,6 +1114,30 @@ export async function trim({ input, output, start = 0, duration = null, end = nu
   // ignored.
   if (snapToBeat && snapToKeyframe) throw new MediaKitError("snap_to_beat and snap_to_keyframe cannot be combined (pick one grid: beats or keyframes)", "INVALID_ARG");
   if (snapToBeat && smartCut) throw new MediaKitError("snap_to_beat and smart_cut cannot be combined (smart_cut already lands the start exactly)", "INVALID_ARG");
+
+  // Edge buffer (Outtake's 0.1s clip-edge buffer): widen the requested
+  // window by up to edgeBuffer on both sides, clamped to the file
+  // edges, so a cut never lands exactly on a word/action onset — the
+  // kept clip carries handles instead. It runs BEFORE snap, so a
+  // snapped cut snaps the buffered window, not the raw request. It
+  // refuses smart_cut: that mode lands the start exactly, and the
+  // buffer would move it. Default 0 = the old behaviour, byte for
+  // byte: the request is the cut.
+  const eb = num(edgeBuffer, "edge_buffer", { min: 0, max: 1 });
+  const reqS = s, reqE = s + dur;
+  let edgeApplied = null;
+  if (eb > 0) {
+    if (smartCut) throw new MediaKitError("edge_buffer and smart_cut cannot be combined (smart_cut lands the start exactly; the buffer would move it earlier)", "INVALID_ARG");
+    const srcMeta = await probe(inPath);
+    const srcDur = srcMeta.duration_seconds;
+    if (srcDur === null) throw new MediaKitError("edge_buffer needs an input with a known duration", "PROBE_FAILED");
+    const bufS = Math.max(0, +(s - eb).toFixed(3));
+    const bufE = Math.min(srcDur, +(reqE + eb).toFixed(3));
+    if (bufE <= bufS) throw new MediaKitError(`edge_buffer ${eb}s leaves no clip to keep (requested ${s}–${reqE}s on a ${srcDur}s file)`, "INVALID_ARG");
+    edgeApplied = { start: +(s - bufS).toFixed(3), end: +(bufE - reqE).toFixed(3) };
+    s = bufS;
+    dur = +(bufE - bufS).toFixed(3);
+  }
 
   // smart_cut is a stream-copy cut with an exact start: it re-encodes
   // only the head up to the next keyframe. snap_to_keyframe would
@@ -1184,12 +1208,16 @@ export async function trim({ input, output, start = 0, duration = null, end = nu
       operation: "trim", dry_run: true, input: inPath, output: outPath,
       start: sActual, duration_seconds: durActual, stream_copy: streamCopy,
       ...(snapToKeyframe ? {
-        requested_start: s, requested_end: +(s + dur).toFixed(3),
+        requested_start: reqS, requested_end: +reqE.toFixed(3),
         snapped, keyframe_start: kfStart, keyframe_end: kfEnd,
       } : {}),
       ...(snapToBeat ? {
-        requested_start: s, requested_end: +(s + dur).toFixed(3),
+        requested_start: reqS, requested_end: +reqE.toFixed(3),
         snapped, beat_start: beatStart, beat_end: beatEnd, bpm: beatBpm, beat_confidence: beatConfidence, beat_method: beatMethod,
+      } : {}),
+      ...(eb > 0 ? {
+        requested_start: reqS, requested_end: +reqE.toFixed(3),
+        edge_buffer: eb, edge_buffer_applied: edgeApplied,
       } : {}),
       commands: [formatCommand(args)],
       note: "Dry run: no file written. Probes (and the keyframe list for --snap) are read-only; they ran to compute the cut.",
@@ -1199,20 +1227,26 @@ export async function trim({ input, output, start = 0, duration = null, end = nu
   const info = await fileInfo(outPath);
   const meta = await probe(outPath);
   // The check compares against the REQUESTED start, so a snap that
-  // moved the cut shows up as mismatched frames.
+  // moved the cut shows up as mismatched frames. An edge buffer is
+  // different: the widened start IS the requested cut, so a
+  // buffer-only trim checks against the buffered start and verifies.
   return withCheckFrames({
     operation: "trim", input: inPath, output: outPath,
     start: sActual, duration_seconds: durActual, stream_copy: streamCopy,
     ...(snapToKeyframe ? {
-      requested_start: s, requested_end: +(s + dur).toFixed(3),
+      requested_start: reqS, requested_end: +reqE.toFixed(3),
       snapped, keyframe_start: kfStart, keyframe_end: kfEnd,
     } : {}),
     ...(snapToBeat ? {
-      requested_start: s, requested_end: +(s + dur).toFixed(3),
+      requested_start: reqS, requested_end: +reqE.toFixed(3),
       snapped, beat_start: beatStart, beat_end: beatEnd, bpm: beatBpm, beat_confidence: beatConfidence, beat_method: beatMethod,
     } : {}),
+    ...(eb > 0 ? {
+      requested_start: reqS, requested_end: +reqE.toFixed(3),
+      edge_buffer: eb, edge_buffer_applied: edgeApplied,
+    } : {}),
     ...info, duration_actual: meta.duration_seconds,
-  }, { inPath, outPath, requestedStart: s, checkFrames, outMeta: meta });
+  }, { inPath, outPath, requestedStart: (snapToKeyframe || snapToBeat) ? reqS : s, checkFrames, outMeta: meta });
 }
 
 // ---------------------------------------------------------------- fit
@@ -9981,6 +10015,12 @@ export async function silence({ input, output = null, thresholdDb = -40, minDura
 // ("0-5,96-98", 0-based word indices as printed by transcribe).
 // --keep rescues indices even when auto-flagged. No match at all
 // stream-copies the input, the same no-op path silence takes.
+// --edge-buffer (0-1s, default 0) widens every keep segment past its
+// pads, clamped only to the file edges — Outtake's 0.1s clip-edge
+// buffer, so a cut never lands exactly on a kept word's onset. It
+// deliberately keeps up to that much of the neighbouring removed
+// word's edge; a buffer wider than the gap between two kept runs
+// merges them, and the cut between them disappears.
 
 // filler_cut.py's FILLERS, verbatim as a set — "like" and "you know"
 // are deliberately NOT in it: transcriptcut only classifies those
@@ -10050,7 +10090,8 @@ export function normalizeTranscriptWords(raw, label = "words file", tool = "cut_
 // word it removed. Runs shorter than minKeep are dropped, and any
 // kept word that ends up <50% inside the keep segments is reported
 // as swallowed — play it before trusting the cut.
-export function buildKeepSegmentsFromWords(words, cutSet, duration, { padBefore = 0.06, padAfter = 0.12, minKeep = 0.2 } = {}) {
+export function buildKeepSegmentsFromWords(words, cutSet, duration, { padBefore = 0.06, padAfter = 0.12, minKeep = 0.2, edgeBuffer = 0 } = {}) {
+  const eb = num(edgeBuffer, "edge_buffer", { min: 0, max: 1 });
   const runs = [];
   let cur = null;
   words.forEach((w, i) => {
@@ -10070,7 +10111,18 @@ export function buildKeepSegmentsFromWords(words, cutSet, duration, { padBefore 
     const rightEdge = lastIdx === words.length - 1 ? duration : words[lastIdx + 1].start;
     const start = Math.max(0, r.start - Math.min(padBefore, Math.max(0, r.start - leftEdge)));
     const end = Math.min(duration, r.end + Math.min(padAfter, Math.max(0, rightEdge - r.end)));
-    return { start: +start.toFixed(3), end: +end.toFixed(3), duration: +(end - start).toFixed(3), indices: r.indices };
+    // Edge buffer (Outtake's 0.1s clip-edge buffer): handles past the
+    // pads, clamped ONLY to the file edges — it deliberately overlaps
+    // into the neighbouring cut word's time by up to edgeBuffer, so a
+    // kept word's onset/offset is never clipped by a cut landing
+    // exactly on its boundary. A buffer wider than the gap between
+    // two kept runs merges them (the cut between them disappears —
+    // the handles asked for more than the gap had). Runs are filtered
+    // by minKeep AFTER the expansion, so a short run the buffer
+    // rescues to >= minKeep survives.
+    const bStart = Math.max(0, start - eb);
+    const bEnd = Math.min(duration, end + eb);
+    return { start: +bStart.toFixed(3), end: +bEnd.toFixed(3), duration: +(bEnd - bStart).toFixed(3), indices: r.indices };
   }).filter((s) => s.end - s.start >= minKeep);
   const merged = [];
   for (const seg of padded) {
@@ -10091,12 +10143,13 @@ export function buildKeepSegmentsFromWords(words, cutSet, duration, { padBefore 
   return { keep, swallowed };
 }
 
-export async function cutWords({ input, output = null, wordsFile, remove = null, fillers = false, indices = null, keep = null, padBefore = 0.06, padAfter = 0.12, minKeep = 0.2, dryRun = false }) {
+export async function cutWords({ input, output = null, wordsFile, remove = null, fillers = false, indices = null, keep = null, padBefore = 0.06, padAfter = 0.12, minKeep = 0.2, edgeBuffer = 0, dryRun = false }) {
   const inPath = await requireInput(input);
   const wordsPath = await requireInput(wordsFile, "words file");
   const padB = num(padBefore, "pad_before", { min: 0, max: 1 });
   const padA = num(padAfter, "pad_after", { min: 0, max: 1 });
   const minK = num(minKeep, "min_keep", { min: 0.05, max: 5 });
+  const eb = num(edgeBuffer, "edge_buffer", { min: 0, max: 1 });
   let rawWords;
   try {
     rawWords = JSON.parse(await readFile(wordsPath, "utf8"));
@@ -10132,7 +10185,7 @@ export async function cutWords({ input, output = null, wordsFile, remove = null,
   const duration = meta.duration_seconds;
   if (duration === null) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
   const removedWords = [...cut].sort((a, b) => a - b).map((i) => ({ index: i, word: words[i].word, start: words[i].start, end: words[i].end }));
-  const { keep: kept, swallowed } = buildKeepSegmentsFromWords(words, cut, duration, { padBefore: padB, padAfter: padA, minKeep: minK });
+  const { keep: kept, swallowed } = buildKeepSegmentsFromWords(words, cut, duration, { padBefore: padB, padAfter: padA, minKeep: minK, edgeBuffer: eb });
   const keptTotal = kept.reduce((s, k) => s + k.duration, 0);
   const base = {
     operation: "cut_words",
@@ -10147,6 +10200,7 @@ export async function cutWords({ input, output = null, wordsFile, remove = null,
     pad_before: padB,
     pad_after: padA,
     min_keep: minK,
+    edge_buffer: eb,
     cut_check: { swallowed, warnings: swallowed.map((s) => `kept word #${s.index} '${s.word}' @${s.start}s is mostly cut out — play it, then pass --keep ${s.index}`) },
   };
   if (dryRun === true) return { ...base, dry_run: true };
@@ -14398,8 +14452,8 @@ export const BATCH_OPERATIONS = {
     run: (input, output, a) => fitDuration({ input, output, duration: a.duration, method: a.method ?? "speed", maxFps: a.max_fps ?? null }),
   },
   trim: {
-    args: ["start", "end", "duration", "stream_copy", "snap_to_keyframe", "snap_to_beat", "snap_beat_method", "smart_cut", "check_frames"],
-    run: (input, output, a) => trim({ input, output, start: a.start ?? 0, duration: a.duration ?? null, end: a.end ?? null, streamCopy: a.stream_copy ?? false, snapToKeyframe: a.snap_to_keyframe ?? false, snapToBeat: a.snap_to_beat ?? false, snapBeatMethod: a.snap_beat_method ?? "grid", smartCut: a.smart_cut ?? false, checkFrames: a.check_frames ?? true }),
+    args: ["start", "end", "duration", "stream_copy", "snap_to_keyframe", "snap_to_beat", "snap_beat_method", "smart_cut", "edge_buffer", "check_frames"],
+    run: (input, output, a) => trim({ input, output, start: a.start ?? 0, duration: a.duration ?? null, end: a.end ?? null, streamCopy: a.stream_copy ?? false, snapToKeyframe: a.snap_to_keyframe ?? false, snapToBeat: a.snap_to_beat ?? false, snapBeatMethod: a.snap_beat_method ?? "grid", smartCut: a.smart_cut ?? false, edgeBuffer: a.edge_buffer ?? 0, checkFrames: a.check_frames ?? true }),
   },
   silence: {
     args: ["threshold_db", "min_duration", "margin"],
@@ -14426,12 +14480,12 @@ export const BATCH_OPERATIONS = {
   // there is no plain `words_file` arg here; a file with no words
   // file fails its own row only, the rest of the batch still runs.
   cut_words: {
-    args: ["words_dir", "remove", "fillers", "indices", "keep", "pad_before", "pad_after", "min_keep"],
+    args: ["words_dir", "remove", "fillers", "indices", "keep", "pad_before", "pad_after", "min_keep", "edge_buffer"],
     run: (input, output, a) => cutWords({
       input, output,
       wordsFile: cutWordsFileFor(input, a.words_dir),
       remove: a.remove ?? null, fillers: a.fillers ?? false, indices: a.indices ?? null, keep: a.keep ?? null,
-      padBefore: a.pad_before ?? 0.06, padAfter: a.pad_after ?? 0.12, minKeep: a.min_keep ?? 0.2,
+      padBefore: a.pad_before ?? 0.06, padAfter: a.pad_after ?? 0.12, minKeep: a.min_keep ?? 0.2, edgeBuffer: a.edge_buffer ?? 0,
     }),
     // Two byte-identical clips with different words files are
     // different jobs: the words bytes belong in the cache key, or
@@ -15108,11 +15162,11 @@ export const MANIFEST_STEPS = {
   // Manifest overrides the batch shape: a manifest is one input, so
   // the step takes one words file, not a words directory.
   cut_words: {
-    args: ["words_file", "remove", "fillers", "indices", "keep", "pad_before", "pad_after", "min_keep"],
+    args: ["words_file", "remove", "fillers", "indices", "keep", "pad_before", "pad_after", "min_keep", "edge_buffer"],
     run: (input, output, a) => cutWords({
       input, output, wordsFile: a.words_file,
       remove: a.remove ?? null, fillers: a.fillers ?? false, indices: a.indices ?? null, keep: a.keep ?? null,
-      padBefore: a.pad_before ?? 0.06, padAfter: a.pad_after ?? 0.12, minKeep: a.min_keep ?? 0.2,
+      padBefore: a.pad_before ?? 0.06, padAfter: a.pad_after ?? 0.12, minKeep: a.min_keep ?? 0.2, edgeBuffer: a.edge_buffer ?? 0,
     }),
   },
   // Same override for remove_retakes: one words file for the one input.
