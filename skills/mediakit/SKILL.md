@@ -27,6 +27,18 @@ video or audio file, and instead of writing one-off ffmpeg shell commands.
 - **Speech has dead air / long pauses**: `silence` — first run it with
   `detect_only: true` and read the silence/kept segments; only then cut.
   The 0.2s margin keeps words from being clipped.
+- **A voice recording sounds bad (room echo, mains hum, clipping, thin
+  phone audio)**: `clean_voice` — first run it with `diagnose_only: true`
+  and read the diagnosis + plan; it measures peak, clipped runs, noise
+  floor, SNR, echo tail, bandwidth and 50/60 Hz hum, then picks the steps
+  (`declip`, `dehum`, `clearvoice`, `sr`) and runs the EQ + 3.5:1
+  compressor + limiter chain once in float to −14 LUFS. Output is a
+  48 kHz mono float WAV — cut it afterwards with the take's times.
+  `clearvoice`/`sr` need the ClearVoice engine, which is not installed:
+  a plan that needs them refuses the run, so pass `steps: ["declip",
+  "dehum"]` (or `["none"]` for chain only) to clean without them. On a
+  new mic or room, run with `ab: true` and listen to the 12 s window
+  through every candidate chain before committing.
 - **Before publishing to TikTok / Reels / Shorts / YouTube**: `check`
   — verifies dimensions, codecs, duration limit and measured loudness
   against the platform spec, with a fix hint per failed rule.

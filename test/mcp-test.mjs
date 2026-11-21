@@ -14,7 +14,7 @@ import { createCanvas } from "canvas";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { applyContentBaseline, compareDeterminismRuns, estimateDecodedWork, estimateJobRemaining, estimateTempo, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, SHORTS_STYLE_IDS } from "../src/core.js";
+import { applyContentBaseline, compareDeterminismRuns, countClippedRuns, diagnoseVoice, estimateDecodedWork, estimateJobRemaining, estimateTempo, findDensestSpeechWindow, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import bounceTpl from "../src/canvas-scene-lib/templates/bounce.cjs";
 import slideInTpl from "../src/canvas-scene-lib/templates/slide-in.cjs";
@@ -187,10 +187,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut", "clean_voice"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 79 tools present");
-checkOk(missing.length === 0, "tools/list has all 79 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 80 tools present");
+checkOk(missing.length === 0, "tools/list has all 80 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -3818,6 +3818,85 @@ checkOk(/cannot be combined/.test(smartSnap), "trim smart_cut + snap_to_keyframe
 const smartAudio = await callExpectThrow("trim", { input: path.join(root, "test/mix-voice.mp3"), output: path.join(root, "outputs/mcp-trim-smartcut-audio.mp3"), start: 1, duration: 2, stream_copy: true, smart_cut: true });
 checkOk(/needs a video input/.test(smartAudio), "trim smart_cut refuses audio-only input", smartAudio.slice(0, 120));
 
+// clean_voice (idea: marvtub/takes-public clean_voice.py, lượt 131):
+// diagnose first, then the chain once in float. Fixtures are
+// synthetic speech-like takes with known defects (see
+// test/make-cleanvoice-fixtures.mjs) — the assertions below use the
+// numbers measured from those files, not guesses.
+const cvCleanPath = path.join(root, "test/cleanvoice-clean.wav");
+const cvHumPath = path.join(root, "test/cleanvoice-hum.wav");
+const cvClipPath = path.join(root, "test/cleanvoice-clipped.wav");
+const cvEchoPath = path.join(root, "test/cleanvoice-echo.wav");
+async function callCleanVoice(input, extra = {}) {
+  const res = await client.callTool({ name: "clean_voice", arguments: { input, ...extra } });
+  return JSON.parse(res.content[0].text);
+}
+const cvDiagClean = await callCleanVoice(cvCleanPath, { diagnose_only: true });
+checkOk(JSON.stringify(cvDiagClean.steps) === JSON.stringify([]) && cvDiagClean.diagnosis.bandwidth_hz === 24000 && cvDiagClean.diagnosis.echo_tail_db < -24 && cvDiagClean.diagnosis.clipped_runs === 0 && cvDiagClean.diagnosis.hum_db < 12, "clean_voice --diagnose on the clean fixture: chain only, bw 24000 Hz, echo below -24 dB, no clipping, no hum", JSON.stringify(cvDiagClean.diagnosis));
+const cvDiagHum = await callCleanVoice(cvHumPath, { diagnose_only: true });
+checkOk(JSON.stringify(cvDiagHum.steps) === JSON.stringify(["dehum"]) && cvDiagHum.diagnosis.hum_db > 12 && cvDiagHum.diagnosis.hum_hz === 50, "clean_voice --diagnose on the hum fixture: dehum only, 50 Hz hum above 12 dB", JSON.stringify(cvDiagHum.diagnosis));
+const cvDiagEcho = await callCleanVoice(cvEchoPath, { diagnose_only: true });
+checkOk(JSON.stringify(cvDiagEcho.steps) === JSON.stringify(["clearvoice"]) && cvDiagEcho.diagnosis.echo_tail_db > -24 && cvDiagEcho.unavailable.length === 1 && cvDiagEcho.unavailable[0].step === "clearvoice", "clean_voice --diagnose on the echo fixture: clearvoice only, echo tail above -24 dB, reported unavailable (no ClearVoice engine)", JSON.stringify(cvDiagEcho.diagnosis));
+const cvDiagKokoro = await callCleanVoice(path.join(root, "test/kokoro-voice.wav"), { diagnose_only: true });
+checkOk(JSON.stringify(cvDiagKokoro.steps) === JSON.stringify(["sr"]) && cvDiagKokoro.diagnosis.bandwidth_hz < 15000 && cvDiagKokoro.unavailable[0].step === "sr", "clean_voice --diagnose on 24 kHz Kokoro speech: sr only (bandwidth below 15 kHz), reported unavailable", JSON.stringify(cvDiagKokoro.diagnosis));
+// Full run on the clean fixture: LUFS -14 on disk (independent
+// loudnorm measurement, not the tool's own report), 48 kHz mono
+// float WAV, no new clipping, echo still below -24 dB, sync within
+// a few ms, report sidecar on disk.
+const cvCleanOut = path.join(root, "outputs/mcp-clean-voice-clean.wav");
+const cvClean = await callCleanVoice(cvCleanPath, { output: cvCleanOut });
+const cvCleanLufs = await measureLufs(cvCleanOut);
+const cvCleanProbe = JSON.parse((await client.callTool({ name: "probe", arguments: { input: cvCleanOut } })).content[0].text);
+checkOk(near(cvCleanLufs, -14, 0.5) && near(cvClean.out.lufs, -14, 0.5) && cvCleanProbe.audio?.sample_rate === 48000 && cvCleanProbe.audio?.channels === 1 && cvCleanProbe.audio?.codec === "pcm_f32le" && near(cvCleanProbe.duration_seconds, 12, 0.05), "clean_voice run on the clean fixture: -14 LUFS on disk, 48 kHz mono float WAV, 12 s", `lufs=${cvCleanLufs} codec=${cvCleanProbe.audio?.codec} sr=${cvCleanProbe.audio?.sample_rate}`);
+checkOk(cvClean.out.clipped_runs === 0 && cvClean.echo_after_db < -24 && Math.abs(cvClean.out.sync_ms ?? 99) <= 10 && near(cvClean.out.seconds, 12, 0.05), "clean_voice run: no clipping introduced, echo tail still below -24 dB, sync drift within 10 ms", JSON.stringify(cvClean.out));
+const cvReport = JSON.parse(await readFile(cvCleanOut.slice(0, -4) + ".report.json", "utf8"));
+checkOk(JSON.stringify(cvReport.steps) === JSON.stringify([]) && cvReport.diagnosis.peak_dbfs === cvClean.diagnosis.peak_dbfs && near(cvReport.out.lufs, -14, 0.5), "clean_voice writes OUT.report.json with the diagnosis, the plan and the measured output", JSON.stringify({ steps: cvReport.steps, lufs: cvReport.out.lufs }));
+// Dehum run: the 50 Hz line is gone on disk (re-diagnose the
+// output through the tool itself) and the file still hits -14.
+const cvHumOut = path.join(root, "outputs/mcp-clean-voice-hum.wav");
+const cvHum = await callCleanVoice(cvHumPath, { output: cvHumOut });
+const cvHumAfter = await callCleanVoice(cvHumOut, { diagnose_only: true });
+checkOk(JSON.stringify(cvHum.steps) === JSON.stringify(["dehum"]) && cvHumAfter.diagnosis.hum_db < 12 && cvHumAfter.diagnosis.noise_floor_db < cvDiagHum.diagnosis.noise_floor_db && near(await measureLufs(cvHumOut), -14, 0.5), "clean_voice run on the hum fixture: dehum step, hum below 12 dB afterwards, floor dropped, -14 LUFS", `hum_after=${cvHumAfter.diagnosis.hum_db} floor ${cvDiagHum.diagnosis.noise_floor_db} -> ${cvHumAfter.diagnosis.noise_floor_db}`);
+// Declip run: 1351 clipped runs in, 0 out.
+const cvClipOut = path.join(root, "outputs/mcp-clean-voice-clipped.wav");
+const cvClip = await callCleanVoice(cvClipPath, { output: cvClipOut });
+checkOk(JSON.stringify(cvClip.steps) === JSON.stringify(["declip"]) && cvClip.diagnosis.clipped_runs > 20 && cvClip.out.clipped_runs === 0 && near(await measureLufs(cvClipOut), -14, 0.5), "clean_voice run on the clipped fixture: declip step, clipped runs 1351 -> 0, -14 LUFS", `runs ${cvClip.diagnosis.clipped_runs} -> ${cvClip.out.clipped_runs}`);
+// Refusals: a plan that needs clearvoice/sr refuses loudly, and
+// the --steps override is the documented way around it.
+const cvEchoRefuse = await callExpectThrow("clean_voice", { input: cvEchoPath, output: path.join(root, "outputs/mcp-clean-voice-echo.wav") });
+checkOk(/needs clearvoice/.test(cvEchoRefuse) && /ClearVoice engine/.test(cvEchoRefuse), "clean_voice refuses an echoey take that needs clearvoice (names the engine, does not clean without it)", cvEchoRefuse.slice(0, 160));
+const cvSrRefuse = await callExpectThrow("clean_voice", { input: path.join(root, "test/kokoro-voice.wav"), output: path.join(root, "outputs/mcp-clean-voice-kokoro.wav") });
+checkOk(/needs sr/.test(cvSrRefuse) && /ClearVoice engine/.test(cvSrRefuse), "clean_voice refuses 24 kHz speech that needs sr (names the engine)", cvSrRefuse.slice(0, 160));
+const cvKokoroSteps = await callCleanVoice(path.join(root, "test/kokoro-voice.wav"), { output: path.join(root, "outputs/mcp-clean-voice-kokoro-steps.wav"), steps: ["none"] });
+checkOk(JSON.stringify(cvKokoroSteps.steps) === JSON.stringify([]) && near(await measureLufs(path.join(root, "outputs/mcp-clean-voice-kokoro-steps.wav")), -14, 0.5), "clean_voice --steps none runs chain-only on the Kokoro take and still hits -14 LUFS", `lufs=${await measureLufs(path.join(root, "outputs/mcp-clean-voice-kokoro-steps.wav"))}`);
+const cvBadStepsMcp = await callExpectThrow("clean_voice", { input: cvCleanPath, output: path.join(root, "outputs/mcp-clean-voice-bad.wav"), steps: ["bogus"] });
+checkOk(/unknown step/.test(cvBadStepsMcp) && /bogus/.test(cvBadStepsMcp), "clean_voice refuses an unknown --steps name instead of silently dropping it", cvBadStepsMcp.slice(0, 120));
+const cvMp3 = await callExpectThrow("clean_voice", { input: cvCleanPath, output: path.join(root, "outputs/mcp-clean-voice-x.mp3") });
+checkOk(/must end in \.wav/.test(cvMp3), "clean_voice refuses a non-.wav output (48 kHz float WAV only)", cvMp3.slice(0, 120));
+// --ab: one candidate on the clean fixture (chain only), 12 s +
+// 0.8 s gap = 12.8 s on disk, order file lists it.
+const cvAbOut = path.join(root, "outputs/mcp-clean-voice-ab.wav");
+const cvAb = await callCleanVoice(cvCleanPath, { output: cvAbOut, ab: true });
+const cvAbProbe = JSON.parse((await client.callTool({ name: "probe", arguments: { input: cvAb.ab.file } })).content[0].text);
+const cvAbTxt = await readFile(cvAb.ab.order_file, "utf8");
+checkOk(cvAb.ab.order.length === 1 && /chain only/.test(cvAb.ab.order[0]) && near(cvAbProbe.duration_seconds, 12.8, 0.05) && /window 0\.0-12\.0 s/.test(cvAbTxt), "clean_voice --ab: 1 candidate (chain only), 12.8 s on disk (12 s + 0.8 s gap), order file lists it", `dur=${cvAbProbe.duration_seconds} order=${JSON.stringify(cvAb.ab.order)}`);
+// --dry-run prints the exact commands and writes no file.
+const cvDryOut = path.join(root, "outputs/mcp-clean-voice-dry.wav");
+const cvDry = await callCleanVoice(cvHumPath, { output: cvDryOut, dry_run: true });
+checkOk(cvDry.dry_run === true && cvDry.commands.length === 2 && /bandreject=f=50/.test(cvDry.commands[0]) && /acompressor/.test(cvDry.commands[1]) && !existsSync(cvDryOut), "clean_voice --dry-run: 2 commands (dehum + chain), first carries the 50 Hz bandreject, no file written", JSON.stringify(cvDry.commands.map((c) => c.slice(0, 60))));
+// Batch: the 4 fixtures in one call — clean/hum/clipped clean,
+// echo fails its own row (clearvoice unavailable), outputs .wav.
+const cvBatchDir = path.join(root, `outputs/mcp-batch-cleanvoice-${process.pid}`);
+const cvBatch = JSON.parse((await client.callTool({ name: "batch", arguments: { operation: "clean_voice", pattern: "cleanvoice-*.wav", input_dir: path.join(root, "test"), output_dir: cvBatchDir } })).content[0].text);
+checkOk(cvBatch.succeeded === 3 && cvBatch.failed === 1 && cvBatch.results.find((r) => r.input.endsWith("cleanvoice-echo.wav"))?.status === "error", "batch clean_voice: 3 succeeded, echo failed its own row (clearvoice unavailable)", JSON.stringify({ s: cvBatch.succeeded, f: cvBatch.failed }));
+const cvBatchOut = path.join(cvBatchDir, "cleanvoice-clean-clean_voice.wav");
+checkOk(existsSync(cvBatchOut) && near(await measureLufs(cvBatchOut), -14, 0.5), "batch clean_voice writes a .wav at -14 LUFS", cvBatchOut);
+// Manifest: clean_voice as a step in a voice-only pipeline ending in .wav.
+const cvManifestPath = path.join(root, "outputs/mcp-cleanvoice-manifest.json");
+await writeFile(cvManifestPath, JSON.stringify({ version: 1, input: cvClipPath, output: path.join(root, "outputs/mcp-cleanvoice-manifest-out.wav"), steps: [{ tool: "clean_voice", args: {} }] }, null, 2), "utf8");
+const cvManifest = JSON.parse((await client.callTool({ name: "manifest", arguments: { manifest_path: cvManifestPath } })).content[0].text);
+checkOk(cvManifest.output && existsSync(cvManifest.output) && near(await measureLufs(cvManifest.output), -14, 0.5), "manifest clean_voice step: pipeline ending in .wav runs and hits -14 LUFS", JSON.stringify({ out: cvManifest.output }));
+
 // check_frames (idea: broll-mcp, lượt 65): every video trim verifies
 // the cut — 3 output frames vs the source at the requested times.
 // Fixture test/trim-check-source.mp4 is testsrc 10s/30fps with
@@ -6558,6 +6637,57 @@ const scTwoGapWords = [
 ];
 const scTwoGapPlan = planSmartCuts(scTwoGapWords, 5, { minSegment: 2 });
 checkOk(scTwoGapPlan.removed_count === 1 && JSON.stringify(scTwoGapPlan.removed) === JSON.stringify([{ start: 0.35, end: 3.65, duration: 3.3, reason: "gap", text: "" }]) && scTwoGapPlan.min_segment_merges === 2, "planSmartCuts min_segment 2 merges three gaps separated by 0.3s words into one cut", JSON.stringify(scTwoGapPlan.removed));
+
+// clean_voice pure functions (lượt 131, Takes' diagnose/plan
+// ported to Node): clipped runs, the plan thresholds, the step
+// parser, the densest window and the sync cross-correlation.
+// Synthetic 3 s take: two 0.5 s 440 Hz bursts (amp 0.5) with 0.5 s
+// gaps, plus deterministic white noise so the speech spectrum is
+// flat (a pure tone breaks the bandwidth percentile: the 200-4000 Hz
+// band is almost all empty bins, so p90 lands on the floor and every
+// bin passes the ref-50 test — the same quirk Takes' code has).
+const cvSamples = new Float32Array(48000 * 3);
+const cvHash = (i) => { const v = Math.sin(i * 12.9898) * 43758.5453; return v - Math.floor(v); };
+for (let w = 0; w < 2; w++) {
+  const start = Math.round((0.5 + w * 1.5) * 48000);
+  for (let i = 0; i < 24000; i++) cvSamples[start + i] = (Math.sin(2 * Math.PI * 440 * (i / 48000)) * 0.5 + (cvHash(start + i) - 0.5) * 0.3) * Math.min(1, i / 2400);
+}
+const cvDiag = diagnoseVoice(cvSamples);
+checkOk(cvDiag.clipped_runs === 0 && cvDiag.speech_frames > 0 && cvDiag.echo_tail_db !== null && cvDiag.echo_tail_db < -24 && cvDiag.bandwidth_hz > 15000 && cvDiag.words_measured === 2, "diagnoseVoice on two noisy 440 Hz bursts: no clipping, speech found, echo tail below -24 dB, broadband bandwidth, 2 word offsets", JSON.stringify(cvDiag));
+const cvPlanTone = planCleanVoice(cvDiag);
+checkOk(JSON.stringify(cvPlanTone.steps) === JSON.stringify([]) && cvPlanTone.unavailable.length === 0 && JSON.stringify(cvPlanTone.runnable_steps) === JSON.stringify([]), "planCleanVoice on the clean synthetic take: chain only, nothing unavailable", JSON.stringify(cvPlanTone));
+const cvBadDiag = { clipped_runs: 25, hum_db: 20, hum_hz: 50, echo_tail_db: -10, snr_db: 40, bandwidth_hz: 8000 };
+const cvPlanBad = planCleanVoice(cvBadDiag);
+checkOk(JSON.stringify(cvPlanBad.steps) === JSON.stringify(["declip", "dehum", "clearvoice", "sr"]) && JSON.stringify(cvPlanBad.unavailable.map((u) => u.step)) === JSON.stringify(["clearvoice", "sr"]) && JSON.stringify(cvPlanBad.runnable_steps) === JSON.stringify(["declip", "dehum"]), "planCleanVoice thresholds: 25 clipped runs + 20 dB hum + echo -10 dB + SNR 40 + bw 8 kHz plans all four steps in order, clearvoice/sr unavailable", JSON.stringify(cvPlanBad.steps));
+const cvCleanDiag = { clipped_runs: 0, hum_db: 2, hum_hz: 50, echo_tail_db: -45, snr_db: 70, bandwidth_hz: 20000 };
+checkOk(JSON.stringify(planCleanVoice(cvCleanDiag).steps) === JSON.stringify([]) && planCleanVoice(cvCleanDiag).why[0] === "clean recording: chain only", "planCleanVoice on a clean diagnosis plans chain only", JSON.stringify(planCleanVoice(cvCleanDiag)));
+const cvPhoneDiag = { clipped_runs: 0, hum_db: null, hum_hz: 50, echo_tail_db: -45, snr_db: 70, bandwidth_hz: 4000 };
+checkOk(JSON.stringify(planCleanVoice(cvPhoneDiag).steps) === JSON.stringify(["sr"]) && planCleanVoice(cvPhoneDiag).why.some((w) => /PHONE-BAND/.test(w)), "planCleanVoice: unmeasurable hum (null) skips dehum, phone-band bandwidth adds the warning", JSON.stringify(planCleanVoice(cvPhoneDiag).why));
+checkOk(JSON.stringify(parseCleanVoiceSteps("declip,dehum")) === JSON.stringify(["declip", "dehum"]) && JSON.stringify(parseCleanVoiceSteps("none")) === JSON.stringify([]) && parseCleanVoiceSteps(null) === null, "parseCleanVoiceSteps: comma list, 'none' -> [], null passes through", "");
+let cvBadSteps = "";
+try { parseCleanVoiceSteps("declip,bogus"); } catch (e) { cvBadSteps = e.message; }
+checkOk(/unknown step "bogus"/.test(cvBadSteps), "parseCleanVoiceSteps refuses an unknown step name instead of silently dropping it", cvBadSteps.slice(0, 120));
+// Clipped runs are 3+ IDENTICAL samples at the file's peak — a
+// limiter never makes those, so a flat top counts and a loud
+// peak that never repeats does not.
+const cvClipArr = new Float32Array([0.1, 0.5, 0.99, 0.99, 0.99, 0.2, 0.99, 0.1]);
+checkOk(countClippedRuns(cvClipArr) === 1, "countClippedRuns: one run of 3 identical peak samples counts once", `got ${countClippedRuns(cvClipArr)}`);
+const cvNoClipArr = new Float32Array([0.1, 0.5, 0.99, 0.98, 0.99, 0.2]);
+checkOk(countClippedRuns(cvNoClipArr) === 0, "countClippedRuns: a loud peak that never repeats is not clipping", `got ${countClippedRuns(cvNoClipArr)}`);
+// Densest window: 30 s envelope, speech only at 15-25 s — the
+// 12 s window starting at 15 s holds the most speech.
+const cvEnv = new Float64Array(3000).fill(-80);
+for (let i = 1500; i < 2500; i++) cvEnv[i] = -10;
+const cvWin = findDensestSpeechWindow(cvEnv);
+checkOk(cvWin.start >= 13 && cvWin.start <= 15 && near(cvWin.end - cvWin.start, 12, 0.01), "findDensestSpeechWindow finds a 12 s window holding all the speech (15-25 s) — the first max starts at 13 s, any start in 13-15 s holds it all", JSON.stringify(cvWin));
+// Sync: identical signals correlate at 0; a 10 ms delay reads
+// as 10 ms of drift (sign follows Takes' convention).
+const cvSyncA = new Float32Array(48000);
+for (let i = 0; i < 48000; i++) cvSyncA[i] = Math.sin(2 * Math.PI * 220 * (i / 48000)) * (0.5 + 0.5 * Math.sin(2 * Math.PI * 3 * (i / 48000)));
+const cvSyncB = new Float32Array(48000);
+cvSyncB.set(cvSyncA.subarray(0, 48000 - 480), 480);
+checkOk(voiceSyncMs(cvSyncA, cvSyncA) === 0 && Math.abs(voiceSyncMs(cvSyncA, cvSyncB)) === 10, "voiceSyncMs: identical signals sync 0 ms, a 480-sample (10 ms) delay reads 10 ms", `same=${voiceSyncMs(cvSyncA, cvSyncA)} delayed=${voiceSyncMs(cvSyncA, cvSyncB)}`);
+checkOk(voiceEnvelopeDb(cvSamples).length === 300 && voiceEnvelopeDb(cvSamples)[25] < -100, "voiceEnvelopeDb: 3 s at 48 kHz is 300 10 ms frames, and a gap frame sits below -100 dB", `len=${voiceEnvelopeDb(cvSamples).length}`);
 let scBadSeg = false;
 try { planSmartCuts(scUnitWords, 10, { minSegment: 6 }); } catch { scBadSeg = true; }
 checkOk(scBadSeg, "planSmartCuts refuses min_segment above 5", "no throw");
@@ -6923,7 +7053,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 79 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 79 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 80 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 80 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -9277,7 +9407,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 79 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 80 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -9337,11 +9467,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 79, "GET /mcp reports name/version/transport and 79 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 80, "GET /mcp reports name/version/transport and 80 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 79 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 79 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 80 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 80 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -9412,7 +9542,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 79, "JSON-RPC tools/list returns the same 79 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 80, "JSON-RPC tools/list returns the same 80 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

@@ -2316,6 +2316,668 @@ export async function loudness({ input, output, targetLufs = -14, format = null,
   return { operation: "loudness", input: inPath, output: outPath, target_lufs: target, input_lufs: measured?.i ?? null, output_lufs: outputLufs, output_true_peak_db: outputTp, two_pass: twoPass, ...(comp ? { compressor: { threshold_db: comp.threshold_db, ratio: comp.ratio, attack_ms: comp.attack_ms, release_ms: comp.release_ms, knee_db: comp.knee_db, detection: comp.detection }, compressed_lufs: compressedLufs } : {}), ...(warning ? { warning } : {}), format: ext, ...info, duration_seconds: out.duration_seconds };
 }
 
+// ---------------------------------------------------------------- clean_voice
+// Clean a recorded voice for a video (idea: marvtub/takes-public
+// `mcp/clean_voice.py` — diagnose first, then pick the steps; the
+// voice chain runs exactly once, at the end, in float. No code
+// copied — reimplemented in Node/ffmpeg, and the two ML steps are
+// NOT reimplemented: Takes' `clearvoice` (MossFormer2 speech
+// enhancement) and `sr` (MossFormer2 super-resolution) need the
+// ClearVoice package + ~1.7 GB of checkpoints from HuggingFace,
+// which this machine does not have. The plan still lists them when
+// the measurements call for them, but they are reported
+// `available: false` and a run that needs them refuses loudly
+// instead of silently cleaning without them. Everything ffmpeg can
+// do natively — declip (adeclip), dehum (bandreject harmonics),
+// the EQ + 3.5:1 compressor + gain + limiter chain — runs here.)
+const CLEAN_VOICE_SR = 48000;
+const CLEAN_VOICE_MAX_DURATION_SECONDS = 600; // same cap as bpm — the raw PCM decode would exceed memory
+const CLEAN_VOICE_CHAIN_LIMITER = "alimiter=limit=0.89:attack=4:release=60:level=disabled";
+// Takes' decision thresholds, calibrated on one take (clip-on mic,
+// glass room -> ClearVoice, which sounded best). They are starting
+// points, not physics — adjust them with each new recording, and
+// say so in the plan instead of pretending they are universal.
+const CLEAN_VOICE_ECHO_MAX_DB = -24; // echo tail (dB rel. the word) above this -> ClearVoice
+const CLEAN_VOICE_SNR_MIN_DB = 50; // speech-to-noise-floor (dB) below this -> ClearVoice
+const CLEAN_VOICE_BW_MIN_HZ = 15000; // highest frequency with real speech energy below this -> super-resolution
+const CLEAN_VOICE_PHONE_BW_HZ = 7000; // below this it is phone-band: super-resolution cannot rebuild 4-8 kHz
+const CLEAN_VOICE_HUM_DB = 12; // a 50/60 Hz line this far over its neighbours -> notch it
+const CLEAN_VOICE_CLIP_RUNS = 20; // clipped runs in the recording above this -> declip
+const CLEAN_VOICE_UNAVAILABLE_STEPS = {
+  clearvoice: "needs the ClearVoice engine (MossFormer2_SE_48K, PyTorch + ~1.7 GB checkpoints from HuggingFace) — not installed on this machine; install it and re-run, or pass --steps without clearvoice to clean with the ffmpeg-native steps only",
+  sr: "needs the ClearVoice engine (MossFormer2_SR_48K super-resolution, PyTorch + checkpoints from HuggingFace) — not installed on this machine; install it and re-run, or pass --steps without sr to clean with the ffmpeg-native steps only",
+};
+
+// numpy percentile (linear interpolation) on a pre-sorted array.
+function percentileSorted(sorted, p) {
+  if (!sorted.length) return null;
+  const rank = (p / 100) * (sorted.length - 1);
+  const lo = Math.floor(rank);
+  const hi = Math.ceil(rank);
+  if (lo === hi) return sorted[lo];
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (rank - lo);
+}
+
+function percentile(values, p) {
+  return percentileSorted([...values].sort((a, b) => a - b), p);
+}
+
+// Iterative radix-2 FFT (Cooley-Tukey) on a real input of length n
+// (a power of two). Returns the power per bin, bins 0..n/2.
+function fftPower(input, n) {
+  const re = new Float64Array(n);
+  const im = new Float64Array(n);
+  for (let i = 0; i < n; i++) re[i] = input[i];
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      const tr = re[i]; re[i] = re[j]; re[j] = tr;
+      const ti = im[i]; im[i] = im[j]; im[j] = ti;
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = -2 * Math.PI / len;
+    const wr = Math.cos(ang);
+    const wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cwr = 1;
+      let cwi = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const ur = re[i + k];
+        const ui = im[i + k];
+        const vr = re[i + k + len / 2] * cwr - im[i + k + len / 2] * cwi;
+        const vi = re[i + k + len / 2] * cwi + im[i + k + len / 2] * cwr;
+        re[i + k] = ur + vr;
+        im[i + k] = ui + vi;
+        re[i + k + len / 2] = ur - vr;
+        im[i + k + len / 2] = ui - vi;
+        const nwr = cwr * wr - cwi * wi;
+        cwi = cwr * wi + cwi * wr;
+        cwr = nwr;
+      }
+    }
+  }
+  const out = new Float64Array(n / 2 + 1);
+  for (let k = 0; k <= n / 2; k++) out[k] = re[k] * re[k] + im[k] * im[k];
+  return out;
+}
+
+function hannWindow(n) {
+  const w = new Float64Array(n);
+  for (let i = 0; i < n; i++) w[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (n - 1)));
+  return w;
+}
+
+// 10 ms RMS envelope in dB, Takes' env_db (hop = 480 at 48 kHz).
+export function voiceEnvelopeDb(samples, hop = 480) {
+  const k = Math.floor(samples.length / hop);
+  const env = new Float64Array(k);
+  for (let f = 0; f < k; f++) {
+    let sum = 0;
+    const base = f * hop;
+    for (let i = 0; i < hop; i++) sum += samples[base + i] * samples[base + i];
+    env[f] = 20 * Math.log10(Math.sqrt(sum / hop) + 1e-9);
+  }
+  return env;
+}
+
+// Hard clipping = 3+ IDENTICAL samples in a row at the file's peak
+// (a limiter never makes these) — Takes' clipped_runs, ported:
+// hot[i] is true when |a[i]| is at the peak AND a[i] == a[i-1];
+// count the runs of hot with length >= 2.
+export function countClippedRuns(samples) {
+  let peak = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const v = Math.abs(samples[i]);
+    if (v > peak) peak = v;
+  }
+  if (peak <= 0) return 0;
+  const thresh = peak * 0.999;
+  let runs = 0;
+  let runLen = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const hot = Math.abs(samples[i]) >= thresh && i > 0 && samples[i] === samples[i - 1];
+    if (hot) {
+      runLen++;
+    } else {
+      if (runLen >= 2) runs++;
+      runLen = 0;
+    }
+  }
+  if (runLen >= 2) runs++;
+  return runs;
+}
+
+// Measure a recording: peak, clipping, noise floor, SNR, echo tail,
+// bandwidth, hum — Takes' diagnose(), ported to pure Node. The FFT
+// loops subsample their frames (at most 400 speech frames for the
+// spectrum, 120 pause frames for hum) — an average over hundreds of
+// frames is the same measurement, and a 10-minute take would
+// otherwise spend minutes in 16k-point FFTs.
+export function diagnoseVoice(samples, sampleRate = CLEAN_VOICE_SR) {
+  if (!samples || !samples.length) throw new MediaKitError("diagnoseVoice needs decoded audio samples", "INVALID_ARG");
+  const hop = Math.round(sampleRate / 100); // 10 ms frames, like Takes' hop=480 at 48 kHz
+  const env = voiceEnvelopeDb(samples, hop);
+  const floor = percentile(env, 10);
+  const loud = percentile(env, 95);
+  const th = floor + 0.5 * (loud - floor);
+  // Word offsets: the envelope drops below threshold and stays
+  // there for 200 ms. The echo tail is the mean level 30-150 ms
+  // after the offset, relative to the word's peak just before it.
+  const offs = [];
+  for (let k = 10; k < env.length - 30; k++) {
+    if (env[k - 1] > th && env[k] <= th) {
+      let stays = true;
+      for (let j = k; j < k + 20; j++) if (env[j] >= th) { stays = false; break; }
+      if (stays) offs.push(k);
+    }
+  }
+  let echo = null;
+  if (offs.length) {
+    let sum = 0;
+    for (const k of offs) {
+      let tail = 0;
+      for (let j = k + 3; j < k + 15; j++) tail += env[j];
+      tail /= 12;
+      let peak = -Infinity;
+      for (let j = k - 10; j < k; j++) if (env[j] > peak) peak = env[j];
+      sum += tail - peak;
+    }
+    echo = sum / offs.length;
+  }
+  // Spectrum of speech frames only (4096-point FFT, Hann window).
+  const n = 4096;
+  const win4096 = hannWindow(n);
+  const speechIdx = [];
+  for (let k = 0; k < env.length; k++) if (env[k] > th) speechIdx.push(k);
+  const sp = new Float64Array(n / 2 + 1);
+  let cnt = 0;
+  const speechStride = Math.max(1, Math.ceil(speechIdx.length / 5 / 400));
+  for (let s = 0; s < speechIdx.length; s += 5 * speechStride) {
+    const k = speechIdx[s];
+    const start = k * hop;
+    if (start + n > samples.length) continue;
+    const seg = new Float64Array(n);
+    for (let i = 0; i < n; i++) seg[i] = samples[start + i] * win4096[i];
+    const p = fftPower(seg, n);
+    for (let b = 0; b <= n / 2; b++) sp[b] += p[b];
+    cnt++;
+  }
+  for (let b = 0; b <= n / 2; b++) sp[b] = 10 * Math.log10(sp[b] / Math.max(cnt, 1) + 1e-20);
+  const freqs = new Float64Array(n / 2 + 1);
+  for (let b = 0; b <= n / 2; b++) freqs[b] = (b * sampleRate) / n;
+  const band = [];
+  for (let b = 0; b <= n / 2; b++) if (freqs[b] > 200 && freqs[b] < 4000) band.push(sp[b]);
+  const ref = percentile(band, 90);
+  let bw = 0;
+  if (ref !== null) {
+    for (let b = n / 2; b >= 0; b--) {
+      if (sp[b] > ref - 50) { bw = freqs[b]; break; }
+    }
+  }
+  // Hum: 3 Hz bins from the pauses, where the voice cannot mask it
+  // (16384-point FFT). A 50/60 Hz line is measured against its
+  // neighbours 12-27 Hz away on both sides. Only segments that lie
+  // ENTIRELY inside a pause are used: a segment that crosses into
+  // the next word drags broadband word energy into the neighbour
+  // bins and buries the line — measured on the hum fixture:
+  // all-pause segments give 3.9 dB (below the 12 dB threshold, so
+  // the hum is missed), inside-only segments give 49.1 dB. This is
+  // a deliberate deviation from Takes, which takes every pause
+  // frame. When no pause is long enough for a 341 ms window, hum
+  // is unmeasurable (hum_db null) instead of a wrong number.
+  const m = 16384;
+  const win16384 = hannWindow(m);
+  const isPause = new Uint8Array(env.length);
+  for (let k = 0; k < env.length; k++) if (env[k] < floor + 3) isPause[k] = 1;
+  const pausePrefix = new Float64Array(env.length + 1);
+  for (let k = 0; k < env.length; k++) pausePrefix[k + 1] = pausePrefix[k] + isPause[k];
+  const segFrames = Math.ceil(m / hop);
+  const pauseIdx = [];
+  for (let k = 0; k < env.length; k++) if (isPause[k]) pauseIdx.push(k);
+  const q = new Float64Array(m / 2 + 1);
+  let qc = 0;
+  const pauseStride = Math.max(1, Math.ceil(pauseIdx.length / 3 / 120));
+  for (let s = 0; s < pauseIdx.length; s += 3 * pauseStride) {
+    const k = pauseIdx[s];
+    const start = k * hop;
+    if (start + m > samples.length) continue;
+    if (k + segFrames > env.length || pausePrefix[k + segFrames] - pausePrefix[k] < segFrames) continue;
+    const seg = new Float64Array(m);
+    for (let i = 0; i < m; i++) seg[i] = samples[start + i] * win16384[i];
+    const p = fftPower(seg, m);
+    for (let b = 0; b <= m / 2; b++) q[b] += p[b];
+    qc++;
+  }
+  let humHz = 50;
+  let humDb = null;
+  if (qc > 0) {
+    for (let b = 0; b <= m / 2; b++) q[b] = 10 * Math.log10(q[b] / qc + 1e-20);
+    const lineDb = (hz) => {
+      let i = 0;
+      let best = Infinity;
+      for (let b = 0; b <= m / 2; b++) {
+        const d = Math.abs((b * sampleRate) / m - hz);
+        if (d < best) { best = d; i = b; }
+      }
+      const nb = [];
+      for (let b = i - 9; b <= i - 5; b++) if (b >= 0) nb.push(q[b]);
+      for (let b = i + 5; b <= i + 9; b++) if (b <= m / 2) nb.push(q[b]);
+      let peak = -Infinity;
+      for (let b = i - 1; b <= i + 1; b++) if (b >= 0 && b <= m / 2 && q[b] > peak) peak = q[b];
+      return peak - percentile(nb, 50);
+    };
+    const hum50 = lineDb(50);
+    const hum60 = lineDb(60);
+    humHz = hum50 >= hum60 ? 50 : 60;
+    humDb = hum50 >= hum60 ? hum50 : hum60;
+  }
+  let peakDb = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const v = Math.abs(samples[i]);
+    if (v > peakDb) peakDb = v;
+  }
+  return {
+    peak_dbfs: +(20 * Math.log10(peakDb + 1e-12)).toFixed(1),
+    clipped_runs: countClippedRuns(samples),
+    noise_floor_db: +floor.toFixed(1),
+    snr_db: +(loud - floor).toFixed(1),
+    echo_tail_db: echo === null ? null : +echo.toFixed(1),
+    bandwidth_hz: Math.round(bw),
+    hum_hz: humHz,
+    hum_db: humDb === null ? null : +humDb.toFixed(1),
+    words_measured: offs.length,
+    speech_frames: speechIdx.length,
+  };
+}
+
+// Pick the cleanup steps from a diagnosis — Takes' plan(), same
+// thresholds. `steps` is the full plan in run order; each step
+// carries `available` (false for the two ClearVoice steps — see the
+// header comment) and `runnable_steps` is the subset ffmpeg can do.
+export function planCleanVoice(d) {
+  const steps = [];
+  const why = [];
+  if (d.clipped_runs > CLEAN_VOICE_CLIP_RUNS) {
+    steps.push("declip");
+    why.push(`${d.clipped_runs} clipped runs in the recording (lower the mic gain next time)`);
+  }
+  if (d.hum_db !== null && d.hum_db > CLEAN_VOICE_HUM_DB) {
+    steps.push("dehum");
+    why.push(`${d.hum_hz} Hz hum, ${d.hum_db} dB over its neighbours`);
+  }
+  if ((d.echo_tail_db !== null && d.echo_tail_db > CLEAN_VOICE_ECHO_MAX_DB) || d.snr_db < CLEAN_VOICE_SNR_MIN_DB) {
+    steps.push("clearvoice");
+    why.push(`echo ${d.echo_tail_db} dB (limit ${CLEAN_VOICE_ECHO_MAX_DB}), SNR ${d.snr_db} dB (limit ${CLEAN_VOICE_SNR_MIN_DB})`);
+  }
+  if (d.bandwidth_hz < CLEAN_VOICE_BW_MIN_HZ) {
+    steps.push("sr");
+    why.push(`bandwidth ${d.bandwidth_hz} Hz: low-rate audio, rebuild the highs`);
+    if (d.bandwidth_hz < CLEAN_VOICE_PHONE_BW_HZ) {
+      why.push("PHONE-BAND audio: super-resolution will not fill 4-8 kHz; A/B against an external enhancer instead");
+    }
+  }
+  if (!steps.length) why.push("clean recording: chain only");
+  const unavailable = steps
+    .filter((s) => CLEAN_VOICE_UNAVAILABLE_STEPS[s])
+    .map((s) => ({ step: s, reason: CLEAN_VOICE_UNAVAILABLE_STEPS[s] }));
+  return {
+    steps,
+    why,
+    unavailable,
+    runnable_steps: steps.filter((s) => !CLEAN_VOICE_UNAVAILABLE_STEPS[s]),
+  };
+}
+
+// Parse a --steps override: a comma list of declip,dehum,
+// clearvoice,sr, or "none" for chain only. Unknown names fail
+// loudly — a typo must not silently become chain-only.
+export function parseCleanVoiceSteps(raw) {
+  if (raw === null || raw === undefined) return null;
+  const list = (Array.isArray(raw) ? raw : String(raw).split(",")).map((s) => String(s).trim().toLowerCase()).filter(Boolean);
+  if (list.length === 1 && list[0] === "none") return [];
+  const known = ["declip", "dehum", "clearvoice", "sr"];
+  for (const s of list) {
+    if (!known.includes(s)) throw new MediaKitError(`clean_voice --steps: unknown step "${s}" (known: ${known.join(", ")}, or "none" for chain only)`, "INVALID_ARG");
+  }
+  return [...new Set(list)];
+}
+
+// Densest 12 s speech window — Takes' --ab default: convolve the
+// speech mask with a 12 s window and take the argmax. Pure, so the
+// unit tests can check it without ffmpeg.
+export function findDensestSpeechWindow(envDb, windowSeconds = 12, hop = 480, sampleRate = CLEAN_VOICE_SR) {
+  const framesPerSecond = sampleRate / hop;
+  const win = Math.round(windowSeconds * framesPerSecond);
+  const lo = percentile(envDb, 10);
+  const hi = percentile(envDb, 95);
+  const th = lo + 0.5 * (hi - lo);
+  const mask = new Float64Array(envDb.length);
+  for (let i = 0; i < envDb.length; i++) mask[i] = envDb[i] > th ? 1 : 0;
+  if (envDb.length <= win) return { start: 0, end: Math.min(windowSeconds, envDb.length / framesPerSecond) };
+  let sum = 0;
+  for (let i = 0; i < win; i++) sum += mask[i];
+  let best = sum;
+  let bestIdx = 0;
+  for (let i = win; i < envDb.length; i++) {
+    sum += mask[i] - mask[i - win];
+    if (sum > best) { best = sum; bestIdx = i - win + 1; }
+  }
+  const start = bestIdx / framesPerSecond;
+  return { start: +start.toFixed(3), end: +(start + windowSeconds).toFixed(3) };
+}
+
+// Cross-correlate 5 ms loudness envelopes (sample-level correlation
+// is fooled by EQ phase) — Takes' sync_ms: how far the cleaned file
+// drifted from the raw take, in ms. A clean chain stays within a
+// few ms; a large drift means a step re-timed the audio.
+export function voiceSyncMs(a, b) {
+  const env = (x) => {
+    const h = 240;
+    const k = Math.floor(x.length / h);
+    const e = new Float64Array(k);
+    for (let f = 0; f < k; f++) {
+      let sum = 0;
+      const base = f * h;
+      for (let i = 0; i < h; i++) sum += x[base + i] * x[base + i];
+      e[f] = Math.sqrt(sum / h);
+    }
+    return e;
+  };
+  const er = env(a);
+  const eo = env(b);
+  const k = Math.min(er.length, eo.length);
+  if (k < 40) return null;
+  const mr = er.slice(0, k).reduce((s, v) => s + v, 0) / k;
+  const mo = eo.slice(0, k).reduce((s, v) => s + v, 0) / k;
+  let best = -Infinity;
+  let bestD = 0;
+  for (let d = -20; d <= 20; d++) {
+    let s = 0;
+    const a0 = Math.max(0, d);
+    const a1 = k + Math.min(0, d);
+    const b0 = Math.max(0, -d);
+    for (let i = a0; i < a1; i++) s += (er[i] - mr) * (eo[i - a0 + b0] - mo);
+    if (s > best) { best = s; bestD = d; }
+  }
+  return bestD * 5;
+}
+
+// Decode to mono f32 PCM at 48 kHz — the shared input for the
+// clean_voice analysis. `aresample=async=1:first_pts=0` pads the
+// start, so the WAV runs on the video's clock (Takes 2026-10-11):
+// second 0 is frame 0, also when the audio starts late.
+async function decodeMono48000(inPath) {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-cleanvoice-"));
+  const rawPath = path.join(tmpDir, "audio.f32");
+  try {
+    await run(FFMPEG, ["-y", "-v", "error", "-i", inPath, "-vn", "-af", "aresample=async=1:first_pts=0", "-ac", "1", "-ar", String(CLEAN_VOICE_SR), "-f", "f32le", rawPath]);
+    const buf = await readFile(rawPath);
+    const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+    return new Float32Array(ab);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+// The voice chain (Takes' CH): highpass + EQ + 3.5:1 compressor +
+// gain + limiter, run exactly once at the end, in float. The
+// compressor threshold is measured from the signal itself
+// (integrated LUFS after highpass, +2 dB) and converted to LINEAR
+// here — acompressor takes a linear threshold (the same conversion
+// loudness() uses), so the "dB" suffix Takes passes is NOT used.
+function cleanVoiceChainFilter(thresholdDb) {
+  const thrLin = +(10 ** (thresholdDb / 20)).toFixed(4);
+  return `highpass=f=80,equalizer=f=160:t=q:w=0.8:g=2,equalizer=f=350:t=q:w=1.2:g=-1.5,equalizer=f=3500:t=q:w=1:g=2,acompressor=threshold=${thrLin}:ratio=3.5:attack=12:release=150:knee=6:detection=rms`;
+}
+
+function cleanVoiceStepFilter(step, diagnosis) {
+  if (step === "declip") return "adeclip";
+  if (step === "dehum") {
+    const h = diagnosis.hum_hz;
+    return [1, 2, 3, 4].map((k) => `bandreject=f=${h * k}:width_type=q:w=30`).join(",");
+  }
+  throw new MediaKitError(`clean_voice step "${step}" has no ffmpeg implementation`, "INVALID_ARG");
+}
+
+// Measure integrated loudness of a file AFTER a filter — the two
+// measurements the chain needs (threshold from the highpassed
+// signal, gain from the chained signal). Uses the loudnorm analysis
+// pass, like measureLoudnessFull, with the filter prepended.
+async function measureLoudnessFiltered(input, filter) {
+  const { stderr } = await run(FFMPEG, [
+    "-i", input, "-vn",
+    "-af", `${filter},loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json`,
+    "-f", "null", "-",
+  ]);
+  const m = stderr.match(/\{\s*\"input_i\"[\s\S]*?\}/);
+  if (!m) return null;
+  try {
+    const j = JSON.parse(m[0]);
+    const v = parseFloat(j.input_i);
+    return Number.isFinite(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+// Run the voice chain once on a (possibly pre-cleaned) file: measure
+// the threshold, measure the chained loudness, render with the exact
+// gain, limiter last. Returns the measured threshold/gain so the
+// caller can report them.
+async function runVoiceChain(curPath, outPath, targetLufs) {
+  const lufsHp = await measureLoudnessFiltered(curPath, "highpass=f=80");
+  if (lufsHp === null) throw new MediaKitError("clean_voice could not measure the input loudness (highpass pass)", "PROBE_FAILED");
+  const thresholdDb = lufsHp + 2;
+  const chain = cleanVoiceChainFilter(thresholdDb);
+  const lufsChained = await measureLoudnessFiltered(curPath, chain);
+  if (lufsChained === null) throw new MediaKitError("clean_voice could not measure the chained loudness", "PROBE_FAILED");
+  const gainDb = targetLufs - lufsChained;
+  await run(FFMPEG, ["-y", "-i", curPath, "-af", `${chain},volume=${gainDb.toFixed(2)}dB,${CLEAN_VOICE_CHAIN_LIMITER}`, "-ar", String(CLEAN_VOICE_SR), "-ac", "1", "-c:a", "pcm_f32le", outPath]);
+  return { threshold_db: +thresholdDb.toFixed(1), gain_db: +gainDb.toFixed(2) };
+}
+
+export async function cleanVoice({ input, output = null, targetLufs = -14, steps = null, diagnose = false, ab = false, window = null, dryRun = false }) {
+  const inPath = await requireInput(input);
+  const target = num(targetLufs, "target_lufs", { min: -70, max: 0 });
+  const meta = await probe(inPath);
+  if (!meta.audio) throw new MediaKitError("clean_voice needs an audio stream — this file has none", "INVALID_ARG");
+  const total = meta.duration_seconds;
+  if (total === null) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
+  if (total > CLEAN_VOICE_MAX_DURATION_SECONDS) {
+    throw new MediaKitError(`clean_voice refuses files over ${CLEAN_VOICE_MAX_DURATION_SECONDS}s (the raw PCM decode would exceed memory) — trim a section first`, "INVALID_ARG");
+  }
+  // Decode once: every measurement (diagnose, threshold, gain,
+  // sync, echo-after) reads these samples, never a second decode.
+  const samples = await decodeMono48000(inPath);
+  if (!samples.length) throw new MediaKitError("clean_voice: decoded audio is empty", "PROBE_FAILED");
+  const diagnosis = diagnoseVoice(samples);
+  if (diagnosis.speech_frames === 0) {
+    throw new MediaKitError("clean_voice needs audible speech — this file is (near-)silent, there is nothing to diagnose", "INVALID_ARG");
+  }
+  const plan = planCleanVoice(diagnosis);
+  const override = parseCleanVoiceSteps(steps);
+  const effectiveSteps = override ?? plan.steps;
+  const unavailable = effectiveSteps
+    .filter((s) => CLEAN_VOICE_UNAVAILABLE_STEPS[s])
+    .map((s) => ({ step: s, reason: CLEAN_VOICE_UNAVAILABLE_STEPS[s] }));
+  const why = override ? ["--steps override"] : plan.why;
+  if (diagnose) {
+    return {
+      operation: "clean_voice", input: inPath, diagnose: true,
+      diagnosis, steps: effectiveSteps, why, unavailable,
+      runnable_steps: effectiveSteps.filter((s) => !CLEAN_VOICE_UNAVAILABLE_STEPS[s]),
+    };
+  }
+  if (!output) throw new MediaKitError("clean_voice needs an output file (or --diagnose to only measure and print the plan)", "INVALID_ARG");
+  const outPath = await prepareOutput(output, [inPath]);
+  if (path.extname(outPath).toLowerCase() !== ".wav") {
+    throw new MediaKitError(`clean_voice writes 48 kHz mono float WAV only — output must end in .wav, got: ${path.basename(outPath)}`, "INVALID_ARG");
+  }
+  if (unavailable.length) {
+    const runnable = effectiveSteps.filter((s) => !CLEAN_VOICE_UNAVAILABLE_STEPS[s]);
+    throw new MediaKitError(`clean_voice refuses to run: the plan needs ${unavailable.map((u) => u.step).join(", ")}, which ${unavailable.length > 1 ? "are" : "is"} not available — ${unavailable.map((u) => u.reason).join(" ")} Run with --steps ${runnable.join(",") || "none"} to clean with the ffmpeg-native steps only.`, "INVALID_ARG");
+  }
+  const runnableSteps = effectiveSteps.filter((s) => !CLEAN_VOICE_UNAVAILABLE_STEPS[s]);
+  const pid = process.pid;
+  const tmpDir = path.dirname(outPath);
+  const tmp = (tag) => path.join(tmpDir, `.clean-voice-${pid}-${tag}.wav`);
+  const temps = [];
+  const reportPath = outPath.slice(0, -4) + ".report.json";
+  try {
+    // Pre-steps in plan order, each to a lossless temp.
+    let cur = inPath;
+    const stepFiles = [];
+    for (const step of runnableSteps) {
+      const nxt = tmp(step);
+      temps.push(nxt);
+      const args = ["-y", "-i", cur, "-af", cleanVoiceStepFilter(step, diagnosis), "-ar", String(CLEAN_VOICE_SR), "-ac", "1", "-c:a", "pcm_f32le", nxt];
+      if (dryRun) {
+        // The commands below are built after the measurements, so
+        // dry-run still decodes + diagnoses (read-only) but renders
+        // nothing — like loudness --dry-run.
+        stepFiles.push({ step, args });
+      } else {
+        await run(FFMPEG, args);
+      }
+      cur = nxt;
+    }
+    // The chain, measured on the pre-cleaned file: threshold from
+    // the highpassed signal, gain from the chained signal. In
+    // dry-run nothing was rendered, so the measurement is on the
+    // input instead — the note says so, like loudness --dry-run.
+    const measurePath = dryRun ? inPath : cur;
+    const lufsHp = await measureLoudnessFiltered(measurePath, "highpass=f=80");
+    if (lufsHp === null) throw new MediaKitError("clean_voice could not measure the input loudness (highpass pass)", "PROBE_FAILED");
+    const thresholdDb = lufsHp + 2;
+    const chain = cleanVoiceChainFilter(thresholdDb);
+    const lufsChained = await measureLoudnessFiltered(measurePath, chain);
+    if (lufsChained === null) throw new MediaKitError("clean_voice could not measure the chained loudness", "PROBE_FAILED");
+    const gainDb = target - lufsChained;
+    const chainArgs = ["-y", "-i", cur, "-af", `${chain},volume=${gainDb.toFixed(2)}dB,${CLEAN_VOICE_CHAIN_LIMITER}`, "-ar", String(CLEAN_VOICE_SR), "-ac", "1", "-c:a", "pcm_f32le", outPath];
+    if (dryRun) {
+      const commands = [...stepFiles.map((s) => formatCommand(s.args)), formatCommand(chainArgs)];
+      return {
+        operation: "clean_voice", dry_run: true, input: inPath, output: outPath,
+        target_lufs: target, diagnosis, steps: effectiveSteps, why, unavailable,
+        chain: { threshold_db: +thresholdDb.toFixed(1), gain_db: +gainDb.toFixed(2) },
+        commands, note: "Dry run: no file written. The threshold/gain were measured from the uncleaned input — the real run renders the pre-steps first and re-measures, so they will differ when pre-steps apply.",
+      };
+    }
+    await run(FFMPEG, chainArgs);
+    // Verify the file on disk, not the filter's promise: re-measure
+    // LUFS + peak, re-diagnose the echo tail, and cross-correlate
+    // the 5 ms envelopes against the raw take for drift.
+    const info = await fileInfo(outPath);
+    const outProbe = await probe(outPath);
+    const outFull = outProbe.audio ? await measureLoudnessFull(outPath) : null;
+    const outSamples = await decodeMono48000(outPath);
+    const outDiagnosis = diagnoseVoice(outSamples);
+    const result = {
+      operation: "clean_voice", input: inPath, output: outPath,
+      target_lufs: target, diagnosis, steps: effectiveSteps, why,
+      unavailable, chain: { threshold_db: +thresholdDb.toFixed(1), gain_db: +gainDb.toFixed(2) },
+      out: {
+        peak_dbfs: outDiagnosis.peak_dbfs,
+        clipped_runs: outDiagnosis.clipped_runs,
+        lufs: outFull === null ? null : +outFull.i.toFixed(1),
+        true_peak_db: outFull === null ? null : outFull.tp,
+        sync_ms: voiceSyncMs(samples, outSamples),
+        seconds: +(outSamples.length / CLEAN_VOICE_SR).toFixed(2),
+        in_seconds: +(samples.length / CLEAN_VOICE_SR).toFixed(2),
+      },
+      echo_after_db: outDiagnosis.echo_tail_db,
+      report: reportPath,
+      ...info, duration_seconds: outProbe.duration_seconds,
+    };
+    // Report sidecar (Takes' OUT.report.json): the diagnosis, the
+    // plan, and the measured output — the record of what was done.
+    await writeFile(reportPath, JSON.stringify({
+      input: inPath, diagnosis, steps: effectiveSteps, why, unavailable,
+      chain: result.chain, out: result.out, echo_after_db: result.echo_after_db,
+    }, null, 2), "utf8");
+    if (ab) {
+      // A/B window: the densest 12 s of speech by default, or the
+      // explicit --window. Each candidate chain runs on the same
+      // segment and is normalized to the same target, so the listen
+      // compares tone, not loudness. Candidates are the runnable
+      // step-sets only — clearvoice/sr cannot be heard without the
+      // engine, and the .ab.txt says so instead of pretending.
+      let s0;
+      let s1;
+      if (window !== null && window !== undefined) {
+        const parts = String(window).split(",").map((v) => Number(v));
+        if (parts.length !== 2 || !parts.every(Number.isFinite) || parts[0] < 0 || parts[1] <= parts[0]) {
+          throw new MediaKitError(`clean_voice --window must be "start,end" seconds with end > start >= 0, got: ${window}`, "INVALID_ARG");
+        }
+        [s0, s1] = parts;
+        if (s1 > total) throw new MediaKitError(`clean_voice --window end ${s1}s is past the input (${total}s)`, "INVALID_ARG");
+      } else {
+        const w = findDensestSpeechWindow(voiceEnvelopeDb(samples));
+        s0 = w.start;
+        s1 = w.end;
+      }
+      const segPath = tmp("ab-seg");
+      temps.push(segPath);
+      await run(FFMPEG, ["-y", "-ss", String(s0), "-to", String(s1), "-i", inPath, "-vn", "-af", "aresample=async=1:first_pts=0", "-ac", "1", "-ar", String(CLEAN_VOICE_SR), "-c:a", "pcm_f32le", segPath]);
+      const segDiagnosis = diagnoseVoice(await decodeMono48000(segPath));
+      const pre = runnableSteps.filter((s) => s === "declip" || s === "dehum");
+      const candSets = [];
+      const seen = new Set();
+      const pushCand = (label, set) => {
+        const key = set.join("+");
+        if (seen.has(key)) return;
+        seen.add(key);
+        candSets.push({ label, set });
+      };
+      pushCand("chain only", pre);
+      if (pre.includes("declip")) pushCand("declip", ["declip"]);
+      if (pre.includes("dehum")) pushCand("dehum", ["dehum"]);
+      pushCand("plan", runnableSteps);
+      const order = [];
+      const parts = [];
+      for (let ci = 0; ci < candSets.length; ci++) {
+        const cand = candSets[ci];
+        let ccur = segPath;
+        for (const step of cand.set) {
+          const nxt = tmp(`ab-${ci}-${step}`);
+          temps.push(nxt);
+          await run(FFMPEG, ["-y", "-i", ccur, "-af", cleanVoiceStepFilter(step, segDiagnosis), "-ar", String(CLEAN_VOICE_SR), "-ac", "1", "-c:a", "pcm_f32le", nxt]);
+          ccur = nxt;
+        }
+        const candOut = tmp(`ab-${ci}-out`);
+        temps.push(candOut);
+        await runVoiceChain(ccur, candOut, target);
+        const candSamples = await decodeMono48000(candOut);
+        parts.push(candSamples);
+        parts.push(new Float32Array(Math.round(0.8 * CLEAN_VOICE_SR)));
+        order.push(`${String.fromCharCode(65 + ci)}: ${cand.label} (${cand.set.join("+") || "no cleanup"} -> chain)`);
+      }
+      const totalLen = parts.reduce((s, p) => s + p.length, 0);
+      const joined = new Float32Array(totalLen);
+      let off = 0;
+      for (const p of parts) { joined.set(p, off); off += p.length; }
+      const abRaw = tmp("ab-raw");
+      temps.push(abRaw);
+      await writeFile(abRaw, Buffer.from(joined.buffer, joined.byteOffset, joined.byteLength));
+      const abPath = outPath.slice(0, -4) + ".ab.wav";
+      const abTxtPath = outPath.slice(0, -4) + ".ab.txt";
+      await run(FFMPEG, ["-y", "-f", "f32le", "-ar", String(CLEAN_VOICE_SR), "-ac", "1", "-i", abRaw, "-c:a", "pcm_f32le", abPath]);
+      const abLines = [`window ${s0.toFixed(1)}-${s1.toFixed(1)} s of the input, 0.8 s gap between versions`, ...order];
+      if (plan.steps.some((s) => CLEAN_VOICE_UNAVAILABLE_STEPS[s])) {
+        abLines.push(`note: the plan also calls for ${plan.steps.filter((s) => CLEAN_VOICE_UNAVAILABLE_STEPS[s]).join(", ")} — not heard here, the ClearVoice engine is not installed`);
+      }
+      await writeFile(abTxtPath, abLines.join("\n") + "\n", "utf8");
+      result.ab = { file: abPath, order_file: abTxtPath, window: [s0, s1], order };
+    }
+    return result;
+  } finally {
+    for (const t of temps) await unlink(t).catch(() => {});
+  }
+}
+
 // ---------------------------------------------------------------- concat
 // Plain mode: concat demuxer + re-encode (safe across codecs/sizes).
 // Transition mode (ffmpeg-mcp's concat_clips_with_transition idea,
@@ -10217,10 +10879,13 @@ const DOCTOR_FILTERS = [
   "fade", "asplit",
   "vstack",
   "loop",
+  // clean_voice: the EQ/compressor/limiter chain + the two
+  // pre-steps (declip, dehum) — all plain ffmpeg audio filters.
+  "adeclip", "bandreject", "alimiter", "equalizer", "highpass",
 ];
 const DOCTOR_ENCODERS = [
   "libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4", "prores_ks",
-  "aac", "libopus", "libmp3lame", "libvorbis", "flac", "pcm_s16le",
+  "aac", "libopus", "libmp3lame", "libvorbis", "flac", "pcm_s16le", "pcm_f32le",
 ];
 const DOCTOR_DECODERS = [
   "librsvg",
@@ -10307,6 +10972,10 @@ const TOOL_REQUIREMENTS = {
   // search_words reads a transcript JSON in pure Node — no ffmpeg
   // capability needed either.
   search_words: {},
+  // clean_voice decodes to raw PCM for the diagnosis (pure Node),
+  // then runs the pre-steps + the EQ/compressor/limiter chain in
+  // ffmpeg and measures with loudnorm. Output is pcm_f32le WAV.
+  clean_voice: { filters: ["highpass", "equalizer", "acompressor", "alimiter", "bandreject", "adeclip", "aresample", "loudnorm"], encoders: ["pcm_f32le"] },
   // transitions is a pure data lookup over the catalog — no ffmpeg
   // capability needed either.
   transitions: {},
@@ -13618,6 +14287,17 @@ export const BATCH_OPERATIONS = {
     }),
     extraHash: async (input, a) => hashSidecar(cutWordsFileFor(input, a.words_dir)),
   },
+  // clean_voice in batch: same args as the tool, minus the
+  // diagnose/ab modes (a batch row is one cleaned file; diagnose
+  // the takes first with the tool itself). Output is always .wav —
+  // batchOutputExt forces it, like extract_audio --whisper.
+  clean_voice: {
+    args: ["target_lufs", "steps"],
+    run: (input, output, a) => cleanVoice({
+      input, output,
+      targetLufs: a.target_lufs ?? -14, steps: a.steps ?? null,
+    }),
+  },
   // hook in batch is the first PROBE-ONLY batch operation: it writes
   // no file, so there is no output path, no suffix and no output to
   // verify in the cache — the ranked windows come back in the row's
@@ -13751,6 +14431,9 @@ function batchOutputExt(operation, inputExt, args) {
     return AUDIO_FORMATS[inputExt] ? inputExt : "mp3";
   }
   if (operation === "loudness" && args.format) return String(args.format).toLowerCase().replace(/^\./, "");
+  // clean_voice writes 48 kHz mono float WAV only, whatever the
+  // input was — the batch output must be .wav, not the input's ext.
+  if (operation === "clean_voice") return "wav";
   // chroma_key without a background keeps transparency, so the batch
   // output must be .mov (ProRes 4444); with a background it is a
   // flat video — .mp4, or .webm when the input already was one.

@@ -1088,6 +1088,51 @@ export const TOOL_DEFS = [
   },
 
 
+  // Clean a recorded voice (idea: marvtub/takes-public
+  // clean_voice.py — diagnose first, then pick the steps; no code
+  // copied). Diagnose measures peak, clipped runs, noise floor,
+  // SNR, echo tail, bandwidth and 50/60 Hz hum from the decoded
+  // audio in pure Node, then picks the steps: declip (adeclip),
+  // dehum (bandreject harmonics), clearvoice (echo above -24 dB or
+  // SNR below 50 dB), sr (bandwidth below 15 kHz). The voice chain
+  // (highpass 80 + EQ + 3.5:1 compressor + gain to target LUFS +
+  // -1 dBFS limiter) runs exactly once, at the end, in float, and
+  // the output is a 48 kHz mono float WAV on the input's clock.
+  // clearvoice/sr need the ClearVoice engine (PyTorch + ~1.7 GB
+  // checkpoints) — not installed here, so a plan that needs them
+  // refuses the run instead of cleaning without them; pass --steps
+  // with only the ffmpeg-native steps to clean anyway. --diagnose
+  // only measures and prints the plan and writes nothing; --ab
+  // writes a 12 s speech window through every runnable candidate
+  // chain (0.8 s gaps, order in OUT.ab.txt) so a new mic or room
+  // can be heard before committing. A report is written to
+  // OUT.report.json.
+  {
+    name: "clean_voice",
+    description: "Clean a recorded voice for a video: diagnose the recording first (peak, clipped runs, noise floor, SNR, echo tail, bandwidth, 50/60 Hz hum — all measured from the decoded audio), then pick the cleanup steps and run the voice chain (highpass 80 Hz + EQ + 3.5:1 compressor + gain to target LUFS + -1 dBFS limiter) exactly once, at the end, in float. Output is a 48 kHz mono float WAV on the input's video clock. The plan's steps are declip (more than 20 clipped runs), dehum (hum more than 12 dB over its neighbours), clearvoice (echo tail above -24 dB or SNR below 50 dB) and sr (bandwidth below 15 kHz); clearvoice/sr need the ClearVoice engine (PyTorch + ~1.7 GB checkpoints), which is not installed — a run that needs them refuses loudly instead of cleaning without them, so pass steps=['declip','dehum'] or steps=['none'] to clean with the ffmpeg-native steps only. diagnose_only=true only measures and returns the plan and writes nothing; ab=true writes a 12 s speech window through every runnable candidate chain (0.8 s gaps, order in the .ab.txt) so a new mic or room can be heard before committing. A report is written to <output>.report.json with the diagnosis, the plan and the measured output. Refuses inputs over 600 s (trim a section first) and non-.wav outputs.",
+    schema: {
+    input: pathSchema.describe("Audio or video file with a speech track"),
+    output: pathSchema.optional().describe("Output WAV file path, must end in .wav (not needed with diagnose_only=true)"),
+    target_lufs: z.number().min(-70).max(0).default(-14).describe("Target integrated loudness for the cleaned voice (default -14)"),
+    steps: z.array(z.string()).optional().describe("Override the diagnosed plan, e.g. ['declip','dehum'] or ['none'] for chain only — unknown names fail loudly; a plan that needs clearvoice/sr refuses the run unless the override drops them"),
+    diagnose_only: z.boolean().default(false).describe("Only measure the recording and return the diagnosis + plan; write no file"),
+    ab: z.boolean().default(false).describe("Also write <output>.ab.wav: the densest 12 s of speech through every runnable candidate chain, back to back with 0.8 s gaps, with the order in <output>.ab.txt"),
+    window: z.string().optional().describe("Seconds of the input to use for --ab, 'start,end' — default is the densest 12 s of speech"),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg commands and write no file (the threshold/gain are measured from the uncleaned input, so they differ from the real run when pre-steps apply)"),
+  },
+    handler: async (a) => safe(() => core.cleanVoice({
+    input: a.input,
+    output: a.output ?? null,
+    targetLufs: a.target_lufs ?? -14,
+    steps: a.steps ?? null,
+    diagnose: a.diagnose_only ?? false,
+    ab: a.ab ?? false,
+    window: a.window ?? null,
+    dryRun: a.dry_run ?? false,
+  })),
+  },
+
+
   // Search-first editing (burningion/video-editing-mcp's
   // search-first idea, idea only — no code copied): find WHERE a
   // phrase is said in the transcript, then cut from the result.
@@ -1528,9 +1573,9 @@ export const TOOL_DEFS = [
 
   {
     name: "batch",
-    description: "Apply ONE operation to many files matching a glob under a folder, in one call: loudness, resize, reframe, compress, convert, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, trim, silence, chroma_key, cut_words, remove_retakes, smart_cut, slideshow, hook, bpm, beat_grid, tempo_drift, audio_levels or search_words — the same args for every file. Outputs are named <stem>-<operation>.<ext> under the output directory, mirroring the input tree. Returns one row per file (input order) with status ok/error/cached/skipped plus counts, so a failure in one file never hides the rest. Unchanged files are skipped via a content-hash cache (.mediakit-batch-cache.json in the output dir, verified against the output's size + sha256); jobs runs up to 8 files at once under one shared timeout_seconds budget; dry_run lists the planned outputs and writes nothing. cut_words, remove_retakes, smart_cut and search_words find each clip's words file by convention (<words_dir>/<stem>.words.json, default the input's own folder) — a clip with no words file fails its own row only. slideshow is the exception: a SET operation — the whole matched set of images (2-32) becomes ONE slideshow video (output_name, default slideshow.mp4) instead of one output per file, and the per-file cache does not apply. hook, bpm, beat_grid, tempo_drift, audio_levels and search_words are the probe-only exceptions: they write no file (output is null, output_suffix is null) — the measurement comes back in each row's result, and the cache stores that result instead of a file.",
+    description: "Apply ONE operation to many files matching a glob under a folder, in one call: loudness, resize, reframe, compress, convert, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, trim, silence, chroma_key, cut_words, remove_retakes, smart_cut, clean_voice, slideshow, hook, bpm, beat_grid, tempo_drift, audio_levels or search_words — the same args for every file. Outputs are named <stem>-<operation>.<ext> under the output directory, mirroring the input tree. Returns one row per file (input order) with status ok/error/cached/skipped plus counts, so a failure in one file never hides the rest. Unchanged files are skipped via a content-hash cache (.mediakit-batch-cache.json in the output dir, verified against the output's size + sha256); jobs runs up to 8 files at once under one shared timeout_seconds budget; dry_run lists the planned outputs and writes nothing. cut_words, remove_retakes, smart_cut and search_words find each clip's words file by convention (<words_dir>/<stem>.words.json, default the input's own folder) — a clip with no words file fails its own row only. clean_voice writes .wav always (48 kHz mono float), whatever the input was, and a take whose plan needs clearvoice/sr fails its own row (pass steps without them to clean anyway). slideshow is the exception: a SET operation — the whole matched set of images (2-32) becomes ONE slideshow video (output_name, default slideshow.mp4) instead of one output per file, and the per-file cache does not apply. hook, bpm, beat_grid, tempo_drift, audio_levels and search_words are the probe-only exceptions: they write no file (output is null, output_suffix is null) — the measurement comes back in each row's result, and the cache stores that result instead of a file.",
     schema: {
-    operation: z.enum(["loudness", "resize", "reframe", "compress", "convert", "extract_audio", "reverse", "rotate", "boomerang", "make_loopable", "freeze", "grade", "fit", "trim", "silence", "chroma_key", "cut_words", "remove_retakes", "smart_cut", "slideshow", "hook", "bpm", "beat_grid", "tempo_drift", "audio_levels", "search_words"]).describe("The operation to apply to every matched file"),
+    operation: z.enum(["loudness", "resize", "reframe", "compress", "convert", "extract_audio", "reverse", "rotate", "boomerang", "make_loopable", "freeze", "grade", "fit", "trim", "silence", "chroma_key", "cut_words", "remove_retakes", "smart_cut", "clean_voice", "slideshow", "hook", "bpm", "beat_grid", "tempo_drift", "audio_levels", "search_words"]).describe("The operation to apply to every matched file"),
     pattern: z.string().min(1).describe("Glob matched against paths under input_dir: **/*.mp4 for every mp4 at any depth, sub/*.mp4 for one folder, or a bare *.mp4 (matches the basename at any depth)"),
     input_dir: pathSchema.describe("Folder to search under (recursive; hidden dirs, .git, node_modules and .next are skipped)"),
     output_dir: pathSchema.describe("Directory to write outputs + batch-manifest.json into (created if needed; files under it are never treated as inputs)"),

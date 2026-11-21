@@ -665,6 +665,20 @@ const COMMANDS = {
       ["-o, --output", "Output file (required unless --detect-only)"],
     ],
   },
+  "clean-voice": {
+    usage: "mediakit clean-voice <input> -o <output.wav> [--target-lufs -14] [--steps declip,dehum] [--diagnose] [--ab [--window 10,22]] [--dry-run]",
+    desc: "Clean a recorded voice for a video: diagnose the recording first (peak, clipped runs, noise floor, SNR, echo tail, bandwidth, 50/60 Hz hum — all measured from the decoded audio), then pick the cleanup steps and run the voice chain (highpass 80 Hz + EQ + 3.5:1 compressor + gain to target LUFS + -1 dBFS limiter) exactly once, at the end, in float. Output is a 48 kHz mono float WAV on the input's video clock, so cut it afterwards with the take's times. The plan's steps are declip (>20 clipped runs), dehum (hum >12 dB over its neighbours), clearvoice (echo tail >-24 dB or SNR <50 dB) and sr (bandwidth <15 kHz); clearvoice/sr need the ClearVoice engine (PyTorch + ~1.7 GB checkpoints), which is not installed — a run that needs them refuses loudly instead of cleaning without them, so pass --steps with only the ffmpeg-native steps (e.g. --steps declip,dehum, or --steps none for chain only) to clean anyway. --diagnose only measures and prints the plan and writes nothing; --ab writes a 12 s speech window through every runnable candidate chain (0.8 s gaps, order in OUT.ab.txt) so a new mic or room can be heard before committing; --window 'start,end' picks the window instead of the densest 12 s of speech. A report is written to OUT.report.json. Refuses inputs over 600 s (trim a section first) and non-.wav outputs.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--target-lufs", "Target integrated loudness for the cleaned voice (default -14)"],
+      ["--steps", "Comma-separated step override, e.g. \"declip,dehum\" or \"none\" for chain only — unknown names fail loudly"],
+      ["--diagnose", "Only measure the recording and print the diagnosis + plan; write no file"],
+      ["--ab", "Also write OUT.ab.wav: the densest 12 s of speech through every runnable candidate chain, with the order in OUT.ab.txt"],
+      ["--window", "Seconds of the input to use for --ab, 'start,end' (default: densest 12 s of speech)"],
+      ["--dry-run", "Print the exact ffmpeg commands and write no file"],
+      ["-o, --output", "Output WAV file, must end in .wav (required unless --diagnose)"],
+    ],
+  },
   "search-words": {
     usage: "mediakit search-words --words-file <words.json> --query \"<phrase>\" [--pad-before 0.5] [--pad-after 0.5] [--max-matches 10] [--context-words 5]",
     desc: "Find a phrase in a transcript and return where it is said (probe-only, writes no file): give a words file (the JSON transcribe --word-timestamps prints — save its stdout — or a hand-written {words:[{start,end,word}]}), the same file cut-words cuts by, and a --query phrase. Matching is on normalized words (case-insensitive, punctuation ignored — 'Hello,' matches 'hello'), contiguous only: a phrase split by another word is not a match, and ASR mis-hearings are not fuzzy-matched. Every match returns its word indices, start/end/duration, the matched text with context words on each side, and a padded cut window (default 0.5s each side); cut_list merges the windows into the ready-to-cut list. Search the phrase, then cut the window it returns — never guess timestamps. Also a batch operation (one words file per clip, the cut-words convention) and a manifest probe-only step.",
@@ -872,7 +886,7 @@ const COMMANDS = {
   },
   batch: {
     usage: "mediakit batch <operation> --pattern <glob> --input-dir <dir> -o <output-dir> [--args-json '{\"target_lufs\": -14}'] [--jobs 1] [--suffix -loudness] [--no-cache] [--stop-on-error] [--timeout 1800] [--max-files 200] [--dry-run]",
-    desc: "Apply one operation (loudness|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|smart-cut|slideshow|hook|audio-levels|search-words) to every file matching a glob under a folder, with the same args for all. Outputs are <stem>-<operation>.<ext> under the output dir, mirroring the input tree; a batch-manifest.json records every file's result. Unchanged files are skipped via a content-hash cache; --dry-run lists the planned outputs and writes nothing. cut-words, remove-retakes, smart-cut and search-words find each clip's words file as <words-dir>/<stem>.words.json (default: the input's own folder) — a clip with no words file fails its own row only. slideshow is a set operation: the whole matched set of images (2-32) becomes ONE slideshow video (--args-json '{\"output_name\": \"reel.mp4\"}'), and the per-file cache does not apply. hook, audio-levels and search-words are probe-only: they write no file (output null in each row) — the measurement comes back in the row's result, and the cache stores that result.",
+    desc: "Apply one operation (loudness|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|smart-cut|clean-voice|slideshow|hook|audio-levels|search-words) to every file matching a glob under a folder, with the same args for all. Outputs are <stem>-<operation>.<ext> under the output dir, mirroring the input tree; a batch-manifest.json records every file's result. Unchanged files are skipped via a content-hash cache; --dry-run lists the planned outputs and writes nothing. cut-words, remove-retakes, smart-cut and search-words find each clip's words file as <words-dir>/<stem>.words.json (default: the input's own folder) — a clip with no words file fails its own row only. clean-voice writes .wav always (48 kHz mono float), whatever the input was, and a take whose plan needs clearvoice/sr fails its own row (pass --args-json '{\"steps\": \"declip,dehum\"}' to clean anyway). slideshow is a set operation: the whole matched set of images (2-32) becomes ONE slideshow video (--args-json '{\"output_name\": \"reel.mp4\"}'), and the per-file cache does not apply. hook, audio-levels and search-words are probe-only: they write no file (output null in each row) — the measurement comes back in the row's result, and the cache stores that result.",
     args: [{ name: "operation", required: true }],
     options: [
       ["--pattern", "Glob under --input-dir: **/*.mp4 (any depth), sub/*.mp4 (one folder), or bare *.mp4 (basename at any depth) (required)"],
@@ -982,7 +996,7 @@ const COMMANDS = {
   },
   manifest: {
     usage: "mediakit manifest <manifest.json> [-o <output.mp4>] [--dry-run] [--no-cache] [--keep-intermediates]",
-    desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (slideshow as step 1 only — it builds from images in args, so input should be the first slide image; then trim|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|fastforward|broll|grade|fit|silence|denoise|interpolate|burn-captions|overlay|chroma-key|cut-words|remove-retakes|smart-cut; hook|audio-levels|search-words are the probe-only steps — they analyze the chain file at that point and pass it through unchanged), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file.",
+    desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (slideshow as step 1 only — it builds from images in args, so input should be the first slide image; then trim|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|fastforward|broll|grade|fit|silence|denoise|interpolate|burn-captions|overlay|chroma-key|cut-words|remove-retakes|smart-cut|clean-voice; hook|audio-levels|search-words are the probe-only steps — they analyze the chain file at that point and pass it through unchanged), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file. clean-voice writes .wav only, so a manifest step using it needs a .wav chain (a voice-only pipeline, or clean-voice as the step before a .wav output).",
     args: [{ name: "manifest", required: true }],
     options: [
       ["--dry-run", "Validate the manifest and list the planned steps without running anything"],
@@ -1831,6 +1845,18 @@ async function main() {
         });
         break;
       }
+      case "clean-voice": {
+        result = await core.cleanVoice({
+          input: needInput(), output: opts.diagnose === true ? null : needOutput(opts),
+          targetLufs: numOpt(opts, "target_lufs") ?? -14,
+          steps: opts.steps ?? null,
+          diagnose: opts.diagnose === true,
+          ab: opts.ab === true,
+          window: opts.window ?? null,
+          dryRun: opts.dry_run === true,
+        });
+        break;
+      }
       case "search-words": {
         if (!opts.words_file) fail("missing required option: --words-file <words.json>");
         if (!opts.query) fail("missing required option: --query \"<phrase>\"");
@@ -2067,7 +2093,7 @@ async function main() {
         break;
       }
       case "batch": {
-        if (!positional[0]) fail("missing operation: loudness|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|smart-cut|slideshow|hook|audio-levels|search-words");
+        if (!positional[0]) fail("missing operation: loudness|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|smart-cut|clean-voice|slideshow|hook|audio-levels|search-words");
         if (!opts.pattern) fail("missing required option: --pattern <glob>");
         if (!opts.input_dir) fail("missing required option: --input-dir <dir>");
         const opName = positional[0].replace(/-/g, "_");
