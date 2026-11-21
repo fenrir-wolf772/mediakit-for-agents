@@ -649,8 +649,8 @@ const COMMANDS = {
     ],
   },
   "smart-cut": {
-    usage: "mediakit smart-cut <input> --words-file <words.json> -o <output> [--min-gap 0.45] [--aggressiveness 0.5] [--fillers um,uh,\"you know\"] [--min-keep 0.2] [--detect-only] [--dry-run]",
-    desc: "Tighten a talking-head clip on word timings from transcribe --word-timestamps (save its printed JSON and pass it as --words-file): cut the hesitation out of a take in one pass — long pauses between words, long filler words, and words held so long they became a stall. A filler only counts when held long (>= 0.35s - 0.15*aggressiveness), so a quick 0.1s 'um' survives and a stretched 'ummm' does not; that duration gate is what makes 'like'/'you know' safe in the default list. One --aggressiveness knob (0-1, default 0.5) scales all three cut thresholds at once. --detect-only reports the removed intervals and the cut plan and writes no file; --dry-run prints the exact ffmpeg command. Nothing to cut copies the input unchanged. Deterministic, not a judge: a dramatic pause looks like a hesitation to this detector — read the removed list (or run --detect-only) before cutting.",
+    usage: "mediakit smart-cut <input> --words-file <words.json> -o <output> [--min-gap 0.45] [--aggressiveness 0.5] [--fillers um,uh,\"you know\"] [--min-keep 0.2] [--no-contextual-gate] [--min-segment 0] [--detect-only] [--dry-run]",
+    desc: "Tighten a talking-head clip on word timings from transcribe --word-timestamps (save its printed JSON and pass it as --words-file): cut the hesitation out of a take in one pass — long pauses between words, long filler words, and words held so long they became a stall. A filler only counts when held long (>= 0.35s - 0.15*aggressiveness), so a quick 0.1s 'um' survives and a stretched 'ummm' does not; that duration gate is what makes 'like'/'you know' safe in the default list. Since lượt 130 the contextual fillers 'like'/'you know'/'basically'/'actually' ALSO need the context gate (on by default): a long one is only cut when flanked by >= 0.15s pauses on both sides or at the very start/end of the take — a 0.6s 'like' inside 'I like this' survives and is listed in gated_fillers; --no-contextual-gate restores the old duration-only behaviour. --min-segment (default 0 = off) merges removals separated by less than that many seconds of kept speech, so a sub-2s keep fragment between two cuts is cut with them (2.0 follows OpenEdit's silence_cutter default — but it can swallow real words on a dense take, so it stays off unless asked). One --aggressiveness knob (0-1, default 0.5) scales all three cut thresholds at once. --detect-only reports the removed intervals and the cut plan and writes no file; --dry-run prints the exact ffmpeg command. Nothing to cut copies the input unchanged. Deterministic, not a judge: a dramatic pause looks like a hesitation to this detector — read the removed list (or run --detect-only) before cutting.",
     args: [{ name: "input", required: true }],
     options: [
       ["--words-file", "Transcript JSON with a words array (required) — the stdout of `transcribe --word-timestamps` saved to a file"],
@@ -658,6 +658,8 @@ const COMMANDS = {
       ["--aggressiveness", "One knob 0-1 scaling all three cut thresholds (default 0.5): 0 gentle, 1 tight"],
       ["--fillers", "Comma-separated filler phrases to cut when held long, e.g. \"um,uh,you know\" — omit for the default list"],
       ["--min-keep", "Drop keep segments shorter than this many seconds (default 0.2)"],
+      ["--no-contextual-gate", "Disable the context gate: cut 'like'/'you know'/'basically'/'actually' on duration alone, as before lượt 130"],
+      ["--min-segment", "Merge removals separated by less than this many seconds of kept speech (default 0 = off; 2.0 is OpenEdit's default)"],
       ["--detect-only", "Report the removed intervals and the cut plan and write no file"],
       ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required unless --detect-only)"],
@@ -1822,6 +1824,8 @@ async function main() {
           aggressiveness: numOpt(opts, "aggressiveness") ?? 0.5,
           fillers: opts.fillers ?? null,
           minKeep: numOpt(opts, "min_keep") ?? 0.2,
+          contextualGate: opts.contextual_gate !== false,
+          minSegment: numOpt(opts, "min_segment") ?? 0,
           detectOnly: opts.detect_only === true,
           dryRun: opts.dry_run === true,
         });

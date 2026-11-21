@@ -7,7 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "node:url";
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { copyFile, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { createCanvas } from "canvas";
@@ -6438,7 +6438,7 @@ const scWords = path.join(root, "test/smartcut-words.json");
 const scDetectRes = await client.callTool({ name: "smart_cut", arguments: { input: path.join(root, "test/source.mp4"), words_file: scWords, detect_only: true } });
 const scDetectJson = JSON.parse(scDetectRes.content[0].text);
 console.log("smart_cut detect-only:", JSON.stringify(scDetectJson.removed.map((r) => `${r.reason}@${r.start}-${r.end}`)), "| keep", JSON.stringify(scDetectJson.keep_segments));
-checkOk(scDetectRes.isError !== true && scDetectJson.detect_only === true && !("output" in scDetectJson) && scDetectJson.removed_count === 4 && near(scDetectJson.removed_seconds, 3.05, 0.01) && JSON.stringify(scDetectJson.removed.map((r) => r.reason)) === JSON.stringify(["gap", "filler", "stretched", "gap"]) && JSON.stringify(scDetectJson.thresholds) === JSON.stringify({ gap_threshold: 0.405, filler_min_duration: 0.275, stretch_min_duration: 0.75 }) && JSON.stringify(scDetectJson.keep_segments) === JSON.stringify([{ start: 0, end: 0.45, duration: 0.45 }, { start: 1.75, end: 2.65, duration: 0.9 }, { start: 3.7, end: 5.25, duration: 1.55 }, { start: 5.95, end: 10, duration: 4.05 }]) && scDetectJson.cut_check.swallowed.length === 0, "smart_cut detect-only finds gap + long um + stretched so + gap (3.05s) and spares the 0.1s um", JSON.stringify(scDetectJson.removed.map((r) => `${r.reason}:${r.text}`)));
+checkOk(scDetectRes.isError !== true && scDetectJson.detect_only === true && !("output" in scDetectJson) && scDetectJson.removed_count === 4 && near(scDetectJson.removed_seconds, 3.05, 0.01) && JSON.stringify(scDetectJson.removed.map((r) => r.reason)) === JSON.stringify(["gap", "filler", "stretched", "gap"]) && JSON.stringify(scDetectJson.thresholds) === JSON.stringify({ gap_threshold: 0.405, filler_min_duration: 0.275, stretch_min_duration: 0.75, contextual_pause_seconds: 0.15, contextual_gate: true, min_segment: 0 }) && JSON.stringify(scDetectJson.keep_segments) === JSON.stringify([{ start: 0, end: 0.45, duration: 0.45 }, { start: 1.75, end: 2.65, duration: 0.9 }, { start: 3.7, end: 5.25, duration: 1.55 }, { start: 5.95, end: 10, duration: 4.05 }]) && scDetectJson.cut_check.swallowed.length === 0, "smart_cut detect-only finds gap + long um + stretched so + gap (3.05s) and spares the 0.1s um", JSON.stringify(scDetectJson.removed.map((r) => `${r.reason}:${r.text}`)));
 const scRes = await client.callTool({ name: "smart_cut", arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-smartcut.mp4"), words_file: scWords } });
 const scJson = JSON.parse(scRes.content[0].text);
 checkOk(scRes.isError !== true && scJson.removed_count === 4 && near(scJson.duration_after, 6.95, 0.05) && JSON.stringify(scJson.keep_segments) === JSON.stringify([{ start: 0, end: 0.45, duration: 0.45 }, { start: 1.75, end: 2.65, duration: 0.9 }, { start: 3.7, end: 5.25, duration: 1.55 }, { start: 5.95, end: 10, duration: 4.05 }]), "smart_cut cuts to 6.95s on disk", JSON.stringify({ removed: scJson.removed_count, after: scJson.duration_after }));
@@ -6455,6 +6455,20 @@ const scCliDetect = await runCli(["smart-cut", path.join(root, "test/source.mp4"
 checkOk(scCliDetect.code === 0 && /"detect_only": true/.test(scCliDetect.out) && /"removed_count": 4/.test(scCliDetect.out), "CLI smart-cut --detect-only needs no -o and reports 4 removals", scCliDetect.out.slice(0, 200));
 const scCliDry = await runCli(["smart-cut", path.join(root, "test/source.mp4"), "--words-file", path.join(root, "test/smartcut-words.json"), "-o", path.join(root, "outputs/mcp-smartcut-dry.mp4"), "--dry-run"]);
 checkOk(scCliDry.code === 0 && /"dry_run": true/.test(scCliDry.out) && /ffmpeg/.test(scCliDry.out), "CLI smart-cut --dry-run prints the ffmpeg command and writes no file", scCliDry.out.slice(0, 200));
+// smart_cut with the new knobs (lượt 130): the context fixture
+// cuts 3 with the gate on (2 gated survivors), 5 with the gate off;
+// --min-segment 2 collapses the repo fixture to 1 removal.
+const scCtxFile = path.join(root, "test/smartcut-context-words.json");
+const scCtxRes = await client.callTool({ name: "smart_cut", arguments: { input: path.join(root, "test/source.mp4"), words_file: scCtxFile, detect_only: true } });
+const scCtxJson = JSON.parse(scCtxRes.content[0].text);
+checkOk(scCtxRes.isError !== true && scCtxJson.removed_count === 3 && scCtxJson.gated_fillers.length === 2 && JSON.stringify(scCtxJson.gated_fillers.map((g) => g.text)) === JSON.stringify(["like", "basically"]) && scCtxJson.thresholds.contextual_gate === true, "smart_cut detect-only on the context fixture cuts 3 and lists 2 gated survivors", JSON.stringify(scCtxJson.gated_fillers));
+const scCtxOffRes = await client.callTool({ name: "smart_cut", arguments: { input: path.join(root, "test/source.mp4"), words_file: scCtxFile, contextual_gate: false, detect_only: true } });
+const scCtxOffJson = JSON.parse(scCtxOffRes.content[0].text);
+checkOk(scCtxOffRes.isError !== true && scCtxOffJson.removed_count === 5 && scCtxOffJson.gated_fillers.length === 0, "smart_cut contextual_gate false cuts all 5 long contextual fillers", JSON.stringify(scCtxOffJson.removed.map((r) => r.text)));
+const scCliNoGate = await runCli(["smart-cut", path.join(root, "test/source.mp4"), "--words-file", scCtxFile, "--detect-only", "--no-contextual-gate"]);
+checkOk(scCliNoGate.code === 0 && /"removed_count": 5/.test(scCliNoGate.out), "CLI smart-cut --no-contextual-gate reports 5 removals", scCliNoGate.out.slice(0, 200));
+const scCliSeg = await runCli(["smart-cut", path.join(root, "test/source.mp4"), "--words-file", path.join(root, "test/smartcut-words.json"), "--detect-only", "--min-segment", "2"]);
+checkOk(scCliSeg.code === 0 && /"removed_count": 1/.test(scCliSeg.out) && /"min_segment_merges": 3/.test(scCliSeg.out), "CLI smart-cut --min-segment 2 collapses the fixture to 1 removal (3 merges)", scCliSeg.out.slice(0, 200));
 
 // search_words: search-first editing on the transcript — fixture
 // test/search-words.json is 14 words: "the quick brown fox jumps
@@ -6500,11 +6514,11 @@ const scUnitWords = [
   { start: 6.6, end: 6.7, word: "um" }, { start: 7, end: 7.5, word: "done" },
 ];
 const scPlan = planSmartCuts(scUnitWords, 10);
-checkOk(JSON.stringify(scPlan.thresholds) === JSON.stringify({ gap_threshold: 0.405, filler_min_duration: 0.275, stretch_min_duration: 0.75 }) && scPlan.removed_count === 4 && JSON.stringify(scPlan.removed.map((r) => r.reason)) === JSON.stringify(["gap", "filler", "stretched", "gap"]) && JSON.stringify(scPlan.removed) === JSON.stringify([{ start: 0.45, end: 1.25, duration: 0.8, reason: "gap", text: "" }, { start: 1.3, end: 1.75, duration: 0.45, reason: "filler", text: "um" }, { start: 2.65, end: 3.7, duration: 1.05, reason: "stretched", text: "so" }, { start: 5.25, end: 5.95, duration: 0.7, reason: "gap", text: "" }]) && JSON.stringify(scPlan.keep) === JSON.stringify([{ start: 0, end: 0.45, duration: 0.45 }, { start: 1.75, end: 2.65, duration: 0.9 }, { start: 3.7, end: 5.25, duration: 1.55 }, { start: 5.95, end: 10, duration: 4.05 }]) && scPlan.swallowed.length === 0, "planSmartCuts: 0.9s gap + 0.45s um + stretched so + 0.8s gap cut (3.05s), short 0.1s um survives, 6.95s kept in 4 segments", JSON.stringify(scPlan.removed.map((r) => r.reason)));
+checkOk(JSON.stringify(scPlan.thresholds) === JSON.stringify({ gap_threshold: 0.405, filler_min_duration: 0.275, stretch_min_duration: 0.75, contextual_pause_seconds: 0.15, contextual_gate: true, min_segment: 0 }) && scPlan.removed_count === 4 && JSON.stringify(scPlan.removed.map((r) => r.reason)) === JSON.stringify(["gap", "filler", "stretched", "gap"]) && JSON.stringify(scPlan.removed) === JSON.stringify([{ start: 0.45, end: 1.25, duration: 0.8, reason: "gap", text: "" }, { start: 1.3, end: 1.75, duration: 0.45, reason: "filler", text: "um" }, { start: 2.65, end: 3.7, duration: 1.05, reason: "stretched", text: "so" }, { start: 5.25, end: 5.95, duration: 0.7, reason: "gap", text: "" }]) && JSON.stringify(scPlan.keep) === JSON.stringify([{ start: 0, end: 0.45, duration: 0.45 }, { start: 1.75, end: 2.65, duration: 0.9 }, { start: 3.7, end: 5.25, duration: 1.55 }, { start: 5.95, end: 10, duration: 4.05 }]) && scPlan.swallowed.length === 0, "planSmartCuts: 0.9s gap + 0.45s um + stretched so + 0.8s gap cut (3.05s), short 0.1s um survives, 6.95s kept in 4 segments", JSON.stringify(scPlan.removed.map((r) => r.reason)));
 const scPlanAgg0 = planSmartCuts(scUnitWords, 10, { aggressiveness: 0 });
-checkOk(JSON.stringify(scPlanAgg0.thresholds) === JSON.stringify({ gap_threshold: 0.54, filler_min_duration: 0.35, stretch_min_duration: 0.9 }) && scPlanAgg0.removed_count === 4, "planSmartCuts aggressiveness 0 is gentle (gap x1.2, filler >= 0.35s, stretch >= 0.9s) and still cuts the same 4", JSON.stringify(scPlanAgg0.thresholds));
+checkOk(JSON.stringify(scPlanAgg0.thresholds) === JSON.stringify({ gap_threshold: 0.54, filler_min_duration: 0.35, stretch_min_duration: 0.9, contextual_pause_seconds: 0.15, contextual_gate: true, min_segment: 0 }) && scPlanAgg0.removed_count === 4, "planSmartCuts aggressiveness 0 is gentle (gap x1.2, filler >= 0.35s, stretch >= 0.9s) and still cuts the same 4", JSON.stringify(scPlanAgg0.thresholds));
 const scPlanAgg1 = planSmartCuts(scUnitWords, 10, { aggressiveness: 1 });
-checkOk(JSON.stringify(scPlanAgg1.thresholds) === JSON.stringify({ gap_threshold: 0.27, filler_min_duration: 0.2, stretch_min_duration: 0.6 }) && scPlanAgg1.removed_count === 6 && !scPlanAgg1.removed.some((r) => r.reason === "filler" && r.text === "um" && r.start === 6.6) && near(scPlanAgg1.keep.reduce((s, k) => s + k.duration, 0), 6.5, 0.01), "planSmartCuts aggressiveness 1 is tight (gap x0.6, filler >= 0.2s, stretch >= 0.6s): 6 removals (the two 0.3s gaps clear 0.27 too) but the 0.1s um is still spared as a filler — 6.5s kept", JSON.stringify(scPlanAgg1.removed.map((r) => `${r.reason}@${r.start}`)));
+checkOk(JSON.stringify(scPlanAgg1.thresholds) === JSON.stringify({ gap_threshold: 0.27, filler_min_duration: 0.2, stretch_min_duration: 0.6, contextual_pause_seconds: 0.15, contextual_gate: true, min_segment: 0 }) && scPlanAgg1.removed_count === 6 && !scPlanAgg1.removed.some((r) => r.reason === "filler" && r.text === "um" && r.start === 6.6) && near(scPlanAgg1.keep.reduce((s, k) => s + k.duration, 0), 6.5, 0.01), "planSmartCuts aggressiveness 1 is tight (gap x0.6, filler >= 0.2s, stretch >= 0.6s): 6 removals (the two 0.3s gaps clear 0.27 too) but the 0.1s um is still spared as a filler — 6.5s kept", JSON.stringify(scPlanAgg1.removed.map((r) => `${r.reason}@${r.start}`)));
 const scPlanGap = planSmartCuts(scUnitWords, 10, { minGap: 1 });
 checkOk(scPlanGap.removed_count === 3 && near(scPlanGap.keep.reduce((s, k) => s + k.duration, 0), 7.65, 0.01) && JSON.stringify(scPlanGap.keep) === JSON.stringify([{ start: 0, end: 0.45, duration: 0.45 }, { start: 1.75, end: 2.65, duration: 0.9 }, { start: 3.7, end: 10, duration: 6.3 }]), "planSmartCuts min_gap 1.0 keeps the 0.8s gap (threshold 0.9) but still cuts the 0.9s one — 7.65s kept", JSON.stringify(scPlanGap.keep));
 // Phrase matching really matches phrases: VidMCP lists "you know"
@@ -6513,6 +6527,40 @@ checkOk(scPlanGap.removed_count === 3 && near(scPlanGap.keep.reduce((s, k) => s 
 const scPhraseWords = [{ start: 0, end: 0.3, word: "you" }, { start: 0.3, end: 0.9, word: "know" }, { start: 1.2, end: 1.6, word: "ok" }];
 const scPhrasePlan = planSmartCuts(scPhraseWords, 2);
 checkOk(scPhrasePlan.removed_count === 1 && scPhrasePlan.removed[0].reason === "filler" && scPhrasePlan.removed[0].text === "you know" && JSON.stringify(scPhrasePlan.keep) === JSON.stringify([{ start: 0.9, end: 2, duration: 1.1 }]), "planSmartCuts matches the phrase 'you know' across two tokens as one filler removal", JSON.stringify(scPhrasePlan.removed));
+// Contextual filler gate (lượt 130, OpenEdit's rule): a long
+// "like"/"you know"/"basically"/"actually" is only cut when flanked
+// by >= 0.15s pauses on both sides or at the transcript edge.
+// Fixture: "well like this like you know ok basically like" — the
+// first "like" (0.05s flanks) and "basically" (0.05s before) survive
+// and are listed in gated_fillers; the flanked "like", the flanked
+// "you know" and the last-word "like" are cut.
+const scCtxWords = [
+  { start: 0, end: 0.3, word: "well" }, { start: 0.35, end: 0.95, word: "like" },
+  { start: 1.0, end: 1.3, word: "this" }, { start: 1.6, end: 2.2, word: "like" },
+  { start: 2.5, end: 2.8, word: "you" }, { start: 2.8, end: 3.2, word: "know" },
+  { start: 3.5, end: 3.9, word: "ok" }, { start: 3.95, end: 4.55, word: "basically" },
+  { start: 4.85, end: 5.45, word: "like" },
+];
+const scCtxPlan = planSmartCuts(scCtxWords, 6);
+checkOk(scCtxPlan.removed_count === 3 && JSON.stringify(scCtxPlan.removed.map((r) => `${r.reason}:${r.text}@${r.start}`)) === JSON.stringify(["filler:like@1.6", "filler:you know@2.5", "filler:like@4.85"]) && JSON.stringify(scCtxPlan.gated_fillers.map((g) => g.text)) === JSON.stringify(["like", "basically"]) && JSON.stringify(scCtxPlan.keep) === JSON.stringify([{ start: 0, end: 1.6, duration: 1.6 }, { start: 2.2, end: 2.5, duration: 0.3 }, { start: 3.2, end: 4.85, duration: 1.65 }, { start: 5.45, end: 6, duration: 0.55 }]), "planSmartCuts context gate: flanked 'like' + 'you know' + edge 'like' cut, unflanked 'like' and one-sided 'basically' survive in gated_fillers", JSON.stringify(scCtxPlan.removed.map((r) => r.text)));
+const scCtxOffPlan = planSmartCuts(scCtxWords, 6, { contextualGate: false });
+checkOk(scCtxOffPlan.removed_count === 5 && scCtxOffPlan.gated_fillers.length === 0 && scCtxOffPlan.thresholds.contextual_gate === false, "planSmartCuts contextual_gate false restores duration-only cutting (all 5 long contextual fillers cut)", JSON.stringify(scCtxOffPlan.removed.map((r) => r.text)));
+// min_segment merge (lượt 130, OpenEdit's min_segment_s): removals
+// separated by less than min_segment seconds of kept speech merge
+// into one cut. On the repo fixture min_segment 2 collapses all
+// four removals into one [0.45, 5.95] "mixed" cut — that is why the
+// default stays 0 (off): it would delete "world we are here".
+const scSegPlan = planSmartCuts(scUnitWords, 10, { minSegment: 2 });
+checkOk(scSegPlan.removed_count === 1 && JSON.stringify(scSegPlan.removed) === JSON.stringify([{ start: 0.45, end: 5.95, duration: 5.5, reason: "mixed", text: "um so" }]) && scSegPlan.min_segment_merges === 3 && JSON.stringify(scSegPlan.keep) === JSON.stringify([{ start: 0, end: 0.45, duration: 0.45 }, { start: 5.95, end: 10, duration: 4.05 }]) && scSegPlan.thresholds.min_segment === 2, "planSmartCuts min_segment 2 merges the fixture's 4 removals into one [0.45,5.95] cut (3 merges) — the reason the default is off", JSON.stringify(scSegPlan.removed));
+const scTwoGapWords = [
+  { start: 0, end: 0.3, word: "one" }, { start: 1.2, end: 1.5, word: "two" },
+  { start: 2.5, end: 2.8, word: "three" }, { start: 3.7, end: 4.0, word: "four" },
+];
+const scTwoGapPlan = planSmartCuts(scTwoGapWords, 5, { minSegment: 2 });
+checkOk(scTwoGapPlan.removed_count === 1 && JSON.stringify(scTwoGapPlan.removed) === JSON.stringify([{ start: 0.35, end: 3.65, duration: 3.3, reason: "gap", text: "" }]) && scTwoGapPlan.min_segment_merges === 2, "planSmartCuts min_segment 2 merges three gaps separated by 0.3s words into one cut", JSON.stringify(scTwoGapPlan.removed));
+let scBadSeg = false;
+try { planSmartCuts(scUnitWords, 10, { minSegment: 6 }); } catch { scBadSeg = true; }
+checkOk(scBadSeg, "planSmartCuts refuses min_segment above 5", "no throw");
 checkOk(JSON.stringify(parseSmartCutFillers("um,uh,you know")) === JSON.stringify([["um"], ["uh"], ["you", "know"]]) && JSON.stringify(parseSmartCutFillers(null).slice(0, 3)) === JSON.stringify([["um"], ["umm"], ["uh"]]), "parseSmartCutFillers splits a comma string into phrases and defaults to the built-in list", JSON.stringify(parseSmartCutFillers("um,uh,you know")));
 let scBadAgg = false;
 try { planSmartCuts(scUnitWords, 10, { aggressiveness: 1.5 }); } catch { scBadAgg = true; }
@@ -6617,6 +6665,33 @@ const scManifestRes = await client.callTool({
 const scManifestJson = JSON.parse(scManifestRes.content[0].text);
 console.log("manifest smart_cut:", JSON.stringify(scManifestJson.steps.map((s) => ({ tool: s.tool, status: s.status, removed: s.result?.removed_count }))), "| final", scManifestJson.final?.duration_seconds);
 checkOk(scManifestJson.steps_run === 1 && scManifestJson.steps[0].tool === "smart_cut" && scManifestJson.steps[0].status === "ok" && scManifestJson.steps[0].result.removed_count === 4 && near(scManifestJson.final.duration_seconds, 6.95, 0.05), "manifest smart_cut step cuts 4 hesitations, final 6.95s", JSON.stringify(scManifestJson.steps.map((s) => s.result?.removed_count)));
+// smart_cut batch + manifest with the new knobs (lượt 130):
+// --min-segment 2 in batch collapses the clip to 1 removal (4.5s
+// kept); the manifest gate fixture cuts 3 with 2 gated survivors.
+await rm(path.join(root, "outputs/mcp-batch-sc2-out"), { recursive: true, force: true });
+const scBatch2Res = await client.callTool({
+  name: "batch",
+  arguments: { operation: "smart_cut", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-sc-in"), output_dir: path.join(root, "outputs/mcp-batch-sc2-out"), args: { min_segment: 2 }, jobs: 2 },
+});
+const scBatch2Json = JSON.parse(scBatch2Res.content[0].text);
+const scBatch2Row = (name) => scBatch2Json.results.find((r) => r.input.endsWith(`/${name}`));
+checkOk(scBatch2Json.succeeded === 1 && scBatch2Row("source.mp4").status === "ok" && scBatch2Row("source.mp4").result.removed_count === 1 && scBatch2Row("source.mp4").result.min_segment_merges === 3, "batch smart_cut --min-segment 2 collapses to 1 removal (3 merges)", JSON.stringify(scBatch2Json.results.map((r) => r.result?.removed_count)));
+const { stdout: scBatch2DurOut } = await execFileAsync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path.join(root, "outputs/mcp-batch-sc2-out/source-smart_cut.mp4")]);
+checkOk(near(parseFloat(scBatch2DurOut), 4.5, 0.05), "batch smart_cut --min-segment 2 output is 4.5s on disk", scBatch2DurOut.trim());
+await rm(path.join(root, "outputs/mcp-manifest-smartcut-gate.mp4"), { force: true });
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const scGateManifestRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-smartcut-gate.json") },
+});
+const scGateManifestJson = JSON.parse(scGateManifestRes.content[0].text);
+checkOk(scGateManifestJson.steps_run === 1 && scGateManifestJson.steps[0].tool === "smart_cut" && scGateManifestJson.steps[0].status === "ok" && scGateManifestJson.steps[0].result.removed_count === 3 && scGateManifestJson.steps[0].result.gated_fillers.length === 2 && near(scGateManifestJson.final.duration_seconds, 8.1, 0.05), "manifest smart_cut gate fixture cuts 3 (2 gated), final 8.1s", JSON.stringify(scGateManifestJson.steps.map((s) => s.result?.removed_count)));
+const scGateManifestCacheRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-smartcut-gate.json") },
+});
+const scGateManifestCacheJson = JSON.parse(scGateManifestCacheRes.content[0].text);
+checkOk(scGateManifestCacheJson.cache_hits === 1 && scGateManifestCacheJson.steps[0].status === "cached", "manifest smart_cut gate re-run serves from cache", JSON.stringify(scGateManifestCacheJson.steps.map((s) => s.status)));
 
 // No engine at all (both disabled): doctor must report engine
 // "none" with a fix carrying BOTH install lines.
@@ -6800,7 +6875,12 @@ checkOk(sbGen.code === 0 && existsSync(path.join(sandboxDir, "gen.srt")), "sandb
 const sbDoctor = await runCli(["doctor"], sandboxEnv);
 let sbDoctorJson = null;
 try { sbDoctorJson = JSON.parse(sbDoctor.out); } catch { /* not JSON */ }
-checkOk(sbDoctor.code === 0 && sbDoctorJson?.sandbox?.enabled === true && sbDoctorJson?.sandbox?.workdir === sandboxDir, "sandbox: doctor reports enabled + the real workdir path", sbDoctor.out.slice(0, 200));
+// doctor reports the REAL workdir path (workdirRoot realpaths the
+// env value), so compare against realpath(sandboxDir) — the two
+// differ when the workdir is reached through a symlinked component
+// (e.g. an `outputs` dir symlinked to /tmp).
+const sbRealDir = await realpath(sandboxDir);
+checkOk(sbDoctor.code === 0 && sbDoctorJson?.sandbox?.enabled === true && sbDoctorJson?.sandbox?.workdir === sbRealDir, "sandbox: doctor reports enabled + the real workdir path", sbDoctor.out.slice(0, 200));
 const sbDoctorOff = await runCli(["doctor"]);
 let sbDoctorOffJson = null;
 try { sbDoctorOffJson = JSON.parse(sbDoctorOff.out); } catch { /* not JSON */ }

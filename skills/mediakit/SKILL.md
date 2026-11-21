@@ -1682,11 +1682,22 @@ makes "like" / "you know" / "basically" / "actually" safe in the
 default filler list — `cut_words --fillers` cuts every filler and
 deliberately excludes them, `smart_cut` includes them because a
 0.1s "like" (verb) is below the gate while a 0.6s "liiiike"
-(filler) is above it. `--fillers "um,uh,you know"` overrides the
+(filler) is above it. Since lượt 130 a long contextual filler
+ALSO has to pass the context gate (OpenEdit's rule): flanked by
+>= 0.15s pauses on BOTH sides, or sitting at the very start/end
+of the take — a 0.6s "like" inside "I like this" survives and is
+listed in `gated_fillers` (read it in `--detect-only` to see WHY
+it stayed); `--no-contextual-gate` restores the old duration-only
+behaviour. `--min-segment` (default 0 = off) merges removals
+separated by less than that many seconds of kept speech, so a
+sub-2s keep fragment between two cuts is cut with them instead of
+making a choppy clip (2.0 is OpenEdit's default — but it can
+swallow real words on a dense take, so it stays off unless
+asked). `--fillers "um,uh,you know"` overrides the
 list; a phrase matches consecutive words. This is deterministic,
 not a judge: a dramatic pause looks exactly like a hesitation to
 the detector — always run `--detect-only` first and read the
-`removed` list (reason filler/stretched/gap + text) before
+`removed` list (reason filler/stretched/gap/mixed + text) before
 cutting. Nothing to cut stream-copies the input unchanged. In
 batch and manifest it follows the same words-file convention as
 `cut_words` (rule 44). Not the same as `trim --smart-cut` — that

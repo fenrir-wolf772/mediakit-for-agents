@@ -1,5 +1,5 @@
 node_modules/
-outputs/
+outputs
 .mediakit-assemble-cache/
 .mediakit-jobs/
 .mediakit-audit.jsonl

@@ -1058,7 +1058,7 @@ export const TOOL_DEFS = [
 
   {
     name: "smart_cut",
-    description: "Tighten a talking-head clip on word timings from transcribe --word-timestamps: cut the hesitation out of a take in one pass — long pauses between words (gap >= min_gap * (1.2 - 0.6*aggressiveness), default min_gap 0.45s), long filler words (a filler only counts when held >= 0.35s - 0.15*aggressiveness, so a quick 0.1s 'um' survives and a stretched 'ummm' does not), and words held so long they became a stall ('soooo', 'this...', cut from 0.05s in so the attack survives). One aggressiveness knob (0-1, default 0.5) scales all three thresholds at once. The default filler list is um, umm, uh, uhh, uhm, erm, er, hmm, mm, mhm, ah, eh, like, you know, basically, actually — 'like'/'you know' are safe here because the duration gate, not context, decides (cut_words --fillers cuts every filler and deliberately excludes them). Pass fillers to use your own list (phrases like 'you know' match consecutive words). Returns the removed intervals (reason filler/stretched/gap + text), keep segments and cut_check.swallowed; detect_only=true returns the plan and writes no file. Nothing to cut stream-copies the input unchanged. Deterministic, not a judge: a dramatic pause is indistinguishable from a hesitation to this detector — read the removed list (or run detect_only) before cutting.",
+    description: "Tighten a talking-head clip on word timings from transcribe --word-timestamps: cut the hesitation out of a take in one pass — long pauses between words (gap >= min_gap * (1.2 - 0.6*aggressiveness), default min_gap 0.45s), long filler words (a filler only counts when held >= 0.35s - 0.15*aggressiveness, so a quick 0.1s 'um' survives and a stretched 'ummm' does not), and words held so long they became a stall ('soooo', 'this...', cut from 0.05s in so the attack survives). One aggressiveness knob (0-1, default 0.5) scales all three thresholds at once. The default filler list is um, umm, uh, uhh, uhm, erm, er, hmm, mm, mhm, ah, eh, like, you know, basically, actually — 'like'/'you know'/'basically'/'actually' are contextual: a long one is only cut when flanked by >= 0.15s pauses on both sides or sitting at the very start/end of the take (contextual_gate, default true — a 0.6s 'like' inside 'I like this' survives and is listed in gated_fillers; set contextual_gate=false for the old duration-only behaviour). Pass fillers to use your own list (phrases like 'you know' match consecutive words). min_segment (default 0 = off) merges removals separated by less than that many seconds of kept speech, so a sub-2s keep fragment between two cuts is cut with them instead of making a choppy clip (2.0 follows OpenEdit's silence_cutter default — but it can swallow real words on a dense take, so it stays off unless asked). Returns the removed intervals (reason filler/stretched/gap/mixed + text), gated_fillers, min_segment_merges, keep segments and cut_check.swallowed; detect_only=true returns the plan and writes no file. Nothing to cut stream-copies the input unchanged. Deterministic, not a judge: a dramatic pause is indistinguishable from a hesitation to this detector — read the removed list (or run detect_only) before cutting.",
     schema: {
     input: pathSchema.describe("Audio or video file with a speech track"),
     output: pathSchema.optional().describe("Output media file path (not needed with detect_only=true)"),
@@ -1067,6 +1067,8 @@ export const TOOL_DEFS = [
     aggressiveness: z.number().min(0).max(1).default(0.5).describe("One knob 0-1 scaling all three cut thresholds (default 0.5): 0 is gentle (gap x1.2, filler >= 0.35s, stretch >= 0.9s), 1 is tight (gap x0.6, filler >= 0.2s, stretch >= 0.6s)"),
     fillers: z.array(z.string()).optional().describe("Filler phrases to cut when held long, e.g. ['um', 'uh', 'you know'] — omit for the default list (um, umm, uh, uhh, uhm, erm, er, hmm, mm, mhm, ah, eh, like, you know, basically, actually)"),
     min_keep: z.number().min(0.05).max(5).default(0.2).describe("Drop keep segments shorter than this many seconds (default 0.2)"),
+    contextual_gate: z.boolean().default(true).describe("Context gate for 'like'/'you know'/'basically'/'actually' (default true): a long contextual filler is only cut when flanked by >= 0.15s pauses on both sides or at the very start/end of the take; survivors are listed in gated_fillers. Set false for the old duration-only behaviour"),
+    min_segment: z.number().min(0).max(5).default(0).describe("Merge removals separated by less than this many seconds of kept speech (default 0 = off; 2.0 follows OpenEdit's silence_cutter default — a sub-2s keep fragment between two cuts is cut with them instead of making a choppy clip)"),
     detect_only: z.boolean().default(false).describe("Report the removed intervals and the cut plan without writing any file"),
     dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
@@ -1078,6 +1080,8 @@ export const TOOL_DEFS = [
     aggressiveness: a.aggressiveness ?? 0.5,
     fillers: a.fillers ?? null,
     minKeep: a.min_keep ?? 0.2,
+    contextualGate: a.contextual_gate ?? true,
+    minSegment: a.min_segment ?? 0,
     detectOnly: a.detect_only ?? false,
     dryRun: a.dry_run ?? false,
   })),

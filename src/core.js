@@ -70,25 +70,30 @@ function isInsideDir(dir, p) {
 async function assertInsideWorkdir(abs, label) {
   const root = await workdirRoot();
   if (!root) return;
-  if (!isInsideDir(root, abs)) {
-    throw new MediaKitError(`${label} escapes MEDIAKIT_WORKDIR (${root}): ${abs}`, "SANDBOX_ESCAPE");
-  }
-  // Symlink escape: resolve the nearest existing ancestor. If abs
-  // itself exists its realpath is checked; if it does not exist yet,
-  // every component below the nearest existing ancestor is new, so it
-  // cannot be a symlink pointing outside.
+  // Resolve the path the same way the workdir root was resolved:
+  // the root is a realpath, so the input has to be one too — a
+  // path that reaches the workdir through a symlinked component
+  // (an `outputs` dir symlinked to /tmp, or /tmp itself on macOS)
+  // is inside, not an escape. The walk still refuses a symlink
+  // that points outside and a `..` that lands outside, because
+  // those resolve outside the root. A not-yet-existing output is
+  // resolved through its nearest existing ancestor; the components
+  // below that ancestor are new, so they cannot be a symlink.
   let cur = abs;
+  let tail = [];
   for (;;) {
     try {
       const real = await realpath(cur);
-      if (!isInsideDir(root, real)) {
-        throw new MediaKitError(`${label} escapes MEDIAKIT_WORKDIR via symlink (${root}): ${abs} -> ${real}`, "SANDBOX_ESCAPE");
+      const resolved = tail.length ? path.join(real, ...tail) : real;
+      if (!isInsideDir(root, resolved)) {
+        throw new MediaKitError(`${label} escapes MEDIAKIT_WORKDIR (${root}): ${abs}`, "SANDBOX_ESCAPE");
       }
       return;
     } catch (err) {
       if (err instanceof MediaKitError) throw err;
       const parent = path.dirname(cur);
-      if (parent === cur) return; // filesystem root; the lexical check above already passed
+      if (parent === cur) return; // filesystem root; nothing left to resolve
+      tail.unshift(path.basename(cur));
       cur = parent;
     }
   }
@@ -9728,7 +9733,19 @@ export async function removeRetakes({ input, output = null, wordsFile, minWords 
 //     "basically" / "actually" safe to include in the default list:
 //     cut_words deliberately excludes them (no LLM to judge context),
 //     smart_cut includes them because a 0.1s "like" (verb) is below
-//     the gate while a 0.6s "liiiike" (filler) is above it.
+//     the gate while a 0.6s "liiiike" (filler) is above it — and
+//     since lượt 130 a long contextual filler ALSO has to pass the
+//     context gate (OpenEdit's rule): flanked by >= 0.15s pauses on
+//     both sides, or at the transcript edge. A 0.6s "like" inside
+//     "I like this" survives; the same 0.6s "like" between two
+//     pauses is cut. The survivors are listed in gated_fillers so
+//     detect-only shows WHY they stayed.
+//   * Removals separated by less than --min-segment seconds of kept
+//     speech merge into one cut (OpenEdit's min_segment_s): a sub-2s
+//     keep fragment between two cuts is choppiness, not a sentence.
+//     Default 0 (off) — OpenEdit's 2.0 default fits silence-only
+//     gap lists, but smart_cut also removes fillers and stretched
+//     words, so 2.0 would eat real words on a dense take.
 //   * A stretched non-filler ("soooo", "this...") is cut from 0.05s
 //     in — the first 50ms is kept so the word's attack survives and
 //     the join does not swallow the previous word's tail.
@@ -9758,6 +9775,20 @@ const SMART_CUT_STRETCH_WORDS = new Set([
 const SMART_CUT_GAP_PAD_SECONDS = 0.05;
 const SMART_CUT_STRETCH_KEEP_SECONDS = 0.05;
 const SMART_CUT_MERGE_TOLERANCE_SECONDS = 0.02;
+// Contextual fillers (AH64-dll/OpenEdit's silence_cutter.py
+// CONTEXTUAL_FILLERS, idea only — no code copied): "like" / "you
+// know" / "basically" / "actually" can be real words, so a long one
+// is only cut when the transcript itself marks it as hesitation —
+// flanked by a pause >= 0.15s on BOTH sides, or sitting at the very
+// start/end of the take (OpenEdit's "utterance edge" is the first/last
+// word of the alignment; MediaKit has no utterance segmentation, so
+// the edge is the first/last word of the words file). Pure fillers
+// (um/uh/hmm…) keep the duration-only gate: they are never content
+// words. Deviation from OpenEdit: they check per TOKEN ("you" /
+// "know" separately); MediaKit matches "you know" as one phrase and
+// measures the flanking pauses around the whole phrase.
+const SMART_CUT_CONTEXTUAL_FILLERS = new Set(["like", "you know", "basically", "actually"]);
+const SMART_CUT_CONTEXTUAL_PAUSE_SECONDS = 0.15;
 
 // Parse a fillers spec into phrases of normalized tokens: a string
 // ("um,uh,you know" — comma separates phrases, spaces join them),
@@ -9785,12 +9816,17 @@ export function parseSmartCutFillers(spec) {
 // [{start, end, word}] from normalizeTranscriptWords, duration is the
 // media duration in seconds. Returns the merged remove intervals
 // (each with reason filler/stretched/gap/mixed + text), the keep
-// segments (min_keep-filtered), and any kept word that ends up mostly
-// cut out (swallowed — same definition as cut_words).
-export function planSmartCuts(words, duration, { minGap = 0.45, aggressiveness = 0.5, fillers = null, minKeep = 0.2 } = {}) {
+// segments (min_keep-filtered), any kept word that ends up mostly
+// cut out (swallowed — same definition as cut_words), the fillers
+// that passed the duration gate but failed the context gate
+// (gated_fillers — they survived, with WHY visible), and how many
+// removals the min_segment merge folded together.
+export function planSmartCuts(words, duration, { minGap = 0.45, aggressiveness = 0.5, fillers = null, minKeep = 0.2, contextualGate = true, minSegment = 0 } = {}) {
   const agg = num(aggressiveness, "aggressiveness", { min: 0, max: 1 });
   const minG = num(minGap, "min_gap", { min: 0.1, max: 5 });
   const minK = num(minKeep, "min_keep", { min: 0.05, max: 5 });
+  const minS = num(minSegment, "min_segment", { min: 0, max: 5 });
+  const useGate = contextualGate !== false;
   const dur = num(duration, "duration", { min: 0 });
   const gapThreshold = +(minG * (1.2 - 0.6 * agg)).toFixed(3);
   const fillerMinDuration = +(0.35 - 0.15 * agg).toFixed(3);
@@ -9798,9 +9834,16 @@ export function planSmartCuts(words, duration, { minGap = 0.45, aggressiveness =
   const phrases = parseSmartCutFillers(fillers);
   const norm = words.map((w) => normalizeWord(w.word));
   const removed = [];
+  const gatedFillers = [];
   // Filler phrases (long ones only) and stretched single words,
   // scanned left to right; a matched phrase advances past all its
-  // tokens, longest phrase wins at each position.
+  // tokens, longest phrase wins at each position. A contextual
+  // phrase ("like", "you know", "basically", "actually") that passes
+  // the duration gate still has to pass the context gate — pause
+  // >= 0.15s on both sides, or at the transcript edge — or it falls
+  // through to the single-word path below, so a long "like" can
+  // still be caught as a stretch, and a short one is recorded in
+  // gated_fillers instead of being cut.
   let i = 0;
   while (i < words.length) {
     let matched = null;
@@ -9812,18 +9855,32 @@ export function planSmartCuts(words, duration, { minGap = 0.45, aggressiveness =
       }
       if (ok && (!matched || ph.length > matched.ph.length)) matched = { ph, len: ph.length };
     }
+    let gateFailedIndex = -1;
     if (matched) {
       const first = words[i];
       const last = words[i + matched.len - 1];
       if (last.end - first.start >= fillerMinDuration) {
-        removed.push({
-          start: +first.start.toFixed(3), end: +last.end.toFixed(3),
-          duration: +(last.end - first.start).toFixed(3),
-          reason: "filler", text: words.slice(i, i + matched.len).map((w) => w.word).join(" "),
-        });
+        let passesContext = true;
+        if (useGate && SMART_CUT_CONTEXTUAL_FILLERS.has(matched.ph.join(" "))) {
+          const atEdge = i === 0 || i + matched.len === words.length;
+          const pauseBefore = i === 0 ? Infinity : first.start - words[i - 1].end;
+          const pauseAfter = i + matched.len === words.length ? Infinity : words[i + matched.len].start - last.end;
+          passesContext = atEdge || (pauseBefore >= SMART_CUT_CONTEXTUAL_PAUSE_SECONDS && pauseAfter >= SMART_CUT_CONTEXTUAL_PAUSE_SECONDS);
+        }
+        if (passesContext) {
+          removed.push({
+            start: +first.start.toFixed(3), end: +last.end.toFixed(3),
+            duration: +(last.end - first.start).toFixed(3),
+            reason: "filler", text: words.slice(i, i + matched.len).map((w) => w.word).join(" "),
+          });
+          i += matched.len;
+          continue;
+        }
+        gateFailedIndex = i;
+      } else {
+        i += matched.len;
+        continue;
       }
-      i += matched.len;
-      continue;
     }
     const w = words[i];
     if (SMART_CUT_STRETCH_WORDS.has(norm[i]) && w.end - w.start >= stretchMinDuration) {
@@ -9831,6 +9888,14 @@ export function planSmartCuts(words, duration, { minGap = 0.45, aggressiveness =
         start: +(w.start + SMART_CUT_STRETCH_KEEP_SECONDS).toFixed(3), end: +w.end.toFixed(3),
         duration: +(w.end - w.start - SMART_CUT_STRETCH_KEEP_SECONDS).toFixed(3),
         reason: "stretched", text: w.word,
+      });
+    } else if (gateFailedIndex === i) {
+      const first = words[i];
+      const last = words[i + matched.len - 1];
+      gatedFillers.push({
+        start: +first.start.toFixed(3), end: +last.end.toFixed(3),
+        duration: +(last.end - first.start).toFixed(3),
+        text: words.slice(i, i + matched.len).map((w2) => w2.word).join(" "),
       });
     }
     i++;
@@ -9856,9 +9921,38 @@ export function planSmartCuts(words, duration, { minGap = 0.45, aggressiveness =
       last.text = [last.text, r.text].filter(Boolean).join(" ");
     } else merged.push({ ...r });
   }
+  // min_segment (OpenEdit silence_cutter.py's min_segment_s, idea
+  // only — no code copied): merge removals separated by less than
+  // minSegment seconds of kept speech. A sub-2s keep fragment
+  // between two cuts is not a sentence, it is choppiness — merge
+  // the cuts and the fragment goes with them. Strict `<`, like
+  // OpenEdit's `g[0] - merged[-1][1] < min_segment_s`. Default 0
+  // (off): smart_cut removals include fillers and stretched words,
+  // not just silence, so OpenEdit's 2.0 default would eat real
+  // words on a dense take — on the repo fixture it collapses four
+  // removals into one [0.45, 5.95] and deletes "world we are here".
+  // Opt in per take (2.0 is OpenEdit's default for silence-only
+  // gap lists); leading/trailing keeps are never merged away, only
+  // the speech BETWEEN two removals.
+  let minSegmentMerges = 0;
+  let finalRemoved = merged;
+  if (minS > 0 && merged.length > 1) {
+    const segMerged = [{ ...merged[0] }];
+    for (const r of merged.slice(1)) {
+      const last = segMerged[segMerged.length - 1];
+      if (r.start - last.end < minS) {
+        last.end = Math.max(last.end, r.end);
+        last.duration = +(last.end - last.start).toFixed(3);
+        if (last.reason !== r.reason) last.reason = "mixed";
+        last.text = [last.text, r.text].filter(Boolean).join(" ");
+        minSegmentMerges++;
+      } else segMerged.push({ ...r });
+    }
+    finalRemoved = segMerged;
+  }
   const keep = [];
   let cur = 0;
-  for (const r of merged) {
+  for (const r of finalRemoved) {
     if (r.start > cur + 0.02) keep.push({ start: +cur.toFixed(3), end: r.start, duration: +(r.start - cur).toFixed(3) });
     cur = Math.max(cur, r.end);
   }
@@ -9866,21 +9960,23 @@ export function planSmartCuts(words, duration, { minGap = 0.45, aggressiveness =
   const kept = keep.filter((s) => s.end - s.start >= minK);
   const swallowed = [];
   words.forEach((w, idx) => {
-    const removedCov = merged.reduce((s, r) => s + Math.max(0, Math.min(w.end, r.end) - Math.max(w.start, r.start)), 0);
+    const removedCov = finalRemoved.reduce((s, r) => s + Math.max(0, Math.min(w.end, r.end) - Math.max(w.start, r.start)), 0);
     if (removedCov / (w.end - w.start) >= 0.5) return; // a cut word, not swallowed
     const keptCov = kept.reduce((s, k) => s + Math.max(0, Math.min(w.end, k.end) - Math.max(w.start, k.start)), 0);
     if (keptCov / (w.end - w.start) < 0.5) swallowed.push({ index: idx, word: w.word, start: w.start });
   });
   return {
-    thresholds: { gap_threshold: gapThreshold, filler_min_duration: fillerMinDuration, stretch_min_duration: stretchMinDuration },
-    removed: merged,
-    removed_count: merged.length,
+    thresholds: { gap_threshold: gapThreshold, filler_min_duration: fillerMinDuration, stretch_min_duration: stretchMinDuration, contextual_pause_seconds: SMART_CUT_CONTEXTUAL_PAUSE_SECONDS, contextual_gate: useGate, min_segment: minS },
+    removed: finalRemoved,
+    removed_count: finalRemoved.length,
     keep: kept,
     swallowed,
+    gated_fillers: gatedFillers,
+    min_segment_merges: minSegmentMerges,
   };
 }
 
-export async function smartCut({ input, output = null, wordsFile, minGap = 0.45, aggressiveness = 0.5, fillers = null, minKeep = 0.2, detectOnly = false, dryRun = false }) {
+export async function smartCut({ input, output = null, wordsFile, minGap = 0.45, aggressiveness = 0.5, fillers = null, minKeep = 0.2, contextualGate = true, minSegment = 0, detectOnly = false, dryRun = false }) {
   const inPath = await requireInput(input);
   const wordsPath = await requireInput(wordsFile, "words file");
   let rawWords;
@@ -9894,7 +9990,7 @@ export async function smartCut({ input, output = null, wordsFile, minGap = 0.45,
   if (!meta.audio) throw new MediaKitError("smart_cut needs an input with an audio stream", "INVALID_ARG");
   const duration = meta.duration_seconds;
   if (duration === null) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
-  const plan = planSmartCuts(words, duration, { minGap, aggressiveness, fillers, minKeep });
+  const plan = planSmartCuts(words, duration, { minGap, aggressiveness, fillers, minKeep, contextualGate, minSegment });
   const keptTotal = plan.keep.reduce((s, k) => s + k.duration, 0);
   const base = {
     operation: "smart_cut",
@@ -9907,10 +10003,14 @@ export async function smartCut({ input, output = null, wordsFile, minGap = 0.45,
     thresholds: plan.thresholds,
     removed: plan.removed,
     removed_count: plan.removed_count,
+    gated_fillers: plan.gated_fillers,
+    min_segment_merges: plan.min_segment_merges,
     keep_segments: plan.keep,
     removed_seconds: +(duration - keptTotal).toFixed(3),
     duration_before: duration,
     min_keep: num(minKeep, "min_keep", { min: 0.05, max: 5 }),
+    contextual_gate: contextualGate !== false,
+    min_segment: num(minSegment, "min_segment", { min: 0, max: 5 }),
     cut_check: { swallowed: plan.swallowed, warnings: plan.swallowed.map((s) => `kept word #${s.index} '${s.word}' @${s.start}s is mostly cut out — play it, then re-run with a larger --min-gap or smaller --aggressiveness`) },
   };
   if (detectOnly === true) return { ...base, detect_only: true, ...(dryRun ? { dry_run: true } : {}) };
@@ -13508,12 +13608,13 @@ export const BATCH_OPERATIONS = {
   },
   // smart_cut in batch: same words-file-by-convention as cut_words.
   smart_cut: {
-    args: ["words_dir", "min_gap", "aggressiveness", "fillers", "min_keep"],
+    args: ["words_dir", "min_gap", "aggressiveness", "fillers", "min_keep", "contextual_gate", "min_segment"],
     run: (input, output, a) => smartCut({
       input, output,
       wordsFile: cutWordsFileFor(input, a.words_dir),
       minGap: a.min_gap ?? 0.45, aggressiveness: a.aggressiveness ?? 0.5,
       fillers: a.fillers ?? null, minKeep: a.min_keep ?? 0.2,
+      contextualGate: a.contextual_gate ?? true, minSegment: a.min_segment ?? 0,
     }),
     extraHash: async (input, a) => hashSidecar(cutWordsFileFor(input, a.words_dir)),
   },
@@ -14155,11 +14256,12 @@ export const MANIFEST_STEPS = {
   },
   // Same override for smart_cut: one words file for the one input.
   smart_cut: {
-    args: ["words_file", "min_gap", "aggressiveness", "fillers", "min_keep"],
+    args: ["words_file", "min_gap", "aggressiveness", "fillers", "min_keep", "contextual_gate", "min_segment"],
     run: (input, output, a) => smartCut({
       input, output, wordsFile: a.words_file,
       minGap: a.min_gap ?? 0.45, aggressiveness: a.aggressiveness ?? 0.5,
       fillers: a.fillers ?? null, minKeep: a.min_keep ?? 0.2,
+      contextualGate: a.contextual_gate ?? true, minSegment: a.min_segment ?? 0,
     }),
   },
   // Same override for search_words: one words file for the one
