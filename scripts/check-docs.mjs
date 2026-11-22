@@ -33,8 +33,8 @@ if (new Set(serverTools).size !== serverTools.length) problems.push("duplicate t
 // doing so (e.g. someone inlines a copy).
 const serverSrc = await readFile(path.join(root, "src/server.js"), "utf8");
 const httpSrc = await readFile(path.join(root, "src/http.js"), "utf8");
-if (!/import \{ TOOL_DEFS \} from "\.\/tools\.js"/.test(serverSrc)) problems.push("src/server.js no longer imports TOOL_DEFS from src/tools.js");
-if (!/import \{ TOOL_DEFS \} from "\.\/tools\.js"/.test(httpSrc)) problems.push("src/http.js no longer imports TOOL_DEFS from src/tools.js");
+if (!/import \{[^}]*\bTOOL_DEFS\b[^}]*\} from "\.\/tools\.js"/.test(serverSrc)) problems.push("src/server.js no longer imports TOOL_DEFS from src/tools.js");
+if (!/import \{[^}]*\bTOOL_DEFS\b[^}]*\} from "\.\/tools\.js"/.test(httpSrc)) problems.push("src/http.js no longer imports TOOL_DEFS from src/tools.js");
 
 // Batch enum guard (lượt 38): the MCP batch tool's operation enum must
 // cover every key of BATCH_OPERATIONS in src/core.js. Lượt 36 added
@@ -98,6 +98,23 @@ if (!ciCounts.length) problems.push("could not find a \"tools\": N assertion in 
 for (const n of ciCounts) {
   if (n !== serverTools.length) problems.push(`CI asserts "tools": ${n} but src/tools.js has ${serverTools.length} tools — bump the ci.yml assertion when a tool ships`);
 }
+
+// Safety-tier guard (lượt 141): every TOOL_DEFS entry must carry
+// exactly one tier from the EncodeX set, and the tier must match the
+// annotations the transports publish — a tool without a tier would
+// silently default to WRITE in toolAnnotations, which is the wrong
+// direction (a probe tool must never look mutative).
+const TIERS = ["READ", "PLAN", "WRITE", "DESTRUCTIVE"];
+const tierLines = [...toolsSrc.matchAll(/^\s+tier: "([A-Z]+)",$/gm)].map((m) => m[1]);
+if (tierLines.length !== serverTools.length) {
+  problems.push(`tier count drift: ${tierLines.length} tier fields for ${serverTools.length} tools — every TOOL_DEFS entry needs exactly one tier`);
+}
+for (const t of tierLines) {
+  if (!TIERS.includes(t)) problems.push(`unknown safety tier "${t}" (must be one of ${TIERS.join(", ")})`);
+}
+const destructiveTools = serverTools.filter((_, i) => tierLines[i] === "DESTRUCTIVE");
+if (!destructiveTools.includes("patch_manifest")) problems.push("patch_manifest must stay DESTRUCTIVE — it is the only tool that rewrites a user artifact in place");
+if (destructiveTools.length !== 1) problems.push(`expected exactly 1 DESTRUCTIVE tool (patch_manifest), got ${destructiveTools.length}: ${destructiveTools.join(", ")}`);
 
 if (problems.length) {
   console.error("check-docs FAILED:");

@@ -9508,6 +9508,259 @@ export async function convert({ input, output, videoCodec = null, audioCodec = n
   };
 }
 
+// ---------------------------------------------------------------- estimate_conversion
+// Estimate a convert’s output size + time BEFORE running it (EncodeX’s
+// estimate_conversion idea, lượt 119; harken’s transcribe_status
+// pattern, lượt 141: answer without doing the heavy work). The
+// estimate is MEASURED, in two components, never a bitrate table:
+//  - VIDEO: at 2 window positions, encode the same start twice,
+//    video-only, at a short length (2s) and a long length (6s), with
+//    ACCURATE seek (-ss after -i). Both start with one keyframe, so
+//    steady_rate = (long_bytes - short_bytes) / (long - short) and
+//    iframe_bytes = short_bytes - steady_rate x short. Full video =
+//    steady_rate x duration + iframe_bytes x ceil(frames / 250)
+//    (x264/x265 default GOP). The naive version of this tool (v1,
+//    lượt 141 probe) sampled 2s windows and extrapolated the
+//    mean: it overestimated size by +45-64% on the fixtures, because
+//    every 2s sample carries a full keyframe per 60 frames while the
+//    real encode carries one per 250 — and because -ss before -i
+//    quantizes starts to source keyframes (a "start 20" window was
+//    really [15,20) on hook-source). The differential removes both
+//    biases; measured after the fix: -6.1% / +4.2% on the two
+//    fixtures.
+//  - AUDIO: copy (the convert default) costs the probed source audio
+//    bitrate x duration; a requested re-encode is measured with one
+//    audio-only sample encode. v1 defaulted to re-encoding at 192k,
+//    which did NOT match convert (audio copy) and added up to +72%
+//    phantom bytes on hook-source.
+//  - TIME: duration / measured encode speed + one startup. Speed comes
+//    from the long sample’s wall minus a 0.1s probe encode’s wall
+//    (spawn+seek+mux, measured once); a differential speed explodes
+//    on near-static video where the marginal encode is ~0. Time is a
+//    rough ETA, size is the precise part — the notes say so.
+// A file shorter than the sample budget is encoded whole, so the
+// answer is exact instead of estimated; an audio-only input is
+// encoded whole too. Samples go to a temp dir that is removed
+// afterwards — the tool leaves no artifact (PLAN tier).
+const ESTIMATE_CODECS = ["libx264", "libx265"];
+const ESTIMATE_PRESETS = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"];
+const ESTIMATE_GOP_FRAMES = 250;
+
+export async function estimateConversion({ input, videoCodec = "libx264", crf = 23, preset = "medium", width = null, height = null, fps = null, audioBitrateKbps = null, positions = 2, shortSeconds = 2, longSeconds = 6 }) {
+  const inPath = await requireInput(input);
+  if (!ESTIMATE_CODECS.includes(videoCodec)) {
+    throw new MediaKitError(`estimate_conversion supports ${ESTIMATE_CODECS.join(", ")}, got: ${videoCodec} (vp9/av1 use different quality knobs, so a crf estimate would not match convert)`, "INVALID_ARG");
+  }
+  const c = num(crf, "crf", { min: 0, max: 51, integer: true });
+  if (!ESTIMATE_PRESETS.includes(preset)) {
+    throw new MediaKitError(`unknown preset: ${preset} (supported: ${ESTIMATE_PRESETS.join(", ")})`, "INVALID_ARG");
+  }
+  const w = width === null || width === undefined ? null : num(width, "width", { min: 2, integer: true });
+  const h = height === null || height === undefined ? null : num(height, "height", { min: 2, integer: true });
+  const f = fps === null || fps === undefined ? null : num(fps, "fps", { min: 0.1 });
+  const ab = audioBitrateKbps === null || audioBitrateKbps === undefined ? null : num(audioBitrateKbps, "audio_bitrate_kbps", { min: 8, max: 320, integer: true });
+  const nPos = num(positions, "positions", { min: 1, max: 3, integer: true });
+  const ss = num(shortSeconds, "short_seconds", { min: 1, max: 3 });
+  const ls = num(longSeconds, "long_seconds", { min: 4, max: 10 });
+  if (ls <= ss) throw new MediaKitError(`long_seconds (${ls}) must be longer than short_seconds (${ss}) — the differential needs two lengths`, "INVALID_ARG");
+  const meta = await probe(inPath);
+  if (meta.duration_seconds === null || !(meta.duration_seconds > 0)) {
+    throw new MediaKitError("estimate_conversion needs an input with a measurable duration", "INVALID_ARG");
+  }
+  const duration = meta.duration_seconds;
+  const target = { video_codec: videoCodec, crf: c, preset, width: w, height: h, fps: f, audio_bitrate_kbps: ab };
+  const source = {
+    width: meta.video?.display_width ?? null,
+    height: meta.video?.display_height ?? null,
+    fps: meta.video?.fps ?? null,
+    video_codec: meta.video?.codec ?? null,
+    audio_codec: meta.audio?.codec ?? null,
+    audio_bit_rate: meta.audio?.bit_rate ?? null,
+    size_bytes: meta.size_bytes,
+  };
+  const notes = [];
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-estimate-"));
+  let cleanupWarning = null;
+  let result = null;
+  try {
+    const videoArgs = (outFile, start, len) => {
+      // Accurate seek: -ss AFTER -i decodes to the exact timestamp.
+      // -ss before -i quantizes the start to the previous source
+      // keyframe (measured: "start 20" became [15,20) on a 250-frame
+      // GOP source), which silently samples the wrong content.
+      const a = ["-y", "-i", inPath];
+      if (start !== null) a.push("-ss", String(start));
+      if (len !== null) a.push("-t", String(len));
+      a.push("-an");
+      if (w !== null || h !== null) a.push("-vf", `scale=${w ?? -2}:${h ?? -2}`);
+      if (f !== null) a.push("-r", String(f));
+      a.push("-c:v", videoCodec, "-crf", String(c), "-preset", preset);
+      a.push(outFile);
+      return a;
+    };
+    const audioArgs = (outFile, start, len) => {
+      const a = ["-y", "-i", inPath];
+      if (start !== null) a.push("-ss", String(start));
+      if (len !== null) a.push("-t", String(len));
+      a.push("-vn", "-c:a", "aac", "-b:a", `${ab}k`);
+      a.push(outFile);
+      return a;
+    };
+    const fullArgs = (outFile) => {
+      const a = ["-y", "-i", inPath];
+      if (w !== null || h !== null) a.push("-vf", `scale=${w ?? -2}:${h ?? -2}`);
+      if (f !== null) a.push("-r", String(f));
+      if (meta.video) a.push("-c:v", videoCodec, "-crf", String(c), "-preset", preset);
+      else a.push("-vn");
+      if (!meta.audio || ab === 0) a.push("-an");
+      else if (ab === null) a.push("-c:a", "copy");
+      else a.push("-c:a", "aac", "-b:a", `${ab}k`);
+      a.push(outFile);
+      return a;
+    };
+    const base = {
+      operation: "estimate_conversion", input: inPath, duration_seconds: duration,
+      source, target,
+    };
+    if (duration <= nPos * ls) {
+      // Shorter than the sample budget: encode the whole file and
+      // report the exact answer — an estimate would be worse.
+      // Audio-only + copy keeps the source container: MP3 cannot go
+      // into .m4a (measured: "Could not find tag for codec mp3"),
+      // so the temp file takes the source extension.
+      const audioExt = ab === null ? (path.extname(inPath) || ".m4a") : ".m4a";
+      const outFile = path.join(tmpDir, meta.video ? "full.mp4" : `full${audioExt}`);
+      const t0 = Date.now();
+      await run(FFMPEG, fullArgs(outFile));
+      const wall = (Date.now() - t0) / 1000;
+      const info = await fileInfo(outFile);
+      notes.push(`File (${duration}s) is shorter than the sample budget (${nPos} positions x ${ls}s), so the whole file was encoded at the target settings — the size and time are measured, not estimated.`);
+      result = {
+        ...base, method: "full-encode", samples: [],
+        estimated_output_bytes: info.size_bytes,
+        estimated_output_bytes_low: info.size_bytes,
+        estimated_output_bytes_high: info.size_bytes,
+        estimated_output_mb: +(info.size_bytes / 1048576).toFixed(2),
+        estimated_seconds: +wall.toFixed(2),
+        estimated_seconds_low: +wall.toFixed(2),
+        estimated_seconds_high: +wall.toFixed(2),
+        encode_speed_x: +(duration / Math.max(wall, 0.001)).toFixed(2),
+        confidence: "exact", notes,
+      };
+    } else {
+      // --- VIDEO: differential at each position -------------------
+      const fracs = nPos === 1 ? [0.5] : nPos === 2 ? [0.25, 0.75] : [0.2, 0.5, 0.8];
+      const outFps = f ?? meta.video?.fps ?? 30;
+      const keyframes = Math.max(1, Math.ceil((outFps * duration) / ESTIMATE_GOP_FRAMES));
+      // One startup probe: a 0.1s encode pays spawn+seek+mux once.
+      // Subtracting it from each long sample’s wall leaves the
+      // marginal encode time, so the speed is not startup-dominated.
+      const probeFile = path.join(tmpDir, "startup.mp4");
+      const midStart = Math.max(0, Math.min(duration - 0.1, duration / 2));
+      const tProbe = Date.now();
+      await run(FFMPEG, videoArgs(probeFile, midStart, 0.1));
+      const startup = Math.max(0.05, (Date.now() - tProbe) / 1000);
+      const rows = [];
+      for (let i = 0; i < nPos; i++) {
+        const start = Math.max(0, Math.min(duration - ls, fracs[i] * duration));
+        const shortFile = path.join(tmpDir, `pos${i}-short.mp4`);
+        const longFile = path.join(tmpDir, `pos${i}-long.mp4`);
+        await run(FFMPEG, videoArgs(shortFile, start, ss));
+        const tLong = Date.now();
+        await run(FFMPEG, videoArgs(longFile, start, ls));
+        const wallLong = (Date.now() - tLong) / 1000;
+        const shortBytes = (await fileInfo(shortFile)).size_bytes;
+        const longBytes = (await fileInfo(longFile)).size_bytes;
+        // Both windows start with one keyframe: the difference is
+        // steady-state frames only. Clamp: content can simplify
+        // inside the window (long < short scaled), which would make
+        // the steady rate negative — then the short window is all
+        // keyframe and the steady rate is 0.
+        let steadyBps = (longBytes - shortBytes) / (ls - ss);
+        let iframeBytes = shortBytes - steadyBps * ss;
+        if (steadyBps < 0) { steadyBps = 0; iframeBytes = shortBytes; }
+        if (iframeBytes < 0) iframeBytes = 0;
+        const videoEst = Math.round(steadyBps * duration + iframeBytes * keyframes);
+        const speed = ls / Math.max(wallLong - startup, 0.05);
+        rows.push({
+          start_seconds: +start.toFixed(3),
+          short_bytes: shortBytes, long_bytes: longBytes,
+          steady_bps: Math.round(steadyBps), iframe_bytes: Math.round(iframeBytes),
+          video_estimate_bytes: videoEst,
+          encode_speed_x: +speed.toFixed(2),
+          wall_long_seconds: +wallLong.toFixed(3),
+        });
+      }
+      // --- AUDIO ---------------------------------------------------
+      let audioBps;
+      let audioNote;
+      if (!meta.audio) {
+        audioBps = 0;
+        audioNote = "No audio stream in the input.";
+      } else if (ab === null) {
+        // Copy (the convert default): the probed source audio bitrate
+        // x duration — the output carries the same audio bytes.
+        audioBps = meta.audio.bit_rate ?? null;
+        if (audioBps === null) {
+          // No bitrate in the probe (VBR without a header value):
+          // measure it with one audio-only sample encode.
+          const aFile = path.join(tmpDir, "audio-sample.m4a");
+          const aLen = Math.min(10, duration);
+          await run(FFMPEG, ["-y", "-i", inPath, "-ss", String(Math.max(0, duration / 2 - aLen / 2)), "-t", String(aLen), "-vn", "-c:a", "copy", aFile]);
+          audioBps = Math.round(((await fileInfo(aFile)).size_bytes / aLen) * 8);
+          audioNote = "Source audio bitrate was not in the probe, so it was measured from a 10s audio-only copy.";
+        } else {
+          audioNote = "Audio is copied (the convert default), so its cost is the probed source audio bitrate x duration.";
+        }
+      } else {
+        const aFile = path.join(tmpDir, "audio-sample.m4a");
+        const aLen = Math.min(10, duration);
+        await run(FFMPEG, audioArgs(aFile, Math.max(0, duration / 2 - aLen / 2), aLen));
+        audioBps = Math.round(((await fileInfo(aFile)).size_bytes / aLen) * 8);
+        audioNote = `Audio re-encoded to ${ab}k: measured from a ${aLen}s audio-only sample encode at the target bitrate.`;
+      }
+      const audioBytes = Math.round((audioBps / 8) * duration);
+      notes.push(audioNote);
+      // --- COMBINE -------------------------------------------------
+      const videoEsts = rows.map((r) => r.video_estimate_bytes);
+      const meanVideo = videoEsts.reduce((a, b) => a + b, 0) / videoEsts.length;
+      const estBytes = Math.round(meanVideo + audioBytes);
+      const lowBytes = Math.round(Math.min(...videoEsts) + audioBytes);
+      const highBytes = Math.round(Math.max(...videoEsts) + audioBytes);
+      const speeds = rows.map((r) => r.encode_speed_x);
+      const meanSpeed = speeds.reduce((a, b) => a + b, 0) / speeds.length;
+      const estSeconds = duration / meanSpeed + startup;
+      const spread = meanVideo > 0 ? (Math.max(...videoEsts) - Math.min(...videoEsts)) / meanVideo : 0;
+      const confidence = spread <= 0.1 ? "high" : spread <= 0.25 ? "medium" : "low";
+      notes.push(`${nPos} window position(s) x (${ss}s + ${ls}s) video-only sample encodes at the exact target settings (accurate seek); size = steady video rate x duration + one keyframe per ${ESTIMATE_GOP_FRAMES} frames + audio.`);
+      notes.push("Time is a rough ETA: duration / measured encode speed + one measured startup. Size is the precise part.");
+      if (confidence === "low") notes.push("Window video estimates disagree a lot — the content varies across the file, so trust the range, not the point estimate.");
+      const iframeShare = meanVideo > 0 ? (rows.reduce((a, r) => a + r.iframe_bytes, 0) / rows.length * keyframes) / meanVideo : 0;
+      if (iframeShare > 0.5) notes.push("Keyframes are over half the estimated video bytes (near-static video) — the estimate leans on the keyframe count, and scene cuts would add keyframes it does not count.");
+      result = {
+        ...base, method: "sample-encode", samples: rows,
+        audio_estimate_bytes: audioBytes, audio_bit_rate_bps: audioBps,
+        keyframes_estimated: keyframes, startup_seconds: +startup.toFixed(3),
+        estimated_output_bytes: estBytes,
+        estimated_output_bytes_low: lowBytes,
+        estimated_output_bytes_high: highBytes,
+        estimated_output_mb: +(estBytes / 1048576).toFixed(2),
+        estimated_seconds: +estSeconds.toFixed(1),
+        estimated_seconds_low: +(duration / Math.max(...speeds) + startup).toFixed(1),
+        estimated_seconds_high: +(duration / Math.min(...speeds) + startup).toFixed(1),
+        encode_speed_x: +meanSpeed.toFixed(2),
+        confidence, notes,
+      };
+    }
+    if (source.size_bytes) {
+      result.size_ratio_vs_source = +(result.estimated_output_bytes / source.size_bytes).toFixed(3);
+    }
+  } finally {
+    cleanupWarning = await removeTempDir(tmpDir);
+  }
+  return { ...result, cleanup_warning: cleanupWarning };
+}
+
 // ---------------------------------------------------------------- compress
 // Shrink a file with one named quality preset (ffmpeg-mcp-lite's
 // compress idea, rebuilt on libx264): low/medium/high map to a CRF +
@@ -11193,6 +11446,12 @@ const TOOL_REQUIREMENTS = {
   job: {},
   doctor: {},
   audit: {},
+  // safety is a pure data lookup over the tier table in tools.js —
+  // no ffmpeg capability needed either.
+  safety: {},
+  // estimate_conversion sample-encodes with libx264 or libx265
+  // (the two codecs it accepts) — at least one must be present.
+  estimate_conversion: { encoders: ["libx264", "libx265"] },
 };
 
 async function listCapabilities(kind) {

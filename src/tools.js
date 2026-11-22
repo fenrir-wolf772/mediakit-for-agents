@@ -43,6 +43,7 @@ const pathSchema = z.string().min(1).describe("Path to the file (relative or abs
 export const TOOL_DEFS = [
   {
     name: "probe",
+    tier: "READ",
     description: "Inspect a media file with ffprobe: duration, dimensions, codecs, streams. The video block reports the coded size plus rotation (clockwise degrees from the display matrix or rotate tag, null when absent) and the display size — what a player actually shows, so a phone clip coded 1920x1080 with rotation 90 reports display 1080x1920. It also reports time_base, which concat --fast compares before stream-copying.",
     schema: { input: pathSchema },
     handler: async ({ input }) => safe(() => core.probe(input)),
@@ -51,6 +52,7 @@ export const TOOL_DEFS = [
 
   {
     name: "trim",
+    tier: "WRITE",
     description: "Cut a clip out of a media file. Give start (seconds) plus duration OR end. Re-encodes by default for frame-accurate cuts; set stream_copy=true for fast lossless cuts (keyframe boundaries only). With stream_copy, set snap_to_keyframe=true to move start down / end up to the nearest keyframes so the cut lands exactly (see the keyframes tool first), or smart_cut=true to keep the exact start instead: only the head up to the next keyframe is re-encoded (source bitrate x1.2), the rest is stream-copied — exact start, near-lossless speed. Set snap_to_beat=true to move start down / end up to the nearest beats of the music instead (see the beat_grid tool first): the grid is measured from the audio, and the cut refuses when the grid is unreliable (speech, tone, drone — no steady beat to snap to). snap_to_beat works on re-encode cuts too, and refuses snap_to_keyframe and smart_cut. Set edge_buffer (0-1s, default 0) to widen the requested window by that much on both sides, clamped to the file edges — Outtake's 0.1s clip-edge buffer, so the cut never lands exactly on a word or action onset; the result reports requested_start/requested_end plus edge_buffer_applied (how much each side actually grew — less at the file edges). It composes with snap_to_keyframe/snap_to_beat (the buffer widens first, then the snap moves the buffered window) and refuses smart_cut (which lands the start exactly). Every video trim verifies the cut by default: check_frames compares 3 frames of the output (head/middle/tail) against the source at the requested times and reports cut_verified plus mean_abs_diff per frame (threshold max(5, normal_step)); a snap that moved the cut shows up as mismatched frames, but a buffer-only trim checks against the buffered start, so it verifies. Set check_frames=false to skip the verification. Set dry_run=true to print the exact ffmpeg command(s) that would run and write no file.",
     schema: {
     input: pathSchema,
@@ -87,6 +89,7 @@ export const TOOL_DEFS = [
 
   {
     name: "crop",
+    tier: "WRITE",
     description: "Crop a video to a rectangle. width/height/x/y in pixels; must fit inside the source frame. Set dry_run=true to print the exact ffmpeg command and write no file.",
     schema: {
     input: pathSchema,
@@ -111,6 +114,7 @@ export const TOOL_DEFS = [
 
   {
     name: "resize",
+    tier: "WRITE",
     description: "Resize a video. Give width and/or height; with keep_aspect (default) the other dimension follows the aspect ratio and is rounded to an even number. Or give preset (360p/480p/720p/1080p/2160p): the frame is fit inside that box, preserving aspect, and never upscaled. Set dry_run=true to print the exact ffmpeg command and write no file.",
     schema: {
     input: pathSchema,
@@ -135,6 +139,7 @@ export const TOOL_DEFS = [
 
   {
     name: "extract_audio",
+    tier: "WRITE",
     description: "Extract the audio track to mp3, aac, wav, ogg, opus or flac (from the output extension). Set whisper=true for the Whisper ASR preset: 16 kHz mono WAV (the output is renamed to .wav when needed) — the direct input for a transcribe step. Set channel (0-based) to pick one channel out of a multi-channel input and return it as mono. Set dry_run=true to print the exact ffmpeg command and write no file (duration/size/output_codec report null — measured on the real output; with whisper=true the sample rate/channels are forced by the command, so they are exact).",
     schema: {
     input: pathSchema,
@@ -157,6 +162,7 @@ export const TOOL_DEFS = [
 
   {
     name: "extract_frame",
+    tier: "WRITE",
     description: "Grab a single frame at a timestamp as PNG/JPG/WebP. Frame-accurate: the frame is captured at the exact timestamp (two-stage seek), not the keyframe before it.",
     schema: {
     input: pathSchema,
@@ -169,6 +175,7 @@ export const TOOL_DEFS = [
 
   {
     name: "thumbnail",
+    tier: "WRITE",
     description: "Build a contact sheet: N evenly spaced frames tiled into a grid image. Each tile is captured at its own exact timestamp and labelled with it (timestamps=true by default), so the sheet shows WHEN each frame is, not just what it shows — look at it before cutting or publishing. start_delay_percent / end_delay_percent skip the first/last slice of the file (intros, credits) before spacing the tiles. header=true adds a metadata band on top (filename, measured duration, resolution, fps, codecs, size, grid) so a forwarded sheet still says which file it came from. timestamps_list names every tile time explicitly (seconds or MM:SS each; sets the tile count, cannot combine with the delay percents). sharpest=true picks the sharpest frame in each tile's window instead of the window start (Laplacian mean measured on disk; each tile reports its sharpness) — use it when the sheet must show the cleanest frame, not just the first one.",
     schema: {
     input: pathSchema,
@@ -203,6 +210,7 @@ export const TOOL_DEFS = [
 
   {
     name: "loudness",
+    tier: "WRITE",
     description: "Normalize loudness to a target (default -14 LUFS, the YouTube/Spotify standard) with two-pass loudnorm: the input is measured first, then the exact linear gain is applied, and the output is re-measured on disk. Pass compressor=true for quiet, high-crest speech (a gentle compressor, threshold -24 dB / ratio 4 by default, runs before the loudnorm pass — without it a peak-limited voice stalls below target and the result says so in `warning`). Good for speech and creator audio. Set dry_run=true to print the exact ffmpeg command(s) that would run and write no file (the loudnorm measurement still runs, read-only; with a compressor the loudnorm measured_* values come from the uncompressed input because the real run re-measures the compressed temp first — the note says so).",
     schema: {
     input: pathSchema,
@@ -227,6 +235,7 @@ export const TOOL_DEFS = [
 
   {
     name: "concat",
+    tier: "WRITE",
     description: "Join 2+ media files into one. By default it probes the clips first: identical clips (codec, size, fps, pixel format, time_base, audio) are stream-copied with no re-encoding (fast, lossless); differing clips are re-encoded so the join still works — except a time_base mismatch, a display-size mismatch, or any rotation difference, which go through the filter graph instead of the demuxer, because the demuxer copies timestamps verbatim and stretches the join (measured 10s+10s → 116.9s) and applies the first clip's display-matrix rotation to every clip (an upright second clip came out rotated 90 degrees and stretched). Size is compared on display dimensions (what the viewer sees after autorotate): a clip stored 1280x720 with rotation 90 displays 720x1280, and fast=true additionally needs identical stored dims + rotation. Set fast=true to require the stream-copy path (errors with the exact mismatch if clips differ), or fast=false to always re-encode. Set transition (e.g. fade, wipeleft, dissolve, circlecrop) to crossfade between clips instead of a hard cut — clips are normalized to the first clip's display size/fps first, and the output is sum(durations) minus (n-1) x transition_duration. Per-clip trim: give an input as {file, start, end} (seconds or MM:SS) — trims always re-encode with exact cuts, and fast=true refuses them (stream-copy cuts snap to keyframes). Set dry_run=true to print the exact ffmpeg command that would run and write no file (the demuxer path also returns list_file + list_content — write the content to that path first, then run the printed command as-is; the transition and trim paths print one exact filter-graph command; mode/expected_duration are computed from the probes, so they are exact; duration/size report null — measured on the real output).",
     schema: {
     inputs: z.array(z.union([
@@ -260,6 +269,7 @@ export const TOOL_DEFS = [
 
   {
     name: "frames",
+    tier: "WRITE",
     description: "Extract N evenly spaced frames as separate image files (frame-001.png, ...) into a directory, each with its timestamp — so you can actually look at what is in a video before cutting it. One frame per interval; timestamps are i * duration / count, and each frame is captured at its exact timestamp (two-stage seek), so the reported time is the frame's real time. sharpest=true picks the sharpest frame in each interval instead of the interval start (Laplacian mean, measured on disk; each entry reports sharpness and its window) — use it when a frame must be the cleanest one in its stretch, e.g. picking a cover frame out of a shaky pan.",
     schema: {
     input: pathSchema,
@@ -284,6 +294,7 @@ export const TOOL_DEFS = [
 
   {
     name: "extract_frames",
+    tier: "WRITE",
     description: "Export EVERY frame of a clip (or a time range) as a sequence of images (frame-0001.png, ...) into a directory — the full sequence, not N samples like frames. Use it to scrub a shot frame by frame: a fast move, a blink, a lip-sync slip that a 6-frame sample hides. fps defaults to the source frame rate (every frame); set it lower for a sparser sequence. Frame i lands at start + i/fps, and the count is verified on disk against round((end-start) * fps). PNG is written rgba (keeps alpha, e.g. ProRes 4444 sources). Refuses over 5000 frames — lower fps or shorten the range instead of filling the disk. Set dry_run=true to print the exact ffmpeg command and write no file.",
     schema: {
     input: pathSchema,
@@ -312,6 +323,7 @@ export const TOOL_DEFS = [
 
   {
     name: "burn_captions",
+    tier: "WRITE",
     description: "Burn subtitles into the video (hardcoded, always visible). Accepts .srt, .ass or .vtt. Style: background (default — white text on a semi-transparent black box), outline (black outline, no box), shadow (thin outline + drop shadow), or glow (thick halo in the text's own colour, reads on bright footage). Defaults scale with frame height: ~60px type on 1080x1920, sitting ~500px above the bottom edge so platform UI (bottom ~480px) never covers the text. Explicit font_size / margin_v override. max_lines shrinks the type (measured with the same font libass draws, Liberation Sans) until every cue wraps to at most that many lines, never below a readability floor (1.6% of frame height, min 16px); a cue that still overflows at the floor burns at the floor and reports fit.fits=false. platform sets the default margin from that platform's own bottom UI depth (tiktok 520px at 1920 high, youtube 100px at 1080 high) and narrows the fit width to its text-safe rect; explicit margin_v wins. .ass files carry their own styles, so style, max_lines and the platform margin are ignored there (style_applied=false, fit=null with a note). Set dry_run=true to print the exact ffmpeg command and write no file (font_size/margin/style/fit are computed from the input, so they are exact; duration/size report null — measured on the real output).",
     schema: {
     input: pathSchema,
@@ -342,6 +354,7 @@ export const TOOL_DEFS = [
 
   {
     name: "reframe",
+    tier: "WRITE",
     description: "Reframe a video to a target aspect/size in one step (e.g. 16:9 to 9:16 vertical 1080x1920). mode crop cuts the target aspect out (centre, or x/y anchor, or a named anchor: left/right/top/bottom/top-left/... to keep an edge subject in frame); pad letterboxes with black bars; blur fills the empty area with a blurred copy of the frame. Crop mode reports crop_kept_percent and warns below 40% kept (upscaled, may look soft). Set dry_run=true to print the exact ffmpeg command and write no file (crop/kept-percent are computed from the input geometry, so they are exact; duration/size report null — measured on the real output).",
     schema: {
     input: pathSchema,
@@ -372,6 +385,7 @@ export const TOOL_DEFS = [
 
   {
     name: "check",
+    tier: "READ",
     description: "Verify a finished file against a platform delivery spec (tiktok, reels, shorts, youtube): dimensions, codecs, fps, duration limit, audio channels and measured loudness, plus a file-size limit where the platform has one. Video bitrate is checked as a warning only (platforms publish recommendations, not gates) and the result also reports the platform's text-safe zone. expected_duration fails the check when the measured duration is more than 0.5s off the brief (same tolerance as qa_report). audio_sync is always checked when both streams carry a duration: the video and audio stream lengths must agree within ±0.2s, or the file fails (a mux that pads or truncates one stream drifts captions and sync on some players); when either duration is missing the rule is skipped, not failed. With content=true, one extra decode pass scans for black frames, frozen frames, silence and audio peaks (0.1s windows above peak_threshold_db, default -1 dBFS; >= 0 dBFS is clipping) and folds them into the same pass/fail list with position-aware rules (a short black stretch at the very start/end is a warning — likely a fade — the same stretch mid-file fails). content_start/content_end (seconds) scan only that time range, reported on the file's own timeline. With baseline (a JSON file: a previous check --content result, a raw content result, or a plain {black, freeze, silence, peaks} span list — needs content=true), spans already in the baseline are reported as pre-existing and do not fail the gate, so only NEW spans fail: a render is judged on what it introduced, not on what the source already had (a detected interval counts as pre-existing when it overlaps a baseline span of the same kind by >= 50% of its own duration). With decoded_work=true, the decoded work is estimated from the probe (video pixel-frames + audio sample-channels) and warned when over the ceiling (250B pixel-frames / 6B sample-channels, plus per-stream limits: 3600s, 8192px, 120fps, 8ch, 192kHz) — a heavy input can OOM the machine before any tool reports progress. With palette (2-6 hex colors, e.g. \"#DCC0A0,#A02D19,#1B2740\") or palette_brand (amber-teal | warm-story | minimal-line, the same registry as assemble), frames are sampled at 2 fps and measured against the locked look: time-averaged share per color, off-palette share (pixels farther than 60 RGB from every palette color), mean luma, crushed/blown share and luma swing — crushed or blown past 2% fails, a mean luma outside 95-175 or more than half the pixels off-palette only warns. Policy tiers (idea: OpenEdit qc/policy.py): policy=full (default) runs every requested detector; light runs probe-based rules only and refuses content/baseline/palette (decode-heavy detectors are skipped, reported in `skipped` with complete:false — a light pass is not a full verification); skip runs nothing at all (no probe, no decode) and returns pass:true, complete:false with the skipped list — the stamp for a cache-hit proxy render. Env MEDIAKIT_QC_POLICY sets the default when policy is absent. Returns pass/fail per rule with fix hints. Run this before publishing.",
     schema: {
     input: pathSchema,
@@ -408,6 +422,7 @@ export const TOOL_DEFS = [
 
   {
     name: "qa_report",
+    tier: "READ",
     description: "One-call delivery gate for a finished file: even dimensions, yuv420p pixel format, frame rate, aspect ratio and length for the target (tiktok, reels, shorts, youtube, instagram-feed, instagram-story, linkedin, or any for a platform-free file), measured loudness in -16..-12 LUFS and true peak, black/frozen frames and dead air (silence over 2s), pacing (average shot length from real scene cuts), and an optional expected duration. Probe-only — writes no file. Returns one verdict (pass/warn/fail) plus a per-check list with details; run this, plus thumbnail, on every deliverable before calling it done.",
     schema: {
     input: pathSchema,
@@ -424,6 +439,7 @@ export const TOOL_DEFS = [
 
   {
     name: "grade",
+    tier: "WRITE",
     description: "Color-grade a video with a named preset (warm, cool, cinematic, noir, vintage) or one custom video filter chain (--filter). Re-encodes video (libx264, crf 23 default), copies audio through untouched. The result reports the filter actually applied and the mean R/G/B of the middle frame before and after, measured on disk — so the grade is verified on pixels, not assumed from the filter string. Presets are fixed chains: warm pushes red and pulls blue, cool does the opposite, noir is black-and-white, vintage is faded and desaturated. Set dry_run=true to print the exact ffmpeg command and write no file (color_before is still measured on the input, read-only; color_after reports null — it is measured on the real output).",
     schema: {
     input: pathSchema,
@@ -453,6 +469,7 @@ export const TOOL_DEFS = [
 
   {
     name: "make_loopable",
+    tier: "WRITE",
     description: "Make a clip loop seamlessly: crossfade the tail into the head (tail-to-head crossfade, moviepy MakeLoopable idea), so the end flows back into the start with no visible jump or audio click. The output is the overlap shorter (a 10s clip with 0.5s overlap becomes 9.5s) and re-encodes (libx264, crf 23 default). Works on audio-only input too (acrossfade only). The result measures the loop on disk: seam_before vs seam_after (mean abs gray difference between the last and first frames) plus normal_step (two neighbouring mid frames) as the baseline — a good seam lands at the normal step, not at zero. Set dry_run=true to print the exact ffmpeg command and write no file (seam_before is measured on the input, so it is exact; seam_after/normal_step/duration report null — measured on the real output).",
     schema: {
     input: pathSchema,
@@ -473,6 +490,7 @@ export const TOOL_DEFS = [
 
   {
     name: "freeze",
+    tier: "WRITE",
     description: "Hold one frame still for N seconds: insert a frozen-frame segment at time `at` (default the end of the clip — hold the last frame, the end-card use), so the clip grows by exactly the hold and the tail keeps its place in the timeline (moviepy Freeze idea). The frozen frame is the frame starting at or before `at`. Audio in the hold is silence (not the original audio continuing — that would leave the video longer than the audio and force trailing silence); the audio timeline is [0,at] + silence(hold) + [at,end]. Re-encodes video (libx264, crf 23 default), AAC pinned 192k. The result measures the freeze on disk: frozen_frame_diff (input frame vs output frame mid-hold, ~0 when truly frozen) and post_frame_diff (input frame after the freeze point vs the same frame in the output tail, ~0 when the tail kept its place; null when the hold sits on the last frame). Set dry_run=true to print the exact ffmpeg command and write no file (frame_index/frame_seconds are computed from the input's frame count, so they are exact; the diffs and the duration report null — measured on the real output).",
     schema: {
     input: pathSchema,
@@ -495,6 +513,7 @@ export const TOOL_DEFS = [
 
   {
     name: "fastforward",
+    tier: "WRITE",
     description: "Speed up marked spans of a clip and burn a badge on them (khang-nyb/demo-recorder's render() idea: their demo tool fast-forwards dead backend waits and stamps \">> tua nhanh x8\" on the sped footage; this is the general version). The timeline is split into pieces — normal spans at 1x, marked spans at N x — and re-joined, so the output is shorter by exactly the saved time and everything after a span keeps its place. Video speeds up with setpts, audio keeps its pitch with chained atempo. Spans are clamped to the clip, sorted, and overlaps collapse onto the previous span's end instead of failing on input order. The badge is a dark box + text bottom-right, sized from the display frame height (same relative size on vertical and landscape clips); set badge false to skip it. Re-encodes video (libx264, crf 23 default), AAC pinned 192k. The result measures the speed-up on disk: duration_expected vs duration_seconds, timing_check_mapped (input frame mid-span vs the output frame it should land on, ~0 when the mapping is right) vs timing_check_unmapped, and the frame count. Set dry_run=true to print the exact ffmpeg command and write no file (duration/timing/frames report null — measured on the real output; the badge label files are written to a deterministic temp dir and kept, so the printed command runs as-is).",
     schema: {
     input: pathSchema,
@@ -523,6 +542,7 @@ export const TOOL_DEFS = [
 
   {
     name: "reverse",
+    tier: "WRITE",
     description: "Play a clip backwards: video frames reversed with the `reverse` filter, audio reversed with `areverse` (on by default; set audio false to keep the audio playing forward under reversed video). Re-encodes video (libx264, crf 23 default). The `reverse` filter buffers every frame, so very long inputs cost memory. The result reports whether video/audio were actually reversed, plus duration measured on disk. Set dry_run=true to print the exact ffmpeg command and write no file (duration/size report null — measured on the real output).",
     schema: {
     input: pathSchema,
@@ -543,6 +563,7 @@ export const TOOL_DEFS = [
 
   {
     name: "rotate",
+    tier: "WRITE",
     description: "Rotate or flip a clip: angle 90/180/270 clockwise, or flip horizontal/vertical (exactly one of angle/flip). The angle applies to the frame the viewer sees — ffmpeg autorotates on decode, so a phone clip coded 1280x720 with rotation 90 rotates from its 720x1280 display size (rotate 90 gives 1280x720, rotate 180 keeps 720x1280). The re-encode strips the display-matrix/rotate metadata, so the output reports rotation null and no player double-rotates it (yuan66-hub's rotate has no such guard). Re-encodes video (libx264, crf 23 default), AAC pinned 192k. Set metadata_only=true to rotate WITHOUT re-encoding: only the display-matrix metadata is rewritten (stream copy, coded video packets byte-identical — verified with a packet MD5 on disk), so it is instant and lossless; the angle ADDS to any rotation the input already carries (90 on a rotation-90 clip gives 180; 270 on it strips the matrix to null). Only mp4/mov/mkv (the matrix is a QuickTime/Matroska feature — webm refuses it), angle only, no flip. The result reports input_rotation vs output_rotation plus the display dimensions before and after, measured on disk. Set dry_run=true to print the exact ffmpeg command and write no file (dimensions is the expected display size after the rotation; output_rotation/duration/size report null — measured on the real output).",
     schema: {
     input: pathSchema,
@@ -567,6 +588,7 @@ export const TOOL_DEFS = [
 
   {
     name: "boomerang",
+    tier: "WRITE",
     description: "Play a clip forward then backwards — the ping-pong loop (moviepy TimeSymmetrize/TimeMirror idea): the clip followed by its own reverse, so a bounce, swing or wave returns to where it started with no cut. The peak frame is NOT played twice: the reversed half drops its first frame (moviepy v2.2.1's TimeMirror clipping fix) and the reversed audio drops one video-frame of audio at the same point, so the output is 2D - 1/fps (audio-only input has no video frame to pivot on, so it plays forward + reversed whole, 2D). Re-encodes video (libx264, crf 23 default), AAC pinned 192k. The result measures the seam on disk: seam_diff (output frame just before the seam vs just after it) against normal_step (two neighbouring mid-forward frames) — a good seam lands at the normal step; the frame count (2N-1) is the honest proof the pivot frame was dropped. Set dry_run=true to print the exact ffmpeg command and write no file (pivot/expected duration are computed from the input, so they are exact; seam_diff/normal_step/duration report null — measured on the real output).",
     schema: {
     input: pathSchema,
@@ -587,6 +609,7 @@ export const TOOL_DEFS = [
 
   {
     name: "chroma_key",
+    tier: "WRITE",
     description: "Remove a green/blue screen: keys out one color (chromakey filter) and either keeps the transparency (output MUST be .mov, ProRes 4444 — .mp4 has no alpha channel, and this ffmpeg build drops VP9 alpha in .webm) or composites the subject onto a background in the same call (image file or hex color, output .mp4/.webm). similarity 0-1 is the tolerance (too high eats the subject), blend 0-1 softens the edge. The result measures the alpha on disk (middle frame, 0-255): full-frame mean plus corner (should be ~0 for a full-screen key) and center (should be ~255 on the subject). Set dry_run=true to print the exact ffmpeg command and write no file (mode/background are decided before the run; pixel_format/alpha/duration/dimensions/size report null — measured on the real output).",
     schema: {
     input: pathSchema,
@@ -613,6 +636,7 @@ export const TOOL_DEFS = [
 
   {
     name: "zoom_pan",
+    tier: "WRITE",
     description: "Ken Burns effect: turn a still image into a moving clip (zoompan filter). Zooms linearly from zoom_from to zoom_to while the focus point moves from (focus_x, focus_y) to (focus_end_x, focus_end_y) — all 0-1 fractions of the frame, 0.5 is center. The input is pre-scaled 1.25x before zooming (avoids the integer-crop jitter zoompan is known for). Input must be a still image, not a video. The result counts frames on the output file, so duration and fps are measured, not assumed. Set dry_run=true to print the exact ffmpeg command and write no file (zoom/focus expressions are computed from the arguments, so they are exact; duration/frames report null — measured on the real output).",
     schema: {
     input: pathSchema.describe("Still image file (PNG/JPG/WebP)"),
@@ -651,6 +675,7 @@ export const TOOL_DEFS = [
 
   {
     name: "image_to_video",
+    tier: "WRITE",
     description: "Turn one still image into a fixed-duration video that holds still (no motion — use zoom_pan for Ken Burns). Use it for a podcast still, a song cover, or a title card held over audio. Dimensions default to the image itself; width/height fit the image inside the box and pad black to the exact size. audio loops an audio file to the same duration (a short bed loops, a long one is trimmed). Output .mp4 (H.264) or .webm (VP9). The result counts frames on the output file, so the duration is measured, not assumed. Set dry_run=true to print the exact ffmpeg command and write no file (dimensions/fps/duration are computed from the arguments, so they are exact; frames report null — measured on the real output).",
     schema: {
     input: pathSchema.describe("Still image file (PNG/JPG/WebP)"),
@@ -679,6 +704,7 @@ export const TOOL_DEFS = [
 
   {
     name: "slideshow",
+    tier: "WRITE",
     description: "Turn 2-32 still images into one video with an xfade transition between every pair. Each image is visible for its own duration — the transition eats a handle, not slide time — so the total is exactly the sum of the durations. One transition type for all pairs (transition/transition_duration), or a different one per join: transitions (one xfade name per join, n-1 entries) and transition_durations (one length per join, each shorter than both slides it joins). Images are rendered to clips in parallel first, then joined with the concat xfade chain. audio loops a bed under the whole slideshow. Output .mp4 only in v1. The result counts frames on the output file, so the duration is measured, not assumed. Set dry_run=true to print the exact commands for all three stages and write no file (one exact command per slide clip, the exact xfade join command — built by the same builder concat --transition runs — and the exact audio command when a bed is given; run them in order to reproduce the real output; duration/frames report null — measured on the real output).",
     schema: {
     images: z.array(z.union([
@@ -723,6 +749,7 @@ export const TOOL_DEFS = [
 
   {
     name: "interpolate",
+    tier: "WRITE",
     description: "Raise a clip's frame rate with motion interpolation (minterpolate): 30fps to 60fps for smoother playback or slow motion. Modes: blend (fast default, cross-fades neighbours), mci (true motion-compensated frames, best quality but much slower — about 9x realtime on CPU), dup (repeats frames). Only raises the frame rate; use fit --max-fps to lower it. The result counts frames on the output file, so the fps is measured, not assumed. Set dry_run=true to print the exact ffmpeg command and write no file (frames_before is counted on the input, so it is exact; fps_after/frames_after report null — measured on the real output).",
     schema: {
     input: pathSchema,
@@ -745,6 +772,7 @@ export const TOOL_DEFS = [
 
   {
     name: "denoise",
+    tier: "WRITE",
     description: "Reduce sensor noise on a video: hqdn3d (fast default) or nlmeans (better on fine detail, much slower — minutes for a few seconds of 720p). strength 0-1 maps to hqdn3d 0-30 (0.5 is 15, the strength that gained +2.9 dB PSNR on sigma-10 noise in testing) or nlmeans s 0-10. The result measures high-frequency noise energy before and after (mean |frame minus blurred frame|), so the reduction is measured, not assumed. Set dry_run=true to print the exact ffmpeg command and write no file (noise_before is measured on the input, so it is exact; noise_after reports null — measured on the real output).",
     schema: {
     input: pathSchema,
@@ -767,6 +795,7 @@ export const TOOL_DEFS = [
 
   {
     name: "segment",
+    tier: "WRITE",
     description: "Cut a video into an HLS VOD playlist: index.m3u8 plus .ts segments in an output directory, ready to serve statically or preview in a player. Stream-copy is the default (fast, lossless) but segments can only start on keyframes, so actual segment lengths follow the source GOP — a sparse-GOP source gives fewer, longer segments than requested; use reencode=true to re-encode to libx264/aac with forced keyframes so segments land exactly on the requested grid. Copy mode refuses non-H.264 video or non-AAC/MP3 audio up front. The result parses the playlist back from disk and stats every segment file, so the count and durations are measured, not assumed. Set dry_run=true to print the exact ffmpeg command and write no file — no directory is created and no stale segments are deleted (segment_count/durations report null — measured on the real output).",
     schema: {
     input: pathSchema,
@@ -793,6 +822,7 @@ export const TOOL_DEFS = [
 
   {
     name: "convert",
+    tier: "WRITE",
     description: "Change container or codec. Omit video_codec/audio_codec to stream-copy that stream. crf 23 is a good default for H.264. gop (frames) or gop_seconds sets an exact keyframe interval on re-encode (scene-cut keyframes disabled for libx264/libx265/mpeg4); the result measures the keyframes on the output file. A GOP is required for keyframe-snapped stream-copy cuts. encoder picks the video encoder: \"auto\" probes for the first working hardware encoder of the codec family and falls back to software when none works (the fallback is reported in encoder_fallback, never silent); a named hardware encoder (h264_nvenc, hevc_qsv, h264_vaapi, ...) must probe-usable or the call fails. The result reports encoder_used and verifies the output codec on disk (codec_verified). Set dry_run=true to print the exact ffmpeg command and write no file.",
     schema: {
     input: pathSchema,
@@ -823,6 +853,7 @@ export const TOOL_DEFS = [
 
   {
     name: "compress",
+    tier: "WRITE",
     description: "Shrink a file with one named quality preset instead of guessing CRF numbers: low (CRF 32), medium (CRF 26), high (CRF 20) or email-25mb (targets 18 MB so the file still fits a 25 MB email attachment after base64 inflation), each with its own x264 preset and audio bitrate. Optional max_width scales the video down first. Set target_size_mb to hit an exact size instead (e.g. 10 for a Discord upload): two-pass ABR encoding from the size + duration budget, with a 10% safety margin; reports target_met measured on disk. In target-size mode a resolution ladder steps the frame down (1080→720→480→360→240) when the bitrate buys less than 0.045 bits per pixel per frame, so a starved encode stays watchable instead of mush; set resolution_ladder=false to keep the source frame. Target-size mode also returns a quality_proof: SSIM measured against the source at 3 sample points plus PSNR mid-clip and a verdict in words (indistinguishable / looks_the_same / slight_softening / visible_loss / clearly_degraded) — VMAF is measured at the mid point when the ffmpeg build has libvmaf (default vmaf_v0.6.1 model); otherwise SSIM is the measured proxy and the proof says so, and the proof rates encode fidelity at the delivered resolution (it does not penalize the ladder's resolution drop; compare dimensions and bpp_after for that tradeoff). Set quality_proof=false to skip the measurement. target_size_mb ignores quality and cannot be combined with crf. Returns the size before/after and the reduction percent actually measured on disk, so the agent can check the tradeoff worked. Set dry_run=true to print the exact ffmpeg command(s) — two passes in target-size video mode — and write no file (bitrate/ladder are computed from the input, so they are exact; size_after/target_met/reduction/quality_proof report null — measured on the real output).",
     schema: {
     input: pathSchema,
@@ -853,6 +884,7 @@ export const TOOL_DEFS = [
 
   {
     name: "silence",
+    tier: "WRITE",
     description: "Remove silent stretches from speech/video. Detects silence with silencedetect, keeps the speech plus a margin of silence on each side (so words are never clipped), then cuts and re-joins — every kept segment gets a 12ms fade out + 15ms fade in at the join, so a cut mid-tone has no click. Set detect_only=true to just report the silence/kept segments without writing a file. Returns removed_seconds and the kept segment list — verify those before trusting the cut. Set dry_run=true to print the exact ffmpeg command that would run and write no file (the silencedetect measurement still runs, read-only; duration_after/size report null — measured on the real output; with nothing worth cutting the command is a stream-copy).",
     schema: {
     input: pathSchema,
@@ -877,6 +909,7 @@ export const TOOL_DEFS = [
 
   {
     name: "cropdetect",
+    tier: "READ",
     description: "Measure letterbox/pillarbox black bars with the cropdetect filter: samples frames and returns the most common crop rectangle plus a ready-to-run mediakit crop command. Run before crop/reframe when the source may have black bars.",
     schema: {
     input: pathSchema,
@@ -889,6 +922,7 @@ export const TOOL_DEFS = [
 
   {
     name: "package",
+    tier: "WRITE",
     description: "Bundle a finished file for delivery: a ZIP with the media, spec.json (measured probe + loudness + optional platform check receipt), checksums.sha256, and the captions sidecar when given. Run after check passes, before publishing.",
     schema: {
     input: pathSchema,
@@ -902,6 +936,7 @@ export const TOOL_DEFS = [
 
   {
     name: "receipt",
+    tier: "WRITE",
     description: "Write a provenance receipt (JSON sidecar) for a finished file: probe data, SHA-256, size, measured loudness, optional platform check result, and the exact ffmpeg/ffprobe versions that produced it. Re-run sha256sum against the receipt any time to prove the media has not changed since it was written.",
     schema: {
     input: pathSchema,
@@ -914,6 +949,7 @@ export const TOOL_DEFS = [
 
   {
     name: "convert_captions",
+    tier: "WRITE",
     description: "Convert a subtitle file between SRT and VTT (pure text, no ffmpeg). Cue text is carried verbatim; VTT cue settings (line:/position:/align:) are dropped on the way to SRT and counted in settings_dropped. The output format comes from the output extension; converting a file to its own format is refused.",
     schema: {
     input: pathSchema.describe("Input subtitle file (.srt or .vtt)"),
@@ -925,6 +961,7 @@ export const TOOL_DEFS = [
 
   {
     name: "generate_srt",
+    tier: "WRITE",
     description: "Build a deterministic .srt subtitle file from a cue list [{start, end, text}] — pure text, no ffmpeg. Times accept seconds or \"MM:SS\" / \"HH:MM:SS\". Cues must be in order and must not overlap (touching is fine); each text must be non-empty and may span lines with \\n. This is the input burn_captions wants. Or pass words [{start, end, word}] instead of cues: they are grouped into semantic cues (max 8 words, 3.5s, 84 chars / 2 lines of 42; split on pauses >0.4s and sentence ends; a cue never ends on a stranded word like 'the'/'of') and the grouping report is returned. Pass cues or words, never both.",
     schema: {
     cues: z.array(z.object({
@@ -945,6 +982,7 @@ export const TOOL_DEFS = [
 
   {
     name: "publish_kit",
+    tier: "WRITE",
     description: "Thumbnail & Publishing Kit: from a finished video + a 1280x720 16:9 thumbnail + agent-written copy, write publishing/metadata.md and publishing.json and report a pre-publish checklist. Verifies what it can (thumbnail size, exactly 5 distinct 1-100-char titles, chapter times against the measured video duration, SHA-256 of media + thumbnail) and marks what it cannot verify as human-review (mobile readability, title/cover fidelity, licences) — never a pass. Flags unsupported-promise phrasing in titles as warnings. Does not publish or upload anything.",
     schema: {
     input: pathSchema.describe("Finished video file"),
@@ -976,6 +1014,7 @@ export const TOOL_DEFS = [
 
   {
     name: "transcribe",
+    tier: "WRITE",
     description: "Transcribe speech to subtitles with a LOCAL engine (no cloud, audio never uploaded) — faster-whisper by default, or whisper.cpp with engine=\"whisper\". Writes a .srt and returns the segments with timestamps, detected language and full text — the direct input for burn_captions. The engine is optional: if no engine is installed the call fails with install lines (set MEDIAKIT_ASR_PYTHON to a python that has faster-whisper, or MEDIAKIT_WHISPER_CPP_BIN / MEDIAKIT_WHISPER_MODEL to a whisper.cpp binary + ggml model). Silence transcribes to 0 segments and an empty .srt.",
     schema: {
     input: pathSchema.describe("Audio or video file with a speech track"),
@@ -1000,6 +1039,7 @@ export const TOOL_DEFS = [
 
   {
     name: "cut_words",
+    tier: "WRITE",
     description: "Cut words out of a talking-head clip by transcript: filler words (um/uh), false starts and restarts, using word timings from transcribe --word-timestamps. Give a words file (the JSON transcribe prints — save its stdout — or a hand-written {words:[{start,end,word}]}), then select by word text (--remove 'um,uh'), the built-in filler set (--fillers), or 0-based word-index ranges (--indices '0-5,96-98', as printed by transcribe); --keep rescues indices even when auto-flagged. Keep runs are padded 0.06s before / 0.12s after, clamped so a cut never keeps a fragment of the word it removed, and kept words that end up mostly cut out are reported in cut_check.swallowed — play them before trusting the cut. Set edge_buffer (0-1s, default 0) to widen every keep segment past its pads, clamped only to the file edges — Outtake's 0.1s clip-edge buffer, so a cut never lands exactly on a kept word's onset; it deliberately keeps up to that much of the neighbouring removed word's edge, and a buffer wider than the gap between two kept runs merges them (the cut between them disappears). Every kept segment gets a 12ms fade out + 15ms fade in at the join, so a cut mid-word has no click. --dry-run returns the plan (cut intervals + keep segments) without writing a file. No match stream-copies the input unchanged.",
     schema: {
     input: pathSchema.describe("Audio or video file with a speech track"),
@@ -1034,6 +1074,7 @@ export const TOOL_DEFS = [
 
   {
     name: "remove_retakes",
+    tier: "WRITE",
     description: "Cut repeated takes out of a talking-head clip, on word timings from transcribe --word-timestamps: when the speaker says a sentence, restarts, and says it again, the earlier take plus the restart junk ('okay, again', a filler) is cut and the fluent take is kept whole. A repeat is >= min_words identical words (default 3) with at most max_gap_words words (default 8) and max_gap_seconds (default 5) between the takes; a 2-word abandoned start ('the quick' — 'um' — 'the quick brown fox') is also cut. keep=last (default) keeps the later take — people warm up — keep=first keeps the earlier one. Returns the clusters found (kept take + removed indices + text) so the cut can be reviewed; detect_only=true returns the plan and writes no file. No retake stream-copies the input unchanged. Deterministic, not a judge: an intentional repetition ('I like cats. I like cats a lot.') looks like a retake to this detector — read the clusters (or run detect_only) before cutting.",
     schema: {
     input: pathSchema.describe("Audio or video file with a speech track"),
@@ -1066,6 +1107,7 @@ export const TOOL_DEFS = [
 
   {
     name: "smart_cut",
+    tier: "WRITE",
     description: "Tighten a talking-head clip on word timings from transcribe --word-timestamps: cut the hesitation out of a take in one pass — long pauses between words (gap >= min_gap * (1.2 - 0.6*aggressiveness), default min_gap 0.45s), long filler words (a filler only counts when held >= 0.35s - 0.15*aggressiveness, so a quick 0.1s 'um' survives and a stretched 'ummm' does not), and words held so long they became a stall ('soooo', 'this...', cut from 0.05s in so the attack survives). One aggressiveness knob (0-1, default 0.5) scales all three thresholds at once. The default filler list is um, umm, uh, uhh, uhm, erm, er, hmm, mm, mhm, ah, eh, like, you know, basically, actually — 'like'/'you know'/'basically'/'actually' are contextual: a long one is only cut when flanked by >= 0.15s pauses on both sides or sitting at the very start/end of the take (contextual_gate, default true — a 0.6s 'like' inside 'I like this' survives and is listed in gated_fillers; set contextual_gate=false for the old duration-only behaviour). Pass fillers to use your own list (phrases like 'you know' match consecutive words). min_segment (default 0 = off) merges removals separated by less than that many seconds of kept speech, so a sub-2s keep fragment between two cuts is cut with them instead of making a choppy clip (2.0 follows OpenEdit's silence_cutter default — but it can swallow real words on a dense take, so it stays off unless asked). Returns the removed intervals (reason filler/stretched/gap/mixed + text), gated_fillers, min_segment_merges, keep segments and cut_check.swallowed; detect_only=true returns the plan and writes no file. Nothing to cut stream-copies the input unchanged. Deterministic, not a judge: a dramatic pause is indistinguishable from a hesitation to this detector — read the removed list (or run detect_only) before cutting.",
     schema: {
     input: pathSchema.describe("Audio or video file with a speech track"),
@@ -1117,6 +1159,7 @@ export const TOOL_DEFS = [
   // OUT.report.json.
   {
     name: "clean_voice",
+    tier: "WRITE",
     description: "Clean a recorded voice for a video: diagnose the recording first (peak, clipped runs, noise floor, SNR, echo tail, bandwidth, 50/60 Hz hum — all measured from the decoded audio), then pick the cleanup steps and run the voice chain (highpass 80 Hz + EQ + 3.5:1 compressor + gain to target LUFS + -1 dBFS limiter) exactly once, at the end, in float. Output is a 48 kHz mono float WAV on the input's video clock. The plan's steps are declip (more than 20 clipped runs), dehum (hum more than 12 dB over its neighbours), clearvoice (echo tail above -24 dB or SNR below 50 dB) and sr (bandwidth below 15 kHz); clearvoice/sr need the ClearVoice engine (PyTorch + ~1.7 GB checkpoints), which is not installed — a run that needs them refuses loudly instead of cleaning without them, so pass steps=['declip','dehum'] or steps=['none'] to clean with the ffmpeg-native steps only. diagnose_only=true only measures and returns the plan and writes nothing; ab=true writes a 12 s speech window through every runnable candidate chain (0.8 s gaps, order in the .ab.txt) so a new mic or room can be heard before committing. A report is written to <output>.report.json with the diagnosis, the plan and the measured output. Refuses inputs over 600 s (trim a section first) and non-.wav outputs.",
     schema: {
     input: pathSchema.describe("Audio or video file with a speech track"),
@@ -1156,6 +1199,7 @@ export const TOOL_DEFS = [
   // next trim cuts where it does).
   {
     name: "search_words",
+    tier: "READ",
     description: "Find a phrase in a transcript and return where it is said (probe-only, writes no file): give a words file (the JSON transcribe --word-timestamps prints — save its stdout — or a hand-written {words:[{start,end,word}]}), the same file cut_words cuts by, and a query phrase. Matching is on normalized words (case-insensitive, punctuation ignored — 'Hello,' matches 'hello'), contiguous only: a phrase split by another word is not a match, and ASR mis-hearings are not fuzzy-matched — a missed phrase means the transcript says something else. Every match returns its word indices, start/end/duration, the matched text with context_before/context_after (default 5 words each side), and a padded cut window (default 0.5s each side); cut_list merges the windows into the ready-to-cut list (overlapping windows become one cut). Use it before trim: search the phrase, then cut the window it returns — never guess timestamps. max_matches caps the returned matches (default 10); when more exist, truncated=true and match_count is the true total.",
     schema: {
     words_file: pathSchema.describe("Transcript JSON with a words array — the stdout of `transcribe --word-timestamps` saved to a file, or a hand-written {words:[{start,end,word}]}"),
@@ -1178,6 +1222,7 @@ export const TOOL_DEFS = [
 
   {
     name: "find",
+    tier: "READ",
     description: "Find media files by filename, recursively under a directory (case-insensitive substring match). Returns each match with probe info (duration, dimensions, codecs) so the agent can pick the right file without guessing paths. Skips .git, node_modules and hidden folders; does not follow symlinked directories.",
     schema: {
     directory: pathSchema.describe("Directory to search under (recursive)"),
@@ -1194,6 +1239,7 @@ export const TOOL_DEFS = [
 
   {
     name: "svg_animate",
+    tier: "WRITE",
     description: "Animate an SVG file into an MP4, code-driven: Node interpolates keyframed translate/scale/rotate/opacity on elements (by id) per frame and ffmpeg's librsvg rasterizes each frame — no browser, no SMIL (ffmpeg cannot play SVG animation). Give animations as a list with target id, property, from/to, start/end seconds and easing. A target id that does not exist in the SVG is reported in missing_targets, not fatal.",
     schema: {
     svg: pathSchema.describe("Input SVG file (elements to animate need an id attribute)"),
@@ -1229,6 +1275,7 @@ export const TOOL_DEFS = [
 
   {
     name: "mix",
+    tier: "WRITE",
     description: "Mix voice over a music bed with sidechain ducking: the bed drops by duck_db whenever the voice speaks (attack/release in ms), the voice is levelled to voice_lufs first, the music loops to the voice length, and the mix is mastered to target_lufs with two-pass loudnorm (render unmastered, measure it, then normalise with the measured values — single-pass undershoots on quiet voices with long gaps under a bed). Returns the ducking actually measured (ducking_measured_db, speech vs silence window on the ducked bed) and a warning when the mix is peak-limited and cannot reach the target. sfx drops short sounds at exact timestamps (each {file, at_seconds, volume 0-1}, max 16) — they are mixed in after the ducking, so a sting punches through; a timestamp past the voice end is refused. If the voice file is a video, its video stream is copied through. Set dry_run=true to print the exact ffmpeg commands that would run (render + master) and write no file (probes and the loudnorm measurement still run, read-only, to compute the voice gain).",
     schema: {
     voice: pathSchema.describe("Voice/speech file (audio or video with an audio track)"),
@@ -1267,6 +1314,7 @@ export const TOOL_DEFS = [
 
   {
     name: "overlay",
+    tier: "WRITE",
     description: "Overlay a logo/watermark image on a video. Named position (top-right, top-left, bottom-left, bottom-right, center) plus a margin from the edge; the overlay is scaled to width keeping its aspect ratio, opacity 0-1, and start/end (seconds) show it only during that window. Position and fit are measured on the display frame — a phone clip stored 1280x720 with rotation 90 is 720x1280 to the filter, so top-right lands at 576,24 there, not 1136,24. Audio is copied through. Set dry_run=true to print the exact ffmpeg command and write no file (x/y/overlay_size are computed from the display probe, so they are exact; duration/size report null — measured on the real output).",
     schema: {
     input: pathSchema,
@@ -1297,6 +1345,7 @@ export const TOOL_DEFS = [
 
   {
     name: "pip",
+    tier: "WRITE",
     description: "Picture-in-picture: place a second video over the main one. 9 named positions (corners, edges, center), size by width in pixels or by scale fraction of the main width (default 0.25), opacity 0-1, and start/end (seconds) show it only during that window — the PiP clip loops so it never runs out. Geometry is measured on display frames: a rotated main clip is 720 wide (not 1280 stored), and a rotated PiP clip keeps its portrait aspect instead of being squashed to the stored one. Audio: main (default, PiP audio dropped), pip (PiP audio only), or mix (both mixed, levels kept). Set dry_run=true to print the exact ffmpeg command and write no file (x/y/pip_size are computed from the display probes, so they are exact; duration/size report null — measured on the real output).",
     schema: {
     input: pathSchema,
@@ -1331,6 +1380,7 @@ export const TOOL_DEFS = [
 
   {
     name: "broll",
+    tier: "WRITE",
     description: "Insert B-roll clips into a main video at timestamps (misbahsy/video-audio-mcp's add_b_roll idea, one filter graph instead of their temp-file two-pass). The main timeline is never cut: each clip is trimmed to its window, scaled, and overlaid with enable=between(t,at,end), so the output duration is exactly the main duration. position fullscreen covers the whole frame (the main video underneath is hidden); the 9 PiP positions place it as a corner/edge/center overlay sized by width or scale (default 0.5 of the main width). fade dissolves the clip in/out over the main video (true alpha dissolve, not a dip to black). A window longer than its clip loops the clip. Clips must not overlap; a window running past the end of the main clip is clamped and reported. Audio: main (default, main audio copied untouched), broll (main audio muted inside each window, B-roll audio takes over — a window whose clip has no audio goes silent), mix (main + delayed B-roll audio, levels kept).",
     schema: {
     input: pathSchema,
@@ -1358,6 +1408,7 @@ export const TOOL_DEFS = [
 
   {
     name: "scenes",
+    tier: "READ",
     description: "Detect scene changes / hard cuts in a video (probe-only, writes no file). Returns the cut timestamps plus the segments between them — trim on these boundaries instead of guessing. detector ffmpeg (default) is ffmpeg's scene metric; detector content scores each frame change in hue/sat/luma separately (PySceneDetect ContentDetector idea) and catches hue-only cuts the ffmpeg metric misses, with min_scene_len merging too-short scenes and a flash filter dropping 1-frame blips. fades=true adds fade in/out detection (dark core + measured ramp). Lower threshold = more sensitive; defaults differ per detector (ffmpeg 0.3, content 0.05).",
     schema: {
     input: pathSchema,
@@ -1384,6 +1435,7 @@ export const TOOL_DEFS = [
 
   {
     name: "measure_pace",
+    tier: "READ",
     description: "Measure a reference video's cutting pace (marvtub/takes-public measure_pace idea): count its hard cuts with the scenes content detector, then report {seconds, cuts, cuts_per_min, avg_shot_s, longest_hold_s, longest_at}. With style_file, keep those numbers as that style's pace in the style.json (created or updated, other keys preserved) — diagnose then scores every film in the project against them (cuts within 2x of the style, longest hold over style x1.5 and +2s warns). Without style_file nothing is written. A file under 15s still measures, but the result says it is too short to compare a style against. Also available as a probe-only batch operation and manifest step (measure only — the style-file write is not exposed there).",
     schema: {
     input: pathSchema,
@@ -1404,6 +1456,7 @@ export const TOOL_DEFS = [
 
   {
     name: "highlights",
+    tier: "READ",
     description: "Find a clip's visual beats with perceptual hashes (EncodeX highlight.ts idea, re-implemented from the blockhash-js block-mean-value paper): sample frames at 2 fps, hash each one as an 8x8 average hash (one bit per cell against the frame mean, +/-8 dead zone so encoder noise on a flat frame cannot flip bits, flat-frame tie-break mean > 127.5 -> 1), and call a frame a scene boundary when its hash jumps from the previous frame by >= threshold (normalized Hamming distance, default 0.15). A highlight is the span between two boundaries — spans shorter than min_span_seconds merge into a neighbour, so the timeline never shatters into slivers — and its score is the mean jump inside the span (how much the picture keeps changing there); top_highlights ranks them by score, then duration. Thumbnails are the greedy farthest-point frames (seed = biggest jump, then each pick maximizes its minimum Hamming distance to the picked set) — the most visually distinct moments, for a poster frame or a hook still. Probe-only, writes no file — also available as a probe-only batch operation and manifest step. Long files sample slower instead of refusing (frame cap 1200; below 0.5 fps the file is refused as too long).",
     schema: {
     input: pathSchema,
@@ -1426,6 +1479,7 @@ export const TOOL_DEFS = [
 
   {
     name: "keyframes",
+    tier: "READ",
     description: "List the keyframe (I-frame) timestamps of a video (probe-only, writes no file), plus GOP min/max/avg interval. Check this before a stream-copy trim — cutting between keyframes silently shifts the cut. Pair with trim snap_to_keyframe=true to snap the cut onto keyframes. Set nearest (seconds) to also get the keyframe nearest one cut point: before (largest keyframe <= t), after (smallest >= t), closest, distance_seconds and direction (before/after/exact) — the snap target for a single cut without scanning the whole list.",
     schema: {
       input: pathSchema,
@@ -1437,6 +1491,7 @@ export const TOOL_DEFS = [
 
   {
     name: "audio_levels",
+    tier: "READ",
     description: "Loudness curve + loudest moments of an audio stream (WyattBlue/auto-editor's `levels` idea: one value per timebase chunk, no threshold — the curve IS the data; bariswha/losslesscut-mcp's audio_levels adds buckets + pickPeaks). One decode pass: per-frame astats Peak + RMS bucketed into bucket_seconds windows (default 1s), RMS averaged in the linear domain so each bucket's rms_db is the true energy mean. Returns every bucket {start, end, rms_db, peak_db} (a bucket of true digital silence reports nulls, never a fake -inf), a summary (max_peak_db, energy-mean mean_rms_db, min/max bucket RMS, dynamic_range_db, silent_buckets, loudest_bucket) and the top N peaks (default 5) ranked by peak_db and kept at least min_gap_seconds apart (default 2s — a 3s shout does not fill the whole list with its own neighbours; near-equal peaks tie at 0.1 dB and the earliest wins). Probe-only, writes no file — also available as a probe-only batch operation and manifest step. Cap: at most 3600 buckets (raise bucket_seconds for long files).",
     schema: {
       input: pathSchema,
@@ -1455,6 +1510,7 @@ export const TOOL_DEFS = [
 
   {
     name: "fit",
+    tier: "WRITE",
     description: "Fit a media file to an exact target duration in seconds. method speed (default) speeds it up/down with setpts + chained atempo (factor must stay in 0.25-4x); trim cuts a longer source down; loop repeats a shorter source until it reaches the target. max_fps caps the output frame rate (e.g. 15 for a smaller file) — it only ever lowers the fps, never raises it by duplicating frames. Returns the output duration and fps actually measured with ffprobe, plus duration_error_seconds. Set dry_run=true to print the exact ffmpeg command and write no file (speed_factor/loops/fps_capped are computed from the probe, so they are exact; duration_actual/duration_error/fps/size report null — measured on the real output).",
     schema: {
     input: pathSchema,
@@ -1477,6 +1533,7 @@ export const TOOL_DEFS = [
 
   {
     name: "export_gif",
+    tier: "WRITE",
     description: "Export a clip (or segment) as an animated GIF with a two-pass palette (palettegen + paletteuse from the actual frames). Fits under max_size_mb (default 10 MB, the GitHub README limit; Slack only auto-plays GIFs under ~2 MB) by stepping down fps, then width, then palette colours — each attempt is measured on disk, and size_budget_met says honestly whether the budget was met. Set dry_run=true to print the first ladder step's command and write no file (the ladder plan is listed; later steps only run when the budget needs them; size/duration/frames report null — measured on the real output).",
     schema: {
     input: pathSchema,
@@ -1503,6 +1560,7 @@ export const TOOL_DEFS = [
 
   {
     name: "doctor",
+    tier: "READ",
     description: "Read-only environment preflight: ffmpeg/ffprobe versions, which filters and encoders this build has, and which mediakit tools that enables. An unavailable tool also reports a one-sentence fix telling you how to repair the ffmpeg install. Run first on a new machine — a tool that reports available=false will fail at runtime. With smoke:true, also runs a real end-to-end render (generate → trim → loudness → verify) and reports whether this machine can actually render — a failed smoke fails ok.",
     schema: {
     smoke: z.boolean().default(false).describe("Also run a real end-to-end render chain (generate → trim → loudness → verify) after the static checks; a failed smoke fails ok"),
@@ -1513,6 +1571,7 @@ export const TOOL_DEFS = [
 
   {
     name: "titlecard",
+    tier: "WRITE",
     description: "Render a title card PNG: a big bold hook (3-6 words) on a coloured box, on a transparent canvas so it overlays onto any frame. Text wraps to short lines; the block sits centred in the safe zone (~55% down the frame). Default: yellow text on an orange box, ~120px type at 1080 wide. Pass style: clean-bold | minimal-line | warm-story to use that style's locked palette from skills/shorts-video/styles.json instead; pass brand: amber-teal | warm-story | minimal-line to paint it in the channel look from skills/shorts-video/brands.json (primary = box, on_primary = text, same registry as assemble; set MEDIAKIT_BRANDS to a JSON file of your own to add more brand ids); an explicit text_color/box_color/font_size overrides just that one locked value for this call. Resolution: explicit > brand > style > default; the brand never sets the font size. Set dry_run=true to print the exact ffmpeg command and write no output file (the drawtext text file is written next to the output and kept, so the printed command runs as-is; font_size/colors are computed, so they are exact; size reports null).",
     schema: {
     text: z.string().min(1).describe("The hook text, 3-6 words (e.g. 'The Moon Is Leaving Us')"),
@@ -1543,6 +1602,7 @@ export const TOOL_DEFS = [
 
   {
     name: "intro",
+    tier: "WRITE",
     description: "Render a short intro clip: a title on a solid-colour background that fades in and out. Silent video (no audio); use it as the opening card, then concat it in front of the main clip. Text wraps to short lines, centred on the frame. Pass style: clean-bold | minimal-line | warm-story to use that style's locked palette (its box colour becomes the background, its text colour the text) from skills/shorts-video/styles.json; pass brand: amber-teal | warm-story | minimal-line to paint it in the channel look from skills/shorts-video/brands.json (background = background, text = text, same registry as assemble; set MEDIAKIT_BRANDS to a JSON file of your own to add more brand ids); an explicit bg_color/text_color/font_size overrides just that one locked value for this call. Resolution: explicit > brand > style > default; the brand never sets the font size. Set dry_run=true to print the exact ffmpeg command and write no output file (the drawtext text file is written next to the output and kept, so the printed command runs as-is; font_size/colors are computed, so they are exact; size/duration report null — measured on the real output).",
     schema: {
     text: z.string().min(1).describe("The intro title, e.g. 'Welcome Back'"),
@@ -1579,6 +1639,7 @@ export const TOOL_DEFS = [
 
   {
     name: "social",
+    tier: "WRITE",
     description: "Export one video to several platform specs in a single call: reframes each platform's size (blur keeps the whole frame by default), trims clips longer than the platform's max duration (Shorts 180s, Story 60s), normalizes loudness to target_lufs, then checks each output against that platform's spec. Writes <base>-<platform>.mp4 per platform plus manifest.json (receipt with dimensions, duration, LUFS and check results) into the output directory. A platform whose check fails still writes its file — the result says so instead of hiding it.",
     schema: {
     input: pathSchema,
@@ -1601,6 +1662,7 @@ export const TOOL_DEFS = [
 
   {
     name: "mux",
+    tier: "WRITE",
     description: "Replace a video's audio track with an external audio file, stream-copying both (no re-encode: fast and lossless). The video's original audio is dropped, not mixed in — mix first if you want both. audio_offset_seconds shifts the new audio against the video (positive = audio starts later, negative = video starts later). shortest stops the output at the shorter stream. dry_run prints the exact ffmpeg argv and writes no file.",
     schema: {
     video: pathSchema.describe("Video file (must have a video stream)"),
@@ -1623,6 +1685,7 @@ export const TOOL_DEFS = [
 
   {
     name: "batch",
+    tier: "WRITE",
     description: "Apply ONE operation to many files matching a glob under a folder, in one call: loudness, resize, reframe, compress, convert, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, trim, silence, chroma_key, cut_words, remove_retakes, smart_cut, clean_voice, slideshow, hook, bpm, beat_grid, tempo_drift, audio_levels, search_words, measure_pace or highlights — the same args for every file. Outputs are named <stem>-<operation>.<ext> under the output directory, mirroring the input tree. Returns one row per file (input order) with status ok/error/cached/skipped plus counts, so a failure in one file never hides the rest. Unchanged files are skipped via a content-hash cache (.mediakit-batch-cache.json in the output dir, verified against the output's size + sha256); jobs runs up to 8 files at once under one shared timeout_seconds budget; dry_run lists the planned outputs and writes nothing. cut_words, remove_retakes, smart_cut and search_words find each clip's words file by convention (<words_dir>/<stem>.words.json, default the input's own folder) — a clip with no words file fails its own row only. clean_voice writes .wav always (48 kHz mono float), whatever the input was, and a take whose plan needs clearvoice/sr fails its own row (pass steps without them to clean anyway). slideshow is the exception: a SET operation — the whole matched set of images (2-32) becomes ONE slideshow video (output_name, default slideshow.mp4) instead of one output per file, and the per-file cache does not apply. hook, bpm, beat_grid, tempo_drift, audio_levels, search_words, measure_pace and highlights are the probe-only exceptions: they write no file (output is null, output_suffix is null) — the measurement comes back in each row's result, and the cache stores that result instead of a file.",
     schema: {
     operation: z.enum(["loudness", "resize", "reframe", "compress", "convert", "extract_audio", "reverse", "rotate", "boomerang", "make_loopable", "freeze", "grade", "fit", "trim", "silence", "chroma_key", "cut_words", "remove_retakes", "smart_cut", "clean_voice", "slideshow", "hook", "bpm", "beat_grid", "tempo_drift", "audio_levels", "search_words", "measure_pace", "highlights"]).describe("The operation to apply to every matched file"),
@@ -1657,6 +1720,7 @@ export const TOOL_DEFS = [
 
   {
     name: "manifest",
+    tier: "WRITE",
     description: "Run a whole edit pipeline from ONE declarative JSON manifest file: {version: 1, input, output, steps: [{tool, args}], qa?} — paths in the manifest are relative to the manifest file. Steps run in order, each feeding the next (slideshow as step 1 only — it builds a video from images in args, so the manifest input should be the first slide image; download as step 1 only — it fetches from a URL in args, and when it is step 1 the manifest input may be omitted entirely; then trim, resize, reframe, compress, convert, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, silence, denoise, interpolate, burn_captions, overlay, chroma_key, cut_words, remove_retakes, smart_cut; hook, bpm, beat_grid, tempo_drift, audio_levels, search_words, measure_pace and highlights are the probe-only steps — they analyze the chain file at that point and pass it through unchanged, so their results record WHY the next trim cuts where it does); the whole plan is validated before anything renders, so a typo fails in seconds. Each step is cached by content hash (input bytes + tool + args + sidecar-file bytes, verified against the cached output's size + sha256; a probe-only step stores only its result, there is no file to verify) — re-running an unchanged manifest re-encodes nothing, and editing step 3 only re-runs from step 3. Set qa to a platform (or 'any') to run qa_report on the final file. dry_run prints the plan and writes nothing — the approve-before-render gate. A step failure aborts the run and keeps the intermediates for inspection.",
     schema: {
     manifest_path: pathSchema.describe("Path to the manifest JSON file"),
@@ -1677,6 +1741,7 @@ export const TOOL_DEFS = [
 
   {
     name: "patch_manifest",
+    tier: "DESTRUCTIVE",
     description: "Edit a manifest JSON file under a revision guard (AH64-dll/OpenEdit's revision-guard idea: a write against a stale revision is refused instead of silently overwriting newer work). A manifest carries an optional top-level `revision` (absent = 0); the call requires `expected_revision` to match the file's current revision, applies 1-32 ops, proves the patched manifest still lints and plans (a real manifest --dry-run on a temp copy), then writes atomically (.partial + rename) with revision + 1 — and first copies the pre-patch bytes to `<manifest>.bak` (bariswha/losslesscut-mcp's set_segments idea), so .bak is always the revision just before the current one. A revision mismatch, a bad op, or a patched manifest that no longer validates all refuse with an error code (REVISION_MISMATCH / INVALID_ARG) and leave the file byte-identical — nothing is written. Ops: set {path: input|output|qa|steps.N.tool|steps.N.args.KEY, value: scalar} (version/revision are managed, not settable); add_step {step: {tool, args?}, index?} (append, or insert at index); remove_step {index} (never the last step); replace_step {index, step: {tool, args?}}. Ops apply in order — each op addresses the step list as the previous ops left it (JSON Patch semantics). Returns revision_before/after, the backup path, a human-readable changes list, and the dry-run validation (steps + planned output).",
     schema: {
     manifest_path: pathSchema.describe("Path to the manifest JSON file to patch"),
@@ -1702,6 +1767,7 @@ export const TOOL_DEFS = [
 
   {
     name: "determinism",
+    tier: "PLAN",
     description: "Check whether a linear pipeline manifest reproduces byte-identically (heristop/leclap's verify --rerender idea, for the manifest tool — assemble already has verify --rerender; the manifest cache only verifies size + sha256 of an output it already stored, it never proves a fresh run reproduces the same bytes). Runs the same manifest N times (default 2, max 5) with the cache OFF — a cache hit would prove nothing — then compares byte sha256, decoded-frame digest (framemd5, moviepy's test pattern: compare decoded frames, never bytes), and measured properties (duration/frames/dimensions) across runs. Verdict byte_identical means the pipeline reproduces exactly (on this machine two identical libx264 encodes are byte-identical); content_identical means the frames match but container bytes differ, with the differing format tags named (usually creation_time); differs means the pipeline itself is nondeterministic, with the first differing run pair named. A download-first manifest re-fetches its URL on every run, unless the download step sets cache:true (then the verified per-URL cache serves it). keep_outputs keeps the per-run outputs under .mediakit-determinism-<pid> next to the manifest (removed by default).",
     schema: {
     manifest_path: pathSchema.describe("Path to the manifest JSON file to re-run"),
@@ -1718,6 +1784,7 @@ export const TOOL_DEFS = [
 
   {
     name: "assemble",
+    tier: "WRITE",
     description: "Film assembler (Autopilot-style): build a finished video from ONE declarative film manifest — shots on a voice-led timeline, mixed audio, burned captions, QA and a receipt. The voice is the master clock: total = lead + measured voice duration + tail, and shot durations must cover that total EXACTLY in frames (no silent trim/pad/speed change). Modes: validate (no writes), preview (first N seconds at half size — show it to the user), approve (records the fingerprint of the previewed files; a human must have seen the preview), render (needs a matching approval, unless force:true). Shot segments are cached by content hash, so a re-render rebuilds only changed shots. v1: plain cuts, no per-shot text layers, one aspect per manifest. async:true (render only) returns a job_id immediately and renders in the background — poll the job tool. chapters [{title, at}] in the manifest become MP4 chapters in final.mp4. `preset` in the manifest (vertical/horizontal/square/cinematic/vertical-60) picks width/height/fps/style for the whole film; explicit fields win and are reported in preset_overrides, preset-filled fields in preset_applied. `brand` in the manifest (amber-teal/warm-story/minimal-line, see skills/shorts-video/brands.json — or your own ids from a MEDIAKIT_BRANDS file) paints the whole film in one channel look — palette fills template colors and text-layer color/size, its style fills the caption style when no preset or explicit style sets one; explicit values win and are reported in brand_overrides, brand-filled fields in brand_applied. NOT the manifest tool (that runs a linear edit pipeline). Shot roles (hook/context/core/payoff) and a film-level hook {shot, start?, end?} pin the opening segment — diagnose checks the arc (hook first, payoff last). A shot may carry variants — alternate takes A/B/C of the same kind, each with its own source fields and an optional hook label naming which hook it opens with — with selected (index or label, default 0) picking the one that renders; unselected takes are still probed, hashed and listed in the receipt, so switching the pick re-renders only that shot.",
     schema: {
     manifest_path: pathSchema.describe("Path to the film manifest JSON file (see skills/shorts-video/references/assemble-manifest.md for the schema)"),
@@ -1754,6 +1821,7 @@ export const TOOL_DEFS = [
   // captions, an assets/ layout and a CLAUDE.md with the lifecycle.
   {
     name: "init_project",
+    tier: "WRITE",
     description: "Scaffold a new assemble video project in a directory: a film.json that already validates (preset vertical by default, two template shots, 4s total), a placeholder voice (440 Hz tone WAV, 3s — replace it with the real narration before delivery), placeholder captions, an assets/ layout (shots/, music/) and a CLAUDE.md with the project lifecycle (validate → diagnose → preview → approve → render → verify → verify-cuts). The starter film renders a real preview out of the box, so the project is edited, not debugged into existence. Refuses when film.json or CLAUDE.md already exists unless force:true. Use this before writing a film manifest by hand.",
     schema: {
     dir: pathSchema.describe("Project directory to create (relative to the workspace, or absolute)"),
@@ -1779,6 +1847,7 @@ export const TOOL_DEFS = [
 // (kills the worker's whole process group, ffmpeg children included).
   {
     name: "job",
+    tier: "PLAN",
     description: "Inspect a durable async render job (started by assemble async:true): status shows progress (stage + percent) and the terminal result or error, plus estimate_remaining_seconds — a rough upper-bound ETA in whole seconds while the job runs (null when it is too early to tell, or the job is queued/terminal) — and estimate_basis naming how it was derived (progress-rate from the job's own percent history, elapsed-progress from time since start, complete/not-started/terminal/too-early); treat the number as a rough guide, never a promise. list shows all jobs newest-first; cancel stops a queued or running job. Status also carries progress_history — every distinct percent the worker reported, so in-stage movement is provable without polling luck (list omits it). admission reports the render-job admission gate (max 2 active jobs / 10 starts per minute by default, env MEDIAKIT_MAX_JOBS / MEDIAKIT_MAX_JOB_STARTS_PER_MINUTE) — check it before starting a render so a refused start does not surprise you. Jobs live under MEDIAKIT_JOBS_DIR or <workdir>/.mediakit-jobs.",
     schema: {
     job_id: z.string().optional().describe("Job id (e.g. job-20261114-005800-a1b2c3d4) — required for status/cancel"),
@@ -1809,6 +1878,7 @@ export const TOOL_DEFS = [
 // until the last segment arrives.
   {
     name: "download",
+    tier: "WRITE",
     description: "Download a media file from an http(s) URL into the workspace — stock footage, a reference clip, a music bed. Typed and guarded: http/https only (no credentials in the URL), size cap enforced while streaming for direct files (default 500 MB, refused upfront when Content-Length already exceeds it), 5 redirects max, 300s timeout per attempt, written atomically via <output>.partial and renamed only on success, then probed — a file that is not media is deleted and reported, never left as a success. HLS (.m3u8) / DASH (.mpd) playlists are fetched with ffmpeg -c copy (re-mux, never re-encode) under a protocol whitelist, and the size cap is enforced after the fetch. The output extension is either given (must be a media extension) or derived from the Content-Type / URL path. Transient failures (HTTP 429/5xx, network errors) are retried with exponential backoff 1s/2s/4s honouring Retry-After (default 3 retries; timeouts and deterministic refusals are never retried). cache:true reuses a verified per-URL disk cache (size + sha256 checked, corrupt entries re-fetched; playlists are never cached). rate_limit_rps paces downloads in this process with a token bucket (0 = unlimited). License: pass license to declare the source's license (e.g. CC0, CC-BY, Public Domain — recorded in <output>.provenance.json, never guessed); a license policy file (MEDIAKIT_LICENSE_POLICY env, or license_policy_file per call: {allow?, deny?, require_license?}) gates the download BEFORE any fetch — a declared license outside the allow list, inside the deny list, or missing when required is refused with LICENSE_DENIED and costs zero bytes. Without a policy file the gate is off and the license is only recorded. Returns the output path, size, content-type, redirect count, attempts/retries, cache hit status, the declared license + policy verdict, and the probe summary (duration, dimensions, codecs).",
     schema: {
     url: z.string().url().describe("http(s) URL of a direct media file (video/audio/image) or an HLS (.m3u8) / DASH (.mpd) playlist"),
@@ -1848,6 +1918,7 @@ export const TOOL_DEFS = [
   // MEDIAKIT_AUDIT=0 disables recording); `doctor` reports its state.
   {
     name: "audit",
+    tier: "READ",
     description: "Read the audit log: every tool call this workspace has recorded (newest first), with its arguments hash, input/output files + SHA-256, duration and status. Filter by tool, status, or since a date; verify:true re-hashes the recorded files on disk and reports matched/missing/changed per file, so a stale or tampered output is caught instead of trusted.",
     schema: {
     limit: z.number().int().min(1).max(200).default(20).describe("How many entries to return, newest first (default 20, max 200)"),
@@ -1868,6 +1939,7 @@ export const TOOL_DEFS = [
 
   {
     name: "motion",
+    tier: "READ",
     description: "Measure real movement in a video (probe-only, writes no file): per-second curve of the fraction of pixels that changed between adjacent frames, plus still intervals and a verdict (moving / mostly-static / static). Use it as the director's motion gate — a shot that looks alive in the timeline but scores 0.0000 is a still wearing a video's clothes. A static title card measures 0.0000-0.0001, a bouncing ball 0.003-0.009, testsrc 0.06; the default still threshold 0.001 splits movement from encoder noise with a wide margin. Pass adaptive:true to calibrate the threshold to the clip instead: the threshold becomes min(max(threshold, p25-of-curve * adaptive_factor), max(adaptive_cap, threshold)) (defaults factor 2.0, cap 0.005), so light grain on a static shot (0.0007-0.0013) reads still while a bouncing ball (slowest second 0.007) still reads moving — the cap sits in the measured gap between grain and the slowest real motion. Pass lag_seconds to catch motion too slow for one frame step: the curve then compares frames N seconds apart (value at second k = change between second k and second k+N), so a 10s fade-in from black reads 0.00043 adjacent (static) but ~1.0 at lag 2. Still intervals in lag mode are corrected to clip time (end + lag, clamped to the duration); a still shorter than lag+1s, or one in the final lag seconds, is not reported — use lag 1 for short freezes.",
     schema: {
     input: pathSchema,
@@ -1901,6 +1973,7 @@ export const TOOL_DEFS = [
   // seconds of a Short.
   {
     name: "hook",
+    tier: "READ",
     description: "Find the best hook window in a clip (probe-only, writes no file): slide a window of duration seconds across the file and score each candidate on five measured signals — mean audio energy (astats RMS per frame, binned and normalized against the file's own loudest bin), speech coverage (silencedetect complement), scene cuts (a window opening on a cut, plus cuts inside it, reads as a new beat), real motion (per-frame pixel-diff fraction, binned on the same step grid, normalized against a fixed 0.06 reference — testsrc-level motion is 1.0 — with a 0.001 noise floor and a 0.005 file-level gate so a static clip never scores motion from encoder noise), and visual beats (the highlights perceptual-hash boundaries inside the window — 2+ beats is fully active, 1 beat is half; a boundary at the window start counts, the window opens on it). Score is 0.3*energy + 0.2*speech + 0.2*cut + 0.2*motion + 0.1*visual (audio 0.5 / video 0.5), fixed weights so two runs rank the same way; the top windows are greedy non-overlapping, so they are alternatives, not the same window shifted by one step. Returns the ranked candidates with the score breakdown (each carries visual + visual_beats), the highlight_boundaries, the per-step energy curve (each bin also carries motion + motion_fraction), pacing from real cuts (slow/medium/fast-cut), a trim object, and a suggested_trim command. The trim end snaps to the nearest quiet moment (shorts-maker-gpu's smart end point): within the last snap_window_seconds (default 5) the quietest bin — quiet is (energy + motion) / 2 — wins when it is at most half as busy as the window's own mean, earliest wins a tie so the cut lands where the quiet starts, and the snap never shortens the hook below max(4s, half the window); a uniformly loud window or a whole-file hook keeps its raw end (trim.snapped false + reason). Video-only input scores on cuts+motion; audio-only on energy+speech. Files over 20 minutes are refused (the astats log would exceed the capture buffer). Clip history: pass history_file (a JSON file {version: 1, records: [{source_sha256, start, end, score, recorded_at}]}) to check every candidate against moments already cut — a candidate is duplicate when it comes from the same source file (sha256) and overlaps a recorded window by >= history_overlap (default 0.5) of the shorter window, reported as duplicate + duplicate_of on the candidate; history reports records_checked/duplicates_found/recorded. With record: true the winning window is appended to the history file (atomic write, only the winner — the alternatives were never cut, so they stay eligible); record without history_file is refused. A missing history file is an empty history; a corrupt one fails loudly.",
     schema: {
     input: pathSchema,
@@ -1940,6 +2013,7 @@ export const TOOL_DEFS = [
   // number — never snap cuts to an unreliable grid.
   {
     name: "bpm",
+    tier: "READ",
     description: "Measure the musical tempo of a clip in BPM (probe-only, writes no file): decode to mono PCM, build a spectral-flux onset function, find the period by autocorrelation + comb filterbank with a 120 BPM prior and an onset-recall tie-break (aubio tempo, re-implemented in pure Node). Returns bpm (1 decimal), beat_period_seconds, confidence 0-1, reliable flag, onset_recall, onsets_detected, first_beat_seconds and the first 16 beat times. A steady tone has no onsets and speech has no steady beat — both report reliable: false with low confidence instead of a confident wrong number; do not snap cuts to an unreliable grid. Files over 10 minutes or under 4s are refused.",
     schema: {
     input: pathSchema,
@@ -1970,6 +2044,7 @@ export const TOOL_DEFS = [
   // a steady 120 click track).
   {
     name: "beat_grid",
+    tier: "READ",
     description: "Return the full beat grid of a clip (probe-only, writes no file): the same spectral-flux + autocorrelation/comb measurement as bpm, expanded to every beat across the file instead of the first 16. Returns bpm, beat_period_seconds, confidence, a reliable flag, onset_recall, onsets_detected, first_beat_seconds, beats (all of them, 3 decimals), beat_count and last_beat_seconds. A steady tone or speech reports reliable: false with a warning — do not snap cuts to an unreliable grid (trim snap_to_beat refuses it). The grid is rigid by default: one steady tempo for the whole file, so a clip whose tempo drifts will drift off it. Set method=\"dp\" to run the DP beat tracker instead (librosa beat_track, re-implemented in pure Node): it picks real onset peaks near the grid, so the beats stay on the music while the tempo moves, and reports tempo_drift_seconds (worst distance from the rigid grid) and tempo_drift_cv (interval variation). Files over 10 minutes or under 4s are refused.",
     schema: {
     input: pathSchema,
@@ -2002,6 +2077,7 @@ export const TOOL_DEFS = [
   // refused (the analysis window alone is ~4-9s).
   {
     name: "tempo_drift",
+    tier: "READ",
     description: "Measure the local tempo of a clip over time (probe-only, writes no file): sliding-window tempo estimation — the aubio pipeline (spectral-flux + autocorrelation/comb + 120 BPM prior + onset-recall tie-break) run on overlapping windows of the onset envelope, aggregated to a 1-second tempo_curve (the local-tempo idea of librosa's plp). Returns bpm (global), confidence, a reliable flag, tempo_curve (1s bins with bpm + confidence + reliable), start_bpm / end_bpm (median of the first/last 20% of reliable bins), delta_bpm, max_deviation_bpm, direction (speeding_up / slowing_down / steady) and verdict (steady / drifting / variable / unreliable). Use it before snapping cuts to a beat grid: a drifting take (120->132 over 12s reads delta +6.5) needs beat_grid --method dp, not the rigid grid. A steady tone or speech reports verdict unreliable. Files over 10 minutes or under 8s are refused.",
     schema: {
     input: pathSchema,
@@ -2028,6 +2104,7 @@ export const TOOL_DEFS = [
   // Across machines only the measured properties are comparable.
   {
     name: "verify",
+    tier: "READ",
     description: "Verify an assemble render against its receipt (assemble-receipt.json from a full render): re-hash every input (manifest, voice, music, captions, sfx, shot assets) and the output file, re-measure duration/frames/dimensions/LUFS, and report matched/changed/missing per item with a pass/fail verdict and the first difference. With rerender:true, re-run assemble from the recorded manifest (force) into a temp directory and compare the new receipt against the old one — a byte-identical output plus matching inputs proves the render reproduces. Use it after any render you must trust (report videos, deliveries) and whenever a file has been edited since the render.",
     schema: {
     receipt: pathSchema.describe("Path to assemble-receipt.json (written next to final.mp4 by a full assemble render)"),
@@ -2058,6 +2135,7 @@ export const TOOL_DEFS = [
   // trust, next to verify.
   {
     name: "verify_cuts",
+    tier: "PLAN",
     description: "Verify an assemble render cuts where its film manifest promises: downscale the delivered video to a 270p draft, measure the real hard cuts with the content scene detector, and compare them against the manifest's shot boundaries — a hard cut must land within tolerance (default 0.25s) of its promised time, a transition must show a real visual change across its blend window (measured as a frame diff, since a fade fires no scene cut), and any extra cut is reported as unexpected. Duration is checked against the voice timeline (±0.2s). Returns ok plus one entry per boundary (confirmed/missing/invisible_transition/unmeasured) and the list of unexpected cuts. Probe-only: writes nothing except a temp draft, removed afterwards unless keep_draft.",
     schema: {
     manifest_path: pathSchema.describe("Path to the film manifest JSON file (same schema as assemble)"),
@@ -2092,6 +2170,7 @@ export const TOOL_DEFS = [
   // the render.
   {
     name: "diagnose",
+    tier: "READ",
     description: "Director preflight for an assemble film manifest: validate the manifest, then measure what validation cannot — real motion inside each video shot's exact window (a frozen video is an error), source geometry vs the film frame (upscale over 2x or a low fps warns), the visual seam across each transition (near-identical frames warn), voice loudness, caption coverage and gaps, music loop count, sfx tails past the film end, chapter alignment to cuts, text layers that are too tall or sit in the burned-caption band, and style pace (cuts per minute + longest hold scored against the style.json — an explicit style_file, or the style.json sitting next to the film; films under 15s are too short to compare), and per-shot pacing (a run of 3+ same-look shots, a shot under 1s or over 15s, dialogue denser than 15 chars/s). Probe-only, writes nothing. Returns a pass/warn/fail verdict with one check per finding and the first issue. A broken manifest returns verdict fail with format_error instead of throwing.",
     schema: {
     manifest_path: pathSchema.describe("Path to the film manifest JSON file (same schema as assemble)"),
@@ -2116,6 +2195,7 @@ export const TOOL_DEFS = [
   // DIALOGUE_CHANGED instead of silently aligning the wrong script.
   {
     name: "align_voice",
+    tier: "READ",
     description: "Align an assemble film's shot durations to its voice: split the voice across the shots that speak, in proportion to each shot's dialogue characters (whitespace-free count, like agent-storyboard's estimateTiming), then snap each interior boundary to the middle of the nearest pause within snap_window_ms (default 600) so a cut never clips a word. Dialogue comes from each shot's `dialogue` field, overridden per shot by a --lines file [{shot, dialogue}]; shots with no dialogue keep their durations. Durations are whole frames at the film fps and each spoken run's frame sum is preserved, so the aligned film still tiles lead + voice + tail exactly. Plan mode (default) writes nothing and reports the dialogue_key (sha256 over [[shot id, dialogue]] in film order), per-shot durations/deltas/snap info, and violations (motion-gate, text layer past the new duration, transition too long, hook past the shot). Apply mode (--apply + --output) writes the aligned film — never over the input — embeds the dialogue it aligned from, re-validates the written file, and refuses when there are violations or when --expected-key differs from the computed key (dialogue changed or shots reordered — re-run without it to re-align).",
     schema: {
     film_path: pathSchema.describe("Path to the assemble film manifest JSON file (same schema as assemble; each shot may carry a `dialogue` string)"),
@@ -2148,6 +2228,7 @@ export const TOOL_DEFS = [
   // film.json's "chapters".
   {
     name: "chapters",
+    tier: "READ",
     description: "Generate chapter markers for a long talk or film from measured pauses, not guesses. Two modes, exactly one: words_file (a transcribe --word-timestamps JSON) splits the transcript wherever the gap between two words reaches min_gap (default 2s) and titles each chapter from the first words spoken in it; input (a media file with audio) runs silencedetect and starts a chapter at each speech segment that follows a silence of at least min_gap, titled Part 1..N. The first chapter is always at 0 (YouTube requires the first chapter at 0:00) — when the first word/speech starts later the chapter is clamped to 0 and reported. Over max_chapters (default 32, the assemble cap) the closest neighbours merge first. Returns chapters in the assemble manifest shape {title, at}; pass output to also write that JSON to a file.",
     schema: {
     words_file: pathSchema.optional().describe("Transcript words JSON from transcribe --word-timestamps ({words:[{start,end,word}]}) — one of words_file / input"),
@@ -2179,6 +2260,7 @@ export const TOOL_DEFS = [
   // cover, reveal, other); without it the whole catalog comes back.
   {
     name: "transitions",
+    tier: "READ",
     description: "List the xfade transition catalog (probe-only, writes no file): every transition name concat / slideshow / assemble accept, grouped by family — fade (cross-dissolve), wipe (hard edge sweep), slide (push off frame), smooth (eased slide), shape (geometric mask), diagonal, slice (strips peel away), wind (strips blow across), cover (curtain in), reveal (outgoing slides away), other (pixelize, radial, blur, zoom, squeeze). Returns total (58 on ffmpeg 8.1.2) plus per-category names and one-line descriptions. Pass category to narrow to one family; an unknown category is refused with the valid list.",
     schema: {
     category: z.string().optional().describe("One category name (fade, wipe, slide, smooth, shape, diagonal, slice, wind, cover, reveal, other) — omit for the full catalog"),
@@ -2191,6 +2273,7 @@ export const TOOL_DEFS = [
 
   {
     name: "export_timeline",
+    tier: "WRITE",
     description: "Export an assemble film manifest to an OpenTimelineIO timeline (.otio) — the director's EDL for a real editor (DaVinci / Premiere / any OTIO adapter): the same cuts, transitions, chapters and audio the ffmpeg render produces, with media linked by absolute file:// URL. One Video track (a Clip per image/video shot, a Gap per color/canvas_scene shot — generated frames have no file, so the gap is honest — with a Transition between joined shots), plus Audio tracks for Voice (lead gap + voice + tail gap), Music (looped to the film length) and SFX (each at its timestamp). Chapters become Marker.2 markers on the video track (OTIO 0.18 cannot read Marker.1). Transitions map the xfade join exactly: in_offset/out_offset are the split of the transition frames (in = ceil half, out = floor half), so the OTIO dissolve starts where the ffmpeg blend starts; fade-family xfade names become SMPTE_Dissolve, the rest Custom_Transition with the xfade name in metadata. Frame math is rational, never float seconds: every boundary is a whole number of frames at the film fps, and frame_math reports the snap error per shot (a 26.575s shot at 30fps is 797 frames with a -0.25-frame snap, never 797.25 frames). A file that passed validation and then vanished is linked with available_range null and listed in media.missing instead of failing the export. The writer self-checks the document (every track sums to exactly total_frames) and refuses to write a bad one. Returns the timeline summary, frame_math, media.missing, warnings and the self-check.",
     schema: {
     manifest_path: pathSchema.describe("Path to the assemble film manifest (film.json) to export"),
@@ -2201,4 +2284,105 @@ export const TOOL_DEFS = [
     output: a.output,
   })),
   },
+
+  // Safety tiers (EncodeX's safety.ts idea, lượt 141): every tool
+  // carries one of READ / PLAN / WRITE / DESTRUCTIVE — see `safety`
+  // below and the Safety tiers section of the README. The tier is a
+  // property of the tool, not of its arguments: a WRITE tool with
+  // dry_run=true still reports WRITE (it writes by default).
+  {
+    name: "safety",
+    tier: "READ",
+    description: "Safety tiers for every MediaKit tool (EncodeX's safety-tier idea): READ tools only probe and write nothing (probe, check, hook, diagnose); PLAN tools answer a question by transient work and leave no artifact (determinism renders to a hidden work dir that is removed, verify_cuts renders a draft to temp, estimate_conversion sample-encodes to temp, job only reads/cancels job state); WRITE tools produce a file the caller asked for and never overwrite their own input (prepareOutput refuses that); DESTRUCTIVE tools replace or remove a user artifact in place — only patch_manifest, and it is guarded by expected_revision plus a .bak backup. Returns the tier table with every tool named, the counts, and the rules. Read this before letting an agent loose on a workspace.",
+    schema: {},
+    handler: async () => safe(() => listSafetyTiers()),
+  },
+
+  // Estimate a convert's size + time before running it (EncodeX's
+  // estimate_conversion idea, lượt 141): measured, not a bitrate
+  // table — video-only sample encodes at two lengths per window
+  // position (steady rate + one keyframe, GOP 250), audio copied
+  // (the convert default) or measured from one audio-only sample.
+  // A short file is encoded whole, so the answer is exact.
+  {
+    name: "estimate_conversion",
+    tier: "PLAN",
+    description: "Estimate a convert's output size and time BEFORE running it (EncodeX's estimate_conversion idea): measured, not a bitrate table. At 2 window positions (25%/75% of the file) it encodes the same start twice, video-only, at a short length (default 2s) and a long length (default 6s) with accurate seek — both start with one keyframe, so steady_rate = (long_bytes - short_bytes) / (long - short) and iframe_bytes = short_bytes - steady_rate x short; full video = steady_rate x duration + iframe_bytes x one keyframe per 250 frames (the x264/x265 default GOP). Audio is copied by default (the convert default), so its cost is the probed source audio bitrate x duration; pass audio_bitrate_kbps to re-encode audio, measured from one audio-only sample encode. Time is a rough ETA (duration / measured encode speed + one measured startup); size is the precise part — on the fixtures it lands within 10% (hook-source -6.1%, source +4.2% at crf 23; source.mp4 takes the full-encode path and is exact). A file shorter than the sample budget is encoded whole, so the answer is exact instead of estimated. Leaves no artifact: samples go to a temp dir that is removed afterwards. Only libx264/libx265 (vp9/av1 use different quality knobs, so a crf estimate would not match convert).",
+    schema: {
+    input: pathSchema,
+    video_codec: z.enum(["libx264", "libx265"]).default("libx264").describe("Target video codec (default libx264); only these two — vp9/av1 use different quality knobs"),
+    crf: z.number().int().min(0).max(51).default(23).describe("Constant rate factor 0-51 (default 23, same as convert)"),
+    preset: z.enum(["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"]).default("medium").describe("x264/x265 preset (default medium, same as convert)"),
+    width: z.number().int().min(2).optional().describe("Target width in pixels (omit = source display width; the other dimension follows aspect when only one is given)"),
+    height: z.number().int().min(2).optional().describe("Target height in pixels (omit = source display height)"),
+    fps: z.number().positive().optional().describe("Target frame rate (omit = source fps)"),
+    audio_bitrate_kbps: z.number().int().min(8).max(320).optional().describe("Re-encode audio to this bitrate in kbps; omit to copy the source audio (the convert default)"),
+    positions: z.number().int().min(1).max(3).default(2).describe("How many window positions to sample (1-3, default 2: 25% and 75% of the file)"),
+    short_seconds: z.number().min(1).max(3).default(2).describe("Short sample length in seconds (default 2)"),
+    long_seconds: z.number().min(4).max(10).default(6).describe("Long sample length in seconds (default 6, must be longer than short_seconds)"),
+  },
+    handler: async (a) => safe(() => core.estimateConversion({
+    input: a.input,
+    videoCodec: a.video_codec ?? "libx264",
+    crf: a.crf ?? 23,
+    preset: a.preset ?? "medium",
+    width: a.width ?? null,
+    height: a.height ?? null,
+    fps: a.fps ?? null,
+    audioBitrateKbps: a.audio_bitrate_kbps ?? null,
+    positions: a.positions ?? 2,
+    shortSeconds: a.short_seconds ?? 2,
+    longSeconds: a.long_seconds ?? 6,
+  })),
+  },
 ];
+
+// ---------------------------------------------------------------- safety tiers
+// One source of truth for the tier of every tool: the `tier` field on
+// each TOOL_DEFS entry. The MCP annotations are the standard coarse
+// mapping of that tier (readOnlyHint / destructiveHint /
+// idempotentHint / openWorldHint); `download` is the only tool that
+// touches the network, so it alone gets openWorldHint: true.
+export const SAFETY_TIERS = ["READ", "PLAN", "WRITE", "DESTRUCTIVE"];
+
+export const TIER_ANNOTATIONS = {
+  READ: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  PLAN: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  WRITE: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  DESTRUCTIVE: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+};
+
+export function toolAnnotations(tool) {
+  const a = { ...TIER_ANNOTATIONS[tool.tier ?? "WRITE"] };
+  if (tool.name === "download") a.openWorldHint = true;
+  return a;
+}
+
+const TIER_DESCRIPTIONS = {
+  READ: "Probe-only: reads media and returns measurements, writes nothing.",
+  PLAN: "Answers a question by transient work (a draft render, sample encodes, a job lookup) and leaves no artifact behind.",
+  WRITE: "Produces a file the caller asked for; never overwrites its own input (prepareOutput refuses that).",
+  DESTRUCTIVE: "Replaces or removes a user artifact in place — needs a human-checked guard (patch_manifest: expected_revision + .bak backup).",
+};
+
+export function listSafetyTiers() {
+  const tiers = {};
+  for (const tier of SAFETY_TIERS) tiers[tier] = { description: TIER_DESCRIPTIONS[tier], tools: [] };
+  for (const tool of TOOL_DEFS) {
+    if (!tiers[tool.tier]) throw new Error(`tool "${tool.name}" has unknown tier "${tool.tier}"`);
+    tiers[tool.tier].tools.push(tool.name);
+  }
+  const counts = Object.fromEntries(SAFETY_TIERS.map((t) => [t, tiers[t].tools.length]));
+  return {
+    tiers,
+    counts,
+    total_tools: TOOL_DEFS.length,
+    rules: [
+      "READ tools never write a file, including temp files outside the OS temp dir.",
+      "PLAN tools may render to a temp or hidden work dir, but remove it afterwards; they leave no artifact the caller asked for.",
+      "WRITE tools write exactly the output the caller named, and refuse to overwrite their own input file.",
+      "DESTRUCTIVE tools replace a user artifact in place and must carry a human-checked guard (revision, backup, or explicit confirm).",
+      "A tool's tier is a property of the tool, not its arguments: a WRITE tool with dry_run=true still reports WRITE.",
+    ],
+  };
+}

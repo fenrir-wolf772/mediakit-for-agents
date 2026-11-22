@@ -53,7 +53,7 @@
 import { createServer } from "node:http";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
-import { TOOL_DEFS } from "./tools.js";
+import { TOOL_DEFS, toolAnnotations } from "./tools.js";
 import { explainError, getJob, listJobs, cancelJob } from "./core.js";
 import { recordToolCall } from "./audit.js";
 
@@ -205,6 +205,8 @@ export function listTools() {
     name: t.name,
     description: t.description,
     inputSchema: toolInputSchema(t),
+    tier: t.tier,
+    annotations: toolAnnotations(t),
   }));
 }
 

@@ -7,6 +7,7 @@
  */
 import * as core from "../src/core.js";
 import { queryAudit, recordToolCall } from "../src/audit.js";
+import { listSafetyTiers } from "../src/tools.js";
 
 const VERSION = "0.1.0";
 
@@ -1033,6 +1034,29 @@ const COMMANDS = {
     args: [],
     options: [
       ["--category", "One category name (fade, wipe, slide, smooth, shape, diagonal, slice, wind, cover, reveal, other) — omit for the full catalog"],
+    ],
+  },
+  safety: {
+    usage: "mediakit safety",
+    desc: "Safety tiers for every MediaKit tool (EncodeX's safety-tier idea): READ tools only probe and write nothing; PLAN tools answer a question by transient work and leave no artifact; WRITE tools produce a file the caller asked for and never overwrite their own input; DESTRUCTIVE tools replace a user artifact in place — only patch_manifest, guarded by expected_revision plus a .bak backup. The same tiers ride on the MCP tools/list as standard annotations (readOnlyHint / destructiveHint / idempotentHint / openWorldHint); download alone has openWorldHint because it alone touches the network. Probe-only, writes nothing.",
+    args: [],
+    options: [],
+  },
+  "estimate-conversion": {
+    usage: "mediakit estimate-conversion <input> [--video-codec libx264] [--crf 23] [--preset medium] [--width <px>] [--height <px>] [--fps <n>] [--audio-bitrate-kbps <n>] [--positions 2] [--short-seconds 2] [--long-seconds 6]",
+    desc: "Estimate a convert's output size and time BEFORE running it (EncodeX's estimate_conversion idea): measured, not a bitrate table. At 2 window positions (25%/75% of the file) it encodes the same start twice, video-only, at a short length (default 2s) and a long length (default 6s) with accurate seek — both start with one keyframe, so steady_rate = (long_bytes - short_bytes) / (long - short) and iframe_bytes = short_bytes - steady_rate x short; full video = steady_rate x duration + iframe_bytes x one keyframe per 250 frames. Audio is copied by default (the convert default), so its cost is the probed source audio bitrate x duration; --audio-bitrate-kbps re-encodes audio, measured from one audio-only sample encode. Time is a rough ETA (duration / measured encode speed + one measured startup); size is the precise part — on the fixtures it lands within 10% (hook-source -6.1%, source +4.2% at crf 23; short files take the full-encode path and are exact). Leaves no artifact: samples go to a temp dir that is removed afterwards. Only libx264/libx265.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--video-codec", "Target video codec: libx264 or libx265 (default libx264)"],
+      ["--crf", "Constant rate factor 0-51 (default 23, same as convert)"],
+      ["--preset", "x264/x265 preset: ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow (default medium)"],
+      ["--width", "Target width in pixels (omit = source display width)"],
+      ["--height", "Target height in pixels (omit = source display height)"],
+      ["--fps", "Target frame rate (omit = source fps)"],
+      ["--audio-bitrate-kbps", "Re-encode audio to this bitrate in kbps; omit to copy the source audio (the convert default)"],
+      ["--positions", "How many window positions to sample, 1-3 (default 2: 25% and 75% of the file)"],
+      ["--short-seconds", "Short sample length in seconds, 1-3 (default 2)"],
+      ["--long-seconds", "Long sample length in seconds, 4-10 (default 6, must be longer than --short-seconds)"],
     ],
   },
   manifest: {
@@ -2113,6 +2137,24 @@ async function main() {
       case "transitions":
         result = core.listTransitions({
           category: opts.category ?? null,
+        });
+        break;
+      case "safety":
+        result = listSafetyTiers();
+        break;
+      case "estimate-conversion":
+        result = await core.estimateConversion({
+          input: needInput(),
+          videoCodec: opts.video_codec ?? "libx264",
+          crf: numOpt(opts, "crf") ?? 23,
+          preset: opts.preset ?? "medium",
+          width: numOpt(opts, "width") ?? null,
+          height: numOpt(opts, "height") ?? null,
+          fps: numOpt(opts, "fps") ?? null,
+          audioBitrateKbps: numOpt(opts, "audio_bitrate_kbps") ?? null,
+          positions: numOpt(opts, "positions") ?? 2,
+          shortSeconds: numOpt(opts, "short_seconds") ?? 2,
+          longSeconds: numOpt(opts, "long_seconds") ?? 6,
         });
         break;
       case "mux": {

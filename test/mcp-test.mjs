@@ -188,10 +188,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut", "clean_voice", "measure_pace", "highlights", "align_voice"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut", "clean_voice", "measure_pace", "highlights", "align_voice", "safety", "estimate_conversion"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 83 tools present");
-checkOk(missing.length === 0, "tools/list has all 83 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 85 tools present");
+checkOk(missing.length === 0, "tools/list has all 85 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -5916,10 +5916,19 @@ checkOk(findNestedJson.total_matches === 1 && findNestedJson.matches[0]?.path.en
 
 const findSourceRes = await client.callTool({
   name: "find",
-  arguments: { directory: path.join(root, "test"), name: "source" },
+  arguments: { directory: path.join(root, "test"), name: "source", max_results: 100 },
 });
 const findSourceJson = JSON.parse(findSourceRes.content[0].text);
-checkOk(findSourceJson.total_matches === 18, "find 'source' matches 18 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source, hook-source, hook-motion-source, hook-snap-source, hook-visual-source, sharpness-source, rotate-source, noisy-source, beat-trim-source, levels-source, pace-source, highlights-source)", `got ${findSourceJson.total_matches}`);
+// Ponytail review (lượt 139, should-fix): an absolute count breaks
+// every time a *-source fixture ships — run1 of lượt 139 failed
+// exactly here when hook-visual-source.mp4 landed. Assert the known
+// names are all present (subset) instead of counting the fixture
+// directory; max_results 100 so a growing fixture set still returns
+// every known file in one page.
+const knownSourceFiles = ["source.mp4", "source2.mp4", "silence-source.mp4", "scenes-source.mp4", "quiet-source.mp3", "rich-source.mp4", "trim-check-source.mp4", "hook-source.mp4", "hook-motion-source.mp4", "hook-snap-source.mp4", "hook-visual-source.mp4", "sharpness-source.mp4", "rotate-source.mp4", "noisy-source.mp4", "beat-trim-source.mp4", "levels-source.wav", "pace-source.mp4", "highlights-source.mp4"];
+const foundSourceNames = new Set((findSourceJson.matches ?? []).map((m) => String(m.path).split("/").pop()));
+const missingSourceFiles = knownSourceFiles.filter((f) => !foundSourceNames.has(f));
+checkOk(missingSourceFiles.length === 0 && findSourceJson.total_matches >= knownSourceFiles.length, "find 'source' returns every known *-source fixture (subset, not an absolute count — a new fixture must not break this)", `got ${findSourceJson.total_matches}, missing: ${missingSourceFiles.join(",") || "none"}`);
 
 const findMp3Res = await client.callTool({
   name: "find",
@@ -7491,7 +7500,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 83 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 83 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 85 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 85 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -9907,6 +9916,43 @@ checkOk(explainSynth("DOWNLOAD_FAILED", "download failed: HTTP 429", { retryable
 checkOk(explainSynth("DOWNLOAD_FAILED", "download failed: HTTP 429", { retryable: true, retry_after_seconds: 7 }, { tool: "download", args: { url: "https://x/y.mp4" } }).fixes?.[0]?.retry_after_seconds === 7, "the wait is also read from snake_case retry_after_seconds (the HTTP layer re-wraps errors from envelope JSON — without this the 429 fix named no wait)", "retry-snake");
 checkOk(explainSynth("INPUT_NOT_FOUND", "input gone").kind === "switch" && explainSynth("INPUT_NOT_FOUND", "input gone").fixes?.[0]?.tool === "find" && explainSynth("INPUT_NOT_FOUND", "input gone").fixes?.[0]?.args === undefined, "INPUT_NOT_FOUND with an unparseable message still suggests find, without an invented query", "find-noquery");
 checkOk(explainSynth("REVISION_MISMATCH", "revision mismatch").kind === "fix-arg" && explainSynth("REVISION_MISMATCH", "revision mismatch").fixes?.[0]?.tool === "patch_manifest" && explainSynth("REVISION_MISMATCH", "revision mismatch").fixes?.[0]?.args === undefined, "REVISION_MISMATCH with an unparseable message still says re-read + retry, without an invented revision", "rev-noargs");
+// Safety tiers + estimate_conversion (lượt 141, EncodeX idea):
+// the tier table, the MCP annotations, and the measured estimate.
+const safetyRes = await client.callTool({ name: "safety", arguments: {} });
+const safetyJson = JSON.parse(safetyRes.content[0].text);
+checkOk(safetyJson.total_tools === 85 && safetyJson.counts.READ === 24 && safetyJson.counts.PLAN === 4 && safetyJson.counts.WRITE === 56 && safetyJson.counts.DESTRUCTIVE === 1, "safety counts the tiers: 24 READ / 4 PLAN / 56 WRITE / 1 DESTRUCTIVE of 85 tools", JSON.stringify(safetyJson.counts));
+checkOk(JSON.stringify(safetyJson.tiers.DESTRUCTIVE.tools) === JSON.stringify(["patch_manifest"]), "patch_manifest is the only DESTRUCTIVE tool", JSON.stringify(safetyJson.tiers.DESTRUCTIVE.tools));
+const tierOf = {};
+for (const [tier, v] of Object.entries(safetyJson.tiers)) for (const n of v.tools) tierOf[n] = tier;
+const badAnnotations = tools.tools.filter((t) => {
+  const a = t.annotations ?? {};
+  const tier = tierOf[t.name];
+  if (!tier) return true;
+  if (tier === "READ" ? a.readOnlyHint !== true : a.readOnlyHint !== false) return true;
+  if (tier === "DESTRUCTIVE" ? a.destructiveHint !== true : a.destructiveHint !== false) return true;
+  if (tier === "DESTRUCTIVE" ? a.idempotentHint !== false : a.idempotentHint !== true) return true;
+  if ((t.name === "download") !== (a.openWorldHint === true)) return true;
+  return false;
+});
+checkOk(badAnnotations.length === 0, "tools/list annotations match the safety tiers (READ read-only, DESTRUCTIVE destructive + not idempotent, download alone open-world)", `bad: ${badAnnotations.map((t) => t.name).join(",") || "none"}`);
+const estHookRes = await client.callTool({ name: "estimate_conversion", arguments: { input: path.join(root, "test/hook-source.mp4") } });
+const estHook = JSON.parse(estHookRes.content[0].text);
+console.log("estimate hook-source:", estHook.method, estHook.estimated_output_bytes, "bytes in", estHook.estimated_seconds + "s", estHook.confidence);
+checkOk(estHook.method === "sample-encode" && Math.abs(estHook.estimated_output_bytes / 299031 - 1) <= 0.25 && estHook.cleanup_warning === null && ["high", "medium", "low"].includes(estHook.confidence), "estimate_conversion on hook-source lands within 25% of the real convert (299,031 bytes) by sample-encode, temp cleaned up", `est=${estHook.estimated_output_bytes} method=${estHook.method}`);
+checkOk(estHook.estimated_seconds > 0 && estHook.estimated_seconds_low <= estHook.estimated_seconds && estHook.estimated_seconds <= estHook.estimated_seconds_high, "estimate_conversion time is a sane ordered range (low <= point <= high)", `time=${estHook.estimated_seconds} [${estHook.estimated_seconds_low}..${estHook.estimated_seconds_high}]`);
+const estSrcRes = await client.callTool({ name: "estimate_conversion", arguments: { input: path.join(root, "test/source.mp4") } });
+const estSrc = JSON.parse(estSrcRes.content[0].text);
+checkOk(estSrc.method === "full-encode" && estSrc.confidence === "exact" && estSrc.estimated_output_bytes_low === estSrc.estimated_output_bytes && estSrc.estimated_output_bytes_high === estSrc.estimated_output_bytes && Math.abs(estSrc.estimated_output_bytes / 249664 - 1) <= 0.05, "estimate_conversion on short source.mp4 takes the full-encode path and is exact (within 5% of the real convert's 249,664 bytes — x264 bytes vary slightly across builds)", `est=${estSrc.estimated_output_bytes}`);
+const estAudioRes = await client.callTool({ name: "estimate_conversion", arguments: { input: path.join(root, "test/mix-voice.mp3") } });
+const estAudio = JSON.parse(estAudioRes.content[0].text);
+checkOk(estAudio.method === "full-encode" && estAudio.confidence === "exact" && Math.abs(estAudio.estimated_output_bytes / 38116 - 1) <= 0.01, "estimate_conversion on audio-only mix-voice.mp3 copies the audio exactly (38,116 bytes = the source file)", `est=${estAudio.estimated_output_bytes}`);
+const estVp9Res = await client.callTool({ name: "estimate_conversion", arguments: { input: path.join(root, "test/source.mp4"), video_codec: "vp9" } });
+checkOk(estVp9Res.isError === true, "estimate_conversion refuses vp9 (different quality knobs — a crf estimate would not match convert)", estVp9Res.content[0].text.slice(0, 120));
+const estCrfRes = await client.callTool({ name: "estimate_conversion", arguments: { input: path.join(root, "test/source.mp4"), crf: 99 } });
+checkOk(estCrfRes.isError === true, "estimate_conversion refuses crf 99", estCrfRes.content[0].text.slice(0, 120));
+const estAbRes = await client.callTool({ name: "estimate_conversion", arguments: { input: path.join(root, "test/hook-source.mp4"), audio_bitrate_kbps: 128 } });
+const estAb = JSON.parse(estAbRes.content[0].text);
+checkOk(estAb.method === "sample-encode" && estAb.target.audio_bitrate_kbps === 128 && estAb.audio_bit_rate_bps > 0, "estimate_conversion with --audio-bitrate-kbps measures the re-encoded audio instead of copying", `audio_bps=${estAb.audio_bit_rate_bps}`);
 const dlCacheDir = path.join(root, "outputs/dl-cache");
 const dlCache1Res = await client.callTool({ name: "download", arguments: { url: `${dlBase}/cacheable.mp4`, output: path.join(root, "outputs/mcp-download-cache1.mp4"), cache: true, cache_dir: dlCacheDir } });
 const dlCache1 = JSON.parse(dlCache1Res.content[0].text);
@@ -10040,7 +10086,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 83 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 85 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -10100,11 +10146,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 83, "GET /mcp reports name/version/transport and 83 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 85, "GET /mcp reports name/version/transport and 85 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 83 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 83 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 85 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 85 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -10176,7 +10222,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 83, "JSON-RPC tools/list returns the same 83 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 85, "JSON-RPC tools/list returns the same 85 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

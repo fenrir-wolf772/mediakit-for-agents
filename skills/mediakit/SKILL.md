@@ -1859,6 +1859,59 @@ Measured on the fixture (9s voice, two ~2s pauses, three 10-char
 lines): boundaries snap to 3.033s (+19ms) and 6.533s (+513ms),
 frames 91/105/74 = 270 exactly.
 
+### 58f. Know the blast radius before you act — safety tiers + `estimate_conversion`
+
+An agent that cannot tell a probe from a write will eventually
+overwrite something it only meant to look at. Every tool carries
+one tier — `mediakit safety` lists them, and the MCP `tools/list`
+carries the same tiers as standard annotations
+(`readOnlyHint` / `destructiveHint` / `idempotentHint` /
+`openWorldHint`), so a client can gate on them instead of trusting
+prose. READ (24 tools) only probes and writes nothing; PLAN (4)
+answers a question by transient work and leaves no artifact —
+`determinism` renders to a hidden work dir that is removed,
+`verify_cuts` renders a draft to temp, `estimate_conversion`
+sample-encodes to temp, `job` only reads/cancels job state; WRITE
+(56) produces a file the caller asked for and never overwrites its
+own input; DESTRUCTIVE (1 — `patch_manifest`, guarded by
+`expected_revision` plus a `.bak` backup) replaces a user artifact
+in place. The tier is a property of the tool, not its arguments: a
+WRITE tool with `dry_run=true` still reports WRITE. `download`
+alone has `openWorldHint` because it alone touches the network.
+This is EncodeX's `safety.ts` (READ/PLAN/WRITE/DESTRUCTIVE), with
+one deliberate difference: EncodeX's DESTRUCTIVE tier is a
+permission a human grants per call, while MediaKit's single
+DESTRUCTIVE tool carries its guard in the call itself (revision +
+backup), so no separate approval step exists to forget.
+
+`estimate_conversion` answers "how big / how long will this
+convert be" before the convert runs — measured, never a bitrate
+table. At 2 window positions (25%/75% of the file) it encodes the
+same start twice, video-only, at a short length (default 2s) and a
+long length (default 6s) with accurate seek (`-ss` after `-i`):
+both start with one keyframe, so `steady_rate = (long_bytes −
+short_bytes) / (long − short)` and `iframe_bytes = short_bytes −
+steady_rate × short`; full video = `steady_rate × duration +
+iframe_bytes × one keyframe per 250 frames` (the x264/x265 default
+GOP). Audio is copied by default (the `convert` default), so its
+cost is the probed source audio bitrate × duration;
+`--audio-bitrate-kbps` re-encodes audio, measured from one
+audio-only sample encode. Time is a rough ETA (duration / measured
+encode speed + one measured startup); size is the precise part.
+Measured on the fixtures at crf 23: `hook-source` −6.1%
+(280,845 vs a real convert's 299,031 bytes), `source` +4.2% at one
+position — and `source.mp4` itself takes the full-encode path
+(10s ≤ 2 positions × 6s) and is exact. Two traps the first version
+fell into, so you don't repeat them: sampling 2s windows and
+extrapolating the mean overestimated size by +45–64%, because every
+2s sample carries a full keyframe per 60 frames while the real
+encode carries one per 250; and `-ss` before `-i` quantizes starts
+to source keyframes, so a "start 20" window was really [15,20) on
+a 250-frame GOP source. A file shorter than the sample budget is
+encoded whole, so the answer is exact instead of estimated. Only
+libx264/libx265 — vp9/av1 use different quality knobs, so a crf
+estimate would not match `convert`.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.

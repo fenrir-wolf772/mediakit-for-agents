@@ -9,7 +9,7 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as core from "./core.js";
-import { TOOL_DEFS } from "./tools.js";
+import { TOOL_DEFS, toolAnnotations } from "./tools.js";
 import { recordToolCall } from "./audit.js";
 
 const server = new McpServer({
@@ -29,7 +29,7 @@ const server = new McpServer({
 // wrapper enriches any isError result with the tool name + the exact
 // arguments the call carried (zod defaults already applied).
 const registerTool = server.tool.bind(server);
-server.tool = (name, description, schema, handler) => registerTool(name, description, schema, async (a) => {
+server.tool = (name, description, schema, annotations, handler) => registerTool(name, description, schema, annotations, async (a) => {
   const startedAt = Date.now();
   const res = await handler(a);
   // Audit log (one JSONL line per call, files hashed): fire-and-
@@ -66,7 +66,10 @@ server.tool = (name, description, schema, handler) => registerTool(name, descrip
 });
 
 for (const tool of TOOL_DEFS) {
-  server.tool(tool.name, tool.description, tool.schema, tool.handler);
+  // Safety tiers ride on the standard MCP annotations (lượt 141):
+  // a client can see from tools/list that probe is read-only,
+  // patch_manifest is destructive, and download touches the network.
+  server.tool(tool.name, tool.description, tool.schema, toolAnnotations(tool), tool.handler);
 }
 
 
