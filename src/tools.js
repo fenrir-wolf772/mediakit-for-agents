@@ -1742,10 +1742,11 @@ export const TOOL_DEFS = [
   {
     name: "patch_manifest",
     tier: "DESTRUCTIVE",
-    description: "Edit a manifest JSON file under a revision guard (AH64-dll/OpenEdit's revision-guard idea: a write against a stale revision is refused instead of silently overwriting newer work). A manifest carries an optional top-level `revision` (absent = 0); the call requires `expected_revision` to match the file's current revision, applies 1-32 ops, proves the patched manifest still lints and plans (a real manifest --dry-run on a temp copy), then writes atomically (.partial + rename) with revision + 1 — and first copies the pre-patch bytes to `<manifest>.bak` (bariswha/losslesscut-mcp's set_segments idea), so .bak is always the revision just before the current one. A revision mismatch, a bad op, or a patched manifest that no longer validates all refuse with an error code (REVISION_MISMATCH / INVALID_ARG) and leave the file byte-identical — nothing is written. Ops: set {path: input|output|qa|steps.N.tool|steps.N.args.KEY, value: scalar} (version/revision are managed, not settable); add_step {step: {tool, args?}, index?} (append, or insert at index); remove_step {index} (never the last step); replace_step {index, step: {tool, args?}}. Ops apply in order — each op addresses the step list as the previous ops left it (JSON Patch semantics). Returns revision_before/after, the backup path, a human-readable changes list, and the dry-run validation (steps + planned output).",
+    description: "Edit a manifest JSON file under a revision guard (AH64-dll/OpenEdit's revision-guard idea: a write against a stale revision is refused instead of silently overwriting newer work). A manifest carries an optional top-level `revision` (absent = 0); the call requires `expected_revision` to match the file's current revision, applies 1-100 ops, proves the patched manifest still lints and plans (a real manifest --dry-run on a temp copy), then writes atomically (.partial + rename) with revision + 1 — and first copies the pre-patch bytes to `<manifest>.bak` (bariswha/losslesscut-mcp's set_segments idea), so .bak is always the revision just before the current one. A revision mismatch, a bad op, or a patched manifest that no longer validates all refuse with an error code (REVISION_MISMATCH / INVALID_ARG) and leave the file byte-identical — nothing is written. With dry_run (dziksu/synkinema's apply_operations dry_run + ChatCut's validateOnly: the approve-before-apply gate) the same guard + validation run, but nothing is written at all — no .bak, no revision bump — and the exact candidate document (with revision + 1, the bytes a real run would write) comes back in `candidate`, so the caller inspects it and re-issues the same call without dry_run to commit; a dry-run against a stale revision is still refused. Ops: set {path: input|output|qa|steps.N.tool|steps.N.args.KEY, value: scalar} (version/revision are managed, not settable); add_step {step: {tool, args?}, index?} (append, or insert at index); remove_step {index} (never the last step); replace_step {index, step: {tool, args?}}. Ops apply in order — each op addresses the step list as the previous ops left it (JSON Patch semantics). Returns revision_before/after, the backup path, a human-readable changes list, and the dry-run validation (steps + planned output).",
     schema: {
     manifest_path: pathSchema.describe("Path to the manifest JSON file to patch"),
     expected_revision: z.number().int().min(0).describe("The revision the caller last read from the file (absent = 0). Must match the file's current revision or the call is refused with REVISION_MISMATCH and nothing is written"),
+    dry_run: z.boolean().default(false).describe("Preview only: run the revision guard + op checks + manifest validation and return the exact candidate document (with revision + 1) in `candidate`, writing nothing — no .bak, no revision bump. Re-issue without dry_run to commit"),
     patch: z.array(z.union([
       z.object({ op: z.literal("set"), path: z.string().min(1), value: z.union([z.string(), z.number(), z.boolean(), z.null()]) }).strict(),
       z.object({ op: z.literal("add_step"), step: z.object({ tool: z.string().min(1), args: z.record(z.any()).optional() }).passthrough(), index: z.number().int().min(0).optional() }).strict(),
@@ -1755,12 +1756,13 @@ export const TOOL_DEFS = [
       // in zod with a bare "Invalid input" — core names the op
       // (unknown op "move_step") and the supported list.
       z.object({ op: z.string() }).passthrough(),
-    ])).min(1).max(32).describe("1-32 patch operations, applied in order — each op addresses the list as the previous ops left it"),
+    ])).min(1).max(100).describe("1-100 patch operations, applied in order — each op addresses the list as the previous ops left it"),
   },
     handler: async (a) => safe(() => core.patchManifest({
     manifestPath: a.manifest_path,
     patch: a.patch,
     expectedRevision: a.expected_revision,
+    dryRun: a.dry_run === true,
   })),
   },
 

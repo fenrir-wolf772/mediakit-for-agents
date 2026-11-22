@@ -16515,13 +16515,23 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
 // atomic-reservation philosophy: concurrent writers must not clobber
 // each other). A manifest carries an optional top-level `revision`
 // (absent = 0); patching requires the caller's `expected_revision`
-// to match the file's current revision, applies 1-32 ops to a clone,
+// to match the file's current revision, applies 1-100 ops to a clone,
 // proves the patched manifest still lints + plans (manifest
 // --dry-run on a temp copy), then writes atomically (.partial +
 // rename) with revision + 1. Any failure before the rename leaves
 // the original file byte-identical: a revision mismatch, a bad op,
 // or a patched manifest that no longer validates all refuse without
 // touching the file.
+//
+// With dryRun (dziksu/synkinema's `apply_operations` dry_run +
+// ChatCut's `validateOnly`: the approve-before-apply gate), the same
+// guard + validation run, but nothing is written at all — no .bak,
+// no .partial, no revision bump — and the exact candidate document
+// (with revision + 1, the bytes a real run would write) comes back
+// in `candidate`, so the caller inspects it and re-issues the same
+// call without dry_run to commit. A dry-run against a stale
+// revision is still refused: a candidate computed from a stale base
+// is meaningless.
 //
 // Ops:
 //   {op: "set", path: "output", value: "final2.mp4"}   — top-level
@@ -16532,11 +16542,11 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
 //   {op: "remove_step", index}                         — never the
 //     last remaining step
 //   {op: "replace_step", index, step: {tool, args?}}
-export async function patchManifest({ manifestPath, patch, expectedRevision }) {
+export async function patchManifest({ manifestPath, patch, expectedRevision, dryRun = false }) {
   const manifestAbs = await requireInput(manifestPath, "manifest");
   const expected = num(expectedRevision, "expected_revision", { min: 0, integer: true });
-  if (!Array.isArray(patch) || patch.length < 1 || patch.length > 32) {
-    throw new MediaKitError(`patch must be an array of 1-32 operations, got: ${Array.isArray(patch) ? `${patch.length} operations` : typeof patch}`, "INVALID_ARG");
+  if (!Array.isArray(patch) || patch.length < 1 || patch.length > 100) {
+    throw new MediaKitError(`patch must be an array of 1-100 operations, got: ${Array.isArray(patch) ? `${patch.length} operations` : typeof patch}`, "INVALID_ARG");
   }
   let raw;
   try {
@@ -16688,6 +16698,24 @@ export async function patchManifest({ manifestPath, patch, expectedRevision }) {
     await rm(tmpValidate, { force: true }).catch(() => {});
   }
 
+  // Dry-run: the candidate is proven, return it without writing
+  // anything — no .bak, no .partial, no revision bump. The caller
+  // re-issues the same call without dry_run to commit.
+  if (dryRun) {
+    return {
+      operation: "patch_manifest",
+      manifest: manifestAbs,
+      dry_run: true,
+      backup: null,
+      revision_before: currentRevision,
+      revision_after: currentRevision + 1,
+      ops_applied: patch.length,
+      changes,
+      candidate: next,
+      validated: { dry_run: true, steps: planned.steps.length, output: planned.output },
+    };
+  }
+
   // Backup (bariswha/losslesscut-mcp's set_segments idea: rename
   // the old file to .bak before writing the new one). The original
   // bytes go to <manifest>.bak — overwritten on every successful
@@ -16714,6 +16742,7 @@ export async function patchManifest({ manifestPath, patch, expectedRevision }) {
   return {
     operation: "patch_manifest",
     manifest: manifestAbs,
+    dry_run: false,
     backup: backupPath,
     revision_before: currentRevision,
     revision_after: currentRevision + 1,

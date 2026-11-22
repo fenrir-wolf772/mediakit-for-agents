@@ -1254,6 +1254,44 @@ try { pmCliJson = JSON.parse(pmCli.out); } catch { /* not JSON */ }
 checkOk(pmCli.code === 0 && pmCliJson?.revision_after === 3 && JSON.parse(await readFile(pmPath, "utf8")).qa === "any", "CLI patch-manifest applies the patch file, revision 2 -> 3", pmCli.out.slice(0, 200));
 const pmCliStaleErr = await runCliExpectError(["patch-manifest", pmPath, "--expected-revision", "2", "--patch-file", pmCliPatch]);
 checkOk(pmCliStaleErr !== null && /REVISION_MISMATCH/.test(pmCliStaleErr), "CLI patch-manifest with a stale revision exits 2 naming REVISION_MISMATCH", (pmCliStaleErr ?? "").slice(0, 200));
+// patch_manifest --dry-run (lượt 146; dziksu/synkinema's
+// apply_operations dry_run + ChatCut's validateOnly): the same
+// guard + validation run, but nothing is written — no .bak, no
+// revision bump — and the exact candidate comes back.
+const pmDryBefore = await readFile(pmPath, "utf8");
+const pmDryBakBefore = await readFile(`${pmPath}.bak`, "utf8");
+const pmDryRes = await client.callTool({ name: "patch_manifest", arguments: { manifest_path: pmPath, expected_revision: 3, dry_run: true, patch: [{ op: "set", path: "steps.0.args.end", value: 6 }] } });
+const pmDryJson = JSON.parse(pmDryRes.content[0].text);
+checkOk(pmDryJson.dry_run === true && pmDryJson.revision_before === 3 && pmDryJson.revision_after === 4 && pmDryJson.backup === null && pmDryJson.ops_applied === 1 && pmDryJson.candidate?.steps?.[0]?.args?.end === 6 && pmDryJson.candidate?.revision === 4 && pmDryJson.validated?.steps === 3, "patch_manifest dry_run returns the candidate (revision 4, end 6) without writing", JSON.stringify(pmDryJson).slice(0, 300));
+checkOk((await readFile(pmPath, "utf8")) === pmDryBefore && JSON.parse(pmDryBefore).revision === 3, "patch_manifest dry_run leaves the manifest file byte-identical (still revision 3)", "");
+checkOk((await readFile(`${pmPath}.bak`, "utf8")) === pmDryBakBefore, "patch_manifest dry_run leaves the .bak backup untouched", "");
+// A dry-run against a stale revision is still refused: a candidate
+// computed from a stale base is meaningless.
+const pmDryStaleText = await callExpectThrow("patch_manifest", { manifest_path: pmPath, expected_revision: 2, dry_run: true, patch: [{ op: "set", path: "qa", value: "any" }] });
+checkOk(/REVISION_MISMATCH/.test(pmDryStaleText), "patch_manifest dry_run with a stale revision is refused with REVISION_MISMATCH", pmDryStaleText.slice(0, 200));
+checkOk((await readFile(pmPath, "utf8")) === pmDryBefore, "refused dry-run leaves the file byte-identical", "");
+// Op cap raised 32 -> 100 (Synkinema's apply_operations takes
+// 1-100): 101 ops are refused, 33 identical sets apply as one
+// revision.
+const pmCapText = await callExpectThrow("patch_manifest", { manifest_path: pmPath, expected_revision: 3, patch: Array.from({ length: 101 }, () => ({ op: "set", path: "qa", value: "any" })) });
+checkOk(/at most 100 element/.test(pmCapText), "patch_manifest refuses 101 operations at the zod cap (at most 100 elements)", pmCapText.slice(0, 200));
+const pmCapRes = await client.callTool({ name: "patch_manifest", arguments: { manifest_path: pmPath, expected_revision: 3, patch: Array.from({ length: 33 }, () => ({ op: "set", path: "qa", value: "tiktok" })) } });
+const pmCapJson = JSON.parse(pmCapRes.content[0].text);
+checkOk(pmCapJson.revision_after === 4 && pmCapJson.ops_applied === 33 && JSON.parse(await readFile(pmPath, "utf8")).qa === "tiktok", "patch_manifest applies 33 ops (above the old 32 cap) as one revision 3 -> 4", JSON.stringify(pmCapJson.revision_after));
+// CLI --dry-run: prints the candidate, writes nothing.
+const pmCliDryPatch = path.join(root, "outputs/mcp-manifest-patch-cli-dry.json");
+await writeFile(pmCliDryPatch, JSON.stringify([{ op: "set", path: "qa", value: "any" }]), "utf8");
+const pmCliDry = await runCli(["patch-manifest", pmPath, "--expected-revision", "4", "--patch-file", pmCliDryPatch, "--dry-run"]);
+let pmCliDryJson = null;
+try { pmCliDryJson = JSON.parse(pmCliDry.out); } catch { /* not JSON */ }
+checkOk(pmCliDry.code === 0 && pmCliDryJson?.dry_run === true && pmCliDryJson?.candidate?.qa === "any" && pmCliDryJson?.candidate?.revision === 5, "CLI patch-manifest --dry-run prints the candidate (qa any, revision 5)", pmCliDry.out.slice(0, 200));
+checkOk(JSON.parse(await readFile(pmPath, "utf8")).revision === 4 && JSON.parse(await readFile(pmPath, "utf8")).qa === "tiktok", "CLI --dry-run leaves the manifest on disk at revision 4 with qa still tiktok", "");
+// CLI has no zod layer, so the 101-op refusal there exercises
+// core's own cap message.
+const pmCliCapPatch = path.join(root, "outputs/mcp-manifest-patch-cli-cap.json");
+await writeFile(pmCliCapPatch, JSON.stringify(Array.from({ length: 101 }, () => ({ op: "set", path: "qa", value: "any" }))), "utf8");
+const pmCliCapErr = await runCliExpectError(["patch-manifest", pmPath, "--expected-revision", "4", "--patch-file", pmCliCapPatch]);
+checkOk(pmCliCapErr !== null && /1-100 operations/.test(pmCliCapErr), "CLI patch-manifest refuses 101 operations, naming the 1-100 cap", (pmCliCapErr ?? "").slice(0, 200));
 
 // boomerang: forward + reverse ping-pong. Fixture
 // test/scenes-source.mp4 is red 5s + blue 5s (10.039s, 300 frames

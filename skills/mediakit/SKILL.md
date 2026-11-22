@@ -1161,7 +1161,7 @@ overwrite each other. A manifest carries an optional top-level
 `revision` (absent = 0); the patch call requires
 `expected_revision` to match the file's current revision, or it is
 refused with `REVISION_MISMATCH` and nothing is written — re-read
-the file and retry with the current revision. Ops (1–32, applied in
+the file and retry with the current revision. Ops (1–100, applied in
 order — each op addresses the list as the previous ops left it): `set` a scalar at
 `input` / `output` / `qa` / `steps.N.tool` / `steps.N.args.KEY`
 (`version`/`revision` are managed, not settable); `add_step`
@@ -1178,7 +1178,14 @@ and bumps `revision` by 1. The result lists every change in words
 validation — read it before running the manifest. Note the
 validation runs the manifest's dry-run, so the manifest's input
 file must exist (a download-first manifest has no input, so it
-validates without one).
+validates without one). **Preview before you commit:** `dry_run`
+(MCP) / `--dry-run` (CLI) runs the same guard + validation and
+returns the exact candidate document (with `revision` + 1) in
+`candidate` while writing nothing — no `.bak`, no revision bump.
+Inspect the candidate, then re-issue the same call without
+`dry_run` and the same `expected_revision` to commit; a dry-run
+against a stale revision is still refused, because a candidate
+computed from a stale base is meaningless.
 
 ### 41. One style id for the whole video — don't retype hex values
 Pick the style once (`clean-bold`, `minimal-line` or `warm-story`,

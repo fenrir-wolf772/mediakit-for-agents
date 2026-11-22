@@ -1084,12 +1084,13 @@ const COMMANDS = {
     ],
   },
   "patch-manifest": {
-    usage: "mediakit patch-manifest <manifest.json> --expected-revision <n> --patch-file <patch.json>",
-    desc: "Edit a manifest JSON file under a revision guard (OpenEdit's revision-guard idea): the call is refused when --expected-revision does not match the file's current revision (absent = 0), so a stale edit never overwrites newer work. --patch-file holds a JSON array of 1-32 ops: {op: 'set', path: 'output'|'input'|'qa'|'steps.N.tool'|'steps.N.args.KEY', value} / {op: 'add_step', step: {tool, args?}, index?} / {op: 'remove_step', index} / {op: 'replace_step', index, step: {tool, args?}}. Ops apply in order — each op addresses the step list as the previous ops left it. The patched manifest is validated with a real manifest --dry-run before anything is written, then written atomically (.partial + rename) with revision + 1. A mismatch, a bad op, or a patched manifest that no longer validates all refuse and leave the file byte-identical.",
+    usage: "mediakit patch-manifest <manifest.json> --expected-revision <n> --patch-file <patch.json> [--dry-run]",
+    desc: "Edit a manifest JSON file under a revision guard (OpenEdit's revision-guard idea): the call is refused when --expected-revision does not match the file's current revision (absent = 0), so a stale edit never overwrites newer work. --patch-file holds a JSON array of 1-100 ops: {op: 'set', path: 'output'|'input'|'qa'|'steps.N.tool'|'steps.N.args.KEY', value} / {op: 'add_step', step: {tool, args?}, index?} / {op: 'remove_step', index} / {op: 'replace_step', index, step: {tool, args?}}. Ops apply in order — each op addresses the step list as the previous ops left it. The patched manifest is validated with a real manifest --dry-run before anything is written, then written atomically (.partial + rename) with revision + 1. A mismatch, a bad op, or a patched manifest that no longer validates all refuse and leave the file byte-identical. --dry-run previews the exact candidate document (with revision + 1) and writes nothing — no .bak, no revision bump — the approve-before-apply gate: inspect the candidate, then re-run without --dry-run with the same --expected-revision to commit.",
     args: [{ name: "manifest", required: true }],
     options: [
       ["--expected-revision", "The revision last read from the file (required; absent = 0) — must match the file's current revision"],
       ["--patch-file", "JSON file holding the patch operations array (required)"],
+      ["--dry-run", "Preview only: print the candidate manifest and write nothing"],
     ],
   },
   determinism: {
@@ -2392,6 +2393,7 @@ async function main() {
           manifestPath: positional[0],
           patch,
           expectedRevision: numOpt(opts, "expected_revision"),
+          dryRun: opts.dry_run === true,
         });
         break;
       }
