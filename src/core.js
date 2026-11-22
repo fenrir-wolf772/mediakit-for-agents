@@ -12892,6 +12892,102 @@ export function scoreStylePace(measured, stylePace, styleName = null) {
   return findings;
 }
 
+// Per-shot pacing inspection — Yuuhann1999/agent-storyboard's
+// `inspectPacingDetailed` (public/pacing.js), ported to MediaKit's
+// film shape. Their rules, verbatim in structure:
+//   - a run of >=3 consecutive shots with the same rollType warns
+//     ("check the visual variety is enough");
+//   - a shot under 1s "may be hard to see", over 15s "check the
+//     hold is not too long";
+//   - dialogue denser than 6 chars/s "listen to check the speed".
+// Two adaptations, both measured, not guessed:
+//   - rollType has no MediaKit field: a shot's "look" is its canvas
+//     template, else its kind (video/image/color).
+//   - the 6 chars/s bar is calibrated for Chinese dialogue, where
+//     one character is one syllable: Kokoro af_heart speed 1.0
+//     English narration measures 10.8–14.0 chars/s (mean 12.6 over
+//     the 5 cues of report-luot136), so 6 would warn on every normal
+//     English film. The bar is 15 chars/s (~180 wpm) — above normal
+//     narration, where a line is genuinely rushed.
+// A shot's dialogue is its caption text inside the shot's film
+// window, allocated proportionally when a cue spans a cut (chars
+// counted whitespace-stripped, like theirs). Pure — unit-tested
+// directly and through diagnose.
+const PACING_MIN_SHOT_SECONDS = 1;
+const PACING_MAX_SHOT_SECONDS = 15;
+const PACING_SAME_LOOK_RUN = 3;
+const PACING_MAX_CHARS_PER_SECOND = 15;
+
+export function inspectPacing(shots, cues = null) {
+  const findings = [];
+  const list = (shots ?? []).map((s, i) => ({
+    id: s.id ?? `s${i + 1}`,
+    duration: +s.duration,
+    look: s.template ?? s.kind ?? "unknown",
+  }));
+  // Runs of the same look: the eye needs a change of picture.
+  let runStart = 0;
+  for (let i = 1; i <= list.length; i++) {
+    if (i === list.length || list[i].look !== list[runStart].look) {
+      if (i - runStart >= PACING_SAME_LOOK_RUN) {
+        const run = list.slice(runStart, i);
+        const ids = run.map((s) => s.id);
+        const secs = +run.reduce((a, s) => a + s.duration, 0).toFixed(1);
+        findings.push({
+          rule: "same_look_run", severity: "warn", shot_ids: ids, look: list[runStart].look,
+          message: `shots ${ids.join(", ")} run ${i - runStart}x the same look (${list[runStart].look}) for ${secs}s — check the visual variety is enough`,
+        });
+      }
+      runStart = i;
+    }
+  }
+  // Per-shot duration and dialogue density, on the film timeline.
+  let t = 0;
+  let maxDensity = null;
+  for (const s of list) {
+    const start = t;
+    t += s.duration;
+    if (!Number.isFinite(s.duration) || s.duration <= 0) {
+      findings.push({ rule: "shot_duration", severity: "warn", shot_ids: [s.id],
+        message: `shot ${s.id} has an invalid duration (${s.duration})` });
+      continue;
+    }
+    if (s.duration < PACING_MIN_SHOT_SECONDS) {
+      findings.push({ rule: "shot_duration", severity: "warn", shot_ids: [s.id],
+        message: `shot ${s.id} is ${s.duration}s — under 1s, too short to see clearly` });
+    } else if (s.duration > PACING_MAX_SHOT_SECONDS) {
+      findings.push({ rule: "shot_duration", severity: "warn", shot_ids: [s.id],
+        message: `shot ${s.id} holds ${s.duration}s — over 15s, check the hold is not too long` });
+    }
+    if (cues) {
+      let chars = 0;
+      for (const c of cues) {
+        const cs = c.startMs / 1000;
+        const ce = c.endMs / 1000;
+        const overlap = Math.max(0, Math.min(ce, t) - Math.max(cs, start));
+        const cueDur = ce - cs;
+        if (overlap > 0 && cueDur > 0) {
+          chars += [...String(c.text ?? "").replace(/\s/g, "")].length * (overlap / cueDur);
+        }
+      }
+      const density = +(chars / s.duration).toFixed(2);
+      if (maxDensity === null || density > maxDensity) maxDensity = density;
+      if (density > PACING_MAX_CHARS_PER_SECOND) {
+        findings.push({ rule: "speech_density", severity: "warn", shot_ids: [s.id],
+          density_chars_per_s: density, chars: Math.round(chars),
+          message: `shot ${s.id} carries ${Math.round(chars)} characters in ${s.duration}s (${density} chars/s) — dialogue is dense, listen to check the speed` });
+      }
+    }
+  }
+  return {
+    findings,
+    shots: list.length,
+    longest_s: list.length ? +Math.max(...list.map((s) => s.duration)).toFixed(2) : 0,
+    max_density_chars_per_s: maxDensity,
+    density_measured: cues !== null,
+  };
+}
+
 // Measure a reference video's pace and, with --style-file, keep it
 // in that style's style.json (Takes' t_measure_pace: meta["pace"]
 // = {…pace, source, measured}). Without a style file nothing is
@@ -18949,6 +19045,40 @@ export async function diagnoseFilm({ manifestPath, styleFile = null }) {
           add("style_pace", f.severity, f.message, { metric: f.metric, measured: f.measured, style: f.style, ...(f.fix ? { fix: f.fix } : {}), style_file: stylePath, style_source: styleSource });
         }
       }
+    }
+
+    // Per-shot pacing (Yuuhann1999/agent-storyboard's
+    // inspectPacingDetailed, lượt 137): same-look runs, too-short /
+    // too-long shots and dialogue density. The style_pace above
+    // scores the whole edit against the channel style; this scores
+    // each shot on its own. Captions are the shot's dialogue;
+    // .ass is styled, so density is not measured for it.
+    let pacingCues = null;
+    let pacingDensityNote = null;
+    if (plan.captions) {
+      const capExt = path.extname(plan.captions.path).toLowerCase();
+      if (capExt === ".ass") {
+        pacingDensityNote = "density not measured for styled (.ass) captions";
+      } else {
+        const { cues } = parseCaptions(await readFile(plan.captions.path, "utf8"), capExt.slice(1));
+        pacingCues = cues;
+      }
+    }
+    const pacing = inspectPacing(plan.shots, pacingCues);
+    if (pacing.findings.length) {
+      for (const f of pacing.findings) {
+        add("pacing", f.severity, f.message, {
+          rule: f.rule, shot_ids: f.shot_ids,
+          ...(f.look !== undefined ? { look: f.look } : {}),
+          ...(f.density_chars_per_s !== undefined ? { density_chars_per_s: f.density_chars_per_s } : {}),
+        });
+      }
+    } else {
+      add("pacing", "pass",
+        `shot pacing is varied: ${pacing.shots} shot${pacing.shots === 1 ? "" : "s"}, longest ${pacing.longest_s}s, no run of ${PACING_SAME_LOOK_RUN} same-look shots` +
+        (pacing.density_measured
+          ? `, densest dialogue ${pacing.max_density_chars_per_s} chars/s (max ${PACING_MAX_CHARS_PER_SECOND})`
+          : pacingDensityNote ? ` (${pacingDensityNote})` : " (no captions to measure density)"));
     }
 
     // Voice loudness: the master clock should sit in a range the

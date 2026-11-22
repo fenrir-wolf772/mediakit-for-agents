@@ -895,7 +895,19 @@ the seam will be heard), sfx tails past the film end, chapters that
 land mid-shot, and text layers that wrap past 4 lines or sit at the
 bottom in the burned-caption band. It also scores style pace when a
 `style.json` is present — cuts per minute + longest hold of the film's
-planned shots, against the pace the style keeps (see §33h). Probe-only, writes nothing. A
+planned shots, against the pace the style keeps (see §33h). And it
+scores per-shot pacing (Yuuhann1999/agent-storyboard's
+`inspectPacingDetailed`): a run of 3+ consecutive shots with the same
+look (a canvas template, else the shot kind) warns — check the visual
+variety is enough; a shot under 1s is too short to see clearly, over
+15s the hold may be too long; dialogue denser than 15 chars/s warns —
+listen to check the speed. A shot's dialogue is its caption text
+inside the shot's film window, split proportionally when a cue spans a
+cut. The 15 chars/s bar is calibrated, not copied: their 6 is for
+Chinese dialogue (one character = one syllable), while Kokoro
+af_heart speed 1.0 English narration measures 10.8–14.0 chars/s — 6
+would warn on every normal English film. `.ass` captions are styled,
+so density is not measured for them. Probe-only, writes nothing. A
 broken manifest returns verdict `fail` with `format_error` instead of
 throwing, so fix the manifest and re-run diagnose in a loop — a `warn`
 verdict is still renderable, a `fail` is not.

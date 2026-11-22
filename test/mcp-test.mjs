@@ -14,7 +14,7 @@ import { createCanvas } from "canvas";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { applyContentBaseline, averageHash, compareDeterminismRuns, countClippedRuns, diagnoseVoice, estimateDecodedWork, estimateJobRemaining, estimateTempo, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
+import { applyContentBaseline, averageHash, compareDeterminismRuns, countClippedRuns, diagnoseVoice, estimateDecodedWork, estimateJobRemaining, estimateTempo, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, inspectPacing, localTempoCurve, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import bounceTpl from "../src/canvas-scene-lib/templates/bounce.cjs";
@@ -8673,6 +8673,40 @@ checkOk(!diagStyleNoneJson.checks?.some((c) => c.id === "style_pace"), "diagnose
 // The same pass film through the CLI with --style-file.
 const diagStyleCli = await runCliJson(["diagnose", diagStylePassStage.manifestPath, "--style-file", path.join(root, "test/style-warm.json")]);
 checkOk(diagStyleCli.verdict === "pass" && diagStyleCli.checks?.filter((c) => c.id === "style_pace").length === 2, "CLI diagnose --style-file scores the film the same way", JSON.stringify(diagStyleCli.checks?.filter((c) => c.id === "style_pace")));
+// Per-shot pacing warnings in diagnose (lượt 137, idea:
+// Yuuhann1999/agent-storyboard inspectPacingDetailed): >=3 same-look
+// shots in a row, a shot under 1s / over 15s, dialogue over
+// 15 chars/s (their 6, calibrated for English narration — Kokoro
+// af_heart speed 1.0 measures 10.8–14.0 chars/s, so 6 would warn on
+// every normal film). Pure first, then the full diagnose path.
+const pacingPure = inspectPacing(
+  [{ id: "a", kind: "canvas_scene", template: "rings", duration: 0.5 },
+   { id: "b", kind: "canvas_scene", template: "rings", duration: 16 },
+   { id: "c", kind: "canvas_scene", template: "rings", duration: 5 },
+   { id: "d", kind: "canvas_scene", template: "bounce", duration: 5 }],
+  [{ startMs: 0, endMs: 500, text: "Quick line here" },
+   { startMs: 16500, endMs: 21500, text: "Rushed narration packs ninety characters into five seconds of film time here now listen fast" }]);
+checkOk(pacingPure.findings.map((f) => f.rule).join(",") === "same_look_run,shot_duration,speech_density,shot_duration,speech_density" && pacingPure.findings[0].shot_ids.join(",") === "a,b,c" && pacingPure.findings[2].density_chars_per_s === 26 && pacingPure.findings[4].density_chars_per_s === 15.6 && pacingPure.longest_s === 16 && pacingPure.max_density_chars_per_s === 26, "inspectPacing flags the run a–c, the 0.5s shot, the 16s hold and both dense lines (26 and 15.6 chars/s)", JSON.stringify(pacingPure.findings.map((f) => `${f.rule}:${f.shot_ids.join("+")}`)));
+// Boundaries: exactly 1s / 15s / 15 chars/s is not a warning, a run
+// of 2 same-look shots is not one either, and a cue split across a
+// cut allocates its characters proportionally (60 chars over 4s:
+// shot a gets 15 chars in 1s = 15/s, shot b 45 in 15s = 3/s).
+const pacingEdge = inspectPacing(
+  [{ id: "a", kind: "video", duration: 1 }, { id: "b", kind: "video", duration: 15 }],
+  [{ startMs: 0, endMs: 4000, text: "Sixty characters of dialogue spread over four seconds of film time now." }]);
+checkOk(pacingEdge.findings.length === 0 && pacingEdge.max_density_chars_per_s === 15 && pacingEdge.longest_s === 15, "inspectPacing passes the exact boundaries (1s, 15s, 15 chars/s, run of 2) and splits a cue across the cut", JSON.stringify(pacingEdge));
+const diagPacingStage = await stageAssembleManifest("assemble-diagnose-pacing.json");
+const diagPacingRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagPacingStage.manifestPath } });
+const diagPacingJson = JSON.parse(diagPacingRes.content[0].text);
+const diagPacingChecks = diagPacingJson.checks?.filter((c) => c.id === "pacing") ?? [];
+checkOk(diagPacingJson.verdict === "warn" && diagPacingJson.warnings === 6 && diagPacingChecks.length === 5 && diagPacingChecks.map((c) => c.rule).join(",") === "same_look_run,shot_duration,speech_density,shot_duration,speech_density" && /run 3x the same look \(rings\) for 21.5s/.test(diagPacingChecks[0].message) && /shot s1 is 0.5s/.test(diagPacingChecks[1].message) && /26 chars\/s/.test(diagPacingChecks[2].message) && /shot s2 holds 16s/.test(diagPacingChecks[3].message) && /15.6 chars\/s/.test(diagPacingChecks[4].message), "diagnose warns 5 pacing findings on the pacing fixture (run + short + dense + long + dense) plus the 21% caption coverage warn", JSON.stringify(diagPacingChecks.map((c) => `${c.rule}:${c.message.slice(0, 60)}`)));
+// The varied style fixtures stay pacing-clean after the template
+// change (lượt 137): the 4x5s pass film has no run of 3 same-look
+// shots and no dense dialogue.
+checkOk(diagStylePassJson.checks?.some((c) => c.id === "pacing" && c.severity === "pass" && /no run of 3 same-look shots/.test(c.message)), "diagnose passes pacing on the varied 4x5s style film", JSON.stringify(diagStylePassJson.checks?.filter((c) => c.id === "pacing")));
+// The full film's captions run 7.75 chars/s at most — under the
+// 15 bar, so its 3 warnings stay the 2.67x upscales.
+checkOk(diagFilmJson.checks?.some((c) => c.id === "pacing" && c.severity === "pass" && /densest dialogue 7.75 chars\/s/.test(c.message)), "diagnose passes pacing on the full film (densest dialogue 7.75 chars/s)", JSON.stringify(diagFilmJson.checks?.filter((c) => c.id === "pacing")));
 const diagDoctorRes = await client.callTool({ name: "doctor", arguments: {} });
 const diagDoctorJson = JSON.parse(diagDoctorRes.content[0].text);
 checkOk(diagDoctorJson.tools?.diagnose?.available === true, "doctor reports diagnose as available", JSON.stringify(diagDoctorJson.tools?.diagnose));
