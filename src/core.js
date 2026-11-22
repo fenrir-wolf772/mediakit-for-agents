@@ -4747,6 +4747,54 @@ export async function detectTranscribe(model = "tiny") {
   };
 }
 
+// Voice venv (Kokoro TTS, the report-video voiceover): env
+// MEDIAKIT_VOICE_VENV points at a Python venv whose python has
+// kokoro + soundfile. Optional like ASR — a missing venv never fails
+// doctor.ok, it only reports the voice as unavailable, so a machine
+// without TTS still renders everything else. Presence is checked on
+// disk (python binary + site-packages entries), never by importing
+// kokoro — that import pulls torch and takes seconds, and doctor
+// must stay a fast read-only preflight.
+const VOICE_VENV_ENV = "MEDIAKIT_VOICE_VENV";
+const VOICE_VENV_HINT = "set MEDIAKIT_VOICE_VENV to a Python venv whose python has kokoro installed (e.g. python3 -m venv ~/venv_kokoro && ~/venv_kokoro/bin/pip install kokoro soundfile), so the report-video voiceover can run";
+export async function detectVoiceVenv() {
+  const raw = process.env[VOICE_VENV_ENV]?.trim() || null;
+  if (!raw) return { available: false, set: false, venv: null, fix: VOICE_VENV_HINT };
+  const venv = path.resolve(raw);
+  const python = process.platform === "win32"
+    ? path.join(venv, "Scripts", "python.exe")
+    : path.join(venv, "bin", "python");
+  if (!(await fileExists(python))) {
+    return { available: false, set: true, venv, python, kokoro: false, soundfile: false, fix: `MEDIAKIT_VOICE_VENV points at ${venv} but ${python} does not exist — recreate the venv or fix the path` };
+  }
+  // site-packages lives under lib/pythonX.Y/ on posix, Lib/ on win32.
+  let sitePackages = null;
+  if (process.platform === "win32") {
+    sitePackages = path.join(venv, "Lib", "site-packages");
+  } else {
+    try {
+      const libEntries = await readdir(path.join(venv, "lib"));
+      const py = libEntries.filter((e) => e.startsWith("python")).sort();
+      for (const p of py) {
+        const cand = path.join(venv, "lib", p, "site-packages");
+        if (await fileExists(cand)) { sitePackages = cand; break; }
+      }
+    } catch { /* no lib dir: sitePackages stays null */ }
+  }
+  // A module is either a package dir (kokoro/) or a single file
+  // (soundfile.py) — checking only the bare name misses the file
+  // form, which is exactly how soundfile ships (caught by the
+  // smoke probe on the real Kokoro venv, 2026-11-22).
+  const hasModule = async (name) => (await fileExists(path.join(sitePackages, name))) || (await fileExists(path.join(sitePackages, `${name}.py`)));
+  const kokoro = sitePackages ? await hasModule("kokoro") : false;
+  const soundfile = sitePackages ? await hasModule("soundfile") : false;
+  if (!kokoro || !soundfile) {
+    const missing = [!kokoro && "kokoro", !soundfile && "soundfile"].filter(Boolean).join(" + ");
+    return { available: false, set: true, venv, python, kokoro, soundfile, fix: `${python} is missing ${missing} — run ${python} -m pip install ${missing}` };
+  }
+  return { available: true, set: true, venv, python, kokoro: true, soundfile: true };
+}
+
 // Chunks overlap by 2s so a word straddling a boundary is heard whole
 // by at least one chunk; the ownership rule below (a segment belongs
 // to the chunk whose owned window its start falls in) keeps the merge
@@ -11756,6 +11804,24 @@ export async function doctor({ smoke = false } = {}) {
   // Audit log state: enabled/path/entries, so a caller can tell
   // whether tool calls are being recorded before trusting `audit`.
   const audit = await auditStatus();
+  // Async job store: the durable dir jobs live under. It is
+  // auto-created on the first job start (writeJobRecord mkdirs), so
+  // a missing dir is not an error — only an unwritable location is
+  // worth reporting, and it never fails ok (the job start itself
+  // would fail loudly with the real error). Writability is probed
+  // with access(), never by writing — doctor writes nothing.
+  const jobsRootPath = jobsRoot();
+  let jobsDir = { path: jobsRootPath, exists: false, writable: false, note: "created on the first async job" };
+  try {
+    const exists = await fileExists(jobsRootPath);
+    const probePath = exists ? jobsRootPath : path.dirname(jobsRootPath);
+    let writable = false;
+    try { await access(probePath, fsConstants.W_OK); writable = true; } catch { writable = false; }
+    jobsDir = { path: jobsRootPath, exists, writable, ...(exists ? {} : { note: "created on the first async job" }) };
+  } catch { /* keep the default: path + false/false */ }
+  // Voice venv (Kokoro TTS for the report-video voiceover):
+  // optional, never fails ok — same rule as the ASR engine.
+  const voiceVenv = await detectVoiceVenv();
   // --smoke runs a real render chain after the static checks; a
   // failed smoke fails doctor.ok — "available" must mean "renders".
   let smokeResult = null;
@@ -11776,6 +11842,8 @@ export async function doctor({ smoke = false } = {}) {
     job_admission_limits: jobAdmissionLimits(),
     ffmpeg_timeout_ms: ffmpegTimeoutMs(),
     audit,
+    jobs_dir: jobsDir,
+    voice_venv: voiceVenv,
     gpu,
     filters,
     encoders,

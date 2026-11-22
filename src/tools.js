@@ -1561,7 +1561,7 @@ export const TOOL_DEFS = [
   {
     name: "doctor",
     tier: "READ",
-    description: "Read-only environment preflight: ffmpeg/ffprobe versions, which filters and encoders this build has, and which mediakit tools that enables. An unavailable tool also reports a one-sentence fix telling you how to repair the ffmpeg install. Run first on a new machine — a tool that reports available=false will fail at runtime. With smoke:true, also runs a real end-to-end render (generate → trim → loudness → verify) and reports whether this machine can actually render — a failed smoke fails ok.",
+    description: "Read-only environment preflight: ffmpeg/ffprobe versions, which filters and encoders this build has, and which mediakit tools that enables. An unavailable tool also reports a one-sentence fix telling you how to repair the ffmpeg install. Also reports the async job store dir (jobs_dir: path + exists + writable — it is auto-created on the first job) and the Kokoro voice venv (voice_venv, env MEDIAKIT_VOICE_VENV — optional, like the ASR engine). Run first on a new machine — a tool that reports available=false will fail at runtime. With smoke:true, also runs a real end-to-end render (generate → trim → loudness → verify) and reports whether this machine can actually render — a failed smoke fails ok.",
     schema: {
     smoke: z.boolean().default(false).describe("Also run a real end-to-end render chain (generate → trim → loudness → verify) after the static checks; a failed smoke fails ok"),
     },

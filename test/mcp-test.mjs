@@ -14,7 +14,7 @@ import { createCanvas } from "canvas";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { applyContentBaseline, averageHash, compareDeterminismRuns, countClippedRuns, diagnoseVoice, dialogueKeyForShots, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, explainError, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, localTempoCurve, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
+import { applyContentBaseline, averageHash, compareDeterminismRuns, countClippedRuns, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, explainError, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, localTempoCurve, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import bounceTpl from "../src/canvas-scene-lib/templates/bounce.cjs";
@@ -2075,6 +2075,43 @@ const hasLibvmaf = doctorJson.filters?.libvmaf === true;
 checkOk(typeof doctorJson.gpu?.available === "boolean" && Array.isArray(doctorJson.gpu?.encoders) && "working_encoder" in (doctorJson.gpu ?? {}), "doctor: gpu section reports available + listed encoders + working encoder", JSON.stringify(doctorJson.gpu));
 checkOk(doctorJson.gpu.available === (doctorJson.gpu.working_encoder !== null), "doctor: gpu available is true exactly when a probe encode worked", JSON.stringify(doctorJson.gpu));
 console.log("doctor gpu:", JSON.stringify(doctorJson.gpu));
+// jobs_dir + voice_venv (lượt 144, kinocut doctor idea): the async
+// job store is auto-created on the first job, so a missing dir is
+// reported, not an error; the voice venv is optional like ASR.
+const jobsDirExpectSuffix = !process.env.MEDIAKIT_JOBS_DIR;
+checkOk(typeof doctorJson.jobs_dir?.path === "string" && doctorJson.jobs_dir.path.length > 0 && (!jobsDirExpectSuffix || doctorJson.jobs_dir.path.endsWith(".mediakit-jobs")) && typeof doctorJson.jobs_dir.exists === "boolean" && typeof doctorJson.jobs_dir.writable === "boolean", "doctor: jobs_dir reports path + exists + writable", JSON.stringify(doctorJson.jobs_dir));
+checkOk(doctorJson.jobs_dir.writable === true, "doctor: jobs dir (or its parent, when the dir does not exist yet) is writable", JSON.stringify(doctorJson.jobs_dir));
+if (doctorJson.voice_venv?.set === false) {
+  checkOk(doctorJson.voice_venv.available === false && /MEDIAKIT_VOICE_VENV/.test(doctorJson.voice_venv.fix ?? ""), "doctor: voice venv unset reports set:false + the env var to set", JSON.stringify(doctorJson.voice_venv));
+} else {
+  checkOk(doctorJson.voice_venv.available === true && doctorJson.voice_venv.kokoro === true && doctorJson.voice_venv.soundfile === true, "doctor: voice venv set reports available with kokoro + soundfile", JSON.stringify(doctorJson.voice_venv));
+}
+// detectVoiceVenv (lượt 144): pure unit checks with a fake venv
+// under outputs/ — on-disk presence only, no torch import.
+const fakeVenvDir = path.join(root, "outputs/mcp-voice-venv");
+await rm(fakeVenvDir, { recursive: true, force: true });
+await mkdir(path.join(fakeVenvDir, "bin"), { recursive: true });
+await mkdir(path.join(fakeVenvDir, "lib/python3.12/site-packages/kokoro"), { recursive: true });
+await mkdir(path.join(fakeVenvDir, "lib/python3.12/site-packages/soundfile"), { recursive: true });
+await writeFile(path.join(fakeVenvDir, "bin/python"), "", "utf8");
+const savedVoiceVenv = process.env.MEDIAKIT_VOICE_VENV;
+try {
+  process.env.MEDIAKIT_VOICE_VENV = fakeVenvDir;
+  const fakeVenvOk = await detectVoiceVenv();
+  checkOk(fakeVenvOk.available === true && fakeVenvOk.set === true && fakeVenvOk.python === path.join(fakeVenvDir, "bin/python") && fakeVenvOk.kokoro === true && fakeVenvOk.soundfile === true, "detectVoiceVenv: fake venv with python + kokoro + soundfile reports available", JSON.stringify(fakeVenvOk));
+  await rm(path.join(fakeVenvDir, "lib/python3.12/site-packages/soundfile"), { recursive: true, force: true });
+  const fakeVenvNoSf = await detectVoiceVenv();
+  checkOk(fakeVenvNoSf.available === false && fakeVenvNoSf.soundfile === false && /soundfile/.test(fakeVenvNoSf.fix ?? ""), "detectVoiceVenv: venv missing soundfile reports unavailable with a pip fix", JSON.stringify(fakeVenvNoSf));
+  process.env.MEDIAKIT_VOICE_VENV = path.join(root, "outputs/no-such-venv");
+  const fakeVenvGone = await detectVoiceVenv();
+  checkOk(fakeVenvGone.available === false && /does not exist/.test(fakeVenvGone.fix ?? ""), "detectVoiceVenv: venv path with no python reports unavailable", JSON.stringify(fakeVenvGone));
+  delete process.env.MEDIAKIT_VOICE_VENV;
+  const fakeVenvUnset = await detectVoiceVenv();
+  checkOk(fakeVenvUnset.available === false && fakeVenvUnset.set === false && /MEDIAKIT_VOICE_VENV/.test(fakeVenvUnset.fix ?? ""), "detectVoiceVenv: unset env reports set:false with the hint", JSON.stringify(fakeVenvUnset));
+} finally {
+  if (savedVoiceVenv === undefined) delete process.env.MEDIAKIT_VOICE_VENV;
+  else process.env.MEDIAKIT_VOICE_VENV = savedVoiceVenv;
+}
 // transcribe is the exception: it carries a fix hint whenever its
 // optional engine is missing, even on a healthy ffmpeg install.
 checkOk(Object.entries(doctorJson.tools).filter(([n]) => n !== "transcribe").every(([, t]) => !("fix" in t)), "doctor: no fix hint on ffmpeg tools when all are available", JSON.stringify(doctorJson.tools));
@@ -9258,6 +9295,46 @@ const assembleTemplateBouncePsnr = await framePsnr(assembleTemplateEarlyPng, ass
 checkOk(assembleTemplateBouncePsnr !== null && assembleTemplateBouncePsnr < 28, "assemble bounce template really moves: frames 0.5s apart differ (PSNR < 28 dB)", `PSNR=${assembleTemplateBouncePsnr}`);
 const assembleTemplateTitleBandR = await planeMean(assembleTemplateTitlePng, "1080:300:0:810", "r");
 checkOk(assembleTemplateTitleBandR !== null && assembleTemplateTitleBandR > 35, "assemble title-card template draws the white title in the middle band", `band R=${assembleTemplateTitleBandR}`);
+// Text-layer injection proof (lượt 144, Premiere-MCP follow-up):
+// hostile strings — quotes, colons, semicolons, commas, a fake
+// drawtext `enable=` clause, a backslash, unicode — must render
+// literally, never break the filter graph or execute. Text is data
+// in both paths: template params travel as a JS object into
+// node-canvas fillText, text layers travel through a textfile into
+// drawtext; the layer color is hex-validated, so no channel carries
+// filter syntax. The proof renders the hostile film next to a
+// plain-text control with the same geometry: if either text were
+// dropped or sanitized away, the two frames would be byte-identical.
+// (No band-mean threshold here: the 61-char title shrinks to ~28px,
+// so its ink is ~1.5% of the band — the sha256 difference is the
+// robust signal, and the template test above already proves the
+// title-card draws text at all.)
+const hostileText = "It's \"quoted\": semi; comma, enable=between(t,0,99) \\ ünïcode ✓";
+const injectStage = await stageAssembleManifest("assemble-text-injection.json");
+const injectControlStage = await stageAssembleManifest("assemble-text-control.json");
+const injectValidateRes = await client.callTool({ name: "assemble", arguments: { manifest_path: injectStage.manifestPath, mode: "validate" } });
+const injectValidateJson = JSON.parse(injectValidateRes.content[0].text);
+checkOk(injectValidateJson.mode === "validate" && injectValidateJson.total_seconds === 4 && injectValidateJson.total_frames === 120 && injectValidateJson.shots?.[0]?.params?.text === hostileText && injectValidateJson.shots?.[1]?.text_layers?.[0]?.text === hostileText, "assemble validate echoes the hostile text verbatim in the template param and the text layer (nothing silently sanitized)", JSON.stringify({ params: injectValidateJson.shots?.[0]?.params, layers: injectValidateJson.shots?.[1]?.text_layers }));
+const injectOut = path.join(injectStage.dir, "out");
+await client.callTool({ name: "assemble", arguments: { manifest_path: injectStage.manifestPath, mode: "render", output_dir: injectOut, force: true } }, undefined, { timeout: 300000 });
+const injectFinalPath = path.join(injectOut, "final.mp4");
+const injectProbe = await probeStreams(injectFinalPath);
+const injectFrames = await countFrames(injectFinalPath);
+const injectLufs = await measureLufs(injectFinalPath);
+checkOk(near(parseFloat(injectProbe?.format?.duration), 4, 0.15) && injectFrames === 120, "assemble hostile-text film renders 4s with exactly 120 frames", `duration=${injectProbe?.format?.duration} frames=${injectFrames}`);
+checkOk(injectLufs !== null && near(injectLufs, -14, 0.5), "assemble hostile-text final measures -14 LUFS independently", `LUFS=${injectLufs}`);
+const injectControlOut = path.join(injectControlStage.dir, "out");
+await client.callTool({ name: "assemble", arguments: { manifest_path: injectControlStage.manifestPath, mode: "render", output_dir: injectControlOut, force: true } }, undefined, { timeout: 300000 });
+const injectTitlePng = path.join(injectStage.dir, "inject-title.png");
+const injectControlTitlePng = path.join(injectControlStage.dir, "control-title.png");
+await extractPng(injectFinalPath, 1.0, injectTitlePng);
+await extractPng(path.join(injectControlOut, "final.mp4"), 1.0, injectControlTitlePng);
+checkOk((await sha256File(injectTitlePng)) !== (await sha256File(injectControlTitlePng)), "assemble hostile title-card frame differs from the plain-text control (the hostile string was drawn, not dropped)", "");
+const injectLayerPng = path.join(injectStage.dir, "inject-layer.png");
+const injectControlLayerPng = path.join(injectControlStage.dir, "control-layer.png");
+await extractPng(injectFinalPath, 3.0, injectLayerPng);
+await extractPng(path.join(injectControlOut, "final.mp4"), 3.0, injectControlLayerPng);
+checkOk((await sha256File(injectLayerPng)) !== (await sha256File(injectControlLayerPng)), "assemble hostile text-layer frame differs from the plain-text control (the layer was drawn, not dropped)", "");
 // Bounce apex (turn 102): render the template module directly on a
 // 540x960 canvas at mid-bounce (t = cycle/2, ball at the apex) and
 // scan the center column for the red ball — the topmost red row
