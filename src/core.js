@@ -11029,6 +11029,9 @@ const TOOL_REQUIREMENTS = {
   // measure_pace is detectScenes with a different detector default
   // (content) — same two filters as scenes.
   measure_pace: { filters: ["select", "signalstats"] },
+  // highlights samples frames with fps+scale, then hashes them in
+  // pure Node via canvas — the same two filters as extract_frames.
+  highlights: { filters: ["fps", "scale"] },
   // clean_voice decodes to raw PCM for the diagnosis (pure Node),
   // then runs the pre-steps + the EQ/compressor/limiter chain in
   // ffmpeg and measures with loudnorm. Output is pcm_f32le WAV.
@@ -12941,6 +12944,196 @@ export async function measurePace({ input, detector = "content", threshold = nul
   return { ...result, style_file: stylePath, style_name: name, style_written: true };
 }
 
+// ---------------------------------------------------------------- highlights
+// Perceptual-hash highlight detection (EncodeX `src/shared/ai/highlight.ts`
+// idea, re-implemented from the blockhash-js block-mean-value paper):
+// sample frames at 2 fps, hash each one, and call a frame a scene
+// boundary when its hash jumps from the previous frame by >= threshold
+// (normalized Hamming distance, default 0.15 — the EncodeX boundary).
+// A highlight is the span between two boundaries; its score is the
+// mean jump inside the span (how much the picture keeps changing
+// there), and thumbnail candidates are the greedy farthest-point
+// frames — the most visually distinct moments in the clip. The hash
+// itself is the classic 8x8 average hash: downscale to 8x8 grey, one
+// bit per cell against the frame mean, with a +/-8 dead zone around
+// the mean so encoder noise on a flat frame does not flip bits at
+// random (measured on the fixture: uniform colour segments hash
+// stable, cross-segment jump exactly 1.0), and the flat-frame
+// tie-break from blockhash-js (mean > 127.5 -> 1, else 0) so a solid
+// bright frame and a solid dark frame hash to opposite ends.
+
+export const HIGHLIGHTS_DEFAULT_FPS = 2;
+export const HIGHLIGHTS_DEFAULT_THRESHOLD = 0.15;
+export const HIGHLIGHTS_DEFAULT_MIN_SPAN_SECONDS = 2;
+export const HIGHLIGHTS_DEFAULT_TOP = 5;
+export const HIGHLIGHTS_DEFAULT_THUMBNAIL_COUNT = 3;
+export const HIGHLIGHTS_MAX_FRAMES = 1200;
+export const HIGHLIGHTS_HASH_DEAD_ZONE = 8;
+export const HIGHLIGHTS_MIN_FPS = 0.5;
+
+const HAMMING_NIBBLE_BITS = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4];
+
+/** 8x8 average hash of 64 grey values (0-255, row-major) -> 16 hex chars. */
+export function averageHash(grays, deadZone = HIGHLIGHTS_HASH_DEAD_ZONE) {
+  if (!Array.isArray(grays) || grays.length !== 64 || grays.some((g) => typeof g !== "number" || !Number.isFinite(g))) {
+    throw new MediaKitError("averageHash needs 64 finite grey values", "INVALID_ARG");
+  }
+  const mean = grays.reduce((a, b) => a + b, 0) / 64;
+  let bits = "";
+  for (const g of grays) {
+    if (g > mean + deadZone) bits += "1";
+    else if (g < mean - deadZone) bits += "0";
+    else bits += mean > 127.5 ? "1" : "0";
+  }
+  let hex = "";
+  for (let i = 0; i < 64; i += 4) hex += parseInt(bits.slice(i, i + 4), 2).toString(16);
+  return hex;
+}
+
+/** Hamming distance between two 16-hex-char hashes (blockhash-js popcount). */
+export function hammingDistanceHex(hash1, hash2) {
+  if (typeof hash1 !== "string" || typeof hash2 !== "string" || hash1.length !== hash2.length) {
+    throw new MediaKitError("hammingDistanceHex needs two hashes of the same length", "INVALID_ARG");
+  }
+  let d = 0;
+  for (let i = 0; i < hash1.length; i++) {
+    d += HAMMING_NIBBLE_BITS[parseInt(hash1[i], 16) ^ parseInt(hash2[i], 16)];
+  }
+  return d;
+}
+
+/** Split a timeline into spans at the boundary timestamps, merging any
+ * span shorter than minSpanSeconds into its neighbour (backwards, except
+ * the first span which merges forwards so the timeline still starts at
+ * 0). Pure — the merge rule is unit-tested, not eyeballed. */
+export function findHighlightSpans({ boundaries, duration, minSpanSeconds = HIGHLIGHTS_DEFAULT_MIN_SPAN_SECONDS }) {
+  if (!Number.isFinite(duration) || duration <= 0) throw new MediaKitError("findHighlightSpans needs a positive duration", "INVALID_ARG");
+  if (!Array.isArray(boundaries)) throw new MediaKitError("findHighlightSpans needs a boundaries array", "INVALID_ARG");
+  const cuts = [...boundaries].sort((a, b) => a - b).filter((t) => t > 0 && t < duration);
+  const raw = [];
+  let start = 0;
+  for (const cut of cuts) { raw.push({ start, end: cut }); start = cut; }
+  raw.push({ start, end: duration });
+  const merged = [];
+  for (const span of raw) {
+    if (span.end - span.start >= minSpanSeconds) { merged.push({ ...span }); continue; }
+    // Short span: merge backwards into the previous span. A short
+    // FIRST span has nothing before it, so it stays — the while loop
+    // below folds it forwards into the next span instead.
+    if (merged.length > 0) merged[merged.length - 1].end = span.end;
+    else merged.push({ ...span });
+  }
+  // Fold a short leading span forwards: if the first span is under the
+  // minimum, extend it to the end of the next span and drop the next.
+  while (merged.length > 1 && merged[0].end - merged[0].start < minSpanSeconds) {
+    merged[0].end = merged[1].end;
+    merged.splice(1, 1);
+  }
+  return merged;
+}
+
+/** Greedy farthest-point thumbnails (EncodeX highlight.ts): seed with
+ * the frame carrying the biggest jump (earliest wins a tie; the middle
+ * frame when nothing ever jumps), then repeatedly pick the frame whose
+ * MINIMUM Hamming distance to the picked set is largest. Pure. */
+export function pickFarthestThumbnails(frames, count) {
+  if (!Array.isArray(frames) || frames.length === 0) return [];
+  if (!Number.isInteger(count) || count < 0) throw new MediaKitError("pickFarthestThumbnails needs a non-negative integer count", "INVALID_ARG");
+  if (count === 0) return [];
+  const picked = [];
+  const pickedIdx = new Set();
+  let seed = 0;
+  let bestJump = -1;
+  frames.forEach((f, i) => {
+    const j = f.jump ?? 0;
+    if (j > bestJump) { bestJump = j; seed = i; }
+  });
+  if (bestJump <= 0) seed = Math.floor(frames.length / 2);
+  picked.push(seed);
+  pickedIdx.add(seed);
+  while (picked.length < Math.min(count, frames.length)) {
+    let bestIdx = -1, bestMin = -1;
+    frames.forEach((f, i) => {
+      if (pickedIdx.has(i)) return;
+      let minD = Infinity;
+      for (const p of picked) minD = Math.min(minD, hammingDistanceHex(f.hash, frames[p].hash));
+      if (minD > bestMin) { bestMin = minD; bestIdx = i; }
+    });
+    if (bestIdx < 0) break;
+    picked.push(bestIdx);
+    pickedIdx.add(bestIdx);
+  }
+  return picked.map((i) => ({ timestamp: frames[i].timestamp, hash: frames[i].hash }));
+}
+
+export async function findHighlights({ input, fps = HIGHLIGHTS_DEFAULT_FPS, threshold = HIGHLIGHTS_DEFAULT_THRESHOLD, minSpanSeconds = HIGHLIGHTS_DEFAULT_MIN_SPAN_SECONDS, top = HIGHLIGHTS_DEFAULT_TOP, thumbnailCount = HIGHLIGHTS_DEFAULT_THUMBNAIL_COUNT }) {
+  const inPath = await requireInput(input);
+  if (typeof fps !== "number" || !Number.isFinite(fps) || fps < HIGHLIGHTS_MIN_FPS || fps > 5) throw new MediaKitError(`highlights fps must be ${HIGHLIGHTS_MIN_FPS}-5, got: ${fps}`, "INVALID_ARG");
+  if (typeof threshold !== "number" || !Number.isFinite(threshold) || threshold < 0 || threshold > 1) throw new MediaKitError(`highlights threshold must be 0-1, got: ${threshold}`, "INVALID_ARG");
+  if (typeof minSpanSeconds !== "number" || !Number.isFinite(minSpanSeconds) || minSpanSeconds < 0 || minSpanSeconds > 30) throw new MediaKitError(`highlights min_span_seconds must be 0-30, got: ${minSpanSeconds}`, "INVALID_ARG");
+  if (!Number.isInteger(top) || top < 1 || top > 20) throw new MediaKitError(`highlights top must be 1-20, got: ${top}`, "INVALID_ARG");
+  if (!Number.isInteger(thumbnailCount) || thumbnailCount < 0 || thumbnailCount > 10) throw new MediaKitError(`highlights thumbnail_count must be 0-10, got: ${thumbnailCount}`, "INVALID_ARG");
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("highlights needs a video input", "INVALID_ARG");
+  const duration = meta.duration_seconds;
+  if (!Number.isFinite(duration) || duration <= 0) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
+  // Long files sample slower instead of refusing: the frame cap, not
+  // the duration, is the budget — below 0.5 fps the sampling is too
+  // sparse to see a cut, so that is the refusal line (40 min).
+  const effFps = Math.min(fps, HIGHLIGHTS_MAX_FRAMES / duration);
+  if (effFps < HIGHLIGHTS_MIN_FPS) throw new MediaKitError(`highlights: ${duration}s is too long — at ${HIGHLIGHTS_MIN_FPS} fps the ${HIGHLIGHTS_MAX_FRAMES}-frame cap covers only ${HIGHLIGHTS_MAX_FRAMES / HIGHLIGHTS_MIN_FPS}s`, "INVALID_ARG");
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-highlights-"));
+  try {
+    await run(FFMPEG, ["-hide_banner", "-nostats", "-i", inPath,
+      "-vf", `fps=${+effFps.toFixed(3)},scale=32:-2`, "-f", "image2", path.join(tmpDir, "f-%04d.png")]);
+    const files = (await readdir(tmpDir)).filter((f) => f.endsWith(".png")).sort();
+    if (files.length === 0) throw new MediaKitError("highlights: no frames extracted", "FFMPEG_FAILED");
+    const { createCanvas, loadImage } = loadCanvasPackage("highlights measurement");
+    const cv = createCanvas(8, 8);
+    const ctx = cv.getContext("2d");
+    const frames = [];
+    for (let i = 0; i < files.length; i++) {
+      const img = await loadImage(path.join(tmpDir, files[i]));
+      ctx.clearRect(0, 0, 8, 8);
+      ctx.drawImage(img, 0, 0, 8, 8);
+      const data = ctx.getImageData(0, 0, 8, 8).data;
+      const grays = [];
+      for (let p = 0; p < data.length; p += 4) grays.push(0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2]);
+      const hash = averageHash(grays);
+      const timestamp = +(i / effFps).toFixed(3);
+      const jump = frames.length === 0 ? 0 : +(hammingDistanceHex(hash, frames[frames.length - 1].hash) / 64).toFixed(3);
+      frames.push({ timestamp, hash, jump });
+    }
+    const boundaries = frames.filter((f) => f.jump >= threshold && f.timestamp > 0)
+      .map((f) => ({ at_seconds: f.timestamp, jump: f.jump }));
+    const spans = findHighlightSpans({ boundaries: boundaries.map((b) => b.at_seconds), duration, minSpanSeconds });
+    const highlights = spans.map((s) => {
+      const inside = frames.filter((f) => f.timestamp > s.start && f.timestamp < s.end);
+      const jumps = inside.map((f) => f.jump);
+      const meanJump = jumps.length === 0 ? 0 : +(jumps.reduce((a, b) => a + b, 0) / jumps.length).toFixed(3);
+      const peakJump = jumps.length === 0 ? 0 : Math.max(...jumps);
+      return { start: s.start, end: s.end, duration: +(s.end - s.start).toFixed(3), score: meanJump, mean_jump: meanJump, peak_jump: peakJump };
+    });
+    const topHighlights = [...highlights]
+      .sort((a, b) => b.score - a.score || b.duration - a.duration || a.start - b.start)
+      .slice(0, top);
+    return {
+      operation: "highlights",
+      input: inPath,
+      duration_seconds: duration,
+      sample_fps: +effFps.toFixed(3),
+      frames_sampled: frames.length,
+      threshold,
+      boundaries,
+      highlights,
+      top_highlights: topHighlights,
+      thumbnails: pickFarthestThumbnails(frames, thumbnailCount),
+    };
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 // ---------------------------------------------------------------- hook
 // Find the best hook window in a clip (sonic-match-mcp's hook_window
 // idea, measured from the footage instead of a script): slide a
@@ -14609,6 +14802,17 @@ export const BATCH_OPERATIONS = {
     probeOnly: true,
     args: ["detector", "threshold"],
     run: (input, output, a) => measurePace({ input, detector: a.detector ?? "content", threshold: a.threshold ?? null }),
+  },
+  // highlights in batch/manifest is probe-only like hook: the
+  // boundaries + spans + thumbnail candidates come back in the row's
+  // `result` (batch) or the step's result (manifest) and the cache
+  // stores that result — no file is written. A manifest step records
+  // WHERE the visual beats are, so the next trim/search step can cut
+  // on a real scene change instead of a guessed timestamp.
+  highlights: {
+    probeOnly: true,
+    args: ["fps", "threshold", "min_span_seconds", "top", "thumbnail_count"],
+    run: (input, output, a) => findHighlights({ input, fps: a.fps ?? 2, threshold: a.threshold ?? 0.15, minSpanSeconds: a.min_span_seconds ?? 2, top: a.top ?? 5, thumbnailCount: a.thumbnail_count ?? 3 }),
   },
   // slideshow in batch is a SET operation, not a per-file one: the
   // whole matched set becomes ONE slideshow (batch() branches on it

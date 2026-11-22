@@ -14,7 +14,7 @@ import { createCanvas } from "canvas";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { applyContentBaseline, compareDeterminismRuns, countClippedRuns, diagnoseVoice, estimateDecodedWork, estimateJobRemaining, estimateTempo, findDensestSpeechWindow, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
+import { applyContentBaseline, averageHash, compareDeterminismRuns, countClippedRuns, diagnoseVoice, estimateDecodedWork, estimateJobRemaining, estimateTempo, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, localTempoCurve, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import bounceTpl from "../src/canvas-scene-lib/templates/bounce.cjs";
@@ -188,10 +188,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut", "clean_voice", "measure_pace"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut", "clean_voice", "measure_pace", "highlights"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 81 tools present");
-checkOk(missing.length === 0, "tools/list has all 81 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 82 tools present");
+checkOk(missing.length === 0, "tools/list has all 82 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -2829,6 +2829,66 @@ const paceMissing = await callExpectThrow("measure_pace", { input: path.join(roo
 checkOk(/not found|no such file/i.test(paceMissing), "measure_pace on a missing file fails loudly", paceMissing.slice(0, 200));
 const paceCli = await runCliJson(["measure-pace", path.join(root, "test/pace-source.mp4")]);
 checkOk(paceCli.cuts === 3 && paceCli.cuts_per_min === 9 && paceCli.longest_hold_s === 5, "CLI measure-pace reports the same 3 cuts / 9 per minute / 5s hold", JSON.stringify(paceCli));
+
+// highlights (lượt 136, idea: EncodeX highlight.ts + blockhash-js):
+// pure hash/span/thumbnail helpers first, then the tool on the
+// fixtures — the 15s fixture is 3x5s solid colour blocks (red /
+// bright green / blue) by construction, so the boundaries are exact
+// (5.0s and 10.0s, jump 1.000) and every in-segment jump is 0.000.
+checkOk(averageHash(new Array(64).fill(0)) === "0000000000000000", "averageHash: a uniform dark frame hashes to all zeros", averageHash(new Array(64).fill(0)));
+checkOk(averageHash(new Array(64).fill(255)) === "ffffffffffffffff", "averageHash: a uniform bright frame hashes to all ones (flat-frame tie-break)", averageHash(new Array(64).fill(255)));
+const hlHalf = [...new Array(32).fill(0), ...new Array(32).fill(255)];
+checkOk(averageHash(hlHalf) === "00000000ffffffff", "averageHash: dark top half / bright bottom half hashes to 00000000ffffffff", averageHash(hlHalf));
+const hlNoisy = new Array(64).fill(100).map((v, i) => v + (i % 2 === 0 ? 5 : -5));
+checkOk(averageHash(hlNoisy) === averageHash(new Array(64).fill(100)), "averageHash: +-5 noise around a flat mean does not flip any bit (dead zone)", averageHash(hlNoisy));
+checkOk(hammingDistanceHex("0000000000000000", "ffffffffffffffff") === 64, "hammingDistanceHex: all-zero vs all-one is 64", "64");
+checkOk(hammingDistanceHex("0000000000000000", "0000000000000001") === 1, "hammingDistanceHex: one nibble apart is 1", "1");
+checkOk(hammingDistanceHex("abcdef0123456789", "abcdef0123456789") === 0, "hammingDistanceHex: identical hashes are 0", "0");
+const hlSpans = findHighlightSpans({ boundaries: [5, 10], duration: 15, minSpanSeconds: 2 });
+checkOk(hlSpans.length === 3 && hlSpans[0].start === 0 && hlSpans[0].end === 5 && hlSpans[1].start === 5 && hlSpans[1].end === 10 && hlSpans[2].start === 10 && hlSpans[2].end === 15, "findHighlightSpans: boundaries 5/10 over 15s give three 5s spans", JSON.stringify(hlSpans));
+const hlSpansShortLead = findHighlightSpans({ boundaries: [1, 5, 10], duration: 15, minSpanSeconds: 2 });
+checkOk(hlSpansShortLead.length === 3 && hlSpansShortLead[0].start === 0 && hlSpansShortLead[0].end === 5, "findHighlightSpans: a 1s leading span folds forwards into the next span", JSON.stringify(hlSpansShortLead));
+const hlSpansShortTail = findHighlightSpans({ boundaries: [5, 10, 14], duration: 15, minSpanSeconds: 2 });
+checkOk(hlSpansShortTail.length === 3 && hlSpansShortTail[2].start === 10 && hlSpansShortTail[2].end === 15, "findHighlightSpans: a 1s trailing span folds backwards into the previous span", JSON.stringify(hlSpansShortTail));
+const hlThumbs = pickFarthestThumbnails([
+  { timestamp: 0, hash: "0000000000000000", jump: 0 },
+  { timestamp: 5, hash: "ffffffffffffffff", jump: 1 },
+  { timestamp: 10, hash: "0000000000000000", jump: 1 },
+  { timestamp: 12, hash: "0000000000000000", jump: 0 },
+], 3);
+checkOk(hlThumbs.length === 3 && hlThumbs[0].timestamp === 5 && hlThumbs[1].timestamp === 0, "pickFarthestThumbnails: seeds on the biggest jump (5s), then the farthest hash (0s)", JSON.stringify(hlThumbs));
+const hlThumbsStatic = pickFarthestThumbnails([
+  { timestamp: 0, hash: "0000000000000000", jump: 0 },
+  { timestamp: 2.5, hash: "0000000000000000", jump: 0 },
+  { timestamp: 5, hash: "0000000000000000", jump: 0 },
+], 1);
+checkOk(hlThumbsStatic.length === 1 && hlThumbsStatic[0].timestamp === 2.5, "pickFarthestThumbnails: with no jump at all the seed is the middle frame", JSON.stringify(hlThumbsStatic));
+const hlRes = await client.callTool({
+  name: "highlights",
+  arguments: { input: path.join(root, "test/highlights-source.mp4") },
+});
+const hlJson = JSON.parse(hlRes.content[0].text);
+checkOk(hlJson.operation === "highlights" && hlJson.duration_seconds === 15 && hlJson.sample_fps === 2 && hlJson.frames_sampled === 30 && hlJson.threshold === 0.15 && hlJson.boundaries.length === 2 && hlJson.boundaries[0].at_seconds === 5 && hlJson.boundaries[0].jump === 1 && hlJson.boundaries[1].at_seconds === 10 && hlJson.boundaries[1].jump === 1, "highlights on the 3x5s fixture finds boundaries at 5.0s and 10.0s, jump 1.000, 30 frames at 2 fps", JSON.stringify(hlJson.boundaries));
+checkOk(hlJson.highlights.length === 3 && hlJson.highlights.every((h) => h.duration === 5 && h.score === 0 && h.mean_jump === 0 && h.peak_jump === 0) && hlJson.highlights[0].start === 0 && hlJson.highlights[1].start === 5 && hlJson.highlights[2].start === 10 && hlJson.top_highlights.length === 3 && hlJson.top_highlights[0].start === 0, "highlights reports three 5s spans with score 0 (nothing moves inside a solid block) and ranks them in timeline order on a tie", JSON.stringify(hlJson.highlights));
+checkOk(hlJson.thumbnails.length === 3 && hlJson.thumbnails[0].timestamp === 5 && hlJson.thumbnails[0].hash === "ffffffffffffffff" && hlJson.thumbnails[1].timestamp === 0 && hlJson.thumbnails[1].hash === "0000000000000000", "highlights thumbnails seed on the 5s jump (bright green) then the farthest hash (0s red)", JSON.stringify(hlJson.thumbnails));
+const hlStaticRes = await client.callTool({
+  name: "highlights",
+  arguments: { input: path.join(root, "test/highlights-static.mp4") },
+});
+const hlStaticJson = JSON.parse(hlStaticRes.content[0].text);
+checkOk(hlStaticJson.boundaries.length === 0 && hlStaticJson.highlights.length === 1 && hlStaticJson.highlights[0].start === 0 && hlStaticJson.highlights[0].end === 5 && hlStaticJson.thumbnails[0].timestamp === 2.5, "highlights on a static 5s clip: no boundaries, one span, thumbnail seed is the middle frame", JSON.stringify({ boundaries: hlStaticJson.boundaries, spans: hlStaticJson.highlights, thumbs: hlStaticJson.thumbnails }));
+const hlMergeRes = await client.callTool({
+  name: "highlights",
+  arguments: { input: path.join(root, "test/highlights-source.mp4"), min_span_seconds: 6 },
+});
+const hlMergeJson = JSON.parse(hlMergeRes.content[0].text);
+checkOk(hlMergeJson.highlights.length === 1 && hlMergeJson.highlights[0].start === 0 && hlMergeJson.highlights[0].end === 15, "highlights --min-span 6 merges the three 5s spans into one 15s span", JSON.stringify(hlMergeJson.highlights));
+const hlMissing = await callExpectThrow("highlights", { input: path.join(root, "test/no-such-video.mp4") });
+checkOk(/not found|no such file/i.test(hlMissing), "highlights on a missing file fails loudly", hlMissing.slice(0, 200));
+const hlBadThreshold = await callExpectThrow("highlights", { input: path.join(root, "test/highlights-source.mp4"), threshold: 2 });
+checkOk(/threshold/i.test(hlBadThreshold), "highlights with threshold 2 fails validation", hlBadThreshold.slice(0, 200));
+const hlCli = await runCliJson(["highlights", path.join(root, "test/highlights-source.mp4")]);
+checkOk(hlCli.boundaries.length === 2 && hlCli.boundaries[0].at_seconds === 5 && hlCli.boundaries[1].at_seconds === 10 && hlCli.highlights.length === 3 && hlCli.thumbnails[0].timestamp === 5, "CLI highlights reports the same boundaries, spans and thumbnail seed", JSON.stringify({ b: hlCli.boundaries, t: hlCli.thumbnails }));
 const scenesFlashRes = await client.callTool({
   name: "scenes",
   arguments: { input: path.join(root, "test/scenes-flash.mp4"), detector: "content" },
@@ -3164,6 +3224,31 @@ const paceManifestRes = await client.callTool({
 });
 const paceManifestJson = JSON.parse(paceManifestRes.content[0].text);
 checkOk(paceManifestJson.steps_run === 2 && paceManifestJson.steps.every((s) => s.status === "ok") && paceManifestJson.steps[0].tool === "measure_pace" && paceManifestJson.steps[0].result.cuts === 3 && paceManifestJson.steps[0].result.cuts_per_min === 9 && paceManifestJson.steps[0].output === paceManifestJson.input && near(paceManifestJson.final.duration_seconds, 5, 0.05), "manifest measure_pace step records the 3-cut pace, passes the chain through, then trim cuts 5-10s (final 5s)", JSON.stringify(paceManifestJson.steps.map((s) => s.result?.cuts_per_min ?? s.result?.duration_seconds)));
+// highlights in batch + manifest (lượt 136): probe-only like
+// hook — no file is written, the boundaries + spans come back in
+// the row's result / the step's result, and the cache stores that
+// result. The manifest step records WHERE the visual beats are,
+// then trim cuts on the first reported boundary.
+await rm(path.join(root, "outputs/mcp-batch-hl-in"), { recursive: true, force: true });
+await rm(path.join(root, "outputs/mcp-batch-hl-out"), { recursive: true, force: true });
+await mkdir(path.join(root, "outputs/mcp-batch-hl-in"), { recursive: true });
+await copyFile(path.join(root, "test/highlights-source.mp4"), path.join(root, "outputs/mcp-batch-hl-in/highlights-source.mp4"));
+const hlBatchRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "highlights", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-hl-in"), output_dir: path.join(root, "outputs/mcp-batch-hl-out") },
+});
+const hlBatchJson = JSON.parse(hlBatchRes.content[0].text);
+checkOk(hlBatchJson.succeeded === 1 && hlBatchJson.failed === 0 && hlBatchJson.output_suffix === null && hlBatchJson.results[0].status === "ok" && hlBatchJson.results[0].output === null && hlBatchJson.results[0].result.boundaries.length === 2 && hlBatchJson.results[0].result.boundaries[0].at_seconds === 5 && hlBatchJson.results[0].result.highlights.length === 3, "batch highlights succeeds with no output file and the boundaries + spans in the row's result", JSON.stringify(hlBatchJson.results.map((r) => r.result?.boundaries)));
+await rm(path.join(root, "outputs/mcp-manifest-hl.mp4"), { force: true });
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const hlManifestPath = path.join(root, "outputs", "manifest-hl.json");
+await writeFile(hlManifestPath, JSON.stringify({ version: 1, input: path.join(root, "test/highlights-source.mp4"), output: path.join(root, "outputs/mcp-manifest-hl.mp4"), steps: [{ tool: "highlights" }, { tool: "trim", args: { start: 5, end: 10 } }] }), "utf8");
+const hlManifestRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: hlManifestPath },
+});
+const hlManifestJson = JSON.parse(hlManifestRes.content[0].text);
+checkOk(hlManifestJson.steps_run === 2 && hlManifestJson.steps.every((s) => s.status === "ok") && hlManifestJson.steps[0].tool === "highlights" && hlManifestJson.steps[0].result.boundaries.length === 2 && hlManifestJson.steps[0].result.boundaries[0].at_seconds === 5 && hlManifestJson.steps[0].output === hlManifestJson.input && near(hlManifestJson.final.duration_seconds, 5, 0.05), "manifest highlights step records the 5s/10s boundaries, passes the chain through, then trim cuts 5-10s (final 5s)", JSON.stringify(hlManifestJson.steps.map((s) => s.result?.boundaries?.length ?? s.result?.duration_seconds)));
 // The manifest validator takes the new snap args too (same args
 // list as batch): a dry-run manifest with snap_quiet:false validates
 // without rendering anything.
@@ -5709,7 +5794,7 @@ const findSourceRes = await client.callTool({
   arguments: { directory: path.join(root, "test"), name: "source" },
 });
 const findSourceJson = JSON.parse(findSourceRes.content[0].text);
-checkOk(findSourceJson.total_matches === 16, "find 'source' matches 16 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source, hook-source, hook-motion-source, hook-snap-source, sharpness-source, rotate-source, noisy-source, beat-trim-source, levels-source, pace-source)", `got ${findSourceJson.total_matches}`);
+checkOk(findSourceJson.total_matches === 17, "find 'source' matches 17 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source, hook-source, hook-motion-source, hook-snap-source, sharpness-source, rotate-source, noisy-source, beat-trim-source, levels-source, pace-source, highlights-source)", `got ${findSourceJson.total_matches}`);
 
 const findMp3Res = await client.callTool({
   name: "find",
@@ -7281,7 +7366,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 81 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 81 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 82 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 82 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -9772,7 +9857,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 81 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 82 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -9832,11 +9917,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 81, "GET /mcp reports name/version/transport and 81 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 82, "GET /mcp reports name/version/transport and 82 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 81 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 81 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 82 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 82 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -9907,7 +9992,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 81, "JSON-RPC tools/list returns the same 81 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 82, "JSON-RPC tools/list returns the same 82 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

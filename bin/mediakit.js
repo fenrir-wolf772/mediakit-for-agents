@@ -794,6 +794,18 @@ const COMMANDS = {
       ["--nearest", "Time (seconds or MM:SS): report the keyframe nearest this cut point — before (largest <= t), after (smallest >= t), closest, distance, direction"],
     ],
   },
+  highlights: {
+    usage: "mediakit highlights <input> [--fps 2] [--threshold 0.15] [--min-span 2] [--top 5] [--thumbnails 3]",
+    desc: "Find a clip's visual beats with perceptual hashes: sample frames at --fps (default 2), hash each one as an 8x8 average hash, and call a frame a scene boundary when its hash jumps from the previous frame by >= --threshold (normalized Hamming distance, default 0.15). A highlight is the span between two boundaries — spans shorter than --min-span seconds (default 2) merge into a neighbour — and its score is the mean jump inside the span; --top ranks the best spans. --thumbnails returns that many greedy farthest-point frames (the most visually distinct moments, for a poster frame or a hook still). Probe-only, writes no file.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--fps", "Sample rate in frames per second, 0.5-5 (default 2; long files sample slower automatically, down to 0.5)"],
+      ["--threshold", "Boundary threshold on the normalized Hamming jump 0-1 (default 0.15; lower = more boundaries)"],
+      ["--min-span", "Spans shorter than this merge into a neighbour, in seconds 0-30 (default 2)"],
+      ["--top", "How many top highlights to rank, 1-20 (default 5)"],
+      ["--thumbnails", "How many farthest-point thumbnail candidates to return, 0-10 (default 3; 0 = none)"],
+    ],
+  },
   "audio-levels": {
     usage: "mediakit audio-levels <input> [--bucket 1] [--top 5] [--min-gap 2]",
     desc: "Loudness curve + loudest moments of an audio stream. One decode pass: per-frame astats Peak + RMS bucketed into --bucket windows (default 1s), RMS averaged in the linear domain. Returns every bucket {start, end, rms_db, peak_db} (true digital silence reports nulls), a summary (max peak, energy-mean RMS, min/max bucket RMS, dynamic range, silent buckets, loudest bucket) and the --top loudest moments kept at least --min-gap apart (default 2s). Probe-only, writes no file.",
@@ -899,7 +911,7 @@ const COMMANDS = {
   },
   batch: {
     usage: "mediakit batch <operation> --pattern <glob> --input-dir <dir> -o <output-dir> [--args-json '{\"target_lufs\": -14}'] [--jobs 1] [--suffix -loudness] [--no-cache] [--stop-on-error] [--timeout 1800] [--max-files 200] [--dry-run]",
-    desc: "Apply one operation (loudness|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|smart-cut|clean-voice|slideshow|hook|audio-levels|search-words) to every file matching a glob under a folder, with the same args for all. Outputs are <stem>-<operation>.<ext> under the output dir, mirroring the input tree; a batch-manifest.json records every file's result. Unchanged files are skipped via a content-hash cache; --dry-run lists the planned outputs and writes nothing. cut-words, remove-retakes, smart-cut and search-words find each clip's words file as <words-dir>/<stem>.words.json (default: the input's own folder) — a clip with no words file fails its own row only. clean-voice writes .wav always (48 kHz mono float), whatever the input was, and a take whose plan needs clearvoice/sr fails its own row (pass --args-json '{\"steps\": \"declip,dehum\"}' to clean anyway). slideshow is a set operation: the whole matched set of images (2-32) becomes ONE slideshow video (--args-json '{\"output_name\": \"reel.mp4\"}'), and the per-file cache does not apply. hook, audio-levels and search-words are probe-only: they write no file (output null in each row) — the measurement comes back in the row's result, and the cache stores that result.",
+    desc: "Apply one operation (loudness|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|smart-cut|clean-voice|slideshow|hook|audio-levels|search-words|highlights) to every file matching a glob under a folder, with the same args for all. Outputs are <stem>-<operation>.<ext> under the output dir, mirroring the input tree; a batch-manifest.json records every file's result. Unchanged files are skipped via a content-hash cache; --dry-run lists the planned outputs and writes nothing. cut-words, remove-retakes, smart-cut and search-words find each clip's words file as <words-dir>/<stem>.words.json (default: the input's own folder) — a clip with no words file fails its own row only. clean-voice writes .wav always (48 kHz mono float), whatever the input was, and a take whose plan needs clearvoice/sr fails its own row (pass --args-json '{\"steps\": \"declip,dehum\"}' to clean anyway). slideshow is a set operation: the whole matched set of images (2-32) becomes ONE slideshow video (--args-json '{\"output_name\": \"reel.mp4\"}'), and the per-file cache does not apply. hook, audio-levels, search-words and highlights are probe-only: they write no file (output null in each row) — the measurement comes back in the row's result, and the cache stores that result.",
     args: [{ name: "operation", required: true }],
     options: [
       ["--pattern", "Glob under --input-dir: **/*.mp4 (any depth), sub/*.mp4 (one folder), or bare *.mp4 (basename at any depth) (required)"],
@@ -1011,7 +1023,7 @@ const COMMANDS = {
   },
   manifest: {
     usage: "mediakit manifest <manifest.json> [-o <output.mp4>] [--dry-run] [--no-cache] [--keep-intermediates]",
-    desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (slideshow as step 1 only — it builds from images in args, so input should be the first slide image; then trim|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|fastforward|broll|grade|fit|silence|denoise|interpolate|burn-captions|overlay|chroma-key|cut-words|remove-retakes|smart-cut|clean-voice; hook|audio-levels|search-words are the probe-only steps — they analyze the chain file at that point and pass it through unchanged), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file. clean-voice writes .wav only, so a manifest step using it needs a .wav chain (a voice-only pipeline, or clean-voice as the step before a .wav output).",
+    desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (slideshow as step 1 only — it builds from images in args, so input should be the first slide image; then trim|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|fastforward|broll|grade|fit|silence|denoise|interpolate|burn-captions|overlay|chroma-key|cut-words|remove-retakes|smart-cut|clean-voice; hook|audio-levels|search-words|highlights are the probe-only steps — they analyze the chain file at that point and pass it through unchanged), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file. clean-voice writes .wav only, so a manifest step using it needs a .wav chain (a voice-only pipeline, or clean-voice as the step before a .wav output).",
     args: [{ name: "manifest", required: true }],
     options: [
       ["--dry-run", "Validate the manifest and list the planned steps without running anything"],
@@ -2015,6 +2027,16 @@ async function main() {
           styleName: opts.style_name ?? null,
         });
         break;
+      case "highlights":
+        result = await core.findHighlights({
+          input: needInput(),
+          fps: numOpt(opts, "fps") ?? 2,
+          threshold: numOpt(opts, "threshold") ?? 0.15,
+          minSpanSeconds: numOpt(opts, "min_span") ?? 2,
+          top: numOpt(opts, "top") ?? 5,
+          thumbnailCount: numOpt(opts, "thumbnails") ?? 3,
+        });
+        break;
       case "keyframes":
         result = await core.listKeyframes({ input: needInput(), nearest: opts.nearest });
         break;
@@ -2119,7 +2141,7 @@ async function main() {
         break;
       }
       case "batch": {
-        if (!positional[0]) fail("missing operation: loudness|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|smart-cut|clean-voice|slideshow|hook|audio-levels|search-words");
+        if (!positional[0]) fail("missing operation: loudness|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|smart-cut|clean-voice|slideshow|hook|audio-levels|search-words|highlights");
         if (!opts.pattern) fail("missing required option: --pattern <glob>");
         if (!opts.input_dir) fail("missing required option: --input-dir <dir>");
         const opName = positional[0].replace(/-/g, "_");

@@ -1769,6 +1769,36 @@ batch and manifest it follows the same words-file convention as
 one is keyframe-exact stream-copy cutting, this one cuts on the
 transcript.
 
+### 58d. Find the visual beats before you cut — `highlights`
+`hook` (rule 55) finds where a clip gets loud; `highlights` finds
+where the PICTURE changes. It samples frames at 2 fps, hashes each
+one as an 8x8 average hash (the blockhash-js block-mean-value idea:
+one bit per cell against the frame mean, a ±8 dead zone so encoder
+noise on a flat frame cannot flip bits, flat-frame tie-break mean >
+127.5 → 1), and calls a frame a scene boundary when its hash jumps
+from the previous frame by ≥ `--threshold` (normalized Hamming
+distance, default 0.15 — the EncodeX boundary). A highlight is the
+span between two boundaries; spans shorter than `--min-span`
+(default 2s) merge into a neighbour, so the timeline never shatters
+into slivers. Each span's `score` is the mean jump inside it — how
+much the picture keeps changing there — and `top_highlights` ranks
+them by score, then duration. `thumbnails` are the greedy
+farthest-point frames (seed = biggest jump, then each pick
+maximizes its minimum Hamming distance to the picked set): the most
+visually distinct moments, for a poster frame or a hook still. Use
+it to pick the cut points and the thumbnail BEFORE trimming: run
+`highlights` on the raw take, cut on a boundary it reports, and
+take the poster from a `thumbnails` timestamp — never guess either.
+A static take reports one span and no boundaries; a take of solid
+colour blocks reports a boundary at each colour change (measured:
+red/green/blue 5s blocks → boundaries at 5.0s and 10.0s, jump
+1.000). Long files sample slower instead of refusing (frame cap
+1200; below 0.5 fps the file is refused as too long). Probe-only,
+writes no file; also a probe-only batch operation and manifest step.
+Follow-up, not in this tool: feeding the spans into `hook` scoring,
+so the best audio window and the best visual beat are ranked
+together.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.
