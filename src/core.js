@@ -13166,13 +13166,20 @@ export function pickFarthestThumbnails(frames, count) {
   return picked.map((i) => ({ timestamp: frames[i].timestamp, hash: frames[i].hash }));
 }
 
-export async function findHighlights({ input, fps = HIGHLIGHTS_DEFAULT_FPS, threshold = HIGHLIGHTS_DEFAULT_THRESHOLD, minSpanSeconds = HIGHLIGHTS_DEFAULT_MIN_SPAN_SECONDS, top = HIGHLIGHTS_DEFAULT_TOP, thumbnailCount = HIGHLIGHTS_DEFAULT_THUMBNAIL_COUNT }) {
+/** Sample frames at fps and hash them — the frame pipeline `highlights`
+ * and `hook`'s visual component share: extract at scale=32, hash each
+ * frame as an 8x8 average hash, and call a frame a boundary when its
+ * hash jumps from the previous frame by >= threshold. Returns the
+ * frames [{timestamp, hash, jump}], the boundaries [{at_seconds,
+ * jump}], the effective fps and the duration. Throws the same errors
+ * as findHighlights for a too-long file / no video / no frames, so
+ * callers that only need the boundaries (hook) get the same refusal
+ * lines. Pure ffmpeg + node-canvas; writes nothing outside a temp dir
+ * that is removed on the way out. */
+async function sampleHighlightFrames({ input, fps = HIGHLIGHTS_DEFAULT_FPS, threshold = HIGHLIGHTS_DEFAULT_THRESHOLD }) {
   const inPath = await requireInput(input);
   if (typeof fps !== "number" || !Number.isFinite(fps) || fps < HIGHLIGHTS_MIN_FPS || fps > 5) throw new MediaKitError(`highlights fps must be ${HIGHLIGHTS_MIN_FPS}-5, got: ${fps}`, "INVALID_ARG");
   if (typeof threshold !== "number" || !Number.isFinite(threshold) || threshold < 0 || threshold > 1) throw new MediaKitError(`highlights threshold must be 0-1, got: ${threshold}`, "INVALID_ARG");
-  if (typeof minSpanSeconds !== "number" || !Number.isFinite(minSpanSeconds) || minSpanSeconds < 0 || minSpanSeconds > 30) throw new MediaKitError(`highlights min_span_seconds must be 0-30, got: ${minSpanSeconds}`, "INVALID_ARG");
-  if (!Number.isInteger(top) || top < 1 || top > 20) throw new MediaKitError(`highlights top must be 1-20, got: ${top}`, "INVALID_ARG");
-  if (!Number.isInteger(thumbnailCount) || thumbnailCount < 0 || thumbnailCount > 10) throw new MediaKitError(`highlights thumbnail_count must be 0-10, got: ${thumbnailCount}`, "INVALID_ARG");
   const meta = await probe(inPath);
   if (!meta.video) throw new MediaKitError("highlights needs a video input", "INVALID_ARG");
   const duration = meta.duration_seconds;
@@ -13206,42 +13213,51 @@ export async function findHighlights({ input, fps = HIGHLIGHTS_DEFAULT_FPS, thre
     }
     const boundaries = frames.filter((f) => f.jump >= threshold && f.timestamp > 0)
       .map((f) => ({ at_seconds: f.timestamp, jump: f.jump }));
-    const spans = findHighlightSpans({ boundaries: boundaries.map((b) => b.at_seconds), duration, minSpanSeconds });
-    const highlights = spans.map((s) => {
-      const inside = frames.filter((f) => f.timestamp > s.start && f.timestamp < s.end);
-      const jumps = inside.map((f) => f.jump);
-      const meanJump = jumps.length === 0 ? 0 : +(jumps.reduce((a, b) => a + b, 0) / jumps.length).toFixed(3);
-      const peakJump = jumps.length === 0 ? 0 : Math.max(...jumps);
-      return { start: s.start, end: s.end, duration: +(s.end - s.start).toFixed(3), score: meanJump, mean_jump: meanJump, peak_jump: peakJump };
-    });
-    const topHighlights = [...highlights]
-      .sort((a, b) => b.score - a.score || b.duration - a.duration || a.start - b.start)
-      .slice(0, top);
-    return {
-      operation: "highlights",
-      input: inPath,
-      duration_seconds: duration,
-      sample_fps: +effFps.toFixed(3),
-      frames_sampled: frames.length,
-      threshold,
-      boundaries,
-      highlights,
-      top_highlights: topHighlights,
-      thumbnails: pickFarthestThumbnails(frames, thumbnailCount),
-    };
+    return { frames, boundaries, effFps: +effFps.toFixed(3), duration };
   } finally {
     await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+export async function findHighlights({ input, fps = HIGHLIGHTS_DEFAULT_FPS, threshold = HIGHLIGHTS_DEFAULT_THRESHOLD, minSpanSeconds = HIGHLIGHTS_DEFAULT_MIN_SPAN_SECONDS, top = HIGHLIGHTS_DEFAULT_TOP, thumbnailCount = HIGHLIGHTS_DEFAULT_THUMBNAIL_COUNT }) {
+  if (typeof minSpanSeconds !== "number" || !Number.isFinite(minSpanSeconds) || minSpanSeconds < 0 || minSpanSeconds > 30) throw new MediaKitError(`highlights min_span_seconds must be 0-30, got: ${minSpanSeconds}`, "INVALID_ARG");
+  if (!Number.isInteger(top) || top < 1 || top > 20) throw new MediaKitError(`highlights top must be 1-20, got: ${top}`, "INVALID_ARG");
+  if (!Number.isInteger(thumbnailCount) || thumbnailCount < 0 || thumbnailCount > 10) throw new MediaKitError(`highlights thumbnail_count must be 0-10, got: ${thumbnailCount}`, "INVALID_ARG");
+  const { frames, boundaries, effFps, duration } = await sampleHighlightFrames({ input, fps, threshold });
+  const inPath = await requireInput(input);
+  const spans = findHighlightSpans({ boundaries: boundaries.map((b) => b.at_seconds), duration, minSpanSeconds });
+  const highlights = spans.map((s) => {
+    const inside = frames.filter((f) => f.timestamp > s.start && f.timestamp < s.end);
+    const jumps = inside.map((f) => f.jump);
+    const meanJump = jumps.length === 0 ? 0 : +(jumps.reduce((a, b) => a + b, 0) / jumps.length).toFixed(3);
+    const peakJump = jumps.length === 0 ? 0 : Math.max(...jumps);
+    return { start: s.start, end: s.end, duration: +(s.end - s.start).toFixed(3), score: meanJump, mean_jump: meanJump, peak_jump: peakJump };
+  });
+  const topHighlights = [...highlights]
+    .sort((a, b) => b.score - a.score || b.duration - a.duration || a.start - b.start)
+    .slice(0, top);
+  return {
+    operation: "highlights",
+    input: inPath,
+    duration_seconds: duration,
+    sample_fps: +effFps.toFixed(3),
+    frames_sampled: frames.length,
+    threshold,
+    boundaries,
+    highlights,
+    top_highlights: topHighlights,
+    thumbnails: pickFarthestThumbnails(frames, thumbnailCount),
+  };
 }
 
 // ---------------------------------------------------------------- hook
 // Find the best hook window in a clip (sonic-match-mcp's hook_window
 // idea, measured from the footage instead of a script): slide a
 // window of --duration across the file and score each candidate on
-// FOUR measured signals — mean audio energy (astats RMS per frame,
+// FIVE measured signals — mean audio energy (astats RMS per frame,
 // binned and normalized against the file's own loudest bin), speech
 // coverage (silencedetect complement), scene cuts (a window that
-// opens on a cut, plus cuts inside it, reads as a new beat), and real
+// opens on a cut, plus cuts inside it, reads as a new beat), real
 // MOTION (the motion tool's per-frame pixel-diff curve, binned on the
 // same step grid, normalized against a FIXED reference of 0.06 — the
 // measured fraction for testsrc, the motion tool's "clearly moving"
@@ -13251,14 +13267,31 @@ export async function findHighlights({ input, fps = HIGHLIGHTS_DEFAULT_FPS, thre
 // real motion to ~0.2, so the ranking stops seeing the moving half
 // at all. A fixed reference keeps the within-file contrast that the
 // ranking actually needs.
-// The score is 0.35*energy + 0.25*speech + 0.2*cut + 0.2*motion —
-// audio 0.6 / video 0.4, the same split shorts-maker-gpu uses for its
-// combined action score (0.6 audio RMS+flux / 0.4 video frame-diff),
+// The score is 0.3*energy + 0.2*speech + 0.2*cut + 0.2*motion +
+// 0.1*visual — audio 0.5 / video 0.5, the same split shorts-maker-gpu
+// uses for its combined action score (0.6 audio RMS+flux / 0.4 video
+// frame-diff), re-balanced when the fifth signal joined: the visual
+// term is the `highlights` spans fed back in — a window's visual
+// score counts the highlight boundaries (the spans' edges) inside it,
 // so a loud-but-dead frame no longer beats a slightly quieter frame
-// where something actually moves. The weights are fixed so two runs
-// on the same file rank the same way. Top candidates are greedy
+// where the picture actually changes. The visual weight is 0.1 on
+// purpose: it is a nudge, not a takeover — two detectors of the same
+// picture change (scene cuts + hash boundaries) must not outvote the
+// audio that carries the hook. The weights are fixed so two runs on
+// the same file rank the same way. Top candidates are greedy
 // non-overlapping (overlap under half the hook length), so the list
 // is alternatives, not the same window shifted by one step.
+// A boundary is a hash jump, and the hash is blind to flat-colour
+// changes whose means sit on the same side of 127.5 — measured: a
+// flat red->blue cut reports NO boundary (both frames hash to all-0),
+// while red->green jumps 1.0. So `visual` is 0 on synthetic flat
+// colour blocks; on real footage, where every frame has texture, the
+// boundaries fire. That is a property of the average hash, not a bug
+// in the scoring — the span mean-jump scores were measured as the
+// alternative and rejected: a flat span's score is 0 by construction
+// (its jumps happen AT the boundary, which is the span's edge, never
+// inside it), so spans can only feed the score through their
+// boundaries.
 // Motion normalization has a noise floor, borrowed from the motion
 // tool's own calibration: a per-bin fraction under 0.001 (0.1% of
 // pixels) is encoder noise, not movement, and a file whose busiest
@@ -13452,6 +13485,27 @@ async function appendHookHistory(historyFile, record) {
   }
 }
 
+/** Visual beats inside a hook window, from the `highlights`
+ * boundaries (the edges of the highlight spans): a boundary AT the
+ * window start counts — the window opens on the beat, the same
+ * ownership rule as `starts_near_cut` — and a boundary AT the end
+ * belongs to the next window. Two or more beats in one window is
+ * fully visually active (visual 1.0); one beat is half. Pure —
+ * unit-tested, not eyeballed. Boundaries may be plain timestamps or
+ * `{at_seconds}` objects, so the raw `highlights` output feeds it
+ * directly. */
+export function hookVisualScore(boundaries, start, end) {
+  if (!Array.isArray(boundaries)) throw new MediaKitError("hookVisualScore needs a boundaries array", "INVALID_ARG");
+  if (!Number.isFinite(start) || !Number.isFinite(end) || !(end > start)) throw new MediaKitError("hookVisualScore needs start < end", "INVALID_ARG");
+  let beats = 0;
+  for (const b of boundaries) {
+    const t = typeof b === "number" ? b : b?.at_seconds;
+    if (typeof t !== "number" || !Number.isFinite(t)) throw new MediaKitError("hookVisualScore needs numeric boundary timestamps", "INVALID_ARG");
+    if (t >= start && t < end) beats++;
+  }
+  return { visual: Math.min(1, beats / 2), visual_beats: beats };
+}
+
 export async function findHook({ input, duration = 15, step = 0.5, top = 3, thresholdDb = -40, historyFile = null, record = false, historyOverlap = 0.5, snapQuiet = true, snapWindowSeconds = HOOK_SNAP_WINDOW_DEFAULT_SECONDS }) {
   const inPath = await requireInput(input);
   const hookDur = num(duration, "duration", { min: 4, max: 20 });
@@ -13492,6 +13546,21 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
     motionFractions = (await measureMotion({ input: inPath, windowSeconds: stepSec })).motion_curve;
   } else {
     warnings.push("no video stream — no scene cuts or motion to score");
+  }
+  // Visual beats (video only): the `highlights` boundaries, sampled
+  // on the same file at 2 fps — one extra ffmpeg pass, 32px wide, so
+  // it costs almost nothing next to the four passes above. A sampler
+  // failure must not fail the hook: node-canvas missing (or a too-long
+  // file) degrades to visual 0 with a warning, and the other four
+  // signals still rank the windows.
+  let highlightBoundaries = [];
+  if (meta.video) {
+    try {
+      const sampled = await sampleHighlightFrames({ input: inPath, fps: HIGHLIGHTS_DEFAULT_FPS });
+      highlightBoundaries = sampled.boundaries.map((b) => b.at_seconds);
+    } catch (e) {
+      warnings.push(`highlights unavailable — visual component 0 (${e instanceof Error ? e.message : String(e)})`);
+    }
   }
   const maxDb = energyBins.length ? Math.max(...energyBins.map((b) => b.energy_db)) : null;
   // All-silent file: maxDb sits on the floor, span is 0 — every bin
@@ -13545,13 +13614,16 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
     const cutsInside = cuts.filter((c) => c > w.start && c < w.end).length;
     const startsNearCut = cuts.some((c) => Math.abs(c - w.start) <= 0.75);
     const cutScore = +(0.6 * (startsNearCut ? 1 : 0) + 0.4 * (Math.min(cutsInside, 3) / 3)).toFixed(3);
+    const { visual, visual_beats } = hookVisualScore(highlightBoundaries, w.start, w.end);
     w.energy = energy;
     w.speech = speech;
     w.motion = motion;
     w.cuts_inside = cutsInside;
     w.starts_near_cut = startsNearCut;
     w.cut_score = cutScore;
-    w.score = +(0.35 * energy + 0.25 * speech + 0.2 * cutScore + 0.2 * motion).toFixed(3);
+    w.visual = visual;
+    w.visual_beats = visual_beats;
+    w.score = +(0.3 * energy + 0.2 * speech + 0.2 * cutScore + 0.2 * motion + 0.1 * visual).toFixed(3);
   }
   scored.sort((a, b) => b.score - a.score || a.start - b.start);
   const candidates = [];
@@ -13633,6 +13705,7 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
     energy_curve: curve,
     cuts_per_minute: cutsPerMinute,
     pacing,
+    highlight_boundaries: highlightBoundaries,
     candidates,
     hook: best,
     trim,

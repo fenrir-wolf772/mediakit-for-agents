@@ -14,7 +14,7 @@ import { createCanvas } from "canvas";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { applyContentBaseline, averageHash, compareDeterminismRuns, countClippedRuns, diagnoseVoice, dialogueKeyForShots, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, inspectPacing, localTempoCurve, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
+import { applyContentBaseline, averageHash, compareDeterminismRuns, countClippedRuns, diagnoseVoice, dialogueKeyForShots, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, localTempoCurve, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import bounceTpl from "../src/canvas-scene-lib/templates/bounce.cjs";
@@ -3031,23 +3031,32 @@ const motionAudioOnly = await callExpectThrow("motion", { input: path.join(root,
 checkOk(/needs a video input/.test(motionAudioOnly), "motion refuses audio-only input", motionAudioOnly.slice(0, 120));
 
 // hook: best opening window from measured energy + speech + cuts +
-// motion. Fixture test/hook-source.mp4 is 30s: quiet red [0,15) then
-// loud blue [15,30) with the cut at 15s, so the 10s hook must open on
-// the cut — [15,25) scores ~0.75 while a quiet window scores ~0.14.
-// Score is 0.35*energy + 0.25*speech + 0.2*cut + 0.2*motion (audio
-// 0.6 / video 0.4); the clip is static, so motion is only the
-// one-frame cut spike (0.05 mean over the window). The energy curve
-// must also show the step: loud bins ~20 dB above the quiet ones
-// (checked independently with volumedetect below). The trim is NOT
-// snapped on this fixture: the window is uniformly loud, so there is
-// no quiet moment in its last 5s.
+// motion + visual beats. Fixture test/hook-source.mp4 is 30s: quiet
+// red [0,15) then loud blue [15,30) with the cut at 15s, so the 10s
+// hook must open on the cut — [15,25) scores ~0.65 while a quiet
+// window scores ~0.12. Score is 0.3*energy + 0.2*speech + 0.2*cut +
+// 0.2*motion + 0.1*visual (audio 0.5 / video 0.5); the clip is static,
+// so motion is only the one-frame cut spike (0.05 mean over the
+// window). Visual is 0 here ON PURPOSE: the red->blue cut is flat
+// colour on flat colour, and the average hash is blind to it (both
+// frames hash to all-0 — their grey means 76 and 29 sit on the same
+// side of the 127.5 tie-break), so `highlights` reports no boundary
+// and the window gets no visual credit — measured, documented in the
+// core comment, not a bug. The energy curve must also show the step:
+// loud bins ~20 dB above the quiet ones (checked independently with
+// volumedetect below). The trim is NOT snapped on this fixture: the
+// window is uniformly loud, so there is no quiet moment in its last 5s.
 const hookRes = await client.callTool({
   name: "hook",
   arguments: { input: path.join(root, "test/hook-source.mp4"), duration: 10, step: 0.5, top: 3 },
 });
 const hookJson = JSON.parse(hookRes.content[0].text);
 console.log("hook call:", JSON.stringify(hookJson.hook), "| candidates", hookJson.candidates.map((c) => `${c.start}-${c.end}:${c.score}`).join(" "), "| pacing", hookJson.pacing);
-checkOk(hookJson.hook.start === 15 && hookJson.hook.end === 25 && hookJson.hook.starts_near_cut === true && hookJson.hook.cuts_inside === 1 && near(hookJson.hook.score, 0.754, 0.01) && near(hookJson.hook.motion, 0.05, 0.01), "hook opens on the loud cut at 15s (score ~0.75, motion 0.05 = the cut-frame spike only)", JSON.stringify(hookJson.hook));
+checkOk(hookJson.hook.start === 15 && hookJson.hook.end === 25 && hookJson.hook.starts_near_cut === true && hookJson.hook.cuts_inside === 1 && near(hookJson.hook.score, 0.654, 0.01) && near(hookJson.hook.motion, 0.05, 0.01) && hookJson.hook.visual === 0 && hookJson.hook.visual_beats === 0 && JSON.stringify(hookJson.highlight_boundaries) === "[]", "hook opens on the loud cut at 15s (score ~0.65, motion 0.05 = the cut-frame spike only, visual 0 = the flat red->blue cut is invisible to the average hash)", JSON.stringify(hookJson.hook));
+// The score is the weighted sum of its own returned components —
+// recompute it from the parts, so a weight change cannot silently
+// drift the total.
+checkOk(near(hookJson.hook.score, 0.3 * hookJson.hook.energy + 0.2 * hookJson.hook.speech + 0.2 * hookJson.hook.cut_score + 0.2 * hookJson.hook.motion + 0.1 * hookJson.hook.visual, 0.002), "hook score decomposes into 0.3E+0.2S+0.2C+0.2M+0.1V from its own components", `score=${hookJson.hook.score}`);
 checkOk(hookJson.candidates.length === 3 && hookJson.candidates[0].score > hookJson.candidates[1].score && hookJson.candidates[1].score > hookJson.candidates[2].score && hookJson.candidates[2].score < 0.25, "hook ranks 3 non-overlapping windows, quiet last (<0.25)", JSON.stringify(hookJson.candidates.map((c) => c.score)));
 checkOk(near(hookJson.speech_coverage, 0.5, 0.02) && hookJson.pacing === "slow" && hookJson.cuts_per_minute === 2 && hookJson.energy_curve.length === 61, "hook reports speech 0.5, pacing slow (2 cuts/min), 61 curve bins", `speech=${hookJson.speech_coverage} pacing=${hookJson.pacing} bins=${hookJson.energy_curve.length}`);
 checkOk(hookJson.trim.start === 15 && hookJson.trim.end === 25 && hookJson.trim.snapped === false && /no quiet moment/.test(hookJson.trim.reason ?? ""), "hook keeps the raw end on a uniformly loud window (trim not snapped, reason recorded)", JSON.stringify(hookJson.trim));
@@ -3065,7 +3074,7 @@ const hookAudioRes = await client.callTool({
 });
 const hookAudioJson = JSON.parse(hookAudioRes.content[0].text);
 console.log("hook audio-only:", JSON.stringify(hookAudioJson.hook), "| speech_cov", hookAudioJson.speech_coverage);
-checkOk((hookAudioJson.hook.start === 4 || hookAudioJson.hook.start === 4.5) && hookAudioJson.hook.speech >= 0.7 && hookAudioJson.hook.score > 0.4 && near(hookAudioJson.speech_coverage, 0.667, 0.02) && hookAudioJson.pacing === null, "hook on audio-only lands on the densest 4s (start 4/4.5, speech 0.667)", JSON.stringify(hookAudioJson.hook));
+checkOk((hookAudioJson.hook.start === 4 || hookAudioJson.hook.start === 4.5) && hookAudioJson.hook.speech >= 0.7 && near(hookAudioJson.hook.score, 0.376, 0.01) && hookAudioJson.hook.visual === 0 && near(hookAudioJson.speech_coverage, 0.667, 0.02) && hookAudioJson.pacing === null, "hook on audio-only lands on the densest 4s (start 4/4.5, speech 0.667, score 0.376 = 0.3E+0.2S, visual 0 with no video)", JSON.stringify(hookAudioJson.hook));
 checkOk(hookAudioJson.trim.snapped === false && /below 4s/.test(hookAudioJson.trim.reason ?? ""), "hook refuses to snap a 4s window below its 4s floor (the silence at 6-7s stays uncut)", JSON.stringify(hookAudioJson.trim));
 // Video-only: no audio to score — cuts + motion only, warning says
 // so. Fixture test/content-video-only.mp4 is moving testsrc, so the
@@ -3075,7 +3084,7 @@ const hookVideoRes = await client.callTool({
   arguments: { input: path.join(root, "test/content-video-only.mp4"), duration: 4 },
 });
 const hookVideoJson = JSON.parse(hookVideoRes.content[0].text);
-checkOk(hookVideoJson.warnings.some((w) => /no audio stream/.test(w)) && near(hookVideoJson.hook.score, 0.2, 0.01) && hookVideoJson.hook.motion > 0.9 && hookVideoJson.energy_curve.every((b) => b.energy === 0), "hook on video-only scores on motion (0.2, motion ~1.0) and warns about no audio", JSON.stringify(hookVideoJson.warnings));
+checkOk(hookVideoJson.warnings.some((w) => /no audio stream/.test(w)) && near(hookVideoJson.hook.score, 0.2, 0.01) && hookVideoJson.hook.motion > 0.9 && hookVideoJson.hook.visual === 0 && hookVideoJson.energy_curve.every((b) => b.energy === 0), "hook on video-only scores on motion (0.2, motion ~1.0, visual 0 = moving testsrc has no hash boundary) and warns about no audio", JSON.stringify(hookVideoJson.warnings));
 // Short file: duration longer than the file -> whole file, warning.
 const hookShortRes = await client.callTool({
   name: "hook",
@@ -3095,6 +3104,19 @@ const hookDupHit = hookDuplicateOf({ start: 20, end: 30 }, hookDupRecs, 0.5);
 checkOk(hookDupHit !== null && hookDupHit.overlap_seconds === 5 && hookDupHit.start === 15 && hookDupHit.end === 25, "hookDuplicateOf: 5/10 = 0.5 meets the default threshold", JSON.stringify(hookDupHit));
 checkOk(hookDuplicateOf({ start: 20, end: 30 }, hookDupRecs, 0.6) === null, "hookDuplicateOf: 5/10 = 0.5 is below a 0.6 threshold", "null");
 checkOk(hookDuplicateOf({ start: 0, end: 10 }, hookDupRecs, 0.5) === null, "hookDuplicateOf: a merely touching window is not a duplicate", "null");
+// hookVisualScore is pure (no ffmpeg): the boundary-counting rules,
+// unit-tested directly — a boundary at the window start counts (the
+// window opens on the beat), at the end it belongs to the next
+// window, 2+ beats saturate at 1.0, and the span scores are NOT the
+// input (a flat span's mean jump is 0 by construction — its jumps
+// live at the boundary, the span's edge).
+checkOk(JSON.stringify(hookVisualScore([], 0, 10)) === JSON.stringify({ visual: 0, visual_beats: 0 }), "hookVisualScore: no boundaries -> visual 0, 0 beats", "0");
+checkOk(JSON.stringify(hookVisualScore([5], 0, 10)) === JSON.stringify({ visual: 0.5, visual_beats: 1 }), "hookVisualScore: 1 beat -> visual 0.5", "0.5");
+checkOk(JSON.stringify(hookVisualScore([5, 7.5], 0, 10)) === JSON.stringify({ visual: 1, visual_beats: 2 }), "hookVisualScore: 2 beats -> visual 1.0", "1");
+checkOk(JSON.stringify(hookVisualScore([2, 5, 8], 0, 10)) === JSON.stringify({ visual: 1, visual_beats: 3 }), "hookVisualScore: 3 beats saturate at visual 1.0 (beats still counted)", "1/3");
+checkOk(hookVisualScore([10], 0, 10).visual_beats === 0 && hookVisualScore([0], 0, 10).visual_beats === 1, "hookVisualScore: a boundary at the start counts, at the end it belongs to the next window", "start 1, end 0");
+checkOk(JSON.stringify(hookVisualScore([{ at_seconds: 15 }, { at_seconds: 20 }], 15, 25)) === JSON.stringify({ visual: 1, visual_beats: 2 }), "hookVisualScore: accepts {at_seconds} objects straight from highlights", "1/2");
+checkOk(hookVisualScore([5], 5, 15).visual_beats === 1 && hookVisualScore([15], 5, 15).visual_beats === 0, "hookVisualScore: [start, end) is half-open on both sides", "1/0");
 // No history file: history null, every candidate fresh (not "unknown").
 checkOk(hookJson.history === null && hookJson.candidates.every((c) => c.duplicate === false && c.duplicate_of === null), "hook without history_file: history null, all candidates fresh", JSON.stringify(hookJson.history));
 const hookHistPath = path.join(root, "outputs", "hook-history.json");
@@ -3108,7 +3130,7 @@ const hookRecJson = JSON.parse(hookRecRes.content[0].text);
 checkOk(hookRecJson.history.recorded === true && hookRecJson.history.records_checked === 0 && hookRecJson.history.records_total === 1 && hookRecJson.hook.duplicate === false, "hook --record creates the history file with the winner [15,25)", JSON.stringify(hookRecJson.history));
 const hookHistDoc = JSON.parse(await readFile(hookHistPath, "utf8"));
 const hookSrcSha = createHash("sha256").update(await readFile(path.join(root, "test/hook-source.mp4"))).digest("hex");
-checkOk(hookHistDoc.version === 1 && hookHistDoc.records.length === 1 && hookHistDoc.records[0].source_sha256 === hookSrcSha && hookHistDoc.records[0].start === 15 && hookHistDoc.records[0].end === 25 && hookHistDoc.records[0].score === 0.754 && typeof hookHistDoc.records[0].recorded_at === "string", "history file on disk: version 1, one record, sha/start/end/score match the winner", JSON.stringify(hookHistDoc.records[0]));
+checkOk(hookHistDoc.version === 1 && hookHistDoc.records.length === 1 && hookHistDoc.records[0].source_sha256 === hookSrcSha && hookHistDoc.records[0].start === 15 && hookHistDoc.records[0].end === 25 && hookHistDoc.records[0].score === 0.654 && typeof hookHistDoc.records[0].recorded_at === "string", "history file on disk: version 1, one record, sha/start/end/score match the winner", JSON.stringify(hookHistDoc.records[0]));
 // Same file again: the winner is a duplicate, and --record does not
 // append it a second time.
 const hookDupRes = await client.callTool({
@@ -3186,6 +3208,11 @@ const hookMotionCurve = hookMotionJson.energy_curve;
 const hookMotionStatic = hookMotionCurve.filter((b) => b.t < 13).reduce((a, b) => a + b.motion, 0) / hookMotionCurve.filter((b) => b.t < 13).length;
 const hookMotionMoving = hookMotionCurve.filter((b) => b.t >= 16).reduce((a, b) => a + b.motion, 0) / hookMotionCurve.filter((b) => b.t >= 16).length;
 checkOk(hookMotionJson.hook.start >= 13.5 && hookMotionJson.hook.start <= 15.5 && hookMotionJson.hook.motion > 0.5 && hookMotionJson.hook.score > 0.6, "hook with motion wins in the moving half (start 13.5-15.5, motion > 0.5)", JSON.stringify(hookMotionJson.hook));
+// The winner opens ON the xfade boundary at 14.5: one visual beat,
+// visual 0.5 — the hash boundary the scene detector never sees
+// (cuts_per_minute is 0, cut_score is 0). Score 0.723 decomposes
+// into 0.3*0.91 + 0.2*1 + 0 + 0.2*1 + 0.1*0.5.
+checkOk(hookMotionJson.hook.start === 14.5 && hookMotionJson.hook.visual === 0.5 && hookMotionJson.hook.visual_beats === 1 && JSON.stringify(hookMotionJson.highlight_boundaries) === "[14.5]" && near(hookMotionJson.hook.score, 0.723, 0.01) && hookMotionJson.hook.cut_score === 0, "hook motion winner opens on the xfade hash boundary (visual 0.5, 1 beat, cut 0)", JSON.stringify(hookMotionJson.hook));
 checkOk(hookMotionStatic < 0.05 && hookMotionMoving > 0.9, "hook motion curve shows the step: static half ~0, moving half ~1.0", `static=${hookMotionStatic.toFixed(3)} moving=${hookMotionMoving.toFixed(3)}`);
 // The same measured bins under the OLD weights (0.5*energy +
 // 0.3*speech + 0.2*cut, no motion): the loud static window [0,10)
@@ -3196,6 +3223,30 @@ const hookMotionMeanOver = (key, a, b) => { const v = hookMotionCurve.filter((x)
 const hookMotionOldStatic = 0.5 * hookMotionMeanOver("energy", 0, 10) + 0.3 * hookMotionMeanOver("speech", 0, 10);
 const hookMotionOldWinner = 0.5 * hookMotionJson.hook.energy + 0.3 * hookMotionJson.hook.speech;
 checkOk(hookMotionJson.cuts_per_minute === 0 && hookMotionOldStatic > hookMotionOldWinner, "old weights on the same bins score the static window higher (0.8 vs ~0.75) — the flip is motion", `old static=${hookMotionOldStatic.toFixed(3)} old winner=${hookMotionOldWinner.toFixed(3)}`);
+// hook visual (the `highlights` feed, this turn): fixture
+// test/hook-visual-source.mp4 is 30s, loud + static red [0,15) then
+// quieter + lime/blue/lime blocks [15,30) joined by 1s crossfades,
+// so cut_score is 0 everywhere (cuts_per_minute 0) and the only
+// thing separating the halves is the three hash boundaries at 15/20/26.
+// The winner [11.5,21.5) holds 2 of them (visual 1.0) plus the fade
+// motion; under the OLD weights (0.35E+0.25S+0.2C+0.2M, no visual)
+// the same bins rank the [6,16) window first (0.615 vs 0.563) — the
+// flip to [11.5,21.5) is the visual term, not motion (0.3) and not
+// cuts (0). The new score decomposes into its own components.
+const hookVisualRes = await client.callTool({
+  name: "hook",
+  arguments: { input: path.join(root, "test/hook-visual-source.mp4"), duration: 10, step: 0.5, top: 3 },
+});
+const hookVisualJson = JSON.parse(hookVisualRes.content[0].text);
+console.log("hook visual fixture:", JSON.stringify(hookVisualJson.hook), "| candidates", hookVisualJson.candidates.map((c) => `${c.start}-${c.end}:${c.score}`).join(" "), "| boundaries", JSON.stringify(hookVisualJson.highlight_boundaries));
+checkOk(hookVisualJson.hook.start === 11.5 && hookVisualJson.hook.end === 21.5 && hookVisualJson.hook.visual === 1 && hookVisualJson.hook.visual_beats === 2 && hookVisualJson.hook.cut_score === 0 && hookVisualJson.cuts_per_minute === 0 && near(hookVisualJson.hook.score, 0.577, 0.01), "hook visual winner holds 2 hash boundaries (visual 1.0, cut 0, score ~0.58)", JSON.stringify(hookVisualJson.hook));
+checkOk(JSON.stringify(hookVisualJson.highlight_boundaries) === "[15,20,26]", "hook visual fixture has exactly 3 hash boundaries (15/20/26), one per xfade", JSON.stringify(hookVisualJson.highlight_boundaries));
+checkOk(near(hookVisualJson.hook.score, 0.3 * hookVisualJson.hook.energy + 0.2 * hookVisualJson.hook.speech + 0.2 * hookVisualJson.hook.cut_score + 0.2 * hookVisualJson.hook.motion + 0.1 * hookVisualJson.hook.visual, 0.002), "hook visual score decomposes into 0.3E+0.2S+0.2C+0.2M+0.1V", `score=${hookVisualJson.hook.score}`);
+const hookVisualCurve = hookVisualJson.energy_curve;
+const hookVisualMeanOver = (key, a, b) => { const v = hookVisualCurve.filter((x) => x.t >= a && x.t < b); return v.reduce((s, x) => s + x[key], 0) / v.length; };
+const hookVisualOldWinner = 0.35 * hookVisualJson.hook.energy + 0.25 * hookVisualJson.hook.speech + 0.2 * hookVisualJson.hook.cut_score + 0.2 * hookVisualJson.hook.motion;
+const hookVisualOldSix = 0.35 * hookVisualMeanOver("energy", 6, 16) + 0.25 * hookVisualMeanOver("speech", 6, 16) + 0.2 * hookVisualMeanOver("motion", 6, 16);
+checkOk(hookVisualOldSix > hookVisualOldWinner && near(hookVisualOldSix, 0.615, 0.01) && near(hookVisualOldWinner, 0.563, 0.01), "old weights on the same bins rank [6,16) first (0.615 vs 0.563) — the flip to [11.5,21.5) is the visual term", `old [6,16)=${hookVisualOldSix.toFixed(3)} old winner=${hookVisualOldWinner.toFixed(3)}`);
 // hook quiet snap (shorts-maker-gpu's find_smart_end_point):
 // fixture test/hook-snap-source.mp4 is 30s, loud blue [15,22) then
 // silence [22,30). The winning window is [14.5,24.5) but its tail
@@ -3236,7 +3287,7 @@ const hookBatchJson = JSON.parse(hookBatchRes.content[0].text);
 console.log("batch hook:", JSON.stringify(hookBatchJson.results.map((r) => ({ status: r.status, output: r.output, hook: r.result?.hook }))), "| suffix", hookBatchJson.output_suffix);
 const hookBatchRow = (name) => hookBatchJson.results.find((r) => r.input.endsWith(`/${name}`));
 checkOk(hookBatchJson.succeeded === 3 && hookBatchJson.failed === 0 && hookBatchJson.output_suffix === null && hookBatchJson.results.every((r) => r.status === "ok" && r.output === null), "batch hook succeeds on all three files with no output file (output null, suffix null)", JSON.stringify(hookBatchJson.results.map((r) => r.output)));
-checkOk(hookBatchRow("hook-source.mp4").result.hook.start === 15 && near(hookBatchRow("hook-source.mp4").result.hook.score, 0.754, 0.01) && hookBatchRow("source.mp4").result.hook.start === 0 && hookBatchRow("source.mp4").result.hook.end === 10, "batch hook rows carry the ranked windows (hook-source 15-25 @0.75, source whole 10s file)", JSON.stringify(hookBatchJson.results.map((r) => r.result?.hook)));
+checkOk(hookBatchRow("hook-source.mp4").result.hook.start === 15 && near(hookBatchRow("hook-source.mp4").result.hook.score, 0.654, 0.01) && hookBatchRow("source.mp4").result.hook.start === 0 && hookBatchRow("source.mp4").result.hook.end === 10, "batch hook rows carry the ranked windows (hook-source 15-25 @0.65, source whole 10s file)", JSON.stringify(hookBatchJson.results.map((r) => r.result?.hook)));
 checkOk(hookBatchRow("hook-snap-source.mp4").result.hook.start === 14.5 && hookBatchRow("hook-snap-source.mp4").result.trim.end === 22 && hookBatchRow("hook-snap-source.mp4").result.trim.snapped === true, "batch hook passes the snap through (snap fixture trims to 22)", JSON.stringify(hookBatchRow("hook-snap-source.mp4").result.trim));
 const hookBatchCacheRes = await client.callTool({
   name: "batch",
@@ -5866,7 +5917,7 @@ const findSourceRes = await client.callTool({
   arguments: { directory: path.join(root, "test"), name: "source" },
 });
 const findSourceJson = JSON.parse(findSourceRes.content[0].text);
-checkOk(findSourceJson.total_matches === 17, "find 'source' matches 17 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source, hook-source, hook-motion-source, hook-snap-source, sharpness-source, rotate-source, noisy-source, beat-trim-source, levels-source, pace-source, highlights-source)", `got ${findSourceJson.total_matches}`);
+checkOk(findSourceJson.total_matches === 18, "find 'source' matches 18 files (source, source2, silence-source, scenes-source, quiet-source, rich-source, trim-check-source, hook-source, hook-motion-source, hook-snap-source, hook-visual-source, sharpness-source, rotate-source, noisy-source, beat-trim-source, levels-source, pace-source, highlights-source)", `got ${findSourceJson.total_matches}`);
 
 const findMp3Res = await client.callTool({
   name: "find",

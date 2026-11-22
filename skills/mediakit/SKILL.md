@@ -1569,21 +1569,28 @@ comparable with adjacent-frame energy of the same clip.
 ### 55. Pick the opening shot by measurement — `hook` finds where the clip gets loud
 A Short lives or dies in its first seconds, and the loudest moment
 is rarely at 0:00. `hook <clip> [--duration 15]` slides a window of
-that length across the file and scores each candidate on four
+that length across the file and scores each candidate on five
 measured signals — mean audio energy (astats RMS per frame, binned
 and normalized against the clip's own loudest bin), speech coverage
 (the silencedetect complement: a window full of talk beats one full
 of dead air), scene cuts (a window that opens on a cut scores
-higher, plus cuts inside it), and real motion (the `motion` tool's
+higher, plus cuts inside it), real motion (the `motion` tool's
 per-frame pixel-diff curve, binned on the same step grid, normalized
 against a fixed 0.06 reference — testsrc-level motion is 1.0 — with
 a 0.001 noise floor and a 0.005 file-level gate, so a static clip
-never scores motion from encoder noise). The score is 0.35×energy +
-0.25×speech + 0.2×cut + 0.2×motion — audio 0.6 / video 0.4, the
-shorts-maker-gpu split — with fixed weights, so two runs rank the
-same way, and the top windows are greedy non-overlapping —
-alternatives, not the same window shifted one step. The result
-carries the ranked candidates with the score breakdown, the per-step
+never scores motion from encoder noise), and visual beats (the
+`highlights` perceptual-hash boundaries inside the window — 2+ beats
+is fully active, 1 beat is half; a boundary at the window start
+counts, the window opens on it). The score is 0.3×energy +
+0.2×speech + 0.2×cut + 0.2×motion + 0.1×visual — audio 0.5 / video
+0.5 — with fixed weights, so two runs rank the same way, and the top
+windows are greedy non-overlapping — alternatives, not the same
+window shifted one step. The visual weight is 0.1 on purpose: a
+nudge, not a takeover — scene cuts and hash boundaries are two
+detectors of the same picture change and must not outvote the audio.
+The result carries the ranked candidates with the score breakdown
+(each carries `visual` + `visual_beats`), the
+`highlight_boundaries`, the per-step
 energy curve (each bin also carries `motion` + `motion_fraction`),
 pacing from real cuts (slow/medium/fast-cut), a `trim` object, and a
 `suggested_trim` command. The trim end snaps to the nearest quiet
@@ -1597,7 +1604,7 @@ to, and a whole-file hook is never snapped — both report
 `trim.snapped: false` with a reason. Run it on raw footage before
 cutting the opening of a Short, then trim the winner — the trim in
 the result already ends on the quiet moment, so cut that, not the
-raw window. Video-only input scores on cuts+motion (energy/speech 0,
+raw window. Video-only input scores on cuts+motion+visual (energy/speech 0,
 and the warnings say so); audio-only on energy+speech. Files over 20
 minutes are refused: the astats log behind the curve would exceed
 the capture buffer, so trim a section first.
@@ -1807,9 +1814,13 @@ red/green/blue 5s blocks → boundaries at 5.0s and 10.0s, jump
 1.000). Long files sample slower instead of refusing (frame cap
 1200; below 0.5 fps the file is refused as too long). Probe-only,
 writes no file; also a probe-only batch operation and manifest step.
-Follow-up, not in this tool: feeding the spans into `hook` scoring,
-so the best audio window and the best visual beat are ranked
-together.
+Follow-up DONE (lượt 139): the spans feed `hook` scoring through
+their boundaries — each candidate carries `visual` + `visual_beats`
+(0.1 weight), so the best audio window and the best visual beat are
+ranked together. One measured limit stays: the average hash is blind
+to flat-colour changes whose means sit on the same side of 127.5
+(red→blue flat cut: no boundary), so `visual` is 0 on synthetic flat
+colour blocks and only fires on real textured footage.
 
 ### 58e. Let the voice set the shot lengths — `align_voice`
 
