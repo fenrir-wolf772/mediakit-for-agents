@@ -14,7 +14,7 @@ import { createCanvas } from "canvas";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { applyContentBaseline, averageHash, compareDeterminismRuns, countClippedRuns, diagnoseVoice, dialogueKeyForShots, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, localTempoCurve, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
+import { applyContentBaseline, averageHash, compareDeterminismRuns, countClippedRuns, diagnoseVoice, dialogueKeyForShots, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, explainError, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, localTempoCurve, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import bounceTpl from "../src/canvas-scene-lib/templates/bounce.cjs";
@@ -1207,6 +1207,8 @@ checkOk(pmRunJson.dry_run === true && pmRunJson.steps.length === 4, "patched man
 const pmBefore = await readFile(pmPath, "utf8");
 const pmMismatchText = await callExpectThrow("patch_manifest", { manifest_path: pmPath, expected_revision: 0, patch: [{ op: "set", path: "output", value: "x.mp4" }] });
 checkOk(/REVISION_MISMATCH/.test(pmMismatchText) && /revision is 1, expected 0/.test(pmMismatchText), "patch_manifest refuses a stale expected_revision with REVISION_MISMATCH", pmMismatchText.slice(0, 200));
+const pmMismatchJson = JSON.parse(pmMismatchText ?? "{}");
+checkOk(pmMismatchJson.explain?.kind === "fix-arg" && pmMismatchJson.explain?.fixes?.[0]?.tool === "patch_manifest" && pmMismatchJson.explain?.fixes?.[0]?.args?.expected_revision === 1, "REVISION_MISMATCH explains itself: fix-arg patch_manifest with expected_revision 1 (the current revision, parsed from the message)", pmMismatchText.slice(0, 200));
 checkOk((await readFile(pmPath, "utf8")) === pmBefore, "stale revision leaves the file byte-identical", "");
 checkOk((await readFile(`${pmPath}.bak`, "utf8")) === pmOriginal, "stale revision also leaves the .bak backup untouched (still the pre-patch bytes)", "");
 // Bad patch (unknown tool in replace_step): the dry-run validation
@@ -9875,12 +9877,36 @@ checkOk(/HTTP 503/.test(dlA503Text ?? "") && /after 3 attempts/.test(dlA503Text 
 // a 429 with Retry-After 7 names exactly 7s, on the first attempt.
 const dlA503Json = JSON.parse(dlA503Text ?? "{}");
 checkOk(dlA503Json.code === "DOWNLOAD_FAILED" && dlA503Json.retryable === true && dlA503Json.retry_after_seconds === undefined && dlA503Json.retry?.tool === "download", "a permanent 503 that exhausts retries reports retryable=true with no retry_after_seconds (the server sent none)", dlA503Text ?? "");
+checkOk(dlA503Json.explain?.kind === "retry" && dlA503Json.explain?.fixes?.[0]?.tool === "download" && dlA503Json.explain?.fixes?.[0]?.retry_after_seconds === undefined, "a retryable 503 explains itself: retry the identical download call, no wait named", dlA503Text ?? "");
 const dlA429Text = await callExpectThrow("download", { url: `${dlBase}/always-429`, output: path.join(root, "outputs/mcp-download-a429.mp4"), max_retries: 0 });
 const dlA429Json = JSON.parse(dlA429Text ?? "{}");
 checkOk(dlA429Json.code === "DOWNLOAD_FAILED" && dlA429Json.retryable === true && dlA429Json.retry_after_seconds === 7 && dlHits.always429 === 1, "a 429 with Retry-After 7 reports retryable=true + retry_after_seconds=7 on the first attempt (max_retries 0)", dlA429Text ?? "");
+checkOk(dlA429Json.explain?.kind === "retry" && dlA429Json.explain?.fixes?.[0]?.tool === "download" && dlA429Json.explain?.fixes?.[0]?.retry_after_seconds === 7 && String(dlA429Json.explain?.fixes?.[0]?.args?.url ?? "").includes("always-429"), "a 429 explains itself: retry the identical download call after ~7s, with tool + args attached", dlA429Text ?? "");
 const probeMissingText = await callExpectThrow("probe", { input: path.join(root, "test/no-such-file.mp4") });
 const probeMissingJson = JSON.parse(probeMissingText ?? "{}");
 checkOk(probeMissingJson.code === "INPUT_NOT_FOUND" && probeMissingJson.retryable === false && probeMissingJson.retry_after_seconds === undefined, "a missing input reports retryable=false and no retry_after_seconds (re-issuing the identical call cannot help)", probeMissingText ?? "");
+checkOk(probeMissingJson.explain?.kind === "switch" && probeMissingJson.explain?.fixes?.[0]?.tool === "find" && probeMissingJson.explain?.fixes?.[0]?.args?.query === "no-such-file.mp4", "a missing input explains itself: switch to find with the basename as query", probeMissingText ?? "");
+// explainError, pure (lượt 140): every mapped code returns its fix,
+// unmapped codes return kind "none" with no fixes (never guess), and
+// a local engine failure never suggests retry — re-issuing the same
+// audio cannot fix a crashed engine.
+const explainSynth = (code, message, extra = {}, ctx = {}) => explainError(Object.assign(new Error(message), { code, ...extra }), ctx);
+checkOk(explainSynth("INVALID_ARG", "invalid arguments for trim: start: Number must be greater than or equal to 0").fixes?.[0]?.kind === "fix-arg" && /start: Number must be greater than or equal to 0/.test(explainSynth("INVALID_ARG", "invalid arguments for trim: start: Number must be greater than or equal to 0").fixes?.[0]?.label ?? ""), "INVALID_ARG explains itself as fix-arg naming the bad argument", "trim start");
+checkOk(explainSynth("LICENSE_DENIED", "download refused by license policy (env): license \"X\" is not in the allow list [CC0]").kind === "fix-arg" && /--license/.test(explainSynth("LICENSE_DENIED", "x").fixes?.[0]?.label ?? ""), "LICENSE_DENIED explains itself as fix-arg pointing at --license", "license");
+checkOk(explainSynth("ASR_NOT_INSTALLED", "no ASR engine").kind === "check-env" && explainSynth("ASR_NOT_INSTALLED", "no ASR engine").fixes?.[0]?.tool === "doctor", "ASR_NOT_INSTALLED explains itself as check-env via doctor", "asr");
+checkOk(explainSynth("DIALOGUE_CHANGED", "dialogue changed").kind === "fix-arg" && /--expected-key/.test(explainSynth("DIALOGUE_CHANGED", "dialogue changed").fixes?.[0]?.label ?? ""), "DIALOGUE_CHANGED explains itself as fix-arg pointing at --expected-key", "dialogue");
+checkOk(explainSynth("ALIGN_VIOLATION", "2 violations").kind === "fix-arg", "ALIGN_VIOLATION explains itself as fix-arg", "align");
+checkOk(explainSynth("JOB_NOT_FOUND", "job not found").kind === "switch" && explainSynth("JOB_NOT_FOUND", "job not found").fixes?.[0]?.tool === "job" && explainSynth("JOB_NOT_FOUND", "job not found").fixes?.[0]?.args?.action === "list", "JOB_NOT_FOUND explains itself: switch to job action=list", "job");
+checkOk(explainSynth("TOOL_NOT_FOUND", "unknown tool: nope").kind === "fix-arg" && /\/mcp\/tools/.test(explainSynth("TOOL_NOT_FOUND", "unknown tool: nope").fixes?.[0]?.label ?? ""), "TOOL_NOT_FOUND explains itself as fix-arg pointing at the tool list", "tool");
+checkOk(explainSynth("OUTPUT_NOT_WRITABLE", "output not writable").kind === "fix-arg" && explainSynth("OUTPUT_OVERWRITES_INPUT", "output overwrites input").kind === "fix-arg", "output-path refusals explain themselves as fix-arg", "output");
+checkOk(explainSynth("FFMPEG_FAILED", "ffmpeg failed").kind === "none" && explainSynth("FFMPEG_FAILED", "ffmpeg failed").fixes.length === 0, "FFMPEG_FAILED explains itself as none — no safe fix is guessed from ffmpeg stderr", "ffmpeg");
+checkOk(explainSynth("ASR_FAILED", "asr failed").kind === "none" && explainSynth("ASR_FAILED", "asr failed").fixes.length === 0, "ASR_FAILED never suggests retry (a local engine failure is not transient)", "asr-failed");
+checkOk(explainSynth("SOME_FUTURE_CODE", "boom").kind === "none" && explainSynth("SOME_FUTURE_CODE", "boom").fixes.length === 0, "an unmapped code explains itself as none with no fixes", "future");
+checkOk(explainSynth("DOWNLOAD_FAILED", "download failed: HTTP 503", { retryable: true }).kind === "retry" && explainSynth("DOWNLOAD_FAILED", "download failed: HTTP 503", { retryable: true }).fixes?.[0]?.tool === undefined, "a retryable failure without call context still says retry, label-only (no invented tool/args)", "retry-noctx");
+checkOk(explainSynth("DOWNLOAD_FAILED", "download failed: HTTP 429", { retryable: true, retryAfterSeconds: 7 }, { tool: "download", args: { url: "https://x/y.mp4" } }).fixes?.[0]?.tool === "download" && explainSynth("DOWNLOAD_FAILED", "download failed: HTTP 429", { retryable: true, retryAfterSeconds: 7 }, { tool: "download", args: { url: "https://x/y.mp4" } }).fixes?.[0]?.retry_after_seconds === 7, "a retryable failure with call context carries tool + args + the wait on the retry fix", "retry-ctx");
+checkOk(explainSynth("DOWNLOAD_FAILED", "download failed: HTTP 429", { retryable: true, retry_after_seconds: 7 }, { tool: "download", args: { url: "https://x/y.mp4" } }).fixes?.[0]?.retry_after_seconds === 7, "the wait is also read from snake_case retry_after_seconds (the HTTP layer re-wraps errors from envelope JSON — without this the 429 fix named no wait)", "retry-snake");
+checkOk(explainSynth("INPUT_NOT_FOUND", "input gone").kind === "switch" && explainSynth("INPUT_NOT_FOUND", "input gone").fixes?.[0]?.tool === "find" && explainSynth("INPUT_NOT_FOUND", "input gone").fixes?.[0]?.args === undefined, "INPUT_NOT_FOUND with an unparseable message still suggests find, without an invented query", "find-noquery");
+checkOk(explainSynth("REVISION_MISMATCH", "revision mismatch").kind === "fix-arg" && explainSynth("REVISION_MISMATCH", "revision mismatch").fixes?.[0]?.tool === "patch_manifest" && explainSynth("REVISION_MISMATCH", "revision mismatch").fixes?.[0]?.args === undefined, "REVISION_MISMATCH with an unparseable message still says re-read + retry, without an invented revision", "rev-noargs");
 const dlCacheDir = path.join(root, "outputs/dl-cache");
 const dlCache1Res = await client.callTool({ name: "download", arguments: { url: `${dlBase}/cacheable.mp4`, output: path.join(root, "outputs/mcp-download-cache1.mp4"), cache: true, cache_dir: dlCacheDir } });
 const dlCache1 = JSON.parse(dlCache1Res.content[0].text);
@@ -10142,6 +10168,7 @@ const httpA429 = await httpCall("POST", "/mcp/tools/download/invoke", { argument
 httpA429Server.closeAllConnections();
 httpA429Server.close();
 checkOk(httpA429.status === 500 && httpA429.json?.code === "DOWNLOAD_FAILED" && httpA429.json?.retryable === true && httpA429.json?.retry_after_seconds === 7 && httpA429.json?.retry?.tool === "download", "POST download/invoke on a 429 returns retryable=true + retry_after_seconds=7 in the HTTP error body", JSON.stringify(httpA429.json));
+checkOk(httpA429.json?.explain?.kind === "retry" && httpA429.json?.explain?.fixes?.[0]?.tool === "download" && httpA429.json?.explain?.fixes?.[0]?.retry_after_seconds === 7, "the HTTP 429 error body also carries explain: retry the identical download call after ~7s", JSON.stringify(httpA429.json?.explain ?? {}));
 const httpGetInvoke = await httpCall("GET", "/mcp/tools/probe/invoke");
 checkOk(httpGetInvoke.status === 405, "GET on an invoke endpoint is a 405 (invoke is POST-only)", `status=${httpGetInvoke.status}`);
 const httpRpcInit = await httpCall("POST", "/", { jsonrpc: "2.0", id: 1, method: "initialize", params: {} });

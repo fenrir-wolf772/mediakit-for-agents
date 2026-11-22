@@ -75,7 +75,7 @@ curl -X POST http://127.0.0.1:3000/ \
        "params": {"name": "trim", "arguments": {"input": "clip.mp4", "output": "cut.mp4", "start": 2, "duration": 5}}}'
 ```
 
-Errors are JSON (`{error, code, retryable, retry_after_seconds?, retry}`) with an HTTP status that
+Errors are JSON (`{error, code, retryable, retry_after_seconds?, retry, explain}`) with an HTTP status that
 matches the failure — `400` for bad arguments, `404` for an unknown
 tool or job, `429` for a refused job start (`JOB_ADMISSION_LIMIT` — the render-job gate: 2 active jobs / 10 starts per minute by default), `500` for a failed run — and `retry: {tool, arguments}` on
 every tool error, so a caller can re-issue the identical call.
@@ -88,6 +88,20 @@ fix the call instead of repeating it). When the failure named a wait,
 admission gate's computed wait); the CLI prints the same guidance
 (`(retryable: true — retry in ~7s)`) on its error line. The same
 fields ride the HTTP error body and the JSON-RPC `isError` result.
+`explain: {kind, fixes}` says what to do instead, so a caller never
+has to derive the fix from the message: `kind` is the primary fix —
+`retry` (the identical call, only when `retryable` is true, with
+`tool`/`args`/`retry_after_seconds` on the fix), `switch` (a
+different tool — a missing input points at `find` with the basename
+as `query`; an unknown job id points at `job` `action=list`),
+`fix-arg` (same tool, corrected argument — a stale `patch_manifest`
+names the current `expected_revision`; a bad argument names the
+field; a refused license points at `--license`), `check-env` (run
+`doctor` — a missing ASR engine is an install problem), or `none`
+(no safe fix is known — an ffmpeg failure or a crashed ASR engine
+never suggests retry). A fix never invents a value it cannot derive:
+when the revision or the filename cannot be read out of the error,
+the fix says what to do without the value.
 JSON-RPC errors use the standard codes (`-32700` parse error,
 `-32601` unknown method, `-32602` unknown tool / bad params); a tool
 that runs and fails reports `isError: true` in the result, exactly

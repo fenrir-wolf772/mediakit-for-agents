@@ -130,9 +130,114 @@ const RETRYABLE_ERROR_CODES = new Set(["DOWNLOAD_TIMEOUT", "JOB_ADMISSION_LIMIT"
 export function errorRetryInfo(err) {
   const retryable = err?.retryable === true || RETRYABLE_ERROR_CODES.has(err?.code ?? "");
   const out = { retryable };
-  const secs = err?.retryAfterSeconds ?? (err?.retryAfterMs != null ? Math.ceil(err.retryAfterMs / 1000) : null);
+  // Both spellings: core errors carry camelCase retryAfterSeconds
+  // (MediaKitError), but the HTTP layer re-wraps tool results into
+  // plain Errors from envelope JSON, which uses snake_case
+  // retry_after_seconds — without the fallback the wait was silently
+  // dropped from explainError's retry fix on the HTTP path (lượt 140:
+  // the 429 body said retry_after_seconds 7 while the fix said none).
+  const secs = err?.retryAfterSeconds ?? err?.retry_after_seconds ?? (err?.retryAfterMs != null ? Math.ceil(err.retryAfterMs / 1000) : null);
   if (retryable && Number.isFinite(secs) && secs > 0) out.retry_after_seconds = secs;
   return out;
+}
+
+// Structured error fixes (backlog lượt 119, idea: EncodeX
+// explain_error + oh-my-cassette BridgeError; lượt 140): the error
+// envelope already says whether the identical call can help
+// (retryable, lượt 121) and how long to wait — this adds WHAT TO DO
+// INSTEAD. Pure: it reads only the error's code/message/retryable
+// fields, so every transport calls it on the same fields, and the
+// unit tests can feed it synthetic errors. `kind` is the primary fix
+// kind; `fixes` is 0–3 structured fixes, best first. Kinds:
+//   retry     — re-issue the identical call (transient only; never
+//               for a deterministic refusal, and never for a local
+//               engine failure such as ASR_FAILED — re-issuing the
+//               same audio cannot fix a crashed engine).
+//   switch    — call a DIFFERENT tool instead (find the missing file,
+//               list the jobs).
+//   fix-arg   — same tool, corrected argument(s); `args` carries only
+//               the corrected fields, never a guessed full call.
+//   check-env — the environment is the problem; `doctor` reports it.
+//   none      — no safe fix is known; guessing would burn retries or
+//               send the caller down a wrong path, so fixes is empty.
+// A fix never invents a value it cannot derive: REVISION_MISMATCH
+// parses the current revision out of core's own message format, and
+// INPUT_NOT_FOUND takes the basename out of the same message. When
+// the caller passes { tool, args } (the transports do — they know
+// which call failed), the retry fix carries them so the identical
+// call can be re-issued verbatim; without that context the fix is
+// label-only.
+export function explainError(err, { tool = null, args = null } = {}) {
+  const code = err?.code ?? "ERROR";
+  const message = String(err?.message ?? "");
+  const info = errorRetryInfo(err);
+  const fixes = [];
+  if (info.retryable) {
+    const fix = { kind: "retry", label: `Re-issue the identical call${info.retry_after_seconds != null ? ` after ~${info.retry_after_seconds}s` : ""}` };
+    if (tool) fix.tool = tool;
+    if (args != null) fix.args = args;
+    if (info.retry_after_seconds != null) fix.retry_after_seconds = info.retry_after_seconds;
+    fixes.push(fix);
+    return { kind: "retry", fixes };
+  }
+  switch (code) {
+    case "INPUT_NOT_FOUND": {
+      const m = message.match(/not found or not readable: (.+)$/);
+      const query = m ? path.basename(m[1].trim()) : null;
+      fixes.push({
+        kind: "switch", tool: "find",
+        ...(query ? { args: { query } } : {}),
+        label: query
+          ? `Locate the file with find (it searches the workspace recursively by name): query "${query}"`
+          : "Locate the file with find (it searches the workspace recursively by name)",
+      });
+      break;
+    }
+    case "REVISION_MISMATCH": {
+      const m = message.match(/manifest revision is (\d+)/);
+      const current = m ? Number(m[1]) : null;
+      fixes.push({
+        kind: "fix-arg", tool: "patch_manifest",
+        ...(current != null ? { args: { expected_revision: current } } : {}),
+        label: current != null
+          ? `Re-read the manifest, then retry patch_manifest with expected_revision ${current}`
+          : "Re-read the manifest, then retry patch_manifest with its current revision",
+      });
+      break;
+    }
+    case "INVALID_ARG": {
+      const detail = message.replace(/^invalid arguments for [^:]+: /, "");
+      fixes.push({ kind: "fix-arg", label: `Fix the named argument and re-issue the call: ${detail}` });
+      break;
+    }
+    case "LICENSE_DENIED":
+      fixes.push({ kind: "fix-arg", label: "Declare a permitted license (--license <label> from the policy allow list) or adjust the license policy file, then re-issue the call" });
+      break;
+    case "ASR_NOT_INSTALLED":
+      fixes.push({ kind: "check-env", tool: "doctor", label: "Run doctor to see ASR engine status and install hints (faster-whisper or whisper.cpp)" });
+      break;
+    case "DIALOGUE_CHANGED":
+      fixes.push({ kind: "fix-arg", label: "Re-run align_voice without --expected-key, or with the fresh dialogue key from the plan output" });
+      break;
+    case "ALIGN_VIOLATION":
+      fixes.push({ kind: "fix-arg", label: "Fix the listed violations (motion-gated shots, text layers, transitions, hook, min-duration) then re-run align_voice --apply" });
+      break;
+    case "JOB_NOT_FOUND":
+      fixes.push({ kind: "switch", tool: "job", args: { action: "list" }, label: "List jobs with job action=list to find a live job id" });
+      break;
+    case "TOOL_NOT_FOUND":
+      fixes.push({ kind: "fix-arg", label: "List available tools (GET /mcp/tools) and use an exact tool name" });
+      break;
+    case "OUTPUT_NOT_WRITABLE":
+      fixes.push({ kind: "fix-arg", label: "Choose a writable output directory and re-issue the call" });
+      break;
+    case "OUTPUT_OVERWRITES_INPUT":
+      fixes.push({ kind: "fix-arg", label: "Choose a different output path (the output must not overwrite the input) and re-issue the call" });
+      break;
+    default:
+      break;
+  }
+  return { kind: fixes.length ? fixes[0].kind : "none", fixes };
 }
 
 function runCapture(cmd, args, { timeoutMs = ffmpegTimeoutMs() } = {}) {

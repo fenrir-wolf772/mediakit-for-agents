@@ -25,8 +25,12 @@ async function safe(fn) {
     // `retryable` (always — false means re-issuing the identical
     // call cannot help) and `retry_after_seconds` (only when the
     // failure named a wait: a server Retry-After, the admission
-    // gate). Both transports surface this same body.
-    const body = { error: err.message, code: err.code ?? "ERROR", ...core.errorRetryInfo(err) };
+    // gate). Both transports surface this same body. Since lượt 140
+    // it also carries `explain: { kind, fixes }` — structured fixes
+    // from core.explainError (retry / switch / fix-arg / check-env /
+    // none); safe() has no tool/args context, so a retry fix here is
+    // label-only and the transport wrappers fill in tool + args.
+    const body = { error: err.message, code: err.code ?? "ERROR", ...core.errorRetryInfo(err), explain: core.explainError(err) };
     return {
       content: [{ type: "text", text: JSON.stringify(body, null, 2) }],
       isError: true,

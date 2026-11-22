@@ -2393,7 +2393,13 @@ async function main() {
       // identical call can help, and how long to wait when known.
       const info = core.errorRetryInfo(err);
       const wait = info.retry_after_seconds != null ? ` — retry in ~${info.retry_after_seconds}s` : "";
-      fail(`${err.message} [${err.code}] (retryable: ${info.retryable}${wait})`, 2);
+      // Same structured fixes as the envelope (lượt 140): one line
+      // per fix, so a human reading stderr sees what to do instead
+      // of just what failed. The retry fix carries the failed call
+      // (cmd + cliArgs) so it can be re-issued verbatim.
+      const explain = core.explainError(err, { tool: cmd, args: cliArgs });
+      const fixesText = explain.fixes.map((f) => `\n  Fix (${f.kind}): ${f.label}`).join("");
+      fail(`${err.message} [${err.code}] (retryable: ${info.retryable}${wait})${fixesText}`, 2);
     }
     fail(err.message, 2);
   }

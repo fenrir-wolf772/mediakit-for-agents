@@ -229,6 +229,22 @@ reported in `brand_overrides`.
 | Audio much quieter than other Shorts | Not normalized | `loudness` to −14 LUFS |
 | Captions missing on some lines | SRT cue gap or bad timestamp format | Check `HH:MM:SS,mmm`, no overlaps |
 
+Every tool error also carries its own fix — read `explain` in the
+error body before guessing: `{error, code, retryable,
+retry_after_seconds?, retry, explain: {kind, fixes}}`. `kind` is the
+primary fix — `retry` (re-issue the identical call; only when
+`retryable` is true, after `retry_after_seconds` when named),
+`switch` (call a different tool — a missing input points at `find`
+with the basename as `query`; an unknown job id points at `job`
+`action=list`), `fix-arg` (same tool, corrected argument — a stale
+`patch_manifest` names the current `expected_revision`; a bad
+argument names the field), `check-env` (run `doctor` — a missing ASR
+engine is an install problem, not a call problem), or `none` (no safe
+fix is known — an ffmpeg failure or a crashed ASR engine never
+suggests retry; read the message instead of re-issuing the call). The
+CLI prints the same fixes under the error line (`Fix (<kind>): …`).
+Never re-issue a call whose `retryable` is `false` unchanged.
+
 ## One-command recap (landscape → vertical captioned Short)
 
 ```bash

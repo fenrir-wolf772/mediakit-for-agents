@@ -54,7 +54,7 @@ import { createServer } from "node:http";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { TOOL_DEFS } from "./tools.js";
-import { getJob, listJobs, cancelJob } from "./core.js";
+import { explainError, getJob, listJobs, cancelJob } from "./core.js";
 import { recordToolCall } from "./audit.js";
 
 const NAME = "mediakit-for-agents";
@@ -271,6 +271,11 @@ function sendError(res, err) {
   if (err.retry) body.retry = err.retry;
   if (err.retryable !== undefined) body.retryable = err.retryable;
   if (err.retry_after_seconds != null) body.retry_after_seconds = err.retry_after_seconds;
+  // Same structured fixes as the stdio envelope (lượt 140): the
+  // retry fix gets tool/args from err.retry when the failed call
+  // carried them (invokeTool attaches it); without that context the
+  // fix is label-only.
+  body.explain = explainError(err, { tool: err.retry?.tool ?? null, args: err.retry?.arguments ?? null });
   sendJson(res, status, body);
 }
 
@@ -370,6 +375,7 @@ async function handleJsonRpc(body) {
     if (err.retry) {
       const body = { error: err.message, code: err.code, retry: err.retry, retryable: err.retryable === true };
       if (err.retry_after_seconds != null) body.retry_after_seconds = err.retry_after_seconds;
+      body.explain = explainError(err, { tool: err.retry?.tool ?? null, args: err.retry?.arguments ?? null });
       return respond({
         jsonrpc: "2.0",
         id,

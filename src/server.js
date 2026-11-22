@@ -49,6 +49,15 @@ server.tool = (name, description, schema, handler) => registerTool(name, descrip
       const body = JSON.parse(res.content?.[0]?.text ?? "");
       if (body && typeof body === "object" && body.error) {
         body.retry = { tool: name, arguments: a };
+        // safe() computed `explain` without tool/args context; the
+        // retry fix gets them here so the identical call can be
+        // re-issued verbatim (other fixes already carry their own
+        // tool/args or none).
+        if (Array.isArray(body.explain?.fixes)) {
+          for (const fix of body.explain.fixes) {
+            if (fix.kind === "retry" && !fix.tool) { fix.tool = name; fix.args = a; }
+          }
+        }
         return { content: [{ type: "text", text: JSON.stringify(body, null, 2) }], isError: true };
       }
     } catch { /* error text is not JSON — leave it as-is */ }
