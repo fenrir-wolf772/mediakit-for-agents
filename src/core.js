@@ -11053,6 +11053,10 @@ const TOOL_REQUIREMENTS = {
   // chapters only needs silencedetect, and only in input mode — the
   // words-file mode is pure JSON and needs no ffmpeg capability.
   chapters: { filters: ["silencedetect"] },
+  // align_voice measures the pauses in the voice (silencedetect)
+  // and does the rest in pure Node — the same one filter as
+  // chapters, so a build without it is reported the same way.
+  align_voice: { filters: ["silencedetect"] },
   motion: { filters: ["tblend", "blend", "fps", "split", "trim", "setpts", "geq", "signalstats", "scale"] },
   keyframes: {},
   fit: { filters: ["setpts", "atempo", "fps"], encoders: ["libx264", "aac"] },
@@ -17215,6 +17219,18 @@ async function validateAssembleManifest(doc, manifestAbs) {
       }
       shot.role = raw.role;
     }
+    // Dialogue (agent-storyboard's `dialogue` on the shot): the
+    // script line spoken during this shot — the input `align_voice`
+    // splits the voice by. Annotation only for the render (the voice
+    // file carries the words); a shot with no dialogue is unspoken
+    // and keeps its duration when aligning. A --lines file overrides
+    // this field per shot.
+    if (raw.dialogue !== undefined && raw.dialogue !== null) {
+      if (typeof raw.dialogue !== "string" || raw.dialogue.trim().length > 5000) {
+        throw new MediaKitError(`${label} (${id}): dialogue must be a string of at most 5000 characters`, "INVALID_ARG");
+      }
+      if (raw.dialogue.trim()) shot.dialogue = raw.dialogue.trim();
+    }
     // Variants (Takes set_storyboard): every take tried for this
     // shot, A/B/C — `selected` (index or label, default 0) picks
     // the one that renders. The shot's own source fields must be
@@ -17465,6 +17481,339 @@ async function validateAssembleManifest(doc, manifestAbs) {
     music, sfx, captions, shots, chapters, hook, warnings, fingerprint,
     fingerprint_parts: { manifest: manifestHash, voice: voiceHash, music: musicHash, sfx: sfxHashes, captions: captionsHash, assets: assetHashes, brand: brandResolved ? stableStringify(brandResolved) : null },
   };
+}
+
+// ---------------------------------------------------------------- align_voice
+// Director's voice alignment (idea: Yuuhann1999/agent-storyboard
+// `timing.mjs` — estimateTiming / applyTiming / dialogueKey, read
+// verbatim and re-implemented in Node/ffmpeg, adapted to MediaKit's
+// frame-exact film math). The voice is the master clock: split the
+// voice across the shots that speak, in proportion to how many
+// characters each shot's dialogue has, then snap each interior
+// boundary to the middle of the nearest pause (±600ms) so a cut never
+// clips a word. Shots with no dialogue keep their durations; the
+// spoken shots split the voice time their run covers. Frame-exact:
+// durations are whole frames at the film fps, and each spoken run's
+// frame sum is preserved, so the aligned film still tiles
+// lead + voice + tail exactly and `assemble validate` passes.
+export const ALIGN_VOICE_SNAP_WINDOW_MS = 600;
+export const ALIGN_VOICE_DIALOGUE_MAX_CHARS = 5000;
+
+export function dialogueKeyForShots(shots) {
+  // agent-storyboard's dialogueKey: sha256 over [[id, dialogue]] in
+  // shot order, over ALL shots (unspoken ones contribute ""). The
+  // dialogue is trimmed first: their key uses the raw string, but
+  // trimming keeps the key stable whether a line came from the film's
+  // `dialogue` field or a --lines file with different surrounding
+  // whitespace — the same words must hash the same.
+  const pairs = (shots ?? []).map((s) => [s.id, (s.dialogue ?? "").trim()]);
+  return createHash("sha256").update(JSON.stringify(pairs)).digest("hex");
+}
+
+export function estimateVoiceAlignment(spoken, totalMs, silenceMidpointsMs, { snapWindowMs = ALIGN_VOICE_SNAP_WINDOW_MS } = {}) {
+  // Pure port of agent-storyboard's estimateTiming. spoken =
+  // [{id, chars}] in film order (chars = dialogue length with
+  // whitespace removed — one CJK character counts the same as one
+  // Latin letter, exactly like their [...dialogue.replace(/\s/g,
+  // "")].length); totalMs = the voice window these shots share;
+  // silenceMidpointsMs = pause midpoints in the same clock (ms).
+  // Returns [{shotId, startMs, endMs, snapped, snapDeltaMs,
+  // silenceMs}]. Two deliberate differences, both documented:
+  //  - the snap target is the pause MIDPOINT, not silence_start:
+  //    the exact start of a detected silence wobbles with the
+  //    threshold, while the middle of a pause is silence on both
+  //    sides, so a cut there can clip neither a word tail nor the
+  //    next onset.
+  //  - the 1ms-per-shot guard is kept (cursor + 1, leave 1ms per
+  //    shot still to come) — the 0.5s frame floor is enforced by the
+  //    caller, which knows the film fps.
+  if (!(totalMs > 0)) throw new MediaKitError("align_voice needs a voice window longer than 0ms", "INVALID_ARG");
+  const list = (spoken ?? []).filter((s) => s.chars > 0);
+  if (!list.length) throw new MediaKitError("align_voice needs at least one shot with dialogue", "INVALID_ARG");
+  const totalChars = list.reduce((a, s) => a + s.chars, 0);
+  const mids = [...(silenceMidpointsMs ?? [])].filter((n) => Number.isFinite(n)).sort((a, b) => a - b);
+  let cursor = 0, weight = 0;
+  return list.map((s, index) => {
+    weight += s.chars;
+    const ideal = totalMs * weight / totalChars;
+    let snapped = false, snapDeltaMs = 0, silenceMs = null;
+    let end;
+    if (index === list.length - 1) {
+      end = totalMs;
+    } else {
+      const near = mids.filter((n) => n > cursor + 100 && Math.abs(n - ideal) < snapWindowMs)
+        .sort((a, b) => Math.abs(a - ideal) - Math.abs(b - ideal))[0];
+      if (near !== undefined) {
+        end = near;
+        snapped = true;
+        silenceMs = near;
+        snapDeltaMs = Math.round(near - ideal);
+      } else {
+        end = Math.round(ideal);
+      }
+      // agent-storyboard's guard: >=1ms per shot, and leave >=1ms
+      // for each shot still to come. A snap the guard moves is no
+      // longer a snap — report it as unsnapped.
+      const guarded = Math.max(cursor + 1, Math.min(totalMs - (list.length - index - 1), end));
+      if (guarded !== end) {
+        end = guarded;
+        snapped = false;
+        silenceMs = null;
+        snapDeltaMs = 0;
+      } else {
+        end = guarded;
+      }
+    }
+    const row = { shotId: s.id, startMs: cursor, endMs: end, snapped, snapDeltaMs, silenceMs };
+    cursor = end;
+    return row;
+  });
+}
+
+export async function alignVoice({ filmPath, linesPath = null, thresholdDb = -40, minSilenceSeconds = 0.25, snapWindowMs = ALIGN_VOICE_SNAP_WINDOW_MS, apply = false, outputPath = null, expectedKey = null } = {}) {
+  const filmAbs = await requireInput(filmPath, "film manifest");
+  let doc;
+  try {
+    doc = JSON.parse(await readFile(filmAbs, "utf8"));
+  } catch (e) {
+    throw new MediaKitError(`align_voice: cannot read film manifest ${filmPath}: ${e.message}`, "INVALID_ARG");
+  }
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
+    throw new MediaKitError("align_voice: film manifest must be a JSON object", "INVALID_ARG");
+  }
+  if (!Array.isArray(doc.shots) || !doc.shots.length) {
+    throw new MediaKitError("align_voice: film manifest needs a shots array", "INVALID_ARG");
+  }
+  // --lines file (optional): [{shot, dialogue}] — overrides the
+  // film's own `dialogue` field for the shots it names. Unknown shot
+  // ids and duplicate entries fail loudly: a typo must not silently
+  // align the wrong shot.
+  let lines = null;
+  if (linesPath !== undefined && linesPath !== null) {
+    const linesAbs = await requireInput(linesPath, "lines file");
+    let parsed;
+    try {
+      parsed = JSON.parse(await readFile(linesAbs, "utf8"));
+    } catch (e) {
+      throw new MediaKitError(`align_voice: cannot read lines file ${linesPath}: ${e.message}`, "INVALID_ARG");
+    }
+    if (!Array.isArray(parsed)) throw new MediaKitError("align_voice: lines file must be a JSON array of {shot, dialogue}", "INVALID_ARG");
+    const filmIds = new Set(doc.shots.map((s) => s?.id).filter((x) => typeof x === "string"));
+    const seen = new Set();
+    lines = parsed.map((entry, i) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry) || typeof entry.shot !== "string" || !entry.shot.trim()) {
+        throw new MediaKitError(`align_voice: lines[${i}] must be an object {shot, dialogue}`, "INVALID_ARG");
+      }
+      const shot = entry.shot.trim();
+      if (!filmIds.has(shot)) throw new MediaKitError(`align_voice: lines[${i}] names unknown shot "${shot}" (shots: ${[...filmIds].join(", ")})`, "INVALID_ARG");
+      if (seen.has(shot)) throw new MediaKitError(`align_voice: lines[${i}] duplicates shot "${shot}"`, "INVALID_ARG");
+      seen.add(shot);
+      if (typeof entry.dialogue !== "string" || entry.dialogue.trim().length > ALIGN_VOICE_DIALOGUE_MAX_CHARS) {
+        throw new MediaKitError(`align_voice: lines[${i}] dialogue must be a string of at most ${ALIGN_VOICE_DIALOGUE_MAX_CHARS} characters`, "INVALID_ARG");
+      }
+      return { shot, dialogue: entry.dialogue.trim() };
+    });
+  }
+  // Validate the film first — the same gate `assemble validate`
+  // uses: probes the voice + every asset and checks the timeline
+  // tiles lead + voice + tail exactly. A broken film fails here in
+  // seconds, before any silence is measured.
+  const film = await validateAssembleManifest(doc, filmAbs);
+  const fps = film.fps;
+  const lead = film.voice.lead;
+  const voiceDuration = film.voice.duration_seconds;
+  // Resolve the dialogue per shot: --lines wins, then the film's
+  // own `dialogue` field, then unspoken. Chars count whitespace-free
+  // code points, like estimateTiming.
+  const resolved = film.shots.map((s, i) => {
+    const fromLines = lines?.find((l) => l.shot === s.id);
+    const dialogue = fromLines ? fromLines.dialogue : (doc.shots[i]?.dialogue ?? "");
+    const clean = typeof dialogue === "string" ? dialogue.trim() : "";
+    return { id: s.id, dialogue: clean, chars: [...clean.replace(/\s/g, "")].length };
+  });
+  const dialogueKey = dialogueKeyForShots(resolved);
+  if (expectedKey !== undefined && expectedKey !== null) {
+    if (typeof expectedKey !== "string" || expectedKey.trim().toLowerCase() !== dialogueKey) {
+      throw new MediaKitError(`align_voice: dialogue changed — expected key ${expectedKey} but the current lines hash to ${dialogueKey} (re-run without --expected-key to re-align)`, "DIALOGUE_CHANGED");
+    }
+  }
+  const threshold = num(thresholdDb, "threshold_db", { min: -90, max: 0 });
+  const minSilence = num(minSilenceSeconds, "min_silence_seconds", { min: 0.05, max: 60 });
+  const snapWindow = num(snapWindowMs, "snap_window_ms", { min: 0, max: 5000 });
+  const det = await detectSilence(film.voice.path, { thresholdDb: threshold, minDuration: minSilence });
+  const midpointsMs = det.silences.map((s) => Math.round(((s.start + s.end) / 2) * 1000));
+  const silenceByMid = new Map(det.silences.map((s) => [Math.round(((s.start + s.end) / 2) * 1000), s]));
+  // Split the film into maximal runs of spoken shots. Unspoken shots
+  // keep their durations; each spoken run splits the voice time its
+  // shots currently cover (film time minus lead — the shots tile the
+  // voice timeline exactly, so a run's voice window is the sum of its
+  // current durations).
+  const minFrames = Math.max(1, Math.round(0.5 * fps));
+  const newFrames = film.shots.map((s) => s.frames);
+  const newRows = [];
+  const violations = [];
+  const unspoken = resolved.filter((r) => r.chars === 0).map((r) => r.id);
+  let cursorFrames = 0;
+  let i = 0;
+  while (i < film.shots.length) {
+    if (resolved[i].chars === 0) {
+      cursorFrames += film.shots[i].frames;
+      i++;
+      continue;
+    }
+    const runStart = i;
+    while (i < film.shots.length && resolved[i].chars > 0) i++;
+    const run = resolved.slice(runStart, i);
+    const runFrames = film.shots.slice(runStart, i).reduce((a, s) => a + s.frames, 0);
+    const runStartVoiceMs = Math.round(((cursorFrames / fps) - lead) * 1000);
+    const runMs = Math.round((runFrames / fps) * 1000);
+    const rows = estimateVoiceAlignment(run, runMs, midpointsMs.map((m) => m - runStartVoiceMs).filter((m) => m > 0 && m < runMs), { snapWindowMs: snapWindow });
+    // Rows are run-local ms; convert to frames, enforce the 0.5s
+    // floor by borrowing from the next shot in the run, and fix the
+    // residual on the last shot so the run's frame sum is exact.
+    let frames = rows.map((r) => Math.round(((r.endMs - r.startMs) / 1000) * fps));
+    for (let j = 0; j < frames.length; j++) {
+      if (frames[j] >= minFrames) continue;
+      let need = minFrames - frames[j];
+      for (let k = j + 1; k < frames.length && need > 0; k++) {
+        const take = Math.min(need, frames[k] - minFrames);
+        if (take > 0) {
+          frames[k] -= take;
+          frames[j] += take;
+          need -= take;
+        }
+      }
+      if (need > 0) {
+        violations.push({ shot: run[j].id, kind: "min-duration", message: `shot ${run[j].id} would last ${(frames[j] / fps).toFixed(3)}s after aligning, below the 0.5s floor — its dialogue is too short for this voice (give it more lines, or shorten the voice)` });
+      }
+    }
+    const residual = runFrames - frames.reduce((a, b) => a + b, 0);
+    if (residual !== 0) {
+      frames[frames.length - 1] += residual;
+      if (frames[frames.length - 1] < minFrames) {
+        violations.push({ shot: run[frames.length - 1].id, kind: "min-duration", message: `shot ${run[frames.length - 1].id} would last ${(frames[frames.length - 1] / fps).toFixed(3)}s after the frame-residual fix, below the 0.5s floor — its dialogue is too short for this voice` });
+      }
+    }
+    let runCursor = cursorFrames;
+    rows.forEach((r, j) => {
+      const shotFrames = frames[j];
+      newFrames[runStart + j] = shotFrames;
+      newRows.push({
+        id: r.shotId,
+        dialogue_chars: run[j].chars,
+        start_seconds: +(runCursor / fps).toFixed(3),
+        end_seconds: +((runCursor + shotFrames) / fps).toFixed(3),
+        duration_seconds: +(shotFrames / fps).toFixed(3),
+        frames: shotFrames,
+        previous_duration_seconds: film.shots[runStart + j].duration,
+        delta_seconds: +((shotFrames - film.shots[runStart + j].frames) / fps).toFixed(3),
+        snapped: r.snapped,
+        snap_delta_ms: r.snapDeltaMs,
+        silence: r.silenceMs === null ? null : { start: silenceByMid.get(r.silenceMs + runStartVoiceMs)?.start ?? null, end: silenceByMid.get(r.silenceMs + runStartVoiceMs)?.end ?? null },
+      });
+      runCursor += shotFrames;
+    });
+    cursorFrames += runFrames;
+  }
+  // Unspoken shots keep their durations; they still get a row so the
+  // plan covers the whole film.
+  const allRows = [];
+  {
+    let cursor = 0;
+    film.shots.forEach((s, idx) => {
+      const aligned = newRows.find((r) => r.id === s.id);
+      if (aligned) {
+        allRows.push(aligned);
+      } else {
+        allRows.push({
+          id: s.id, dialogue_chars: 0,
+          start_seconds: +(cursor / fps).toFixed(3),
+          end_seconds: +((cursor + s.frames) / fps).toFixed(3),
+          duration_seconds: s.duration, frames: s.frames,
+          previous_duration_seconds: s.duration, delta_seconds: 0,
+          snapped: false, snapDeltaMs: 0, silence: null,
+        });
+      }
+      cursor += newFrames[idx];
+    });
+  }
+  // Violations on the NEW durations: a plan that would write an
+  // invalid film is reported, and --apply refuses it. The checks
+  // mirror validateAssembleManifest's own rules, applied to the new
+  // frame counts.
+  film.shots.forEach((s, idx) => {
+    const dur = newFrames[idx] / fps;
+    const label = `shot ${idx + 1} (${s.id})`;
+    if ((s.kind === "image" && !s.zoom) || s.kind === "color") {
+      if (dur > ASSEMBLE_MOTION_GATE_SECONDS) {
+        violations.push({ shot: s.id, kind: "motion-gate", message: `${label}: a ${s.kind === "image" ? "still image without zoom" : "solid color card"} may last at most ${ASSEMBLE_MOTION_GATE_SECONDS}s, got ${dur.toFixed(3)}s after aligning (add a zoom, or split the shot)` });
+      }
+    }
+    for (const [j, layer] of (s.textLayers ?? []).entries()) {
+      if (layer.end_seconds > dur + 1e-9) {
+        violations.push({ shot: s.id, kind: "text-layer", message: `${label} text[${j}] ends at ${layer.end_seconds}s, past the new shot duration ${dur.toFixed(3)}s (shorten the layer, or lengthen the dialogue)` });
+      }
+    }
+    if (s.transition) {
+      const prevFrames = newFrames[idx - 1];
+      if (s.transition.frames > Math.min(prevFrames, newFrames[idx])) {
+        violations.push({ shot: s.id, kind: "transition", message: `${label}: transition ${s.transition.frames} frames (${s.transition.duration_seconds}s) is longer than the shorter adjacent shot after aligning (${Math.min(prevFrames, newFrames[idx])} frames) — shorten the transition or lengthen the shots` });
+      }
+    }
+  });
+  if (film.hook) {
+    const hookShotIdx = film.shots.findIndex((s) => s.id === film.hook.shot);
+    if (hookShotIdx >= 0 && film.hook.end_seconds > newFrames[hookShotIdx] / fps + 1e-9) {
+      violations.push({ shot: film.hook.shot, kind: "hook", message: `hook window ends at ${film.hook.end_seconds}s, past the new duration of shot ${film.hook.shot} (${(newFrames[hookShotIdx] / fps).toFixed(3)}s) — move the hook slot, or lengthen the dialogue` });
+    }
+  }
+  const result = {
+    operation: "align_voice",
+    film: filmAbs,
+    voice: film.voice.path,
+    voice_duration_seconds: voiceDuration,
+    lead_seconds: lead,
+    tail_seconds: film.voice.tail,
+    fps,
+    total_seconds: film.total_seconds,
+    total_frames: film.total_frames,
+    dialogue_key: dialogueKey,
+    silence: { threshold_db: threshold, min_duration_seconds: minSilence, intervals: det.silences.length, midpoints_ms: midpointsMs },
+    snap_window_ms: snapWindow,
+    unspoken_shots: unspoken,
+    shots: allRows,
+    violations,
+    applied: false,
+    output: null,
+  };
+  if (!apply) return result;
+  if (violations.length) {
+    throw new MediaKitError(`align_voice: refusing to apply — ${violations.length} violation(s): ${violations.map((v) => v.message).join(" | ")}`, "ALIGN_VIOLATION");
+  }
+  if (!outputPath) {
+    throw new MediaKitError("align_voice --apply needs --output <aligned-film.json> (the input film is never overwritten in place)", "INVALID_ARG");
+  }
+  const outAbs = await prepareOutput(outputPath, [filmAbs]);
+  // The aligned film carries the dialogue it was aligned from, so a
+  // later re-align reproduces the same key without a --lines file.
+  const next = JSON.parse(JSON.stringify(doc));
+  next.shots.forEach((shot, idx) => {
+    shot.duration = +(newFrames[idx] / fps).toFixed(3);
+    const line = resolved[idx];
+    if (line.dialogue) shot.dialogue = line.dialogue;
+  });
+  const partial = `${outAbs}.partial-${process.pid}-${randomBytes(4).toString("hex")}`;
+  try {
+    await writeFile(partial, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+    await rename(partial, outAbs);
+  } catch (e) {
+    await rm(partial, { force: true }).catch(() => {});
+    throw e;
+  }
+  // Prove the written film validates: the frame math above claims
+  // exactness, but the file on disk is the evidence.
+  await validateAssembleManifest(next, outAbs);
+  return { ...result, applied: true, output: outAbs };
 }
 
 // ---------------------------------------------------------------- canvas_scene

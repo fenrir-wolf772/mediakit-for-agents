@@ -999,6 +999,20 @@ const COMMANDS = {
       ["--style-file", "Style file to score the film's pace against (default: style.json next to the film manifest, when it exists)"],
     ],
   },
+  "align-voice": {
+    usage: "mediakit align-voice <film.json> [--lines <lines.json>] [--threshold-db -40] [--min-silence 0.25] [--snap-window-ms 600] [--apply -o <aligned-film.json>] [--expected-key <hex>]",
+    desc: "Align an assemble film's shot durations to its voice: split the voice across the shots that speak, in proportion to each shot's dialogue characters, then snap each interior boundary to the middle of the nearest pause within --snap-window-ms (default 600) so a cut never clips a word. Dialogue comes from each shot's `dialogue` field, overridden per shot by --lines [{shot, dialogue}]; shots with no dialogue keep their durations. Plan mode (default) writes nothing and reports the dialogue_key, per-shot durations/deltas/snap info, and violations. --apply writes the aligned film (never over the input) and embeds the dialogue it aligned from; it refuses when there are violations or when --expected-key differs from the computed key.",
+    args: [{ name: "manifest", required: true }],
+    options: [
+      ["--lines", "JSON file [{shot, dialogue}] — overrides the film's `dialogue` field for the shots it names"],
+      ["--threshold-db", "Silence threshold in dBFS for pause detection (default -40)"],
+      ["--min-silence", "Shortest pause that counts as a snap target, in seconds (default 0.25)"],
+      ["--snap-window-ms", "Snap window in milliseconds (default 600)"],
+      ["--apply", "Write the aligned film (needs -o); without this, only the plan is printed"],
+      ["-o, --output", "Where to write the aligned film JSON (required with --apply; never the input film)"],
+      ["--expected-key", "Dialogue lock: refuse the apply unless the computed dialogue_key equals this value"],
+    ],
+  },
   chapters: {
     usage: "mediakit chapters [--words-file <words.json> | <input>] [--min-gap 2] [--title-words 4] [--max-chapters 32] [-o <chapters.json>]",
     desc: "Generate chapter markers from measured pauses, not guesses. --words-file (a transcribe --word-timestamps JSON) splits the transcript wherever the gap between two words reaches --min-gap (default 2s) and titles each chapter from the first words spoken in it; <input> (a media file with audio) runs silencedetect and starts a chapter at each speech segment that follows a silence of at least --min-gap, titled Part 1..N. The first chapter is always at 0 (YouTube requires it). Over --max-chapters (default 32, the assemble cap) the closest neighbours merge first. Returns chapters in the assemble manifest shape {title, at}; -o also writes that JSON to a file. Probe-only unless -o is given.",
@@ -2252,6 +2266,20 @@ async function main() {
         result = await core.diagnoseFilm({
           manifestPath: positional[0],
           styleFile: opts.style_file ?? null,
+        });
+        break;
+      }
+      case "align-voice": {
+        if (!positional[0]) fail("missing manifest file: mediakit align-voice <film.json>");
+        result = await core.alignVoice({
+          filmPath: positional[0],
+          linesPath: opts.lines ?? null,
+          thresholdDb: numOpt(opts, "threshold_db") ?? -40,
+          minSilenceSeconds: numOpt(opts, "min_silence") ?? 0.25,
+          snapWindowMs: numOpt(opts, "snap_window_ms") ?? 600,
+          apply: opts.apply === true,
+          outputPath: opts.output ?? null,
+          expectedKey: opts.expected_key ?? null,
         });
         break;
       }

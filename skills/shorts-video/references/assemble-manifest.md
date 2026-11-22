@@ -131,6 +131,14 @@ pictures — pictures fit the voice:
   that does not open the film warns at validate (and again in
   `diagnose`); so does a hook slot on a shot whose `role` is not
   `"hook"`.
+- `dialogue` is optional per shot: the script line spoken during
+  that shot (a string, at most 5000 characters — annotation only
+  for the render, like `role`). It is the input `align_voice`
+  splits the voice by: each shot's share of the voice is
+  proportional to its dialogue characters, with boundaries snapped
+  to the middle of the nearest pause. A shot with no dialogue is
+  unspoken and keeps its duration when aligning; a `--lines` file
+  overrides the field per shot. See `align_voice` below.
 - `style.json` (next to the film, not inside it) is optional:
   `{version: 1, name, pace: {cuts_per_min, longest_hold_s?}}` —
   the channel pace `diagnose` scores the film's planned cuts per
@@ -379,6 +387,50 @@ registry fails loudly instead of resolving to different motion.
 - Needs the `canvas` npm package (installed with MediaKit).
   If it is missing, `validate` passes but the build fails with
   a clear message telling you to install it.
+
+## Aligning shot durations to the voice — `align_voice`
+
+Hand-typing shot durations to match a voiceover is guessing. The
+voice is the master clock, so `align_voice` measures the cuts:
+
+```bash
+mediakit align-voice film.json
+mediakit align-voice film.json --lines lines.json --apply -o film-aligned.json
+```
+
+- Dialogue comes from each shot's `dialogue` field, overridden per
+  shot by a `--lines` file `[{shot, dialogue}]`. Shots with no
+  dialogue keep their durations; the spoken shots split the voice
+  time their run covers.
+- Each spoken shot's share is proportional to its dialogue
+  characters (whitespace removed — one CJK character counts the
+  same as one Latin letter), then each interior boundary snaps to
+  the middle of the nearest pause within 600ms (`--snap-window-ms`,
+  pauses of at least `--min-silence` seconds, default 0.25,
+  at `--threshold-db`, default −40).
+- Durations are whole frames at the film fps, and each spoken run's
+  frame sum is preserved — the aligned film still tiles lead +
+  voice + tail exactly, so `assemble validate` passes on it.
+- Plan mode (default) writes nothing: it reports the
+  `dialogue_key` (sha256 over `[[shot id, dialogue]]` in film
+  order), per-shot durations/deltas/snap info, and violations — a
+  still image or color card pushed past the 2.5s motion gate, a
+  text layer ending past the new shot duration, a transition longer
+  than its shorter neighbour, a hook window past its shot.
+- `--apply` writes the aligned film (never over the input) and
+  embeds the dialogue it aligned from, so a later re-align
+  reproduces the same key without a `--lines` file. It re-validates
+  the written file and refuses when there are violations, or when
+  `--expected-key` differs from the computed key — a changed line
+  or a reordered shot refuses with `DIALOGUE_CHANGED` instead of
+  silently aligning the wrong script.
+
+The idea is agent-storyboard's `timing.mjs`
+(`estimateTiming`/`applyTiming`/`dialogueKey`), re-implemented for
+MediaKit's frame-exact film math. One deliberate difference: the
+snap target is the pause midpoint, not the silence start — the
+exact start of a detected silence wobbles with the threshold,
+while the middle of a pause is silence on both sides.
 
 ## Cache and approval
 

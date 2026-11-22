@@ -2099,6 +2099,42 @@ export const TOOL_DEFS = [
   })),
   },
 
+  // Voice-to-shot alignment (idea: Yuuhann1999/agent-storyboard
+  // `timing.mjs` estimateTiming/applyTiming — the director's "the
+  // voice is the master clock" made automatic): split the voice
+  // across the shots that speak, in proportion to each shot's
+  // dialogue characters, then snap each interior boundary to the
+  // middle of the nearest pause (within 600ms) so a cut never clips
+  // a word. Plan mode writes nothing; --apply writes an aligned
+  // film (never over the input) and embeds the dialogue, so a later
+  // re-align reproduces the same dialogue_key. --expected-key locks
+  // the apply: a changed line or reordered shot refuses with
+  // DIALOGUE_CHANGED instead of silently aligning the wrong script.
+  {
+    name: "align_voice",
+    description: "Align an assemble film's shot durations to its voice: split the voice across the shots that speak, in proportion to each shot's dialogue characters (whitespace-free count, like agent-storyboard's estimateTiming), then snap each interior boundary to the middle of the nearest pause within snap_window_ms (default 600) so a cut never clips a word. Dialogue comes from each shot's `dialogue` field, overridden per shot by a --lines file [{shot, dialogue}]; shots with no dialogue keep their durations. Durations are whole frames at the film fps and each spoken run's frame sum is preserved, so the aligned film still tiles lead + voice + tail exactly. Plan mode (default) writes nothing and reports the dialogue_key (sha256 over [[shot id, dialogue]] in film order), per-shot durations/deltas/snap info, and violations (motion-gate, text layer past the new duration, transition too long, hook past the shot). Apply mode (--apply + --output) writes the aligned film — never over the input — embeds the dialogue it aligned from, re-validates the written file, and refuses when there are violations or when --expected-key differs from the computed key (dialogue changed or shots reordered — re-run without it to re-align).",
+    schema: {
+    film_path: pathSchema.describe("Path to the assemble film manifest JSON file (same schema as assemble; each shot may carry a `dialogue` string)"),
+    lines_path: pathSchema.optional().describe("Optional JSON file [{shot, dialogue}] — overrides the film's `dialogue` field for the shots it names"),
+    threshold_db: z.number().min(-90).max(0).default(-40).describe("Silence threshold in dBFS for pause detection (default -40, same as the silence tool)"),
+    min_silence_seconds: z.number().min(0.05).max(60).default(0.25).describe("Shortest pause that counts as a snap target, in seconds (default 0.25 — shorter than the silence tool's 0.5, so natural speech pauses count)"),
+    snap_window_ms: z.number().int().min(0).max(5000).default(600).describe("Snap window in milliseconds: a pause midpoint within this far of the proportional boundary is used (default 600, agent-storyboard's window)"),
+    apply: z.boolean().default(false).describe("Write the aligned film (needs output_path); without this, only the plan is returned and nothing is written"),
+    output_path: pathSchema.optional().describe("Where to write the aligned film JSON (required with apply=true; never the input film)"),
+    expected_key: z.string().optional().describe("Dialogue lock: refuse the apply unless the computed dialogue_key equals this value (dialogue changed or shots reordered)"),
+  },
+    handler: async (a) => safe(() => core.alignVoice({
+      filmPath: a.film_path,
+      linesPath: a.lines_path ?? null,
+      thresholdDb: a.threshold_db ?? -40,
+      minSilenceSeconds: a.min_silence_seconds ?? 0.25,
+      snapWindowMs: a.snap_window_ms ?? 600,
+      apply: a.apply ?? false,
+      outputPath: a.output_path ?? null,
+      expectedKey: a.expected_key ?? null,
+    })),
+  },
+
   // Auto-chapters for a long talk / film (op7418/Youtube-clipper idea,
   // turn 64): split a transcript on long pauses, or split audio on
   // silence, and name each chapter from the first words spoken in it.

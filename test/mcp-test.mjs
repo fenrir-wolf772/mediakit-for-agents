@@ -14,7 +14,7 @@ import { createCanvas } from "canvas";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { applyContentBaseline, averageHash, compareDeterminismRuns, countClippedRuns, diagnoseVoice, estimateDecodedWork, estimateJobRemaining, estimateTempo, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, inspectPacing, localTempoCurve, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
+import { applyContentBaseline, averageHash, compareDeterminismRuns, countClippedRuns, diagnoseVoice, dialogueKeyForShots, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, inspectPacing, localTempoCurve, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import bounceTpl from "../src/canvas-scene-lib/templates/bounce.cjs";
@@ -188,10 +188,10 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut", "clean_voice", "measure_pace", "highlights"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut", "clean_voice", "measure_pace", "highlights", "align_voice"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 82 tools present");
-checkOk(missing.length === 0, "tools/list has all 82 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 83 tools present");
+checkOk(missing.length === 0, "tools/list has all 83 tools", `missing: ${missing.join(", ")}`);
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -2889,6 +2889,78 @@ const hlBadThreshold = await callExpectThrow("highlights", { input: path.join(ro
 checkOk(/threshold/i.test(hlBadThreshold), "highlights with threshold 2 fails validation", hlBadThreshold.slice(0, 200));
 const hlCli = await runCliJson(["highlights", path.join(root, "test/highlights-source.mp4")]);
 checkOk(hlCli.boundaries.length === 2 && hlCli.boundaries[0].at_seconds === 5 && hlCli.boundaries[1].at_seconds === 10 && hlCli.highlights.length === 3 && hlCli.thumbnails[0].timestamp === 5, "CLI highlights reports the same boundaries, spans and thumbnail seed", JSON.stringify({ b: hlCli.boundaries, t: hlCli.thumbnails }));
+
+// align_voice (lượt 138, idea: agent-storyboard timing.mjs): pure
+// estimator + dialogue key first, then the tool on the fixtures —
+// the 9s voice is tone [0,2),[4,6),[7,9) by construction, so the
+// pauses are [2.02,4.017] and [6.014,7.012] (measured), midpoints
+// 3.019s and 6.513s; three 10-char lines split 3/3/3s and snap to
+// 91/105/74 frames = 270 exactly.
+const avKeyA = dialogueKeyForShots([{ id: "s1", dialogue: "  hello world " }, { id: "s2", dialogue: "second line" }]);
+const avKeyB = dialogueKeyForShots([{ id: "s1", dialogue: "hello world" }, { id: "s2", dialogue: "second line" }]);
+checkOk(avKeyA === avKeyB && /^[0-9a-f]{64}$/.test(avKeyA), "dialogueKey: surrounding whitespace does not change the key (film field vs --lines file hash the same)", avKeyA.slice(0, 16));
+checkOk(dialogueKeyForShots([{ id: "s1", dialogue: "hello world" }, { id: "s2", dialogue: "CHANGED" }]) !== avKeyA, "dialogueKey: one changed line changes the key", "changed");
+checkOk(dialogueKeyForShots([{ id: "s2", dialogue: "second line" }, { id: "s1", dialogue: "hello world" }]) !== avKeyA, "dialogueKey: reordered shots change the key", "reordered");
+const avEqual = estimateVoiceAlignment([{ id: "a", chars: 10 }, { id: "b", chars: 10 }, { id: "c", chars: 10 }], 9000, []);
+checkOk(avEqual.length === 3 && avEqual[0].endMs === 3000 && avEqual[1].endMs === 6000 && avEqual[2].endMs === 9000 && avEqual.every((r) => !r.snapped), "estimateVoiceAlignment: equal lines, no pauses — clean 3000/6000/9000 split, nothing snapped", JSON.stringify(avEqual.map((r) => r.endMs)));
+const avSnap = estimateVoiceAlignment([{ id: "a", chars: 10 }, { id: "b", chars: 10 }, { id: "c", chars: 10 }], 9000, [3018, 6513]);
+checkOk(avSnap[0].endMs === 3018 && avSnap[0].snapped && avSnap[0].snapDeltaMs === 18 && avSnap[1].endMs === 6513 && avSnap[1].snapped && avSnap[1].snapDeltaMs === 513, "estimateVoiceAlignment: midpoints 3018/6513 snap both boundaries (deltas +18/+513ms)", JSON.stringify(avSnap.map((r) => [r.endMs, r.snapDeltaMs])));
+const avNoSnap = estimateVoiceAlignment([{ id: "a", chars: 5 }, { id: "b", chars: 10 }, { id: "c", chars: 5 }], 9000, [3018, 6513]);
+checkOk(avNoSnap[0].endMs === 2250 && !avNoSnap[0].snapped && avNoSnap[1].endMs === 6513 && avNoSnap[1].snapped && avNoSnap[1].snapDeltaMs === -237, "estimateVoiceAlignment: a midpoint 770ms from the ideal does not snap (2250 stays), the other snaps (delta -237ms)", JSON.stringify(avNoSnap.map((r) => [r.endMs, r.snapped])));
+let avEmptyThrew = false;
+try { estimateVoiceAlignment([], 9000, []); } catch { avEmptyThrew = true; }
+checkOk(avEmptyThrew, "estimateVoiceAlignment: no spoken shots throws instead of returning an empty timeline", "throws");
+const avRes = await client.callTool({
+  name: "align_voice",
+  arguments: { film_path: path.join(root, "test/align-voice-film.json") },
+});
+const avJson = JSON.parse(avRes.content[0].text);
+checkOk(avJson.operation === "align_voice" && avJson.dialogue_key === "b81b8ae497d15da9cda7a865108995f205a87514dc1706fdaaade96374d29b1f" && avJson.total_seconds === 9 && avJson.total_frames === 270 && avJson.violations.length === 0 && avJson.shots.length === 3 && avJson.shots[0].duration_seconds === 3.033 && avJson.shots[0].frames === 91 && avJson.shots[0].snapped && avJson.shots[0].snap_delta_ms === 19 && avJson.shots[1].duration_seconds === 3.5 && avJson.shots[1].frames === 105 && avJson.shots[1].snapped && avJson.shots[1].snap_delta_ms === 513 && avJson.shots[2].duration_seconds === 2.467 && avJson.shots[2].frames === 74 && !avJson.shots[2].snapped && avJson.shots.reduce((a, s) => a + s.frames, 0) === 270, "align_voice plan on the 3x10-char fixture: boundaries snap to 3.033s (+19ms) and 6.533s (+513ms), frames 91/105/74 = 270, no violations", JSON.stringify(avJson.shots.map((s) => [s.duration_seconds, s.frames, s.snapped])));
+const avLinesRes = await client.callTool({
+  name: "align_voice",
+  arguments: { film_path: path.join(root, "test/align-voice-film.json"), lines_path: path.join(root, "test/align-voice-lines.json") },
+});
+const avLinesJson = JSON.parse(avLinesRes.content[0].text);
+checkOk(avLinesJson.dialogue_key !== avJson.dialogue_key && avLinesJson.shots[0].duration_seconds === 2.267 && !avLinesJson.shots[0].snapped && avLinesJson.shots[1].duration_seconds === 4.267 && avLinesJson.shots[1].snapped && avLinesJson.shots[2].duration_seconds === 2.467 && avLinesJson.shots.reduce((a, s) => a + s.frames, 0) === 270, "align_voice --lines 5/10/5 chars: first boundary stays at 2.267s (midpoint 770ms away, no snap), second snaps to 6.5s, frames still sum to 270", JSON.stringify(avLinesJson.shots.map((s) => [s.duration_seconds, s.snapped])));
+const avDir = path.join(root, "outputs/mcp-align-voice");
+await mkdir(avDir, { recursive: true });
+await copyFile(path.join(root, "test/align-voice-film.json"), path.join(avDir, "film.json"));
+await copyFile(path.join(root, "test/mix-voice.mp3"), path.join(avDir, "mix-voice.mp3"));
+const avApplyRes = await client.callTool({
+  name: "align_voice",
+  arguments: { film_path: path.join(avDir, "film.json"), apply: true, output_path: path.join(avDir, "aligned.json") },
+});
+const avApplyJson = JSON.parse(avApplyRes.content[0].text);
+checkOk(avApplyJson.applied === true && avApplyJson.output === path.join(avDir, "aligned.json") && avApplyJson.dialogue_key === avJson.dialogue_key, "align_voice --apply writes the aligned film and reports the same dialogue key", JSON.stringify({ applied: avApplyJson.applied, key: avApplyJson.dialogue_key?.slice(0, 12) }));
+const avAligned = JSON.parse(await readFile(path.join(avDir, "aligned.json"), "utf8"));
+checkOk(avAligned.shots[0].duration === 3.033 && avAligned.shots[1].duration === 3.5 && avAligned.shots[2].duration === 2.467 && avAligned.shots[0].dialogue === "0123456789" && avAligned.shots[1].dialogue === "abcdefghij" && avAligned.shots[2].dialogue === "ABCDEFGHIJ", "aligned film on disk: durations 3.033/3.5/2.467 with the dialogue embedded per shot", JSON.stringify(avAligned.shots.map((s) => [s.duration, s.dialogue])));
+const avValidateRes = await client.callTool({
+  name: "assemble",
+  arguments: { manifest_path: path.join(avDir, "aligned.json"), mode: "validate" },
+});
+const avValidateJson = JSON.parse(avValidateRes.content[0].text);
+checkOk(avValidateRes.isError !== true && avValidateJson.mode === "validate" && avValidateJson.total_seconds === 9 && avValidateJson.total_frames === 270, "assemble validate passes on the aligned film (frame sum still exact)", JSON.stringify({ mode: avValidateJson.mode, total: avValidateJson.total_seconds }));
+const avKeyErr = await callExpectThrow("align_voice", { film_path: path.join(avDir, "aligned.json"), apply: true, output_path: path.join(avDir, "aligned2.json"), expected_key: "0000000000000000000000000000000000000000000000000000000000000000" });
+checkOk(/dialogue changed/i.test(avKeyErr), "align_voice --expected-key with the wrong key refuses with DIALOGUE_CHANGED", avKeyErr.slice(0, 200));
+const avMotionRes = await client.callTool({
+  name: "align_voice",
+  arguments: { film_path: path.join(root, "test/align-voice-film-motion.json") },
+});
+const avMotionJson = JSON.parse(avMotionRes.content[0].text);
+checkOk(avMotionJson.violations.length === 2 && avMotionJson.violations.some((v) => v.kind === "motion-gate") && avMotionJson.violations.some((v) => v.kind === "text-layer"), "align_voice plan on the motion fixture lists both violations (image shot to 8s past the 2.5s gate, text layer past the shrunk shot)", JSON.stringify(avMotionJson.violations.map((v) => v.kind)));
+const avMotionApplyErr = await callExpectThrow("align_voice", { film_path: path.join(root, "test/align-voice-film-motion.json"), apply: true, output_path: path.join(avDir, "motion.json") });
+checkOk(/refusing to apply/i.test(avMotionApplyErr), "align_voice --apply on a violating plan refuses instead of writing an invalid film", avMotionApplyErr.slice(0, 200));
+const avSilentRes = await client.callTool({
+  name: "align_voice",
+  arguments: { film_path: path.join(root, "test/assemble-diagnose-pacing.json") },
+});
+const avSilentJson = JSON.parse(avSilentRes.content[0].text);
+checkOk(avSilentJson.unspoken_shots.length === 4 && avSilentJson.shots.every((s) => s.delta_seconds === 0) && avSilentJson.violations.length === 0, "align_voice on a film with no dialogue anywhere: all 4 shots unspoken, durations unchanged, no violations", JSON.stringify(avSilentJson.unspoken_shots));
+await writeFile(path.join(avDir, "bad-lines.json"), JSON.stringify([{ shot: "nope", dialogue: "hello" }]));
+const avBadLinesErr = await callExpectThrow("align_voice", { film_path: path.join(root, "test/align-voice-film.json"), lines_path: path.join(avDir, "bad-lines.json") });
+checkOk(/unknown shot/i.test(avBadLinesErr), "align_voice --lines naming an unknown shot fails loudly", avBadLinesErr.slice(0, 200));
+const avCli = await runCliJson(["align-voice", path.join(root, "test/align-voice-film.json")]);
+checkOk(avCli.dialogue_key === avJson.dialogue_key && avCli.shots[0].frames === 91 && avCli.shots[1].frames === 105 && avCli.shots[2].frames === 74, "CLI align-voice reports the same key and frame split as MCP", JSON.stringify(avCli.shots.map((s) => s.frames)));
 const scenesFlashRes = await client.callTool({
   name: "scenes",
   arguments: { input: path.join(root, "test/scenes-flash.mp4"), detector: "content" },
@@ -7366,7 +7438,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 82 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 82 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 83 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 83 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -9891,7 +9963,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 82 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 83 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -9951,11 +10023,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 82, "GET /mcp reports name/version/transport and 82 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 83, "GET /mcp reports name/version/transport and 83 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 82 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 82 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 83 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 83 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -10026,7 +10098,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 82, "JSON-RPC tools/list returns the same 82 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 83, "JSON-RPC tools/list returns the same 83 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

@@ -1811,6 +1811,43 @@ Follow-up, not in this tool: feeding the spans into `hook` scoring,
 so the best audio window and the best visual beat are ranked
 together.
 
+### 58e. Let the voice set the shot lengths — `align_voice`
+
+Hand-typing shot durations to match a voiceover is guessing: the
+voice is the master clock, so let it measure the cuts. `align_voice`
+takes a film manifest and splits the voice across the shots that
+speak, in proportion to each shot's `dialogue` characters
+(whitespace-free count — one CJK character counts the same as one
+Latin letter), then snaps each interior boundary to the middle of
+the nearest pause within 600ms, so a cut never clips a word. This
+is agent-storyboard's `timing.mjs` (`estimateTiming` /
+`applyTiming` / `dialogueKey`), re-implemented for MediaKit's
+frame-exact film math: durations are whole frames at the film fps,
+and each spoken run's frame sum is preserved, so the aligned film
+still tiles lead + voice + tail exactly and `assemble validate`
+passes on it. Two deliberate differences from the original: the
+snap target is the pause MIDPOINT, not the silence start (the exact
+start of a detected silence wobbles with the threshold, the middle
+of a pause is silence on both sides), and the snap window is
+measured on pauses of at least 0.25s (default) rather than whatever
+the log happened to record. Dialogue comes from each shot's
+`dialogue` field (a film-manifest field, validated like `role`),
+overridden per shot by a `--lines` file `[{shot, dialogue}]`; shots
+with no dialogue keep their durations. Plan mode writes nothing and
+reports the `dialogue_key` (sha256 over `[[shot id, dialogue]]` in
+film order), per-shot durations/deltas/snap info, and violations:
+a still image or color card pushed past the 2.5s motion gate, a
+text layer ending past the new shot duration, a transition longer
+than its shorter neighbour, a hook window past its shot. `--apply`
+writes the aligned film — never over the input — embeds the
+dialogue it aligned from, re-validates the written file, and
+refuses on violations or when `--expected-key` differs from the
+computed key: a changed line or a reordered shot refuses with
+`DIALOGUE_CHANGED` instead of silently aligning the wrong script.
+Measured on the fixture (9s voice, two ~2s pauses, three 10-char
+lines): boundaries snap to 3.033s (+19ms) and 6.533s (+513ms),
+frames 91/105/74 = 270 exactly.
+
 ## Workflow: vertical captioned clip from a landscape source
 
 1. `probe` the source.
