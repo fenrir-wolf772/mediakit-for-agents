@@ -7616,6 +7616,12 @@ const batchNoMatchText = await callExpectThrow("batch", { operation: "loudness",
 checkOk(/matched no files/.test(batchNoMatchText), "batch with no matches errors instead of reporting an empty success", batchNoMatchText.slice(0, 160));
 // CLI exit codes (lượt 142): 0 = all rows done, 1 = any row failed,
 // 2 = input error — plus the harken summary line on stderr.
+// Lượt 143: the CLI ok-out dir is NOT cleaned by the MCP batch
+// section above (it uses mcp-batch-out), so a re-run of the suite
+// without a /tmp wipe served all 3 rows from the content-hash cache
+// ("0 done, 3 cached") and this assert failed in run 1 of lượt 143.
+// Remove the stale dir first, like every other batch section does.
+await rm(path.join(root, "outputs/mcp-batch-cli-ok-out"), { recursive: true, force: true });
 const cliBatchOk = await runCli(["batch", "loudness", "--pattern", "**/*.mp4", "--input-dir", path.join(root, "outputs/mcp-batch-in"), "-o", path.join(root, "outputs/mcp-batch-cli-ok-out"), "--args-json", '{"target_lufs": -16}', "--jobs", "2"]);
 checkOk(cliBatchOk.code === 0 && /batch complete: 3 done, 0 cached, 0 skipped, 0 failed \(of 3\)/.test(cliBatchOk.out), "CLI batch success exits 0 with the summary line", `code=${cliBatchOk.code} ${cliBatchOk.out.slice(-200)}`);
 const cliBatchFail = await runCli(["batch", "cut-words", "--pattern", "**/*.mp4", "--input-dir", path.join(root, "outputs/mcp-batch-in"), "-o", path.join(root, "outputs/mcp-batch-cli-fail-out"), "--jobs", "2"]);
@@ -9685,6 +9691,24 @@ checkOk(estNoTime.estimate_remaining_seconds === null && estNoTime.estimate_basi
 const estCap = estimateJobRemaining({ ...estBase, created_at: "2026-11-18T02:26:40.000Z" }, estNowMs);
 checkOk(estCap.estimate_remaining_seconds === 86400 && estCap.estimate_basis === "elapsed-progress", "estimate: absurd elapsed time caps at 86400s (24h)", JSON.stringify(estCap));
 
+// Lượt 143: estimate_remaining — rate from the most recent 30s
+// window, not the whole-run average. Hand-checked before coding:
+//   A) history 10% @t=0, 20% @t=100, 50% @t=120, 60% @t=130, now
+//      60%: whole-run rate 50/130 = 0.385%/s -> ceil(40/0.385) = 104s,
+//      but the 30s window (t=100..130: 20% -> 60%) runs 40/30 =
+//      1.333%/s -> ceil(40/1.333) = 30s. The window must win.
+//   B) window holds a single point (history 10% @t=0, 30% @t=60,
+//      60% @t=130): falls back to the whole-run rate, 104s as before.
+//   C) percent held at 50% through the whole history (window dp = 0
+//      and whole-run dp = 0): falls through to elapsed-progress,
+//      130s elapsed at 50% -> 130s.
+const estWindow = estimateJobRemaining({ ...estBase, progress: { stage: "shots", percent: 60 }, created_at: "2026-11-20T09:57:50.000Z", progress_history: [{ at: "2026-11-20T09:57:50.000Z", stage: "shots", percent: 10 }, { at: "2026-11-20T09:59:30.000Z", stage: "shots", percent: 20 }, { at: "2026-11-20T09:59:50.000Z", stage: "shots", percent: 50 }, { at: "2026-11-20T10:00:00.000Z", stage: "shots", percent: 60 }] }, estNowMs);
+checkOk(estWindow.estimate_remaining_seconds === 30 && estWindow.estimate_basis === "progress-rate", "estimate: recent 30s window (20->60% in 30s) gives 30s, not the whole-run 104s", JSON.stringify(estWindow));
+const estWindowThin = estimateJobRemaining({ ...estBase, progress: { stage: "shots", percent: 60 }, created_at: "2026-11-20T09:57:50.000Z", progress_history: [{ at: "2026-11-20T09:57:50.000Z", stage: "shots", percent: 10 }, { at: "2026-11-20T09:58:50.000Z", stage: "shots", percent: 30 }, { at: "2026-11-20T10:00:00.000Z", stage: "shots", percent: 60 }] }, estNowMs);
+checkOk(estWindowThin.estimate_remaining_seconds === 104 && estWindowThin.estimate_basis === "progress-rate", "estimate: 30s window with a single point falls back to the whole-run rate (104s)", JSON.stringify(estWindowThin));
+const estWindowHeld = estimateJobRemaining({ ...estBase, created_at: "2026-11-20T09:57:50.000Z", progress_history: [{ at: "2026-11-20T09:57:50.000Z", stage: "shots", percent: 50 }, { at: "2026-11-20T09:59:30.000Z", stage: "shots", percent: 50 }, { at: "2026-11-20T10:00:00.000Z", stage: "shots", percent: 50 }] }, estNowMs);
+checkOk(estWindowHeld.estimate_remaining_seconds === 130 && estWindowHeld.estimate_basis === "elapsed-progress", "estimate: held percent in the 30s window falls through to elapsed-progress (130s)", JSON.stringify(estWindowHeld));
+
 // Lượt 135: mutation ratchet — pure gate, no ffmpeg, no files.
 // The gate's real teeth at this scale is the killed-count floor:
 // the plain smoke already fails on any survivor, so what the
@@ -10238,6 +10262,35 @@ checkOk(estRow?.estimate_remaining_seconds === 50 && estRow?.estimate_basis === 
 const estCancelRes = await client.callTool({ name: "job", arguments: { job_id: estJobId, action: "cancel" } });
 const estCancelJson = JSON.parse(estCancelRes.content[0].text);
 checkOk(estCancelJson.status === "cancelled" && estCancelJson.estimate_remaining_seconds === null && estCancelJson.estimate_basis === "terminal", "cancelling a job returns the terminal estimate shape (null / terminal)", JSON.stringify({ estimate_remaining_seconds: estCancelJson.estimate_remaining_seconds, estimate_basis: estCancelJson.estimate_basis }));
+// Lượt 143: the same estimate through the read path, but with a dense
+// history where the recent window disagrees with the whole run:
+// created 120s ago, 10% -> 20% -> 50% -> 60% with the last two points
+// 10s apart (50% -> 60% = 1%/s), so the 30s window says 40s left
+// while the whole-run average would say 72s. Status + HTTP must both
+// carry 40 / progress-rate; cancelling leaves no active job behind.
+const estWinJobId = "job-20261122-205800-abcdef02";
+const estWinNow = Date.now();
+const estWinCreated = new Date(estWinNow - 120_000).toISOString();
+await mkdir(path.join(estJobsDir, estWinJobId), { recursive: true });
+await writeFile(path.join(estJobsDir, estWinJobId, "job.json"), JSON.stringify({
+  job_id: estWinJobId, operation: "assemble", status: "running",
+  manifest: "fake", output_dir: "fake", mode: "render", force: true,
+  approval: "forced", title: "estimate window fixture", total_seconds: 10, total_frames: 300,
+  pid: null, progress: { stage: "shots", percent: 60, detail: null },
+  progress_history: [
+    { at: estWinCreated, stage: "shots", percent: 10 },
+    { at: new Date(estWinNow - 100_000).toISOString(), stage: "shots", percent: 20 },
+    { at: new Date(estWinNow - 40_000).toISOString(), stage: "shots", percent: 50 },
+    { at: new Date(estWinNow - 30_000).toISOString(), stage: "shots", percent: 60 },
+  ],
+  created_at: estWinCreated, updated_at: new Date().toISOString(), result: null, error: null,
+}, null, 2));
+const estWinStatusRes = await client.callTool({ name: "job", arguments: { job_id: estWinJobId, action: "status" } });
+const estWinStatusJson = JSON.parse(estWinStatusRes.content[0].text);
+checkOk(estWinStatusJson.estimate_remaining_seconds === 40 && estWinStatusJson.estimate_basis === "progress-rate" && estWinStatusJson.progress_history?.length === 4, "job status carries the 30s-window estimate 40s (not the whole-run 72s)", JSON.stringify({ estimate_remaining_seconds: estWinStatusJson.estimate_remaining_seconds, estimate_basis: estWinStatusJson.estimate_basis }));
+const estWinHttp = await httpCall("GET", `/mcp/jobs/${estWinJobId}`);
+checkOk(estWinHttp.status === 200 && estWinHttp.json?.estimate_remaining_seconds === 40 && estWinHttp.json?.estimate_basis === "progress-rate", "GET /mcp/jobs/<id> carries the same 30s-window estimate", JSON.stringify({ estimate_remaining_seconds: estWinHttp.json?.estimate_remaining_seconds, estimate_basis: estWinHttp.json?.estimate_basis }));
+await client.callTool({ name: "job", arguments: { job_id: estWinJobId, action: "cancel" } });
 // The HTTP error body carries the same retry guidance as stdio:
 // a 429 download names retryable=true + the server's Retry-After.
 // (The download fixture server is already closed by this point in

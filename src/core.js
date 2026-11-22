@@ -20919,11 +20919,17 @@ export async function startAssembleJob({ manifestPath, outputDir, force = false 
 //   failed/cancelled  -> null, "terminal"
 //   queued            -> null, "not-started"
 //   running, percent < 5 or no usable timestamps -> null, "too-early"
-//   running, else ceil((100 - percent) / rate) from the whole-run
-//   average rate in progress_history when it spans >= 1s with a
-//   percent gain ("progress-rate"), else from elapsed time since
-//   created_at ("elapsed-progress"). Capped at 24h: a render that
-//   claims longer than that is lying about something else.
+//   running, else ceil((100 - percent) / rate) from the rate over the
+//   most recent 30s window of progress_history when that window holds
+//   >= 2 points spanning >= 1s with a percent gain ("progress-rate"),
+//   else from the whole-run average rate over all of progress_history
+//   ("progress-rate"), else from elapsed time since created_at
+//   ("elapsed-progress"). A render changes speed by stage (slow
+//   probe/keyframe work up front, faster once encodes stream), so the
+//   whole-run average misjudges the ETA once the job speeds up or
+//   slows down; the recent window tracks what the job is doing now.
+//   Capped at 24h: a render that claims longer than that is lying
+//   about something else.
 const ESTIMATE_MAX_SECONDS = 86400;
 export function estimateJobRemaining(record, nowMs = Date.now()) {
   const status = record?.status;
@@ -20936,16 +20942,29 @@ export function estimateJobRemaining(record, nowMs = Date.now()) {
   if (percent < 5) return { estimate_remaining_seconds: null, estimate_basis: "too-early" };
   const history = Array.isArray(record.progress_history) ? record.progress_history : [];
   const usable = history.filter((h) => typeof h?.percent === "number" && Number.isFinite(Date.parse(h.at ?? "")));
-  if (usable.length >= 2) {
-    const first = usable[0];
-    const last = usable[usable.length - 1];
+  // Rate from two spans, most recent first: (1) the 30s window ending
+  // at the last history point — what the job is doing now; (2) the
+  // whole run — the old behaviour, kept when the window is too thin
+  // (a single point, or a span under 1s, or no percent gain). Either
+  // span that spans >= 1s with dp > 0 yields "progress-rate"; a span
+  // that fails both tests falls through to the elapsed-time estimate.
+  const rateFrom = (points) => {
+    if (points.length < 2) return null;
+    const first = points[0];
+    const last = points[points.length - 1];
     const dt = (Date.parse(last.at) - Date.parse(first.at)) / 1000;
     const dp = last.percent - first.percent;
-    if (dt >= 1 && dp > 0) {
-      const rate = dp / dt; // percent per second
+    return (dt >= 1 && dp > 0) ? dp / dt : null; // percent per second
+  };
+  if (usable.length >= 2) {
+    const last = usable[usable.length - 1];
+    const windowStart = Date.parse(last.at) - 30_000;
+    const window = usable.filter((h) => Date.parse(h.at) >= windowStart);
+    const rate = rateFrom(window) ?? rateFrom(usable);
+    if (rate !== null) {
       return { estimate_remaining_seconds: Math.min(ESTIMATE_MAX_SECONDS, Math.ceil((100 - percent) / rate)), estimate_basis: "progress-rate" };
     }
-    // dt < 1s (history too compressed to trust) or dp <= 0 (percent
+    // Both spans failed (history too compressed to trust, or percent
     // held at a stage boundary while a long encode runs): fall
     // through to the elapsed-time estimate below.
   }

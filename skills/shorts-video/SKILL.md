@@ -188,7 +188,9 @@ no job, so check `mediakit job --admission` first when renders
 are already running. While a job runs, `mediakit job <id>` also
 reports `estimate_remaining_seconds` (rough upper-bound ETA, null
 when too early to tell) with `estimate_basis` naming how it was
-derived — a guide for the user, never a promise. Long renders on a busy machine can also
+derived — `progress-rate` from the rate over the most recent 30s of
+the percent history when that window holds at least 2 points, else
+the whole-run average rate — a guide for the user, never a promise. Long renders on a busy machine can also
 hit the 300s ffmpeg timeout — raise it with
 `MEDIAKIT_FFMPEG_TIMEOUT_MS` (60000–3600000). A shot after the first may carry
 `transition: {type, duration}` (one of the 58 xfade names — see the
