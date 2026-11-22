@@ -1059,6 +1059,19 @@ const COMMANDS = {
       ["--long-seconds", "Long sample length in seconds, 4-10 (default 6, must be longer than --short-seconds)"],
     ],
   },
+  "release-checkpoint": {
+    usage: "mediakit release-checkpoint <input> [--manifest film.json] [--receipt assemble-receipt.json] [--platform tiktok] [-o <checkpoint.json>] [--sheet-frames 9] [--no-sheet]",
+    desc: "Release checkpoint — one QC gate for a finished clip (KyaniteLabs/kinocut's release-checkpoint idea): verify against the assemble receipt (pass only when 0 changed/missing, and the receipt must be for this input), the platform check (default tiktok), full loudness (pass |LUFS+14| <= 1.0 and true peak <= -1.0 dBTP, warn |LUFS+14| <= 2.0 and TP <= -0.5), clipping (fail on any peak >= 0 dBFS), cut positions against the film manifest (fail on any missing boundary or unexpected cut), plus a contact sheet at the inspection points — shot midpoints + transition midpoints from the manifest, evenly spaced without one. A check with nothing to measure reports skipped, never a fake pass (no receipt, no manifest, no audio stream, --no-sheet). Writes <stem>.checkpoint.json (atomic .partial + rename) with the per-check list, the verdict, warnings, sha256, probe summary and version, and <stem>.checkpoint-sheet.jpg next to it. Exit 0 on pass, 1 on fail.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--manifest", "Film manifest (assemble film.json) to verify cuts against and to take contact-sheet timestamps from"],
+      ["--receipt", "Assemble receipt (assemble-receipt.json from a full render) to verify the clip against — must be for this input"],
+      ["--platform", "Destination platform for the dimensions/codec gate (default tiktok)"],
+      ["-o, --output", "Checkpoint JSON path (default <input-stem>.checkpoint.json next to the input; the sheet goes next to the JSON)"],
+      ["--sheet-frames", "How many frames in the contact sheet, 1-64 (default 9; with a manifest the sheet uses at most this many inspection points)"],
+      ["--no-sheet", "Skip the contact sheet"],
+    ],
+  },
   manifest: {
     usage: "mediakit manifest <manifest.json> [-o <output.mp4>] [--dry-run] [--no-cache] [--keep-intermediates]",
     desc: "Run a whole edit pipeline from one declarative JSON manifest: {version: 1, input, output, steps: [{tool, args}], qa?} — paths relative to the manifest file. Steps run in order (slideshow as step 1 only — it builds from images in args, so input should be the first slide image; then trim|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|fastforward|broll|grade|fit|silence|denoise|interpolate|burn-captions|overlay|chroma-key|cut-words|remove-retakes|smart-cut|clean-voice; hook|audio-levels|search-words|highlights are the probe-only steps — they analyze the chain file at that point and pass it through unchanged), each feeding the next; the whole plan is validated before anything renders. Each step is cached by content hash — re-running an unchanged manifest re-encodes nothing. --dry-run lists the planned steps and writes nothing; --qa in the manifest runs qa_report on the final file. clean-voice writes .wav only, so a manifest step using it needs a .wav chain (a voice-only pipeline, or clean-voice as the step before a .wav output).",
@@ -2157,6 +2170,19 @@ async function main() {
           longSeconds: numOpt(opts, "long_seconds") ?? 6,
         });
         break;
+      case "release-checkpoint": {
+        if (!positional[0]) fail("missing input: mediakit release-checkpoint <input> [--manifest film.json] [--receipt assemble-receipt.json]");
+        result = await core.releaseCheckpoint({
+          input: positional[0],
+          manifest: opts.manifest ?? null,
+          receipt: opts.receipt ?? null,
+          platform: opts.platform ?? "tiktok",
+          output: opts.output ?? null,
+          sheet: opts.sheet !== false,
+          sheetFrames: numOpt(opts, "sheet_frames") ?? 9,
+        });
+        break;
+      }
       case "mux": {
         if (!positional[1]) fail("missing audio file");
         result = await core.mux({
@@ -2464,6 +2490,9 @@ async function main() {
   // than process.exit() so the JSON above is flushed first. Input
   // errors already exited 2 via fail() / the catch below.
   if (cmd === "batch" && result && typeof result.exit_code === "number") process.exitCode = result.exit_code;
+  // Same convention for the release checkpoint: a failed gate exits
+  // 1, so a script can stop a delivery on it; a pass exits 0.
+  if (cmd === "release-checkpoint" && result && result.verdict === "fail") process.exitCode = 1;
 }
 
 main();

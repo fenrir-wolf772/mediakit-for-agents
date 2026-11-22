@@ -154,7 +154,13 @@ buttons and caption bar on phones).
    an MP4 whose moov box sits after mdat makes the player download
    the whole file before the first frame — re-mux with
    `-movflags +faststart` until the rule passes.
-5. Record the style id used, so a later re-render or a publishing kit
+5. `release_checkpoint` as the one-command gate once the clip is
+   finished — receipt + platform + loudness + clipping + cuts +
+   contact sheet in one verdict (`mediakit release-checkpoint
+   out.mp4 --manifest film.json --receipt assemble-receipt.json`,
+   exit 0 pass / 1 fail); a check with nothing to measure reports
+   `skipped`, never a fake pass.
+6. Record the style id used, so a later re-render or a publishing kit
    for this video names the same style.
 
 ### Step 7 — Publishing kit (offer once, after approval)

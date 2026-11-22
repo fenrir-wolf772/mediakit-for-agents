@@ -2335,6 +2335,45 @@ export const TOOL_DEFS = [
     longSeconds: a.long_seconds ?? 6,
   })),
   },
+
+  // Release checkpoint (KyaniteLabs/kinocut's `release-checkpoint`
+  // idea, lượt 145): one QC gate that runs the pieces already
+  // measured — verify against the assemble receipt, the platform
+  // check, full loudness, clipping, cut positions against the film
+  // manifest — plus a contact sheet at the inspection points
+  // (shot midpoints + transition midpoints from the manifest,
+  // evenly spaced without one), and writes one JSON verdict next
+  // to the clip. A check with nothing to measure reports skipped,
+  // never a fake pass. Loudness: pass |LUFS+14| <= 1.0 and true
+  // peak <= -1.0 dBTP, warn |LUFS+14| <= 2.0 and TP <= -0.5, else
+  // fail. Clipping fails on any peak >= 0 dBFS. Cuts fail on any
+  // missing boundary or unexpected cut. The receipt must be for
+  // this input. The checkpoint JSON is written atomically
+  // (.partial + rename); the sheet is <stem>.checkpoint-sheet.jpg
+  // next to it. Not in batch/manifest in v1.
+  {
+    name: "release_checkpoint",
+    tier: "WRITE",
+    description: "Release checkpoint — one QC gate for a finished clip (KyaniteLabs/kinocut's release-checkpoint idea): verify against the assemble receipt (pass only when 0 changed/missing, and the receipt must be for this input), the platform check (default tiktok), full loudness (pass |LUFS+14| <= 1.0 and true peak <= -1.0 dBTP, warn |LUFS+14| <= 2.0 and TP <= -0.5), clipping (fail on any peak >= 0 dBFS), cut positions against the film manifest (fail on any missing boundary or unexpected cut), plus a contact sheet at the inspection points — shot midpoints + transition midpoints from the manifest, evenly spaced without one. A check with nothing to measure reports skipped, never a fake pass (no receipt, no manifest, no audio stream, --no-sheet). Writes <stem>.checkpoint.json (atomic .partial + rename) with the per-check list, the verdict, warnings, sha256, probe summary and version, and <stem>.checkpoint-sheet.jpg next to it. Run it on every deliverable before calling it done.",
+    schema: {
+    input: pathSchema,
+    manifest_path: pathSchema.optional().describe("Path to the film manifest JSON file (assemble film.json) to verify cuts against and to take contact-sheet timestamps from; omit to skip the cuts check and space the sheet evenly"),
+    receipt: pathSchema.optional().describe("Assemble receipt (assemble-receipt.json from a full render) to verify the clip against; omit to skip the receipt check — the receipt must be for this input"),
+    platform: z.enum(["tiktok", "reels", "shorts", "youtube", "instagram-feed", "instagram-story", "linkedin"]).default("tiktok").describe("Destination platform for the dimensions/codec gate (default tiktok)"),
+    output: pathSchema.optional().describe("Checkpoint JSON path (default <input-stem>.checkpoint.json next to the input; the sheet goes next to the JSON)"),
+    sheet: z.boolean().default(true).describe("Write the contact sheet (default true; false skips it and reports contact_sheet skipped)"),
+    sheet_frames: z.number().int().min(1).max(64).default(9).describe("How many frames in the contact sheet (default 9; with a manifest the sheet uses at most this many inspection points)"),
+  },
+    handler: async (a) => safe(() => core.releaseCheckpoint({
+    input: a.input,
+    manifest: a.manifest_path ?? null,
+    receipt: a.receipt ?? null,
+    platform: a.platform ?? "tiktok",
+    output: a.output ?? null,
+    sheet: a.sheet ?? true,
+    sheetFrames: a.sheet_frames ?? 9,
+  })),
+  },
 ];
 
 // ---------------------------------------------------------------- safety tiers

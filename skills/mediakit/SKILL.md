@@ -1872,7 +1872,7 @@ answers a question by transient work and leaves no artifact —
 `determinism` renders to a hidden work dir that is removed,
 `verify_cuts` renders a draft to temp, `estimate_conversion`
 sample-encodes to temp, `job` only reads/cancels job state; WRITE
-(56) produces a file the caller asked for and never overwrites its
+(57) produces a file the caller asked for and never overwrites its
 own input; DESTRUCTIVE (1 — `patch_manifest`, guarded by
 `expected_revision` plus a `.bak` backup) replaces a user artifact
 in place. The tier is a property of the tool, not its arguments: a
@@ -1911,6 +1911,40 @@ a 250-frame GOP source. A file shorter than the sample budget is
 encoded whole, so the answer is exact instead of estimated. Only
 libx264/libx265 — vp9/av1 use different quality knobs, so a crf
 estimate would not match `convert`.
+
+### 58g. One gate before you call a clip done — `release_checkpoint`
+
+`verify`, `check`, `loudness`, `audio_levels`, `verify_cuts` and
+`thumbnail` are the pieces; `release_checkpoint` is the gate that
+runs them together and writes the verdict down, so a delivery is
+never "looked fine to me". One call on the finished clip, with the
+film manifest and the assemble receipt when you have them:
+
+```bash
+mediakit release-checkpoint out.mp4 --manifest film.json --receipt assemble-receipt.json
+```
+
+Six checks, in order: `receipt` (`verify` on the receipt — pass
+only when 0 changed/missing, and the receipt must be for *this*
+input, not some other file's clean receipt), `platform` (`check`,
+default tiktok), `loudness` (pass |LUFS+14| ≤ 1.0 and true peak ≤
+−1.0 dBTP, warn |LUFS+14| ≤ 2.0 and TP ≤ −0.5), `clipping`
+(fail on any peak ≥ 0 dBFS), `cuts` (fail on any missing boundary
+or unexpected cut; an invisible transition or a duration drift
+warns instead), `contact_sheet` (a sheet at the inspection points
+— the midpoint of every shot plus the midpoint of every
+transition blend window, from the manifest; evenly spaced without
+one — pass when the file is on disk with the right frame count).
+A check with nothing to measure reports `skipped`, never a fake
+pass: no receipt, no manifest, no audio stream, `--no-sheet`.
+The verdict is `pass` when no check fails; the JSON
+(`<stem>.checkpoint.json`, written atomically) carries the
+per-check list, warnings, SHA-256, a probe summary and the
+version, and the sheet (`<stem>.checkpoint-sheet.jpg`) sits next
+to it. The CLI exits 0 on pass, 1 on fail — stop a delivery
+script on it. This is KyaniteLabs/kinocut's `release-checkpoint`
+idea, with the sheet timestamps borrowed from Synkinema's
+`get_inspection_points`. Not in `batch`/`manifest` in v1.
 
 ## Workflow: vertical captioned clip from a landscape source
 

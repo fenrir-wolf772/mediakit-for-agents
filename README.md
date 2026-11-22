@@ -53,7 +53,7 @@ Then ask your agent things like:
 ### MCP over HTTP — same tools, curl instead of a client
 
 `mediakit mcp --http [--port 3000] [--host 127.0.0.1]` serves the
-exact same 85 tools over HTTP (REST + JSON-RPC 2.0), for hand-testing
+exact same 86 tools over HTTP (REST + JSON-RPC 2.0), for hand-testing
 and for agents that can only speak HTTP. It binds `127.0.0.1` by
 default — there is no auth, so only bind elsewhere on a network you
 trust. Request bodies are capped at 1 MB.
@@ -219,8 +219,9 @@ what you see is the record, not a guess at it.
 | `chapters` | Generate chapter markers for a long talk or film from measured pauses, not guesses. Two modes, exactly one: `--words-file` (a transcribe `--word-timestamps` JSON) splits the transcript wherever the gap between two words reaches `--min-gap` (default 2s) and titles each chapter from the first words spoken in it; `<input>` (a media file with audio) runs silencedetect and starts a chapter at each speech segment that follows a silence of at least `--min-gap`, titled Part 1..N. The first chapter is always at 0 (YouTube requires the first chapter at 0:00) — when the first word/speech starts later the chapter is clamped to 0 and reported. Over `--max-chapters` (default 32, the assemble cap) the closest neighbours merge first. Returns chapters in the assemble manifest shape `{title, at}`, so the result drops straight into `film.json`'s `chapters`; `-o` also writes that JSON to a file. Probe-only unless `-o` is given | `mediakit chapters --words-file talk.words.json` or `mediakit chapters talk.mp3 --min-gap 1` |
 | `transitions` | List the xfade transition catalog, grouped by family (probe-only, writes no file): every name `concat` / `slideshow` / `assemble` accept, with a one-line description per family. `mediakit transitions` returns the full catalog (58 names on ffmpeg 8.1.2); `--category wipe` narrows to one family. Read this before picking a transition name, instead of guessing one and hitting "unknown transition" | `mediakit transitions` or `mediakit transitions --category reveal` |
 | `export_timeline` | Export an assemble film manifest to an OpenTimelineIO timeline (`.otio`) — the director's EDL for a real editor (DaVinci / Premiere / any OTIO adapter): the same cuts, transitions, chapters and audio the ffmpeg render produces, with media linked by absolute `file://` URL. One Video track (a Clip per image/video shot, a Gap per color/`canvas_scene` shot — generated frames have no file, so the gap is honest — with a Transition between joined shots), plus Audio tracks for Voice (lead gap + voice + tail gap), Music (looped to the film length) and SFX (each at its timestamp); chapters become `Marker.2` markers on the video track (OTIO 0.18 cannot read `Marker.1`). Transitions map the xfade join exactly: `in_offset`/`out_offset` split the transition frames, so the OTIO dissolve starts where the ffmpeg blend starts; fade-family names become `SMPTE_Dissolve`, the rest `Custom_Transition` with the xfade name in metadata. Frame math is rational, never float seconds: every boundary is a whole number of frames at the film fps, and `frame_math` reports the snap error per shot (a 26.575s shot at 30fps is 797 frames with a −0.25-frame snap, never 797.25 frames). A file that vanished after validation is linked with `available_range` null and listed in `media.missing` instead of failing the export. The writer self-checks the document (every track sums to exactly `total_frames`) and refuses to write a bad one | `mediakit export-timeline film.json -o film.otio` |
-| `safety` | Safety tiers for every tool (EncodeX's safety-tier idea): READ tools only probe and write nothing (24 tools); PLAN tools answer a question by transient work and leave no artifact (4: `determinism`, `verify_cuts`, `job`, `estimate_conversion`); WRITE tools produce a file the caller asked for and never overwrite their own input (56); DESTRUCTIVE tools replace a user artifact in place — only `patch_manifest`, guarded by `expected_revision` plus a `.bak` backup. The same tiers ride on the MCP `tools/list` as standard annotations (`readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint`); `download` alone has `openWorldHint` because it alone touches the network. Read this before letting an agent loose on a workspace | `mediakit safety` |
+| `safety` | Safety tiers for every tool (EncodeX's safety-tier idea): READ tools only probe and write nothing (24 tools); PLAN tools answer a question by transient work and leave no artifact (4: `determinism`, `verify_cuts`, `job`, `estimate_conversion`); WRITE tools produce a file the caller asked for and never overwrite their own input (57); DESTRUCTIVE tools replace a user artifact in place — only `patch_manifest`, guarded by `expected_revision` plus a `.bak` backup. The same tiers ride on the MCP `tools/list` as standard annotations (`readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint`); `download` alone has `openWorldHint` because it alone touches the network. Read this before letting an agent loose on a workspace | `mediakit safety` |
 | `estimate_conversion` | Estimate a `convert`'s output size and time BEFORE running it (EncodeX's `estimate_conversion` idea): measured, not a bitrate table. At 2 window positions (25%/75% of the file) it encodes the same start twice, video-only, at a short length (default 2s) and a long length (default 6s) with accurate seek — both start with one keyframe, so `steady_rate = (long_bytes − short_bytes) / (long − short)` and `iframe_bytes = short_bytes − steady_rate × short`; full video = `steady_rate × duration + iframe_bytes × one keyframe per 250 frames` (the x264/x265 default GOP). Audio is copied by default (the `convert` default), so its cost is the probed source audio bitrate × duration; `--audio-bitrate-kbps` re-encodes audio, measured from one audio-only sample encode. Time is a rough ETA (duration / measured encode speed + one measured startup); size is the precise part — on the fixtures it lands within 10% (`hook-source` −6.1%, `source` +4.2% at crf 23; short files take the full-encode path and are exact). Leaves no artifact: samples go to a temp dir that is removed afterwards. Only libx264/libx265 | `mediakit estimate-conversion in.mp4` or `mediakit estimate-conversion in.mp4 --crf 28 --preset fast` |
+| `release_checkpoint` | Release checkpoint — one QC gate for a finished clip (KyaniteLabs/kinocut's `release-checkpoint` idea): `verify` against the assemble receipt (pass only when 0 changed/missing, and the receipt must be for this input), the platform `check` (default tiktok), full loudness (pass \|LUFS+14\| ≤ 1.0 and true peak ≤ −1.0 dBTP, warn \|LUFS+14\| ≤ 2.0 and TP ≤ −0.5), clipping (fail on any peak ≥ 0 dBFS), cut positions against the film manifest (fail on any missing boundary or unexpected cut), plus a contact sheet at the inspection points — shot midpoints + transition midpoints from the manifest (Synkinema's `get_inspection_points` idea), evenly spaced without one. A check with nothing to measure reports `skipped`, never a fake pass (no receipt, no manifest, no audio stream, `--no-sheet`). Writes `<stem>.checkpoint.json` (atomic `.partial` + rename) with the per-check list, the verdict, warnings, SHA-256, probe summary and version, and `<stem>.checkpoint-sheet.jpg` next to it. Exit 0 on pass, 1 on fail — see [Release checkpoint](#release-checkpoint) | `mediakit release-checkpoint out.mp4 --manifest film.json --receipt assemble-receipt.json` |
 | `keyframes` | List keyframe (I-frame) timestamps + GOP min/max/avg interval (probe-only) — check before a stream-copy trim. `--nearest <t>` (seconds or `MM:SS`) also reports the keyframe nearest one cut point: `before` (largest ≤ t), `after` (smallest ≥ t), `closest`, `distance_seconds`, `direction` (`before`/`after`/`exact`) — the snap target for a single cut without scanning the whole list | `mediakit keyframes in.mp4 --nearest 3.5` |
 | `audio_levels` | Loudness curve + loudest moments of an audio stream (probe-only): one decode pass, per-frame astats Peak + RMS bucketed into `--bucket` windows (default 1s), RMS averaged in the linear domain. Returns every bucket `{start, end, rms_db, peak_db}` (true digital silence reports nulls, never a fake -inf), a summary (max peak, energy-mean RMS, min/max bucket RMS, dynamic range, silent buckets, loudest bucket) and the `--top` loudest moments (default 5) kept at least `--min-gap` apart (default 2s — a 3s shout does not fill the list with its own neighbours). Also a probe-only batch operation and manifest step. Cap: 3600 buckets | `mediakit audio-levels in.mp4 --bucket 1 --top 5` |
 | `find` | Find media files by name, recursively under a directory (case-insensitive substring); each match comes back with probe info (duration, dimensions, codecs) so you pick the right file without guessing paths | `mediakit find clips/ --name moon` |
@@ -234,6 +235,40 @@ what you see is the record, not a guess at it.
 
 Every tool returns a concise JSON result: output path, size, and the
 verified duration/dimensions of what it produced.
+
+### Release checkpoint
+
+`release_checkpoint` is the one-command delivery gate — run it on
+every finished clip before calling it done, instead of re-running
+five tools and eyeballing the pieces:
+
+```bash
+mediakit release-checkpoint out.mp4 --manifest film.json --receipt assemble-receipt.json
+```
+
+It runs six checks and writes `<stem>.checkpoint.json` next to the
+clip (plus `<stem>.checkpoint-sheet.jpg`, a contact sheet at the
+inspection points — the midpoint of every shot plus the midpoint of
+every transition blend window, from the manifest; evenly spaced
+without one):
+
+| Check | Pass | Fail |
+|---|---|---|
+| **receipt** | `verify` on the receipt: 0 changed/missing | anything differs — and the receipt must be for *this* input (its recorded output has to resolve to the clip) |
+| **platform** | `check` passes for the platform (default tiktok) | any error-severity rule fails (warnings don't fail it) |
+| **loudness** | \|LUFS+14\| ≤ 1.0 and true peak ≤ −1.0 dBTP | \|LUFS+14\| > 2.0 or TP > −0.5 dBTP (between the two bands it warns) |
+| **clipping** | no peak at or over 0 dBFS | any peak ≥ 0 dBFS |
+| **cuts** | every promised boundary confirmed, 0 unexpected | any missing boundary or unexpected cut (an invisible transition or a duration drift warns instead) |
+| **contact_sheet** | the sheet is on disk with the right frame count | missing sheet or wrong frame count |
+
+A check with nothing to measure reports `skipped`, never a fake
+pass: no `--receipt`, no `--manifest`, no audio stream (loudness and
+clipping skip), `--no-sheet`. The verdict is `pass` when no check
+fails (`fail` when any does); `warnings` counts the warn checks.
+The JSON is written atomically (`.partial` + rename) and carries
+the per-check list, the verdict, SHA-256, a probe summary and the
+MediaKit version. The CLI exits 0 on pass, 1 on fail, so a script
+can stop a delivery on it. Not in `batch`/`manifest` in v1.
 
 ### Custom brands (`MEDIAKIT_BRANDS`)
 
@@ -588,7 +623,7 @@ MCP `tools/list` carries the same tiers as standard annotations):
 |---|---|---|
 | READ | Probe-only: reads media and returns measurements, writes nothing | 24 — `probe`, `check`, `qa_report`, `cropdetect`, `motion`, `hook`, `bpm`, `beat_grid`, `tempo_drift`, `highlights`, `scenes`, `keyframes`, `audio_levels`, `measure_pace`, `chapters`, `transitions`, `find`, `search_words`, `doctor`, `audit`, `diagnose`, `verify`, `align_voice`, `safety` |
 | PLAN | Answers a question by transient work and leaves no artifact | 4 — `determinism` (renders to a hidden work dir that is removed), `verify_cuts` (draft render to temp), `job` (reads/cancels job state), `estimate_conversion` (sample encodes to temp) |
-| WRITE | Produces a file the caller asked for; never overwrites its own input | 56 — every editing/rendering tool |
+| WRITE | Produces a file the caller asked for; never overwrites its own input | 57 — every editing/rendering tool |
 | DESTRUCTIVE | Replaces a user artifact in place — needs a human-checked guard | 1 — `patch_manifest` (`expected_revision` + `.bak` backup) |
 
 Rules: a tier is a property of the tool, not its arguments — a WRITE

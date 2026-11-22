@@ -11452,6 +11452,11 @@ const TOOL_REQUIREMENTS = {
   // cuts with the content scene detector (signalstats per frame) +
   // frame diffs (blend on rgb24 + signalstats).
   verify_cuts: { filters: ["scale", "signalstats", "blend", "trim", "setpts"], encoders: ["libx264"] },
+  // release_checkpoint runs verify (assemble's filters) + check
+  // (loudnorm, astats) + verify_cuts (draft + detector) + a
+  // contact sheet (thumbnail: tile + drawtext labels) — the union
+  // of their capabilities, no new one.
+  release_checkpoint: { filters: ["zoompan", "xfade", "scale", "crop", "fps", "trim", "setpts", "format", "subtitles", "sidechaincompress", "amix", "aresample", "volume", "loudnorm", "adelay", "apad", "drawtext", "signalstats", "blend", "tile", "astats", "ametadata"], encoders: ["libx264", "aac"] },
   // export_timeline is pure JSON + ffprobe (validateAssembleManifest
   // probes every asset) — ffprobe presence is the global doctor gate,
   // like probe: {}.
@@ -19781,6 +19786,194 @@ export async function verifyAssembleCuts({ manifestPath, video, tolerance = VERI
       try { await rm(path.dirname(draftPath), { recursive: true, force: true }); } catch { /* best-effort */ }
     }
   }
+}
+
+// ---------------------------------------------------------------- release_checkpoint
+// Release checkpoint (KyaniteLabs/kinocut's `release-checkpoint`
+// idea, turn 144): one gate that runs the pieces MediaKit already
+// measures — verify against the assemble receipt, the platform
+// check, full loudness, clipping, cut positions against the film
+// manifest — plus a contact sheet at the inspection points, and
+// writes one JSON verdict next to the clip. The sheet timestamps
+// are Synkinema's `get_inspection_points` idea: the midpoint of
+// every shot plus the midpoint of every transition blend window
+// (which is the cut time itself — the window is centered on it),
+// capped at `sheetFrames` by even subsampling. Without a manifest
+// the sheet falls back to evenly spaced frames. A check that has
+// nothing to measure reports `skipped`, never a fake pass: no
+// receipt, no manifest, no audio stream, `--no-sheet`. The receipt
+// check also guards that the receipt is FOR this input — a clean
+// verify of some other file's receipt must not pass this clip.
+// Thresholds (loudness): pass |LUFS+14| <= 1.0 and TP <= -1.0 dBTP,
+// warn |LUFS+14| <= 2.0 and TP <= -0.5, else fail. The checkpoint
+// JSON is written atomically (.partial + rename, like
+// patch_manifest). Exit code is the CLI's job (0 pass / 1 fail).
+export function inspectionPointTimestamps(plan, maxPoints = 9) {
+  if (!plan || !Array.isArray(plan.shots) || !plan.fps) {
+    throw new MediaKitError("inspectionPointTimestamps needs a validated film plan ({shots, fps})", "INVALID_ARG");
+  }
+  const max = num(maxPoints, "sheet_frames", { min: 1, max: 64, integer: true });
+  const fps = plan.fps;
+  const points = [];
+  let startFrames = 0;
+  for (let i = 0; i < plan.shots.length; i++) {
+    const shot = plan.shots[i];
+    points.push(+((startFrames + shot.frames / 2) / fps).toFixed(3));
+    startFrames += shot.frames;
+    if (i < plan.shots.length - 1 && plan.shots[i + 1].transition) {
+      points.push(+(startFrames / fps).toFixed(3));
+    }
+  }
+  points.sort((a, b) => a - b);
+  const uniq = [...new Set(points)];
+  if (uniq.length <= max) return uniq;
+  if (max === 1) return [uniq[0]];
+  const out = [];
+  for (let i = 0; i < max; i++) out.push(uniq[Math.round((i * (uniq.length - 1)) / (max - 1))]);
+  return [...new Set(out)];
+}
+
+export async function releaseCheckpoint({ input, manifest = null, receipt = null, platform = "tiktok", output = null, sheet = true, sheetFrames = 9 }) {
+  const inPath = await requireInput(input);
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("release_checkpoint needs a video input", "INVALID_ARG");
+  const frames = num(sheetFrames, "sheet_frames", { min: 1, max: 64, integer: true });
+  const stem = path.parse(inPath).name;
+  const outPath = await prepareOutput(output ?? path.join(path.dirname(inPath), `${stem}.checkpoint.json`), [inPath]);
+  const sha256 = createHash("sha256").update(await readFile(inPath)).digest("hex");
+  const hasAudio = meta.audio !== null;
+  const checks = [];
+  const add = (name, status, detail, extra = {}) => checks.push({ name, status, detail, ...extra });
+
+  // a. receipt: a real verify on the given receipt — pass only when
+  // nothing changed and nothing is missing, and the receipt is for
+  // THIS input (its recorded output must resolve to the input path).
+  if (receipt) {
+    const v = await verifyRender({ receipt });
+    const forThisInput = path.resolve(v.output) === inPath;
+    const ok = v.verdict === "pass" && v.changed === 0 && forThisInput;
+    add("receipt", ok ? "pass" : "fail",
+      !forThisInput
+        ? `receipt is for ${v.output}, not this input`
+        : `verify ${v.verdict}: ${v.changed} of ${v.total} items differ${v.first_difference ? `, first: ${v.first_difference}` : ""}`,
+      { verify_verdict: v.verdict, changed: v.changed, total: v.total, receipt_output: v.output, for_this_input: forThisInput });
+  } else {
+    add("receipt", "skipped", "no receipt given");
+  }
+
+  // b. platform: the same gate `check` runs, warnings included.
+  const chk = await check({ input: inPath, platform });
+  const failedRules = (chk.checks ?? []).filter((c) => !c.pass && c.severity !== "warn");
+  const warnRules = (chk.checks ?? []).filter((c) => !c.pass && c.severity === "warn");
+  add("platform", chk.pass ? "pass" : "fail",
+    chk.pass
+      ? `check ${platform} passes (${chk.checks.length} rules${warnRules.length ? `, ${warnRules.length} warning(s)` : ""})`
+      : `check ${platform} fails: ${failedRules.map((c) => c.name).join(", ")}`,
+    { platform, rules_failed: failedRules.map((c) => c.name), rules_warned: warnRules.map((c) => c.name) });
+
+  // c. loudness: pass |LUFS+14| <= 1.0 and TP <= -1.0 dBTP,
+  // warn |LUFS+14| <= 2.0 and TP <= -0.5, else fail.
+  if (!hasAudio) {
+    add("loudness", "skipped", "no audio stream");
+  } else {
+    const full = await measureLoudnessFull(inPath);
+    if (full === null) {
+      add("loudness", "warn", "loudness could not be measured");
+    } else {
+      const dLufs = Math.abs(full.i + 14);
+      const status = dLufs <= 1.0 && full.tp <= -1.0 ? "pass" : dLufs <= 2.0 && full.tp <= -0.5 ? "warn" : "fail";
+      add("loudness", status,
+        `${full.i} LUFS (target -14, |Δ| ${+dLufs.toFixed(2)}), true peak ${full.tp} dBTP`,
+        { lufs: full.i, true_peak_db: full.tp });
+    }
+  }
+
+  // d. clipping: fail on any peak at or over 0 dBFS.
+  if (!hasAudio) {
+    add("clipping", "skipped", "no audio stream");
+  } else {
+    const lv = await audioLevels({ input: inPath });
+    const maxPeak = lv.summary?.max_peak_db ?? null;
+    const clipped = maxPeak !== null && maxPeak >= 0;
+    add("clipping", clipped ? "fail" : "pass",
+      maxPeak === null ? "no measurable peaks" : `max peak ${maxPeak} dBFS${clipped ? " — at or over 0 dBFS" : ""}`,
+      { max_peak_db: maxPeak });
+  }
+
+  // e. cuts: fail on any missing boundary or unexpected cut; other
+  // verify_cuts warnings (invisible transition, duration drift)
+  // warn instead of failing — the picture is there, the seam is not.
+  let plan = null;
+  if (manifest) {
+    const vc = await verifyAssembleCuts({ manifestPath: manifest, video: inPath });
+    const missing = vc.cuts.filter((c) => c.status === "missing").length;
+    const unexpected = vc.unexpected_cuts.length;
+    const confirmed = vc.cuts.filter((c) => c.status === "confirmed").length;
+    const status = missing > 0 || unexpected > 0 ? "fail" : vc.warnings.length > 0 ? "warn" : "pass";
+    add("cuts", status,
+      `${confirmed}/${vc.cuts.length} boundaries confirmed, ${missing} missing, ${unexpected} unexpected${vc.duration_ok ? "" : ", duration mismatch"}`,
+      { confirmed, missing, unexpected, duration_ok: vc.duration_ok, warnings: vc.warnings });
+    const manifestAbs = await requireInput(manifest, "manifest");
+    const doc = JSON.parse(await readFile(manifestAbs, "utf8"));
+    plan = await validateAssembleManifest(doc, manifestAbs);
+  } else {
+    add("cuts", "skipped", "no manifest given");
+  }
+
+  // f. contact sheet at the inspection points (or evenly spaced
+  // without a manifest); pass when the file is on disk with the
+  // right frame count.
+  let sheetOut = null;
+  if (sheet === false) {
+    add("contact_sheet", "skipped", "sheet disabled (--no-sheet)");
+  } else {
+    const sheetPath = path.join(path.dirname(outPath), `${stem}.checkpoint-sheet.jpg`);
+    const times = plan ? inspectionPointTimestamps(plan, frames) : null;
+    const th = await thumbnail({ input: inPath, output: sheetPath, ...(times ? { timestampsList: times } : { frames }) });
+    const want = times ? times.length : frames;
+    let onDisk = false;
+    try { await stat(sheetPath); onDisk = true; } catch { /* missing */ }
+    const okSheet = onDisk && th.frames === want;
+    add("contact_sheet", okSheet ? "pass" : "fail",
+      okSheet
+        ? `${th.frames} frames at ${th.timestamps_seconds.map((t) => `${t}s`).join(", ")}`
+        : `sheet ${onDisk ? `has ${th.frames} frames, want ${want}` : "was not written"}`,
+      { sheet: sheetPath, timestamps_seconds: th.timestamps_seconds ?? null, frames: th.frames ?? null });
+    if (okSheet) sheetOut = { path: sheetPath, timestamps_seconds: th.timestamps_seconds };
+  }
+
+  const warnings = checks.filter((c) => c.status === "warn").length;
+  const verdict = checks.some((c) => c.status === "fail") ? "fail" : "pass";
+  const doc = {
+    tool: "release_checkpoint",
+    operation: "release_checkpoint",
+    input: inPath,
+    sha256,
+    probe: {
+      duration_seconds: meta.duration_seconds,
+      dimensions: meta.video ? `${meta.video.display_width ?? meta.video.width}x${meta.video.display_height ?? meta.video.height}` : null,
+      fps: meta.video?.fps ?? null,
+      video_codec: meta.video?.codec ?? null,
+      audio: hasAudio,
+      size_bytes: meta.size_bytes,
+    },
+    checks,
+    verdict,
+    warnings,
+    sheet: sheetOut,
+    output: outPath,
+    created_at: new Date().toISOString(),
+    version: MEDIAKIT_VERSION,
+  };
+  const partial = `${outPath}.partial-${process.pid}-${randomBytes(4).toString("hex")}`;
+  try {
+    await writeFile(partial, `${JSON.stringify(doc, null, 2)}\n`, "utf8");
+    await rename(partial, outPath);
+  } catch (e) {
+    await rm(partial, { force: true }).catch(() => {});
+    throw e;
+  }
+  return doc;
 }
 
 // ---------------------------------------------------------------- diagnose
