@@ -912,7 +912,7 @@ const COMMANDS = {
   },
   batch: {
     usage: "mediakit batch <operation> --pattern <glob> --input-dir <dir> -o <output-dir> [--args-json '{\"target_lufs\": -14}'] [--jobs 1] [--suffix -loudness] [--no-cache] [--stop-on-error] [--timeout 1800] [--max-files 200] [--dry-run]",
-    desc: "Apply one operation (loudness|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|smart-cut|clean-voice|slideshow|hook|audio-levels|search-words|highlights) to every file matching a glob under a folder, with the same args for all. Outputs are <stem>-<operation>.<ext> under the output dir, mirroring the input tree; a batch-manifest.json records every file's result. Unchanged files are skipped via a content-hash cache; --dry-run lists the planned outputs and writes nothing. cut-words, remove-retakes, smart-cut and search-words find each clip's words file as <words-dir>/<stem>.words.json (default: the input's own folder) — a clip with no words file fails its own row only. clean-voice writes .wav always (48 kHz mono float), whatever the input was, and a take whose plan needs clearvoice/sr fails its own row (pass --args-json '{\"steps\": \"declip,dehum\"}' to clean anyway). slideshow is a set operation: the whole matched set of images (2-32) becomes ONE slideshow video (--args-json '{\"output_name\": \"reel.mp4\"}'), and the per-file cache does not apply. hook, audio-levels, search-words and highlights are probe-only: they write no file (output null in each row) — the measurement comes back in the row's result, and the cache stores that result.",
+    desc: "Apply one operation (loudness|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|smart-cut|clean-voice|slideshow|hook|audio-levels|search-words|highlights) to every file matching a glob under a folder, with the same args for all. Outputs are <stem>-<operation>.<ext> under the output dir, mirroring the input tree; a batch-manifest.json records every file's result, and batch-manifest.jsonl streams one JSON line per finished row. Exit code: 0 = every row done/cached/skipped, 1 = any row failed, 2 = input error (unknown operation, bad pattern/args, no matches). Unchanged files are skipped via a content-hash cache; --dry-run lists the planned outputs and writes nothing. cut-words, remove-retakes, smart-cut and search-words find each clip's words file as <words-dir>/<stem>.words.json (default: the input's own folder) — a clip with no words file fails its own row only. clean-voice writes .wav always (48 kHz mono float), whatever the input was, and a take whose plan needs clearvoice/sr fails its own row (pass --args-json '{\"steps\": \"declip,dehum\"}' to clean anyway). slideshow is a set operation: the whole matched set of images (2-32) becomes ONE slideshow video (--args-json '{\"output_name\": \"reel.mp4\"}'), and the per-file cache does not apply. hook, audio-levels, search-words and highlights are probe-only: they write no file (output null in each row) — the measurement comes back in the row's result, and the cache stores that result.",
     args: [{ name: "operation", required: true }],
     options: [
       ["--pattern", "Glob under --input-dir: **/*.mp4 (any depth), sub/*.mp4 (one folder), or bare *.mp4 (basename at any depth) (required)"],
@@ -2197,26 +2197,26 @@ async function main() {
         break;
       }
       case "batch": {
-        if (!positional[0]) fail("missing operation: loudness|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|smart-cut|clean-voice|slideshow|hook|audio-levels|search-words|highlights");
-        if (!opts.pattern) fail("missing required option: --pattern <glob>");
-        if (!opts.input_dir) fail("missing required option: --input-dir <dir>");
+        if (!positional[0]) fail("missing operation: loudness|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|smart-cut|clean-voice|slideshow|hook|audio-levels|search-words|highlights", 2);
+        if (!opts.pattern) fail("missing required option: --pattern <glob>", 2);
+        if (!opts.input_dir) fail("missing required option: --input-dir <dir>", 2);
         const opName = positional[0].replace(/-/g, "_");
         let batchArgs = {};
         if (opts.args_json !== undefined) {
           try {
             batchArgs = JSON.parse(String(opts.args_json));
           } catch (e) {
-            fail(`bad --args-json: ${e.message}`);
+            fail(`bad --args-json: ${e.message}`, 2);
           }
           if (batchArgs === null || typeof batchArgs !== "object" || Array.isArray(batchArgs)) {
-            fail("--args-json must be a JSON object");
+            fail("--args-json must be a JSON object", 2);
           }
         }
         result = await core.batch({
           operation: opName,
           pattern: opts.pattern,
           inputDir: opts.input_dir,
-          outputDir: opts.output ?? opts.output_dir ?? fail("missing required option: -o <output-dir>"),
+          outputDir: opts.output ?? opts.output_dir ?? fail("missing required option: -o <output-dir>", 2),
           args: batchArgs,
           jobs: numOpt(opts, "jobs") ?? 1,
           outputSuffix: opts.suffix ?? null,
@@ -2452,7 +2452,18 @@ async function main() {
     tool: cmd, via: "cli", args: cliArgs, result,
     status: "ok", durationMs: Date.now() - cliStartedAt,
   });
+  // harken's batch summary line (stderr, so stdout stays pure JSON):
+  // "batch complete: X done, Y cached, Z skipped, W failed (of N)".
+  // A dry-run has no counts, so it prints nothing here.
+  if (cmd === "batch" && result && result.dry_run !== true && typeof result.succeeded === "number") {
+    console.error(`batch complete: ${result.succeeded} done, ${result.cached ?? 0} cached, ${result.skipped ?? 0} skipped, ${result.failed ?? 0} failed (of ${result.files_matched ?? result.results?.length ?? 0})`);
+  }
   console.log(JSON.stringify(result, null, 2));
+  // harken exit codes for batch: the summary's exit_code (0 = every
+  // row done/cached/skipped, 1 = any row failed). Set exitCode rather
+  // than process.exit() so the JSON above is flushed first. Input
+  // errors already exited 2 via fail() / the catch below.
+  if (cmd === "batch" && result && typeof result.exit_code === "number") process.exitCode = result.exit_code;
 }
 
 main();

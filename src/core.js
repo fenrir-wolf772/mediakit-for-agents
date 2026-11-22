@@ -6,7 +6,7 @@
  */
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { access, copyFile, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { access, appendFile, copyFile, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -15384,6 +15384,16 @@ export const BATCH_OPERATIONS = {
 
 const BATCH_CACHE_FILENAME = ".mediakit-batch-cache.json";
 const BATCH_MANIFEST_FILENAME = "batch-manifest.json";
+// Streaming per-row record (harken's manifest.jsonl idea): one JSON
+// line per finished row, appended as rows complete — in completion
+// order, with `index` = the row's position in input order so a
+// consumer can re-sort. A batch killed mid-run still leaves a
+// partial record of what finished. Fresh-truncated at run start so
+// the file always matches this run's batch-manifest.json (harken
+// appends across runs instead; MediaKit truncates, because the .json
+// manifest it mirrors is per-run too). Best-effort: a failed append
+// never fails the batch — the .json manifest stays authoritative.
+const BATCH_MANIFEST_JSONL_FILENAME = "batch-manifest.jsonl";
 
 // Output extension for a batch item: the input's, except
 // extract_audio (whisper forces .wav; an explicit format wins; an
@@ -15611,9 +15621,11 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
       ...(skippedDirectories ? { skipped_directories: skippedDirectories } : {}),
     };
     if (dryRun) {
-      return { ...summaryBase, dry_run: true, succeeded: 0, failed: 0, cached: 0, skipped: 0, elapsed_seconds: 0, results: [{ input: images, output, status: "planned" }] };
+      return { ...summaryBase, dry_run: true, exit_code: 0, succeeded: 0, failed: 0, cached: 0, skipped: 0, elapsed_seconds: 0, results: [{ input: images, output, status: "planned" }] };
     }
     const outDir = await prepareOutputDir(outDirAbs);
+    const jsonlPath = path.join(outDir, BATCH_MANIFEST_JSONL_FILENAME);
+    await writeFile(jsonlPath, "", "utf8");
     if (Date.now() > startedAt + timeout * 1000) {
       return { ...summaryBase, dry_run: false, succeeded: 0, failed: 0, cached: 0, skipped: 1, elapsed_seconds: 0, results: [{ input: images, output, status: "skipped", error: `batch timeout exceeded (${timeout}s shared budget)` }] };
     }
@@ -15642,8 +15654,15 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
       elapsed_seconds: +((Date.now() - startedAt) / 1000).toFixed(1),
       results: [{ input: images, output, status, elapsed_ms: Date.now() - fileStarted, ...(result ? { result } : {}), ...(error ? { error, code } : {}) }],
     };
+    // harken exit codes: 0 = every row done, 1 = any row failed
+    // (2 = input error, thrown before a summary exists).
+    summary.exit_code = summary.failed > 0 ? 1 : 0;
     summary.manifest = path.join(outDir, BATCH_MANIFEST_FILENAME);
+    summary.manifest_jsonl = jsonlPath;
     await writeFile(summary.manifest, JSON.stringify(summary, null, 2), "utf8");
+    // Best-effort streaming line — a failed append never fails the
+    // batch; the .json manifest above stays authoritative.
+    try { await appendFile(jsonlPath, `${JSON.stringify({ index: 0, ...summary.results[0] })}\n`, "utf8"); } catch { /* ignore */ }
     return summary;
   }
   const truncated = files.length > max;
@@ -15661,7 +15680,7 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
   if (dryRun) {
     return {
       operation, pattern: pattern.trim(), input_dir: inDir, output_dir: outDirAbs,
-      args, jobs: jobCount, cache, output_suffix: suffix, dry_run: true,
+      args, jobs: jobCount, cache, output_suffix: suffix, dry_run: true, exit_code: 0,
       files_total: files.length, files_matched: selected.length, truncated,
       results: items.map((it) => ({ input: it.input, output: it.output, status: "planned" })),
       ...(skippedDirectories ? { skipped_directories: skippedDirectories } : {}),
@@ -15671,6 +15690,17 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
   const startedAt = Date.now();
   const deadline = startedAt + timeout * 1000;
   const outDir = await prepareOutputDir(outDirAbs);
+  // Streaming manifest (see BATCH_MANIFEST_JSONL_FILENAME): one
+  // line per finished row, serialized through a promise chain so
+  // parallel workers never interleave lines; best-effort, a failed
+  // append is swallowed and never fails the batch.
+  const jsonlPath = path.join(outDir, BATCH_MANIFEST_JSONL_FILENAME);
+  await writeFile(jsonlPath, "", "utf8");
+  let jsonlChain = Promise.resolve();
+  const appendJsonlRow = (row) => {
+    jsonlChain = jsonlChain.then(() => appendFile(jsonlPath, `${JSON.stringify(row)}\n`, "utf8")).catch(() => {});
+    return jsonlChain;
+  };
 
   // Content-hash cache (ffmpeg-skill's batch.py idea): the key covers
   // the input bytes + operation + args + suffix, so an unchanged file
@@ -15710,6 +15740,7 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
       const item = items[i];
       if (Date.now() > deadline) {
         results[i] = { input: item.input, output: item.output, status: "skipped", error: `batch timeout exceeded (${timeout}s shared budget)` };
+        await appendJsonlRow({ index: i, ...results[i] });
         continue;
       }
       if (cache) {
@@ -15722,6 +15753,7 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
           // result IS the cache.
           if (probeOnly && hit.result !== undefined) {
             results[i] = { input: item.input, output: null, status: "cached", result: hit.result };
+            await appendJsonlRow({ index: i, ...results[i] });
             continue;
           }
           try {
@@ -15743,6 +15775,7 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
                 if (needCopy) await copyFile(hit.output, item.output);
               }
               results[i] = { input: item.input, output: item.output, status: "cached", result: { ...hit.result, output: item.output } };
+              await appendJsonlRow({ index: i, ...results[i] });
               continue;
             }
           } catch { /* cached output gone or changed: fall through and re-run */ }
@@ -15754,6 +15787,7 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
         const r = await spec.run(item.input, item.output, args);
         const elapsedMs = Date.now() - fileStarted;
         results[i] = { input: item.input, output: item.output, status: "ok", elapsed_ms: elapsedMs, result: r };
+        await appendJsonlRow({ index: i, ...results[i] });
         invalidArgStreak = 0;
         if (cache) {
           // A probe-only result is stored bare — there is no output
@@ -15773,6 +15807,7 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
       } catch (e) {
         const code = e instanceof MediaKitError ? e.code : "ERROR";
         results[i] = { input: item.input, output: item.output, status: "error", elapsed_ms: Date.now() - fileStarted, error: e.message, code };
+        await appendJsonlRow({ index: i, ...results[i] });
         if (stopOnError) aborted = true;
         else if (jobCount === 1 && code === "INVALID_ARG") {
           // A mistyped arg fails every file identically — abort after
@@ -15789,8 +15824,12 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
   for (let i = 0; i < items.length; i++) {
     if (!results[i]) {
       results[i] = { input: items[i].input, output: items[i].output, status: "skipped", error: "batch stopped early (see the first error)" };
+      await appendJsonlRow({ index: i, ...results[i] });
     }
   }
+  // Drain the append chain before the .json manifest is written, so
+  // both manifests describe the same run when the call returns.
+  await jsonlChain;
 
   const summary = {
     operation, pattern: pattern.trim(), input_dir: inDir, output_dir: outDir,
@@ -15804,8 +15843,12 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
     results,
     ...(skippedDirectories ? { skipped_directories: skippedDirectories } : {}),
   };
+  // harken exit codes: 0 = every row done/cached/skipped, 1 = any
+  // row failed (2 = input error, thrown before a summary exists).
+  summary.exit_code = summary.failed > 0 ? 1 : 0;
   const manifestPath = path.join(outDir, BATCH_MANIFEST_FILENAME);
   summary.manifest = manifestPath;
+  summary.manifest_jsonl = jsonlPath;
   await writeFile(manifestPath, JSON.stringify(summary, null, 2), "utf8");
   if (cache) await writeFile(cachePath, JSON.stringify(cacheData, null, 2), "utf8");
   return summary;

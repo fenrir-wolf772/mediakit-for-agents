@@ -7,7 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "node:url";
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { copyFile, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { createCanvas } from "canvas";
@@ -163,6 +163,17 @@ async function callExpectThrow(name, args) {
 }
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+// outputs/ is a symlink to /tmp (bulky test outputs stay off the
+// quota-limited workspace disk); /tmp is tmpfs, so a VM restart wipes
+// the target and leaves a dangling symlink — and Node's recursive
+// mkdir on a dangling symlink fails with ENOENT, so the whole suite
+// dies in seconds (measured lượt 142 after a restart: uptime 16 min,
+// every tool writing under outputs/ failed). Recreate the target
+// before anything runs; a real directory is left alone.
+try {
+  const outTarget = await readlink(path.join(root, "outputs"));
+  await mkdir(path.resolve(root, outTarget), { recursive: true });
+} catch { /* outputs is a real dir, or the target already exists */ }
 // Hermetic jobs root for the async-job tests: one fresh directory per
 // suite run, so smoke-test jobs from the shell never leak into the
 // suite's `job --list` assertions. The server child inherits this env
@@ -7570,6 +7581,12 @@ const batchLufs = await measureLufs(path.join(root, "outputs/mcp-batch-out/sourc
 checkOk(near(batchLufs, -16, 1), "batch loudness output measures -16 LUFS independently", `got ${batchLufs}`);
 const batchManifest = JSON.parse(await readFile(path.join(root, "outputs/mcp-batch-out/batch-manifest.json"), "utf8"));
 checkOk(batchManifest.results.length === 3 && batchManifest.succeeded === 3, "batch writes batch-manifest.json with all 3 rows", `got ${batchManifest.results?.length} rows`);
+// batch-manifest.jsonl + exit codes (lượt 142, harken's scheme): one
+// line per finished row, streamed as rows complete.
+checkOk(batchJson.exit_code === 0 && (batchJson.manifest_jsonl ?? "").endsWith("batch-manifest.jsonl"), "batch summary carries exit_code 0 + manifest_jsonl path", `exit_code=${batchJson.exit_code} manifest_jsonl=${batchJson.manifest_jsonl}`);
+const batchJsonl = (await readFile(path.join(root, "outputs/mcp-batch-out/batch-manifest.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+checkOk(batchJsonl.length === 3 && batchJsonl.every((r) => r.status === "ok") && [...batchJsonl.map((r) => r.index)].sort().join(",") === "0,1,2", "batch-manifest.jsonl has one ok line per row with index 0..2", JSON.stringify(batchJsonl.map((r) => [r.index, r.status])));
+checkOk(batchJsonl.every((r) => batchManifest.results.some((m) => m.input === r.input && m.status === r.status)), "batch-manifest.jsonl rows match the .json manifest rows", JSON.stringify(batchJsonl.map((r) => r.input)));
 const batchMtimeBefore = statSync(path.join(root, "outputs/mcp-batch-out/source-loudness.mp4")).mtimeMs;
 await new Promise((r) => setTimeout(r, 1100));
 const batchCachedRes = await client.callTool({
@@ -7579,6 +7596,8 @@ const batchCachedRes = await client.callTool({
 const batchCachedJson = JSON.parse(batchCachedRes.content[0].text);
 checkOk(batchCachedJson.cached === 3 && batchCachedJson.succeeded === 0, "batch second run serves all 3 files from the content-hash cache", `cached=${batchCachedJson.cached} succeeded=${batchCachedJson.succeeded}`);
 checkOk(statSync(path.join(root, "outputs/mcp-batch-out/source-loudness.mp4")).mtimeMs === batchMtimeBefore, "batch cache hit does not touch the output file (mtime unchanged)", "mtime moved");
+const batchCachedJsonl = (await readFile(path.join(root, "outputs/mcp-batch-out/batch-manifest.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+checkOk(batchCachedJson.exit_code === 0 && batchCachedJsonl.length === 3 && batchCachedJsonl.every((r) => r.status === "cached"), "batch re-run rewrites batch-manifest.jsonl fresh (3 cached lines, not 6 appended)", `exit_code=${batchCachedJson.exit_code} lines=${batchCachedJsonl.length}`);
 const batchBadArgText = await callExpectThrow("batch", { operation: "loudness", pattern: "**/*.mp4", input_dir: path.join(root, "outputs/mcp-batch-in"), output_dir: path.join(root, "outputs/mcp-batch-badarg"), args: { bogus_key: 1 } });
 checkOk(/does not take argument/.test(batchBadArgText) && /bogus_key/.test(batchBadArgText), "batch refuses an unknown operation argument by name", batchBadArgText.slice(0, 160));
 const batchBadValRes = await client.callTool({
@@ -7588,10 +7607,25 @@ const batchBadValRes = await client.callTool({
 const batchBadValJson = JSON.parse(batchBadValRes.content[0].text);
 checkOk(batchBadValJson.failed === 3 && batchBadValJson.succeeded === 0, "batch bad arg fails every file (no silent fallback)", `failed=${batchBadValJson.failed}`);
 checkOk(/target_lufs/.test(batchBadValJson.results[0].error ?? ""), "batch bad arg reports the failing argument per file", (batchBadValJson.results[0].error ?? "").slice(0, 120));
+checkOk(batchBadValJson.exit_code === 1, "batch with every row failed reports exit_code 1", `exit_code=${batchBadValJson.exit_code}`);
+const batchBadValJsonl = (await readFile(path.join(root, "outputs/mcp-batch-badval/batch-manifest.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+checkOk(batchBadValJsonl.length === 3 && batchBadValJsonl.every((r) => r.status === "error" && r.error && r.code), "batch-manifest.jsonl records the failed rows with error + code", JSON.stringify(batchBadValJsonl.map((r) => [r.status, r.code])));
 const batchBadOpText = await callExpectThrow("batch", { operation: "nosuchop", pattern: "**/*.mp4", input_dir: path.join(root, "outputs/mcp-batch-in"), output_dir: path.join(root, "outputs/mcp-batch-badop") });
 checkOk(/Invalid enum value/.test(batchBadOpText) && /nosuchop/.test(batchBadOpText), "batch rejects an unknown operation (MCP enum validation)", batchBadOpText.slice(0, 160));
 const batchNoMatchText = await callExpectThrow("batch", { operation: "loudness", pattern: "*.nomatch", input_dir: path.join(root, "outputs/mcp-batch-in"), output_dir: path.join(root, "outputs/mcp-batch-nomatch") });
 checkOk(/matched no files/.test(batchNoMatchText), "batch with no matches errors instead of reporting an empty success", batchNoMatchText.slice(0, 160));
+// CLI exit codes (lượt 142): 0 = all rows done, 1 = any row failed,
+// 2 = input error — plus the harken summary line on stderr.
+const cliBatchOk = await runCli(["batch", "loudness", "--pattern", "**/*.mp4", "--input-dir", path.join(root, "outputs/mcp-batch-in"), "-o", path.join(root, "outputs/mcp-batch-cli-ok-out"), "--args-json", '{"target_lufs": -16}', "--jobs", "2"]);
+checkOk(cliBatchOk.code === 0 && /batch complete: 3 done, 0 cached, 0 skipped, 0 failed \(of 3\)/.test(cliBatchOk.out), "CLI batch success exits 0 with the summary line", `code=${cliBatchOk.code} ${cliBatchOk.out.slice(-200)}`);
+const cliBatchFail = await runCli(["batch", "cut-words", "--pattern", "**/*.mp4", "--input-dir", path.join(root, "outputs/mcp-batch-in"), "-o", path.join(root, "outputs/mcp-batch-cli-fail-out"), "--jobs", "2"]);
+checkOk(cliBatchFail.code === 1 && /batch complete: 0 done, 0 cached, 0 skipped, 3 failed \(of 3\)/.test(cliBatchFail.out), "CLI batch with failed rows exits 1 with the summary line", `code=${cliBatchFail.code} ${cliBatchFail.out.slice(-200)}`);
+const cliBatchBadOp = await runCli(["batch", "nosuchop", "--pattern", "**/*.mp4", "--input-dir", path.join(root, "outputs/mcp-batch-in"), "-o", path.join(root, "outputs/mcp-batch-cli-badop-out")]);
+checkOk(cliBatchBadOp.code === 2, "CLI batch unknown operation exits 2", `code=${cliBatchBadOp.code} ${cliBatchBadOp.out.slice(0, 120)}`);
+const cliBatchNoMatch = await runCli(["batch", "loudness", "--pattern", "*.nomatch", "--input-dir", path.join(root, "outputs/mcp-batch-in"), "-o", path.join(root, "outputs/mcp-batch-cli-nomatch-out")]);
+checkOk(cliBatchNoMatch.code === 2 && /matched no files/.test(cliBatchNoMatch.out), "CLI batch with no matches exits 2", `code=${cliBatchNoMatch.code} ${cliBatchNoMatch.out.slice(0, 120)}`);
+const cliBatchNoPattern = await runCli(["batch", "loudness", "--input-dir", path.join(root, "outputs/mcp-batch-in"), "-o", path.join(root, "outputs/mcp-batch-cli-nopat-out")]);
+checkOk(cliBatchNoPattern.code === 2 && /missing required option: --pattern/.test(cliBatchNoPattern.out), "CLI batch without --pattern exits 2", `code=${cliBatchNoPattern.code} ${cliBatchNoPattern.out.slice(0, 120)}`);
 // stop_on_error: the audio-only file fails grade first (alphabetical
 // order), so the video after it must be reported skipped, not run.
 await mkdir(path.join(root, "outputs/mcp-batch-stop"), { recursive: true });
@@ -7728,6 +7762,9 @@ const batchSlideFrames = await countFrames(path.join(root, "outputs/mcp-batch-sl
 checkOk(batchSlideFrames === 180, "batch slideshow output counts 180 frames on disk (6s @ 30fps)", `got ${batchSlideFrames}`);
 const batchSlideManifest = JSON.parse(await readFile(path.join(root, "outputs/mcp-batch-slideshow-out/batch-manifest.json"), "utf8"));
 checkOk(batchSlideManifest.results.length === 1 && batchSlideManifest.succeeded === 1, "batch slideshow writes batch-manifest.json with the single row", `got ${batchSlideManifest.results?.length} rows`);
+checkOk(batchSlideJson.exit_code === 0, "batch slideshow summary carries exit_code 0", `exit_code=${batchSlideJson.exit_code}`);
+const batchSlideJsonl = (await readFile(path.join(root, "outputs/mcp-batch-slideshow-out/batch-manifest.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+checkOk(batchSlideJsonl.length === 1 && batchSlideJsonl[0].index === 0 && batchSlideJsonl[0].status === "ok", "batch slideshow writes one jsonl line for its single row", JSON.stringify(batchSlideJsonl.map((r) => [r.index, r.status])));
 const batchSlideOneText = await callExpectThrow("batch", { operation: "slideshow", pattern: "a-logo.png", input_dir: path.join(root, "outputs/mcp-batch-slideshow-in"), output_dir: path.join(root, "outputs/mcp-batch-slideshow-one") });
 checkOk(/at least 2 images/.test(batchSlideOneText), "batch slideshow refuses a single matched image", batchSlideOneText.slice(0, 160));
 const batchSlideNoImgText = await callExpectThrow("batch", { operation: "slideshow", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-in"), output_dir: path.join(root, "outputs/mcp-batch-slideshow-noimg") });
