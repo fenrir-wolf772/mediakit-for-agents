@@ -698,6 +698,48 @@ checkOk(!contentBaselineMatch.issues?.some((i) => i.startsWith("content_black"))
 checkOk(contentBaselineMatch.warnings?.some((w) => w.startsWith("content_black")), "pre-existing spans still show in top-level warnings", JSON.stringify(contentBaselineMatch.warnings));
 const contentBaselineWrong = await checkContent("test/content-black.mp4", "tiktok", { baseline: path.join(root, "test/content-baseline-wrong.json") });
 checkOk(contentBaselineWrong.content.pass === false && contentBaselineWrong.baseline?.matched === 0 && contentBaselineWrong.baseline?.new_spans === 2, "a baseline covering 0-1s forgives nothing: 0 matched, 2 new", JSON.stringify(contentBaselineWrong.baseline));
+
+// check --stamp / --use-stamp (lượt 154, idea: ChatCut
+// `validateOnly` + renderContract stamp): a stamp sidecar records
+// the verdict + the exact args + the media sha256/size + the
+// toolchain, and a later identical check reuses it instead of
+// re-decoding; any mismatch is a stale stamp with its reason, never
+// a silent reuse.
+const stampDir = path.join(root, "outputs/mcp-check-stamp");
+await rm(stampDir, { recursive: true, force: true });
+await mkdir(stampDir, { recursive: true });
+const stampClip = path.join(stampDir, "clip.mp4");
+await copyFile(path.join(root, "test/source.mp4"), stampClip);
+const stampFile = `${stampClip}.mediakit-check.json`;
+const stampPlain = await runCliJson(["check", stampClip, "--platform", "tiktok"], {});
+checkOk(stampPlain.stamp === undefined, "a plain check returns no stamp field", JSON.stringify(Object.keys(stampPlain)));
+const stampWritten = await runCliJson(["check", stampClip, "--platform", "tiktok", "--stamp"], {});
+checkOk(stampWritten.stamp?.used === false && stampWritten.stamp?.written === stampFile, "check --stamp reports the written sidecar", JSON.stringify(stampWritten.stamp));
+const stampDoc = JSON.parse(await readFile(stampFile, "utf8"));
+checkOk(stampDoc.schema === "mediakit-check-stamp/1" && stampDoc.media?.sha256 === (await sha256File(stampClip)) && stampDoc.media?.size_bytes === statSync(stampClip).size, "stamp file carries the schema + the media sha256/size measured on disk", JSON.stringify(stampDoc.media));
+checkOk(stampDoc.args?.platform === "tiktok" && stampDoc.args?.policy === "full" && stampDoc.args?.content === false && stampDoc.args?.baseline_sha256 === null, "stamp records the exact args (platform/policy/content/baseline)", JSON.stringify(stampDoc.args));
+checkOk(typeof stampDoc.environment?.ffmpeg_version === "string" && stampDoc.environment.ffmpeg_version.length > 0 && typeof stampDoc.environment?.ffprobe_version === "string" && stampDoc.environment.ffprobe_version.length > 0 && stampDoc.result?.pass === stampWritten.pass && JSON.stringify(stampDoc.result?.checks) === JSON.stringify(stampWritten.checks), "stamp records the toolchain versions + the full verdict (checks identical to the live run)", JSON.stringify(stampDoc.environment));
+const stampHit = await runCliJson(["check", stampClip, "--platform", "tiktok", "--use-stamp"], {});
+checkOk(stampHit.stamp?.used === true && stampHit.stamp?.file === stampFile && typeof stampHit.stamp?.created_at === "string" && JSON.stringify(stampHit.checks) === JSON.stringify(stampWritten.checks) && stampHit.pass === stampWritten.pass, "check --use-stamp reuses the stamp (same verdict, same checks, no re-run)", JSON.stringify(stampHit.stamp));
+const stampArgsMiss = await runCliJson(["check", stampClip, "--platform", "youtube", "--use-stamp"], {});
+checkOk(stampArgsMiss.stamp?.used === false && stampArgsMiss.stamp?.reason === "args_mismatch", "a stamp for tiktok does not cover a youtube request (args_mismatch)", JSON.stringify(stampArgsMiss.stamp));
+await copyFile(path.join(root, "test/source2.mp4"), stampClip);
+const stampMediaMiss = await runCliJson(["check", stampClip, "--platform", "tiktok", "--use-stamp"], {});
+checkOk(stampMediaMiss.stamp?.used === false && stampMediaMiss.stamp?.reason === "media_changed", "swapping the media invalidates the stamp (media_changed)", JSON.stringify(stampMediaMiss.stamp));
+await copyFile(path.join(root, "test/source.mp4"), stampClip);
+await writeFile(stampFile, "{bad json", "utf8");
+const stampBad = await runCliJson(["check", stampClip, "--platform", "tiktok", "--use-stamp"], {});
+checkOk(stampBad.stamp?.used === false && stampBad.stamp?.reason === "stamp_invalid" && stampBad.pass === stampWritten.pass, "a corrupt stamp file is stamp_invalid and the check still runs fresh", JSON.stringify(stampBad.stamp));
+const stampBoth = await runCliJson(["check", stampClip, "--platform", "tiktok", "--stamp", "--use-stamp"], {});
+checkOk(stampBoth.stamp?.used === false && stampBoth.stamp?.reason === "stamp_invalid" && stampBoth.stamp?.written === stampFile, "stamp + use-stamp together: a stale stamp still runs fresh AND rewrites the stamp", JSON.stringify(stampBoth.stamp));
+const stampHit2 = await runCliJson(["check", stampClip, "--platform", "tiktok", "--use-stamp"], {});
+checkOk(stampHit2.stamp?.used === true, "the rewritten stamp is reusable again", JSON.stringify(stampHit2.stamp));
+const stampSkip = await runCli(["check", stampClip, "--platform", "tiktok", "--policy", "skip", "--stamp"], {});
+checkOk(stampSkip.code !== 0 && /policy skip measures nothing/.test(stampSkip.out), "check --policy skip --stamp is refused (a skip measures nothing)", stampSkip.out.slice(0, 200));
+// MCP end to end: the same flags through tools/call.
+const stampMcpRes = await client.callTool({ name: "check", arguments: { input: stampClip, platform: "tiktok", stamp: true, use_stamp: true } });
+const stampMcpJson = JSON.parse(stampMcpRes.content[0].text);
+checkOk(stampMcpJson.stamp?.used === true, "MCP check stamp:true + use_stamp:true reuses the stamp written by the CLI", JSON.stringify(stampMcpJson.stamp));
 checkOk(contentBaselineWrong.checks.find((c) => c.name === "content_black")?.severity !== "warn" && contentBaselineWrong.issues?.some((i) => i.startsWith("content_black")), "content_black still fails as an error against the wrong baseline", JSON.stringify(contentBaselineWrong.checks.find((c) => c.name === "content_black")));
 checkOk(contentBaselineWrong.content.black.intervals[0]?.pre_existing === undefined, "no pre_existing flag against the wrong baseline", JSON.stringify(contentBaselineWrong.content.black.intervals));
 // Dogfood: the check result itself is a valid baseline (shape 1).
@@ -9259,6 +9301,33 @@ const diagTextRes = await client.callTool({ name: "diagnose", arguments: { manif
 const diagTextJson = JSON.parse(diagTextRes.content[0].text);
 checkOk(diagTextJson.checks?.some((c) => c.id === "text_layer" && c.severity === "warn" && /caption band/.test(c.message)), "diagnose warns on a bottom text layer sitting in the burned-caption band", JSON.stringify(diagTextJson.checks?.filter((c) => c.id === "text_layer")));
 checkOk(diagTextJson.verdict === "warn" && diagTextJson.warnings === 4, "the bottom-text film still warns overall (3 upscale + 1 text layer)", JSON.stringify({ verdict: diagTextJson.verdict, warnings: diagTextJson.warnings }));
+// diagnose --stamp / --use-stamp (lượt 154, same stamp contract
+// as check): the sidecar keys on the film fingerprint (manifest +
+// voice + music + sfx + captions + assets + brand) plus the style
+// file hash and the toolchain; any film change is film_changed.
+const diagStampStage = await stageAssembleManifest("assemble-diagnose-pass.json");
+const diagStampFile = `${diagStampStage.manifestPath}.mediakit-diagnose.json`;
+const diagStampWrittenRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagStampStage.manifestPath, stamp: true } });
+const diagStampWritten = JSON.parse(diagStampWrittenRes.content[0].text);
+checkOk(diagStampWritten.verdict === "pass" && diagStampWritten.stamp?.used === false && diagStampWritten.stamp?.written === diagStampFile, "MCP diagnose stamp:true writes the sidecar on a passing film", JSON.stringify(diagStampWritten.stamp));
+const diagStampDoc = JSON.parse(await readFile(diagStampFile, "utf8"));
+checkOk(diagStampDoc.schema === "mediakit-diagnose-stamp/1" && typeof diagStampDoc.fingerprint === "string" && diagStampDoc.fingerprint.length === 64 && diagStampDoc.style_sha256 === null && diagStampDoc.result?.verdict === "pass" && JSON.stringify(diagStampDoc.result?.checks) === JSON.stringify(diagStampWritten.checks), "diagnose stamp carries the schema + 64-hex film fingerprint + null style hash (no style.json) + the full verdict", JSON.stringify({ fingerprint: diagStampDoc.fingerprint?.slice(0, 16), style_sha256: diagStampDoc.style_sha256 }));
+const diagStampHitRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagStampStage.manifestPath, use_stamp: true } });
+const diagStampHit = JSON.parse(diagStampHitRes.content[0].text);
+checkOk(diagStampHit.stamp?.used === true && diagStampHit.stamp?.file === diagStampFile && diagStampHit.verdict === "pass" && JSON.stringify(diagStampHit.checks) === JSON.stringify(diagStampWritten.checks), "diagnose use_stamp:true reuses the stamp (same verdict, same checks)", JSON.stringify(diagStampHit.stamp));
+// A valid edit that only changes the title still changes the
+// manifest hash, so the fingerprint — and the stamp — go stale.
+const diagStampDoc2 = JSON.parse(await readFile(diagStampStage.manifestPath, "utf8"));
+diagStampDoc2.title = "Diagnose pass fixture — retitled";
+await writeFile(diagStampStage.manifestPath, JSON.stringify(diagStampDoc2), "utf8");
+const diagStampChangedRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagStampStage.manifestPath, use_stamp: true } });
+const diagStampChanged = JSON.parse(diagStampChangedRes.content[0].text);
+checkOk(diagStampChanged.stamp?.used === false && diagStampChanged.stamp?.reason === "film_changed" && diagStampChanged.verdict === "pass", "retitling the film invalidates the stamp (film_changed) and the preflight still runs fresh", JSON.stringify(diagStampChanged.stamp));
+// A corrupt stamp is stamp_invalid, not a crash; the CLI flags
+// work the same as the MCP ones.
+await writeFile(diagStampFile, "{bad json", "utf8");
+const diagStampBadCli = await runCliJson(["diagnose", diagStampStage.manifestPath, "--use-stamp"], {});
+checkOk(diagStampBadCli.stamp?.used === false && diagStampBadCli.stamp?.reason === "stamp_invalid" && diagStampBadCli.verdict === "pass", "CLI diagnose --use-stamp on a corrupt stamp is stamp_invalid and runs fresh", JSON.stringify(diagStampBadCli.stamp));
 // Bounce apex vs top text layer (turn 102): the default apex
 // 0.12H puts the ball top at 0.075H, inside a 1-line top title
 // band (drawtext y=0.08H, 90px → ends 0.127H) — diagnose warns

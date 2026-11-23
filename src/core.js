@@ -6025,8 +6025,119 @@ export function resolveQcPolicy(policy) {
   return mode;
 }
 
-export async function check({ input, platform = "tiktok", content = false, contentStart = null, contentEnd = null, peakThresholdDb = -1, expectedDuration = null, faststart = false, decodedWork = false, palette = null, paletteBrand = null, baseline = null, policy = null }) {
+// ---------------------------------------------------------------- QC stamp
+// A QC stamp (idea: ChatCut-Inc/agent-plugin `validateOnly` +
+// renderContract stamp, lượt 146/154) is a sidecar JSON that says
+// "this file / film passed THIS check, with THESE args, on THIS
+// toolchain" — so a pipeline that re-checks the same deliverable
+// (release-checkpoint, a CI re-run, a second agent pass) can trust
+// the stamp instead of re-decoding the file. The stamp is only
+// reusable when EVERYTHING that could change the verdict is
+// identical: the media bytes (sha256 + size), the exact check args
+// (a stamp run with --content does not cover a --content request
+// made later without it, and vice versa), and the ffmpeg/ffprobe
+// versions (decode detectors depend on the build). Any mismatch is
+// a stale stamp, reported with its reason — never silently reused.
+// A stamp is a cache, not a verdict: it never overrides a fresh
+// run, and policy=skip stamps nothing (a skip measures nothing, so
+// there is nothing to stamp or reuse — refusing, not silently
+// writing a pass that was never measured).
+export const CHECK_STAMP_SCHEMA = "mediakit-check-stamp/1";
+export const DIAGNOSE_STAMP_SCHEMA = "mediakit-diagnose-stamp/1";
+
+export function checkStampPath(inputPath) {
+  return `${inputPath}.mediakit-check.json`;
+}
+
+export function diagnoseStampPath(manifestPath) {
+  return `${manifestPath}.mediakit-diagnose.json`;
+}
+
+async function ffprobeVersionString() {
+  try {
+    const { stdout } = await run(FFPROBE, ["-version"]);
+    return (stdout.match(/ffprobe version (\S+)/) || [])[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function stampEnvironment() {
+  return {
+    ffmpeg_version: await ffmpegVersionString(),
+    ffprobe_version: await ffprobeVersionString(),
+  };
+}
+
+// Atomic sidecar write (.partial-<pid>-<rand> + rename, like
+// patch_manifest): a crashed stamp write never leaves a half-written
+// JSON that a later --use-stamp would read as valid. The path goes
+// through prepareOutput, so the sandbox still applies — a stamp next
+// to an input outside the workdir is refused like any other write.
+async function writeStampFile(stampPath, doc) {
+  const abs = await prepareOutput(stampPath, []);
+  const partial = `${abs}.partial-${process.pid}-${randomBytes(4).toString("hex")}`;
+  try {
+    await writeFile(partial, `${JSON.stringify(doc, null, 2)}\n`, "utf8");
+    await rename(partial, abs);
+  } catch (e) {
+    await rm(partial, { force: true }).catch(() => {});
+    throw e;
+  }
+  return abs;
+}
+
+// Read a stamp file without throwing: a missing file, bad JSON or a
+// non-object document is a stale stamp with its reason, never a
+// crash — the caller falls through to a fresh run.
+async function readStampFile(stampPath) {
+  let raw;
+  try {
+    raw = await readFile(stampPath, "utf8");
+  } catch {
+    return { ok: false, reason: "no_stamp" };
+  }
+  let doc;
+  try {
+    doc = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: "stamp_invalid" };
+  }
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) return { ok: false, reason: "stamp_invalid" };
+  return { ok: true, doc };
+}
+
+// The exact check args that decide the verdict, in canonical form:
+// a baseline is recorded by the hash of its file (editing the
+// baseline re-opens the gate), expected_duration is normalized to
+// seconds, and every flag is present so equality is one comparison.
+async function canonicalCheckArgs({ platform, content, contentStart, contentEnd, peakThresholdDb, expectedDuration, faststart, decodedWork, palette, paletteBrand, policy, baseline }) {
+  let baselineSha256 = null;
+  if (baseline !== null && baseline !== undefined) {
+    const baselinePath = await requireInput(baseline, "baseline");
+    baselineSha256 = await hashFile(baselinePath);
+  }
+  return {
+    platform,
+    content: !!content,
+    content_start: contentStart ?? null,
+    content_end: contentEnd ?? null,
+    peak_threshold_db: peakThresholdDb,
+    expected_duration: expectedDuration === null || expectedDuration === undefined ? null : parseTime(expectedDuration, "expected_duration"),
+    faststart: !!faststart,
+    decoded_work: !!decodedWork,
+    palette: palette ?? null,
+    palette_brand: paletteBrand ?? null,
+    policy,
+    baseline_sha256: baselineSha256,
+  };
+}
+
+export async function check({ input, platform = "tiktok", content = false, contentStart = null, contentEnd = null, peakThresholdDb = -1, expectedDuration = null, faststart = false, decodedWork = false, palette = null, paletteBrand = null, baseline = null, policy = null, stamp = false, useStamp = false }) {
   const qcPolicy = resolveQcPolicy(policy);
+  if ((stamp || useStamp) && qcPolicy === "skip") {
+    throw new MediaKitError("--stamp/--use-stamp need a real check — policy skip measures nothing, so there is nothing to stamp or reuse", "INVALID_ARG");
+  }
   const inPath = await requireInput(input);
   if (baseline !== null && baseline !== undefined && !content) {
     throw new MediaKitError("--baseline needs --content (it only forgives spans the content scan found)", "INVALID_ARG");
@@ -6052,6 +6163,35 @@ export async function check({ input, platform = "tiktok", content = false, conte
   // instead of a light result that quietly never scanned.
   if (qcPolicy === "light" && (content || (baseline !== null && baseline !== undefined) || palette !== null || paletteBrand !== null)) {
     throw new MediaKitError("policy light skips the decode-heavy detectors --content/--baseline/--palette/--palette-brand — use --policy full for them", "INVALID_ARG");
+  }
+  // QC stamp reuse (see the stamp section above): the args that
+  // decide the verdict, the media identity, and the toolchain must
+  // all match the stamp, or the stamp is stale and the check runs
+  // fresh. A hit returns the stamped result untouched — no probe,
+  // no decode — with a `stamp` marker saying so.
+  const args = await canonicalCheckArgs({ platform, content, contentStart, contentEnd, peakThresholdDb, expectedDuration, faststart, decodedWork, palette, paletteBrand, policy: qcPolicy, baseline });
+  const stampPath = checkStampPath(inPath);
+  let stampInfo = null;
+  if (useStamp) {
+    const read = await readStampFile(stampPath);
+    if (!read.ok) {
+      stampInfo = { used: false, reason: read.reason };
+    } else if (read.doc.schema !== CHECK_STAMP_SCHEMA) {
+      stampInfo = { used: false, reason: "stamp_invalid" };
+    } else {
+      const mediaSha256 = await hashFile(inPath);
+      const mediaSize = (await fileInfo(inPath)).size_bytes;
+      const env = await stampEnvironment();
+      if (read.doc.media?.sha256 !== mediaSha256 || read.doc.media?.size_bytes !== mediaSize) {
+        stampInfo = { used: false, reason: "media_changed" };
+      } else if (stableStringify(read.doc.args ?? null) !== stableStringify(args)) {
+        stampInfo = { used: false, reason: "args_mismatch" };
+      } else if (stableStringify(read.doc.environment ?? null) !== stableStringify(env)) {
+        stampInfo = { used: false, reason: "environment_mismatch" };
+      } else {
+        return { ...read.doc.result, stamp: { used: true, file: stampPath, created_at: read.doc.created_at } };
+      }
+    }
   }
   // Same ±0.5s tolerance as qa_report's expected_duration: a render
   // that lands within half a second of the brief is on-spec; beyond
@@ -6297,7 +6437,7 @@ export async function check({ input, platform = "tiktok", content = false, conte
   }
   const failed = checks.filter((c) => !c.pass && c.severity !== "warn");
   const warnings = checks.filter((c) => !c.pass && c.severity === "warn");
-  return {
+  const result = {
     operation: "check", input: inPath, platform, platform_label: spec.label,
     policy: qcPolicy, pass: failed.length === 0,
     // A light result is a partial gate by design: the decode-heavy
@@ -6318,6 +6458,27 @@ export async function check({ input, platform = "tiktok", content = false, conte
     ...(failed.length ? { issues: failed.map((c) => `${c.name}: ${c.actual} (want ${c.expected})${c.hint ? ` — ${c.hint}` : ""}`) } : {}),
     ...(warnings.length ? { warnings: warnings.map((c) => `${c.name}: ${c.actual} (want ${c.expected})${c.hint ? ` — ${c.hint}` : ""}`) } : {}),
   };
+  // Stamp the fresh result when asked: the stored result is the
+  // clean verdict (no `stamp` field inside the stamp itself), and
+  // the returned result reports what the stamp did — a miss reason
+  // from --use-stamp, and the written file when --stamp ran.
+  if (stamp) {
+    const mediaSha256 = await hashFile(inPath);
+    const mediaSize = (await fileInfo(inPath)).size_bytes;
+    const stampDoc = {
+      schema: CHECK_STAMP_SCHEMA,
+      tool: "mediakit-for-agents",
+      mediakit_version: MEDIAKIT_VERSION,
+      created_at: new Date().toISOString(),
+      media: { file: path.basename(inPath), sha256: mediaSha256, size_bytes: mediaSize },
+      args,
+      environment: await stampEnvironment(),
+      result,
+    };
+    const written = await writeStampFile(stampPath, stampDoc);
+    stampInfo = { used: false, ...(stampInfo?.reason ? { reason: stampInfo.reason } : {}), written };
+  }
+  return { ...result, ...(stampInfo ? { stamp: stampInfo } : {}) };
 }
 
 // ---------------------------------------------------------------- qa_report
@@ -20626,7 +20787,7 @@ async function diagnoseFrameMeanDiff(aPng, bPng) {
   return +(+m[1]).toFixed(2);
 }
 
-export async function diagnoseFilm({ manifestPath, styleFile = null }) {
+export async function diagnoseFilm({ manifestPath, styleFile = null, stamp = false, useStamp = false }) {
   const manifestAbs = await requireInput(manifestPath, "film manifest");
   let doc;
   try {
@@ -20654,6 +20815,54 @@ export async function diagnoseFilm({ manifestPath, styleFile = null }) {
   const checks = [];
   const add = (id, severity, message, extra = {}) => checks.push({ id, severity, message, ...extra });
   const built = deriveAssembleHandles(plan.shots, plan.fps);
+  // The style file is resolved here (not inside the checks below)
+  // because the QC stamp keys on it: an explicit --style-file wins,
+  // otherwise the style.json sitting next to the film is used, so a
+  // project scaffolded by init_project scores itself without flags.
+  // The film fingerprint already covers the manifest, voice, music,
+  // sfx, captions, assets and brand — but NOT the external style
+  // file, so the stamp records its hash separately: editing the
+  // style re-opens the preflight, the same way editing a shot does.
+  let stylePath = null;
+  let styleSource = null;
+  if (styleFile) {
+    stylePath = await requireInput(styleFile, "style file");
+    styleSource = "explicit";
+  } else {
+    const sibling = path.join(path.dirname(manifestAbs), "style.json");
+    try {
+      await access(sibling, fsConstants.R_OK);
+      stylePath = sibling;
+      styleSource = "auto";
+    } catch {
+      // No style.json next to the film: no style check at all.
+    }
+  }
+  // QC stamp reuse (same contract as check, see the stamp section):
+  // the film fingerprint + style hash + toolchain must all match,
+  // or the stamp is stale and the preflight runs fresh. A hit
+  // returns the stamped verdict untouched — no frame extraction, no
+  // loudness decode — with a `stamp` marker saying so.
+  const stampPath = diagnoseStampPath(manifestAbs);
+  const styleHash = stylePath ? await hashFile(stylePath) : null;
+  let stampInfo = null;
+  if (useStamp) {
+    const read = await readStampFile(stampPath);
+    if (!read.ok) {
+      stampInfo = { used: false, reason: read.reason };
+    } else if (read.doc.schema !== DIAGNOSE_STAMP_SCHEMA) {
+      stampInfo = { used: false, reason: "stamp_invalid" };
+    } else {
+      const env = await stampEnvironment();
+      if (read.doc.fingerprint !== plan.fingerprint || read.doc.style_sha256 !== styleHash) {
+        stampInfo = { used: false, reason: "film_changed" };
+      } else if (stableStringify(read.doc.environment ?? null) !== stableStringify(env)) {
+        stampInfo = { used: false, reason: "environment_mismatch" };
+      } else {
+        return { ...read.doc.result, stamp: { used: true, file: stampPath, created_at: read.doc.created_at } };
+      }
+    }
+  }
   const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-diagnose-"));
   try {
     add("timeline", "info",
@@ -20703,21 +20912,6 @@ export async function diagnoseFilm({ manifestPath, styleFile = null }) {
     // cuts to compare (Takes' PACE_MIN_S) — that is an info, not a
     // pass. A broken style file is an error: a style that cannot be
     // read must not silently score nothing.
-    let stylePath = null;
-    let styleSource = null;
-    if (styleFile) {
-      stylePath = await requireInput(styleFile, "style file");
-      styleSource = "explicit";
-    } else {
-      const sibling = path.join(path.dirname(manifestAbs), "style.json");
-      try {
-        await access(sibling, fsConstants.R_OK);
-        stylePath = sibling;
-        styleSource = "auto";
-      } catch {
-        // No style.json next to the film: no style check at all.
-      }
-    }
     if (stylePath) {
       let styleDoc = null;
       let styleError = null;
@@ -20966,7 +21160,7 @@ export async function diagnoseFilm({ manifestPath, styleFile = null }) {
   const warnings = checks.filter((c) => c.severity === "warn").length;
   const verdict = errors ? "fail" : warnings ? "warn" : "pass";
   const firstIssue = checks.find((c) => c.severity === "error" || c.severity === "warn")?.message ?? null;
-  return {
+  const result = {
     manifest: manifestAbs,
     title: plan.title,
     verdict,
@@ -20985,6 +21179,26 @@ export async function diagnoseFilm({ manifestPath, styleFile = null }) {
         ? `${warnings} warning${warnings === 1 ? "" : "s"} to look at before rendering; first: ${firstIssue}`
         : `${errors} error${errors === 1 ? "" : "s"} — fix before rendering; first: ${firstIssue}`,
   };
+  // Stamp the fresh verdict when asked: the stored result is the
+  // clean verdict (no `stamp` field inside the stamp itself), keyed
+  // on the film fingerprint + style hash + toolchain.
+  if (stamp) {
+    const stampDoc = {
+      schema: DIAGNOSE_STAMP_SCHEMA,
+      tool: "mediakit-for-agents",
+      mediakit_version: MEDIAKIT_VERSION,
+      created_at: new Date().toISOString(),
+      film: path.basename(manifestAbs),
+      fingerprint: plan.fingerprint,
+      style_sha256: styleHash,
+      style_source: styleSource,
+      environment: await stampEnvironment(),
+      result,
+    };
+    const written = await writeStampFile(stampPath, stampDoc);
+    stampInfo = { used: false, ...(stampInfo?.reason ? { reason: stampInfo.reason } : {}), written };
+  }
+  return { ...result, ...(stampInfo ? { stamp: stampInfo } : {}) };
 }
 
 // ---------------------------------------------------------------- render jobs

@@ -137,6 +137,20 @@ the ceiling — 250B pixel-frames / 6B sample-channels, plus per-stream
 limits (3600s, 8192px, 120fps, 8ch, 192kHz). A 4K60 hour is 1.79T
 pixel-frames and will warn; re-encode smaller/shorter first, or split
 the job, instead of OOMing mid-render. `doctor` reports the ceilings.
+A QC stamp (`--stamp`, `stamp: true` over MCP) writes a sidecar
+`<input>.mediakit-check.json` next to the file — the verdict, the exact
+args, the media sha256/size, and the ffmpeg/ffprobe versions, written
+atomically. `--use-stamp` (`use_stamp: true` over MCP) reuses it
+instead of re-running the check when the media, the args and the
+toolchain all still match, and reports `stamp.used=false` with the
+stale reason (`no_stamp`/`media_changed`/`args_mismatch`/
+`environment_mismatch`/`stamp_invalid`) when they do not — a stamp
+never overrides a fresh run, it only skips a re-check of an unchanged
+file. Both flags are refused under `--policy skip` (a skip measures
+nothing, so there is nothing to stamp or reuse). Do not confuse the QC
+stamp file with the policy=skip result above, which the docs also call
+"the stamp" for a cache-hit proxy render — the QC stamp is a sidecar
+file that records a real measurement.
 
 ### 5. Even dimensions
 H.264 (yuv420p) needs even width/height. `resize` with `keep_aspect`
@@ -909,10 +923,19 @@ cut. The 15 chars/s bar is calibrated, not copied: their 6 is for
 Chinese dialogue (one character = one syllable), while Kokoro
 af_heart speed 1.0 English narration measures 10.8–14.0 chars/s — 6
 would warn on every normal English film. `.ass` captions are styled,
-so density is not measured for them. Probe-only, writes nothing. A
-broken manifest returns verdict `fail` with `format_error` instead of
-throwing, so fix the manifest and re-run diagnose in a loop — a `warn`
-verdict is still renderable, a `fail` is not.
+so density is not measured for them. Probe-only by default — it writes
+nothing unless `--stamp` is given. A broken manifest returns verdict
+`fail` with `format_error` instead of throwing, so fix the manifest and
+re-run diagnose in a loop — a `warn` verdict is still renderable, a
+`fail` is not. A QC stamp (`--stamp`, `stamp: true` over MCP) writes a
+sidecar `<film>.mediakit-diagnose.json` keyed on the film fingerprint
+(manifest + voice + music + sfx + captions + assets + brand) plus the
+style file hash and the ffmpeg/ffprobe versions; `--use-stamp`
+(`use_stamp: true` over MCP) reuses it instead of re-running the
+preflight when the film, the style and the toolchain all still match,
+and reports `stamp.used=false` with the stale reason (`no_stamp`/
+`film_changed`/`environment_mismatch`/`stamp_invalid`) when they do
+not — a stamp never overrides a fresh run.
 
 ### 33g. Chapters come from measured pauses — never guess a timecode
 A chapter list is only useful when its times are measured, not

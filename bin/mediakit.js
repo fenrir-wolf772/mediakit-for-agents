@@ -266,8 +266,8 @@ const COMMANDS = {
     ],
   },
   check: {
-    usage: "mediakit check <input> [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin] [--expected-duration <s|MM:SS>] [--content] [--start <s|MM:SS>] [--end <s|MM:SS>] [--peak-threshold <dB>] [--baseline <file.json>] [--faststart] [--decoded-work] [--palette \"#hex,#hex,#hex\"] [--palette-brand amber-teal|warm-story|minimal-line] [--policy skip|light|full]",
-    desc: "Verify a file against a platform delivery spec (dimensions, codecs, duration, loudness). --expected-duration fails when the measured duration is more than 0.5s off the brief. --content also scans for black/frozen frames, silence and audio peaks; --start/--end scan only that time range. --baseline <file.json> (needs --content) forgives spans already in the source: a previous check --content result (or a plain {black,freeze,silence,peaks} span list) — spans it covers are reported as pre-existing and do not fail the gate, so only NEW spans fail. --decoded-work also estimates the decode load and warns when it is over the ceiling. Video and audio stream durations must agree within ±0.2s (audio_sync, always checked when both durations are measurable). --palette (2-6 hex colors) or --palette-brand measures frames at 2 fps against a locked look: per-color shares, off-palette share, mean luma, crushed/blown share, luma swing — crushed or blown past 2% fails. --policy sets the QC tier (idea: OpenEdit qc/policy.py): full (default) runs every requested detector; light runs probe-based rules only and refuses --content/--baseline/--palette (decode-heavy detectors are skipped, reported in `skipped` with complete:false — a light pass is not a full verification); skip runs nothing at all (no probe, no decode) and returns pass:true, complete:false with the skipped list. Env MEDIAKIT_QC_POLICY is the default when --policy is absent.",
+    usage: "mediakit check <input> [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin] [--expected-duration <s|MM:SS>] [--content] [--start <s|MM:SS>] [--end <s|MM:SS>] [--peak-threshold <dB>] [--baseline <file.json>] [--faststart] [--decoded-work] [--palette \"#hex,#hex,#hex\"] [--palette-brand amber-teal|warm-story|minimal-line] [--policy skip|light|full] [--stamp] [--use-stamp]",
+    desc: "Verify a file against a platform delivery spec (dimensions, codecs, duration, loudness). --expected-duration fails when the measured duration is more than 0.5s off the brief. --content also scans for black/frozen frames, silence and audio peaks; --start/--end scan only that time range. --baseline <file.json> (needs --content) forgives spans already in the source: a previous check --content result (or a plain {black,freeze,silence,peaks} span list) — spans it covers are reported as pre-existing and do not fail the gate, so only NEW spans fail. --decoded-work also estimates the decode load and warns when it is over the ceiling. Video and audio stream durations must agree within ±0.2s (audio_sync, always checked when both durations are measurable). --palette (2-6 hex colors) or --palette-brand measures frames at 2 fps against a locked look: per-color shares, off-palette share, mean luma, crushed/blown share, luma swing — crushed or blown past 2% fails. --policy sets the QC tier (idea: OpenEdit qc/policy.py): full (default) runs every requested detector; light runs probe-based rules only and refuses --content/--baseline/--palette (decode-heavy detectors are skipped, reported in `skipped` with complete:false — a light pass is not a full verification); skip runs nothing at all (no probe, no decode) and returns pass:true, complete:false with the skipped list. Env MEDIAKIT_QC_POLICY is the default when --policy is absent. --stamp writes a QC stamp sidecar <input>.mediakit-check.json (the verdict + the exact args + the media sha256/size + the ffmpeg/ffprobe versions, written atomically); --use-stamp reuses it instead of re-running the check when the media, the args and the toolchain all still match, and reports stamp.used=false with the stale reason (no_stamp/media_changed/args_mismatch/environment_mismatch/stamp_invalid) when they do not — a stamp never overrides a fresh run. --stamp/--use-stamp are refused under --policy skip (a skip measures nothing, so there is nothing to stamp or reuse).",
     args: [{ name: "input", required: true }],
     options: [
       ["--platform", "Delivery platform (default tiktok)"],
@@ -282,6 +282,8 @@ const COMMANDS = {
       ["--palette", "Locked look as 2-6 comma-separated hex colors, e.g. \"#DCC0A0,#A02D19,#1B2740\" (mutually exclusive with --palette-brand)"],
       ["--palette-brand", "Locked look as a brand id: amber-teal | warm-story | minimal-line (same registry as assemble; mutually exclusive with --palette)"],
       ["--policy", "QC policy tier: full (default, every requested detector runs), light (probe-based rules only — refuses --content/--baseline/--palette, reports skipped + complete:false), skip (no probe or decode — pass:true, complete:false, skipped list; env MEDIAKIT_QC_POLICY is the default when --policy is absent)"],
+      ["--stamp", "Write a QC stamp sidecar <input>.mediakit-check.json (the verdict + the exact args + the media sha256/size + the ffmpeg/ffprobe versions, written atomically)"],
+      ["--use-stamp", "Reuse the QC stamp instead of re-running the check when the media, the args and the toolchain all still match; reports stamp.used=false with the stale reason (no_stamp/media_changed/args_mismatch/environment_mismatch/stamp_invalid) when they do not — a stamp never overrides a fresh run; refused under --policy skip"],
     ],
   },
   "qa-report": {
@@ -1004,11 +1006,13 @@ const COMMANDS = {
     ],
   },
   diagnose: {
-    usage: "mediakit diagnose <film.json> [--style-file <style.json>]",
-    desc: "Director preflight for an assemble film manifest: validate the manifest, then measure what validation cannot — real motion inside each video shot's exact window (a frozen video is an error), source geometry vs the film frame (upscale over 2x or a low fps warns), the visual seam across each transition, voice loudness, caption coverage and gaps, music loop count, sfx tails past the film end, chapter alignment to cuts, text layers that are too tall or sit in the burned-caption band, and style pace (cuts per minute + longest hold scored against the style.json — an explicit --style-file, or the style.json sitting next to the film; films under 15s are too short to compare), and per-shot pacing (a run of 3+ same-look shots, a shot under 1s or over 15s, dialogue denser than 15 chars/s). Probe-only, writes nothing. A broken manifest reports verdict fail with format_error instead of exiting 2. Run it after writing a film.json and before approve/render; run verify after the render.",
+    usage: "mediakit diagnose <film.json> [--style-file <style.json>] [--stamp] [--use-stamp]",
+    desc: "Director preflight for an assemble film manifest: validate the manifest, then measure what validation cannot — real motion inside each video shot's exact window (a frozen video is an error), source geometry vs the film frame (upscale over 2x or a low fps warns), the visual seam across each transition, voice loudness, caption coverage and gaps, music loop count, sfx tails past the film end, chapter alignment to cuts, text layers that are too tall or sit in the burned-caption band, and style pace (cuts per minute + longest hold scored against the style.json — an explicit --style-file, or the style.json sitting next to the film; films under 15s are too short to compare), and per-shot pacing (a run of 3+ same-look shots, a shot under 1s or over 15s, dialogue denser than 15 chars/s). Probe-only, writes nothing. A broken manifest reports verdict fail with format_error instead of exiting 2. Run it after writing a film.json and before approve/render; run verify after the render. --stamp writes a QC stamp sidecar <film>.mediakit-diagnose.json keyed on the film fingerprint (manifest + voice + music + sfx + captions + assets + brand) plus the style file hash and the ffmpeg/ffprobe versions; --use-stamp reuses it instead of re-running the preflight when the film, the style and the toolchain all still match, and reports stamp.used=false with the stale reason (no_stamp/film_changed/environment_mismatch/stamp_invalid) when they do not — a stamp never overrides a fresh run.",
     args: [{ name: "manifest", required: true }],
     options: [
       ["--style-file", "Style file to score the film's pace against (default: style.json next to the film manifest, when it exists)"],
+      ["--stamp", "Write a QC stamp sidecar <film>.mediakit-diagnose.json keyed on the film fingerprint + style file hash + toolchain versions (written atomically)"],
+      ["--use-stamp", "Reuse the QC stamp instead of re-running the preflight when the film, the style and the toolchain all still match; reports stamp.used=false with the stale reason when they do not"],
     ],
   },
   "align-voice": {
@@ -1577,6 +1581,8 @@ async function main() {
           palette: opts.palette ?? null,
           paletteBrand: opts.palette_brand ?? null,
           policy: opts.policy ?? null,
+          stamp: opts.stamp === true,
+          useStamp: opts.use_stamp === true,
         });
         break;
       }
@@ -2358,6 +2364,8 @@ async function main() {
         result = await core.diagnoseFilm({
           manifestPath: positional[0],
           styleFile: opts.style_file ?? null,
+          stamp: opts.stamp === true,
+          useStamp: opts.use_stamp === true,
         });
         break;
       }
