@@ -4522,6 +4522,26 @@ const levelsNoAudio = await callExpectThrow("audio_levels", { input: path.join(r
 checkOk(/needs an audio stream/.test(levelsNoAudio), "audio_levels refuses an input with no audio stream", levelsNoAudio.slice(0, 120));
 const levelsCap = await callExpectThrow("audio_levels", { input: path.join(root, "test/levels-long.mp3"), bucket_seconds: 0.1 });
 checkOk(/cap 3600/.test(levelsCap), "audio_levels refuses a bucket grid over the 3600 cap (400s at 0.1s)", levelsCap.slice(0, 120));
+// audio_levels dynamics (lượt 155, Synkinema analyze_audio idea):
+// p10/p90 nearest-rank percentiles + separation verdict + whether a
+// bed fills the speech gaps. Fixtures: levels-source (quiet/loud/
+// silent/medium), levels-bed (same shape, -55 dB bed tone in the
+// gaps), levels-nobed (same shape, true digital silence in the
+// gaps), levels-flat (constant tone, no gaps at all).
+const dyn = levelsJson.summary.dynamics;
+checkOk(near(dyn.quiet_p10_db, -51.53, 0.5) && near(dyn.loud_p90_db, -21.07, 0.5) && near(dyn.separation_db, 30.46, 0.5) && dyn.verdict === "wide" && dyn.gap_buckets === 5 && near(dyn.gap_bed_db, -51.53, 0.5) && dyn.bed_fills_speech_gaps === true, "audio_levels dynamics on levels-source: p10 -51.53 / p90 -21.07 / separation 30.46 wide, 5 gap buckets filled at -51.53", JSON.stringify(dyn));
+const levelsBedRes = await client.callTool({ name: "audio_levels", arguments: { input: path.join(root, "test/levels-bed.wav") } });
+const levelsBedJson = JSON.parse(levelsBedRes.content[0].text);
+const dynBed = levelsBedJson.summary.dynamics;
+checkOk(near(dynBed.quiet_p10_db, -55.05, 0.5) && near(dynBed.loud_p90_db, -27.09, 0.5) && near(dynBed.separation_db, 27.96, 0.5) && dynBed.verdict === "wide" && dynBed.gap_buckets === 6 && near(dynBed.gap_bed_db, -53.79, 0.5) && dynBed.bed_fills_speech_gaps === true, "audio_levels dynamics on levels-bed: p10 -55.05 / p90 -27.09 / separation 27.96 wide, 6 gap buckets filled at -53.79 (bed tone in the gaps)", JSON.stringify(dynBed));
+const levelsNoBedRes = await client.callTool({ name: "audio_levels", arguments: { input: path.join(root, "test/levels-nobed.wav") } });
+const levelsNoBedJson = JSON.parse(levelsNoBedRes.content[0].text);
+const dynNoBed = levelsNoBedJson.summary.dynamics;
+checkOk(near(dynNoBed.quiet_p10_db, -41.51, 0.5) && near(dynNoBed.loud_p90_db, -27.09, 0.5) && near(dynNoBed.separation_db, 14.42, 0.5) && dynNoBed.verdict === "dynamic" && dynNoBed.gap_buckets === 5 && dynNoBed.gap_bed_db === null && dynNoBed.bed_fills_speech_gaps === false, "audio_levels dynamics on levels-nobed: p10 -41.51 / p90 -27.09 / separation 14.42 dynamic, 5 gap buckets of digital silence (gap_bed null, bed_fills false)", JSON.stringify(dynNoBed));
+const levelsFlatRes = await client.callTool({ name: "audio_levels", arguments: { input: path.join(root, "test/levels-flat.wav") } });
+const levelsFlatJson = JSON.parse(levelsFlatRes.content[0].text);
+const dynFlat = levelsFlatJson.summary.dynamics;
+checkOk(dynFlat.quiet_p10_db === -27.09 && dynFlat.loud_p90_db === -27.09 && dynFlat.separation_db === 0 && dynFlat.verdict === "flat" && dynFlat.gap_buckets === 0 && dynFlat.gap_bed_db === null && dynFlat.bed_fills_speech_gaps === false, "audio_levels dynamics on levels-flat: p10 = p90 = -27.09, separation 0 flat, no gaps at all", JSON.stringify(dynFlat));
 // CLI wiring: kebab-case command, --bucket/--top/--min-gap options,
 // min_gap 0 keeps adjacent buckets (peaks 2.5, 3).
 const levelsCli = await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "audio-levels", path.join(root, "test/levels-source.wav"), "--bucket", "0.5", "--top", "2", "--min-gap", "0"]);

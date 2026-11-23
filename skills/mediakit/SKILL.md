@@ -1769,14 +1769,30 @@ fake -inf — plus a summary (`max_peak_db`, energy-mean `mean_rms_db`,
 `loudest_bucket`) and the `--top` loudest moments (default 5) kept at
 least `--min-gap` apart (default 2s, so a 3s shout does not fill the
 list with its own neighbours; near-equal peaks tie at 0.1 dB and the
-earliest wins). Use it to pick the loudest moment to feature, to
-find the quietest stretch to cut on, or to check a mix's dynamic
-range before publishing. A 12s fixture with a quiet / loud / silent /
-medium tone reads buckets -51.5 / -21.1 / null / -31.5 dB RMS and
-peaks at 2s, 4s, 9s (the 2s bucket is the frame straddling the 3s
-switch, so its peak already reads loud while its RMS is still mixed). Cap: at most 3600 buckets — a long file needs a
-wider `--bucket`. Like the other audio probes it is a probe-only step
-in `batch` and `manifest`.
+earliest wins). The summary also carries `dynamics` (same decode, no
+extra cost): `quiet_p10_db` / `loud_p90_db` are nearest-rank
+percentiles over the finite bucket RMS values, `separation_db` is
+p90 − p10 with a verdict — flat (<6 dB), narrow (<12), dynamic
+(<24), wide (beyond) — and `bed_fills_speech_gaps` tells you
+whether the gaps between loud moments still carry something
+audible: a gap bucket is true digital silence or ≥20 dB below the
+loud p90, and the flag is true when those gaps still average above
+−60 dBFS (`gap_bed_db` is their energy-mean RMS). Use it to pick the
+loudest moment to feature, to find the quietest stretch to cut on,
+or to check a mix's dynamic range before publishing — a mix whose
+gaps read digital silence has no bed under the pauses, a mix whose
+`gap_bed_db` sits around −54 dB has one. A 12s fixture with a quiet
+/ loud / silent / medium tone reads buckets -51.5 / -21.1 / null /
+-31.5 dB RMS and peaks at 2s, 4s, 9s (the 2s bucket is the frame
+straddling the 3s switch, so its peak already reads loud while its
+RMS is still mixed), with dynamics p10 −51.5 / p90 −21.1 /
+separation 30.5 dB (wide) and the gaps filled at −51.5 dB; the same
+shape with true digital silence in the gaps reads
+`bed_fills_speech_gaps: false` and `gap_bed_db: null`, and a
+constant tone reads separation 0 dB (flat) with no gaps at all. Cap:
+at most 3600 buckets — a long file needs a wider `--bucket`. Like
+the other audio probes it is a probe-only step in `batch` and
+`manifest`.
 
 ### 58b. Find the phrase before you cut — `search_words`
 `cut_words` cuts by word, but it needs you to already know WHICH

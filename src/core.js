@@ -15625,6 +15625,39 @@ export async function audioLevels({ input, bucketSeconds = 1, topN = 5, minGapSe
   }
   const finiteRms = buckets.filter((b) => b.rms_db !== null).map((b) => b.rms_db);
   const loudest = buckets.reduce((best, b) => (b.peak_db !== null && (best === null || b.peak_db > best.peak_db)) ? b : best, null);
+  // Dynamics (dziksu/synkinema `analyze_audio` idea: quiet_p10 /
+  // loud_p90 / separation_db / bed_fills_speech_gaps, computed from
+  // the same bucket curve — no extra decode). Percentiles are
+  // nearest-rank over the finite bucket RMS values, so p10/p90 are
+  // real bucket readings, not interpolated guesses. Verdict bands
+  // are MediaKit's own, calibrated on the fixtures: a constant tone
+  // reads ~0 dB separation (flat), a quiet/loud/medium take reads
+  // ~30 dB (wide). A "gap" bucket is true digital silence (null) or
+  // at least 20 dB below the loud p90 — speech is gone there; if
+  // those buckets still carry finite energy above -60 dBFS, something
+  // audible (a bed, room tone) fills the gaps instead of digital
+  // silence, which is what a director checks on a mix before
+  // publishing. The threshold is relative, not an absolute -50 dBFS,
+  // so a -45 dB bed under -9 dB speech still counts as filling the
+  // gap instead of being mistaken for speech.
+  const sortedRms = [...finiteRms].sort((a, b) => a - b);
+  const percentile = (p) => {
+    if (!sortedRms.length) return null;
+    return sortedRms[Math.max(1, Math.ceil((p / 100) * sortedRms.length)) - 1];
+  };
+  const quietP10 = percentile(10);
+  const loudP90 = percentile(90);
+  const separation = (quietP10 !== null && loudP90 !== null) ? +(loudP90 - quietP10).toFixed(2) : null;
+  const dynamicsVerdict = separation === null ? null : separation < 6 ? "flat" : separation < 12 ? "narrow" : separation < 24 ? "dynamic" : "wide";
+  const gapThreshold = loudP90 === null ? null : loudP90 - 20;
+  const gapBuckets = gapThreshold === null ? buckets : buckets.filter((b) => b.rms_db === null || b.rms_db < gapThreshold);
+  let gapPower = 0;
+  let gapFrames = 0;
+  for (const b of gapBuckets) {
+    if (b.rms_db !== null) { gapPower += Math.pow(10, b.rms_db / 10); gapFrames++; }
+  }
+  const gapBedDb = gapFrames ? +(10 * Math.log10(gapPower / gapFrames)).toFixed(2) : null;
+  const bedFillsGaps = gapBedDb !== null && gapBedDb > -60;
   // pickPeaks (losslesscut-mcp's idea): rank by peak, keep the top N
   // at least min_gap apart. Ranking quantizes to 0.1 dB so buckets
   // that are only a rounding apart tie and the earliest wins.
@@ -15653,6 +15686,15 @@ export async function audioLevels({ input, bucketSeconds = 1, topN = 5, minGapSe
       dynamic_range_db: finiteRms.length ? +(Math.max(...finiteRms) - Math.min(...finiteRms)).toFixed(2) : null,
       silent_buckets: buckets.filter((b) => b.rms_db === null).length,
       loudest_bucket: loudest ? { start: loudest.start, end: loudest.end, peak_db: loudest.peak_db, rms_db: loudest.rms_db } : null,
+      dynamics: {
+        quiet_p10_db: quietP10,
+        loud_p90_db: loudP90,
+        separation_db: separation,
+        verdict: dynamicsVerdict,
+        gap_buckets: gapBuckets.length,
+        gap_bed_db: gapBedDb,
+        bed_fills_speech_gaps: bedFillsGaps,
+      },
     },
     peaks,
   };

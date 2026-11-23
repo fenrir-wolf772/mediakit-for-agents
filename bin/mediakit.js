@@ -820,7 +820,7 @@ const COMMANDS = {
   },
   "audio-levels": {
     usage: "mediakit audio-levels <input> [--bucket 1] [--top 5] [--min-gap 2]",
-    desc: "Loudness curve + loudest moments of an audio stream. One decode pass: per-frame astats Peak + RMS bucketed into --bucket windows (default 1s), RMS averaged in the linear domain. Returns every bucket {start, end, rms_db, peak_db} (true digital silence reports nulls), a summary (max peak, energy-mean RMS, min/max bucket RMS, dynamic range, silent buckets, loudest bucket) and the --top loudest moments kept at least --min-gap apart (default 2s). Probe-only, writes no file.",
+    desc: "Loudness curve + loudest moments of an audio stream. One decode pass: per-frame astats Peak + RMS bucketed into --bucket windows (default 1s), RMS averaged in the linear domain. Returns every bucket {start, end, rms_db, peak_db} (true digital silence reports nulls), a summary (max peak, energy-mean RMS, min/max bucket RMS, dynamic range, silent buckets, loudest bucket) and the --top loudest moments kept at least --min-gap apart (default 2s). The summary also carries dynamics: quiet_p10 / loud_p90 percentiles, separation_db with a flat/narrow/dynamic/wide verdict, and bed_fills_speech_gaps (true when the gaps between loud moments still carry audible energy above -60 dBFS instead of digital silence). Probe-only, writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--bucket", "Bucket width in seconds, 0.1-60 (default 1; at most 3600 buckets)"],
