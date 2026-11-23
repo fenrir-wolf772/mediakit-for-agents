@@ -1529,14 +1529,14 @@
       "family": "edit",
       "tier": "WRITE",
       "summary": "Ken Burns effect: turn a still image into a moving clip (zoompan filter).",
-      "description": "Ken Burns effect: turn a still image into a moving clip (zoompan filter). Zooms linearly from zoom_from to zoom_to while the focus point moves from (focus_x, focus_y) to (focus_end_x, focus_end_y) — all 0-1 fractions of the frame, 0.5 is center. The input is pre-scaled 1.25x before zooming (avoids the integer-crop jitter zoompan is known for). Input must be a still image, not a video. The result counts frames on the output file, so duration and fps are measured, not assumed. Set dry_run=true to print the exact ffmpeg command and write no file (zoom/focus expressions are computed from the arguments, so they are exact; duration/frames report null — measured on the real output).",
+      "description": "Ken Burns effect: turn a still image into a moving clip (zoompan filter). Zooms linearly from zoom_from to zoom_to while the focus point moves from (focus_x, focus_y) to (focus_end_x, focus_end_y) — all 0-1 fractions of the frame, 0.5 is center. The input is pre-scaled 1.25x before zooming (avoids the integer-crop jitter zoompan is known for). Input must be a still image, not a video — unless events_file is set: chain mode takes a VIDEO and drives the same zoompan filter (d=1, one output frame per input frame) from an event timeline [{time, x, y, hold?}] (JSON file; a bare array or {\"events\": [...]}). Events closer than chain_gap_seconds group into one chain — the camera stays zoomed and pans between targets, arriving at each exactly at its time; wider gaps split chains and the camera zooms out to the full frame between them. Per chain: zoom-in starts pre_lead_seconds before the first event and takes transition_seconds, the last target is held hold_seconds past its time, then zoom-out takes transition_seconds; pans start pan_seconds before the next event. In chain mode the output keeps the input's dimensions, fps and duration (image-mode options are ignored) and the input audio is copied (AAC 192k). The result counts frames on the output file, so duration and fps are measured, not assumed. Set dry_run=true to print the exact ffmpeg command and write no file (zoom/focus expressions are computed from the arguments, so they are exact; duration/frames report null — measured on the real output).",
       "inputSchema": {
         "type": "object",
         "properties": {
           "input": {
             "type": "string",
             "minLength": 1,
-            "description": "Still image file (PNG/JPG/WebP)"
+            "description": "Still image file (PNG/JPG/WebP) — or a video file when events_file is set (chain mode)"
           },
           "output": {
             "type": "string",
@@ -1548,14 +1548,14 @@
             "minimum": 0.5,
             "maximum": 600,
             "default": 5,
-            "description": "Clip length in seconds (default 5)"
+            "description": "Clip length in seconds, image mode only (default 5)"
           },
           "fps": {
             "type": "integer",
             "minimum": 1,
             "maximum": 120,
             "default": 30,
-            "description": "Output frame rate (default 30)"
+            "description": "Output frame rate, image mode only (default 30)"
           },
           "zoom_from": {
             "type": "number",
@@ -1621,6 +1621,52 @@
             "type": "boolean",
             "default": false,
             "description": "Print the exact ffmpeg command and write no file"
+          },
+          "events_file": {
+            "$ref": "#/properties/output",
+            "description": "Chain mode: JSON file of camera events [{time, x, y, hold?}] (x/y 0-1, time in seconds, sorted) — switches the input to video and the camera to the event timeline"
+          },
+          "zoom": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 8,
+            "default": 2,
+            "description": "Chain mode: zoom level while zoomed in, 1 = full frame (default 2)"
+          },
+          "chain_gap_seconds": {
+            "type": "number",
+            "minimum": 0.1,
+            "maximum": 60,
+            "default": 2.5,
+            "description": "Chain mode: gap between events above which a new chain starts (default 2.5)"
+          },
+          "transition_seconds": {
+            "type": "number",
+            "minimum": 0.05,
+            "maximum": 2,
+            "default": 0.3,
+            "description": "Chain mode: seconds to zoom in/out (default 0.3)"
+          },
+          "pre_lead_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 2,
+            "default": 0.2,
+            "description": "Chain mode: seconds before the first event of a chain to start zooming in (default 0.2)"
+          },
+          "pan_seconds": {
+            "type": "number",
+            "minimum": 0.05,
+            "maximum": 2,
+            "default": 0.25,
+            "description": "Chain mode: seconds before the next event to start panning to it (default 0.25)"
+          },
+          "hold_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 10,
+            "default": 0.8,
+            "description": "Chain mode: seconds to hold the last target of a chain past its event time (default 0.8)"
           }
         },
         "required": [
@@ -5665,5 +5711,5 @@
       }
     }
   ],
-  "spec_hash": "037fe52f510737db0fc9386df1d4c9fd7cf5ed156b8c9399a5fa65b16c840c76"
+  "spec_hash": "721b0ccbafec8e51d5e21eb518e994259eff6bcdbda1befd7d1ce196af508881"
 }

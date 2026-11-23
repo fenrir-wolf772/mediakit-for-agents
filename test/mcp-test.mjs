@@ -15,7 +15,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
-import { applyContentBaseline, averageHash, compareDeterminismRuns, countClippedRuns, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, explainError, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, inspectionPointTimestamps, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
+import { applyContentBaseline, averageHash, buildZoomChains, compareDeterminismRuns, countClippedRuns, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, explainError, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, inspectionPointTimestamps, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, parseZoomChainEvents, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
@@ -1847,6 +1847,93 @@ checkOk(zoomDryJson.dry_run === true && zoomDryJson.dimensions === "640x360" && 
 checkOk(zoomDryJson.commands?.length === 1 && zoomDryJson.commands[0].includes("zoompan=z=") && zoomDryJson.commands[0].includes("d=90") && zoomDryJson.commands[0].includes("s=640x360"), "zoom_pan dry-run command carries the zoompan filter for 90 frames at 640x360", zoomDryJson.commands?.[0] ?? "");
 const zoomBad = await callExpectThrow("zoom_pan", { input: path.join(root, "test/kenburns.png"), output: path.join(root, "outputs/mcp-zoompan-bad2.mp4"), zoom_to: 0 });
 checkOk(/zoom_to/.test(zoomBad), "zoom_pan refuses zoom_to below 1", zoomBad.slice(0, 200));
+
+// zoom_pan chain mode (lượt 152, Pagecast zoom chains): a VIDEO input
+// + an events file drives the camera. Fixture
+// test/zoomchain-source.mp4 is 1280x720 6s 30fps, left half red /
+// right half blue + 440Hz tone, so a 2x window on the left is solid
+// red and on the right solid blue — every hold is checkable against
+// a crop computed by hand, exactly like the image-mode tests above.
+// Pure timing first (no ffmpeg): two events 4s apart split into two
+// chains, two events 1s apart stay one chain.
+const chainPlan = buildZoomChains([{ time: 1, x: 0.25, y: 0.5, hold: 0.8 }, { time: 5, x: 0.75, y: 0.5, hold: 0.8 }], {}, 6);
+checkOk(chainPlan.length === 2 && chainPlan[0].startZoom === 0.8 && chainPlan[0].zoomedAt === 1.1 && chainPlan[0].unzoomAt === 1.8 && chainPlan[0].endZoom === 2.1 && chainPlan[1].startZoom === 4.8 && chainPlan[1].zoomedAt === 5.1 && chainPlan[1].unzoomAt === 5.8 && chainPlan[1].endZoom === 6, "buildZoomChains splits 2 events 4s apart into chains [0.8,1.1,1.8,2.1] + [4.8,5.1,5.8,6]", JSON.stringify(chainPlan));
+const panPlan = buildZoomChains([{ time: 1, x: 0.25, y: 0.5, hold: 0.8 }, { time: 2, x: 0.75, y: 0.5, hold: 0.8 }], {}, 6);
+checkOk(panPlan.length === 1 && panPlan[0].startZoom === 0.8 && panPlan[0].zoomedAt === 1.1 && panPlan[0].unzoomAt === 2.8 && panPlan[0].endZoom === 3.1, "buildZoomChains keeps 2 events 1s apart in one chain [0.8,1.1,2.8,3.1]", JSON.stringify(panPlan));
+function expectThrowSync(fn, re, label) {
+  try { fn(); } catch (e) { checkOk(re.test(e.message), label, e.message.slice(0, 200)); return; }
+  checkOk(false, label, "did not throw");
+}
+expectThrowSync(() => parseZoomChainEvents([{ time: 2, x: 0.5, y: 0.5 }, { time: 1, x: 0.5, y: 0.5 }], 6), /sorted/, "parseZoomChainEvents refuses unsorted events");
+expectThrowSync(() => parseZoomChainEvents([{ time: 7, x: 0.5, y: 0.5 }], 6), /within the video/, "parseZoomChainEvents refuses an event past the duration");
+expectThrowSync(() => parseZoomChainEvents([{ time: 1, x: 1.5, y: 0.5 }], 6), /x must be 0/, "parseZoomChainEvents refuses x outside 0-1");
+expectThrowSync(() => buildZoomChains([{ time: 1, x: 0.25, y: 0.5, hold: 0.8 }, { time: 2, x: 0.75, y: 0.5, hold: 0.8 }], { chainGapSeconds: 0.1, transitionSeconds: 2 }, 6), /overlap/, "buildZoomChains refuses chains whose zoom windows overlap");
+const zoomChainRes = await client.callTool({
+  name: "zoom_pan",
+  arguments: { input: path.join(root, "test/zoomchain-source.mp4"), output: path.join(root, "outputs/mcp-zoomchain.mp4"), events_file: path.join(root, "test/zoomchain-events.json") },
+});
+const zoomChainJson = JSON.parse(zoomChainRes.content[0].text);
+console.log("zoom_pan chain call:", JSON.stringify(zoomChainJson).slice(0, 600));
+checkOk(zoomChainJson.mode === "chain" && zoomChainJson.frames === 180 && near(zoomChainJson.duration_seconds, 6, 0.15) && zoomChainJson.dimensions === "1280x720" && zoomChainJson.fps === 30 && zoomChainJson.has_audio === true && zoomChainJson.chains?.length === 2, "zoom_pan chain mode renders 6s 30fps 1280x720 with 180 frames, audio kept, 2 chains", JSON.stringify(zoomChainJson).slice(0, 400));
+// Expected frames, computed by hand from the source (same frame
+// number, plain ffmpeg crop) — not through the tool under test.
+async function expectedChainFrame(frameNo, vf, out) {
+  await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-i", path.join(root, "test/zoomchain-source.mp4"), "-vf", `select='eq(n\\,${frameNo})',${vf}`, "-frames:v", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", out]);
+}
+await frameMp4(path.join(root, "outputs/mcp-zoomchain.mp4"), 1, path.join(root, "outputs/mcp-zoomchain-f1.mp4"));
+await frameMp4(path.join(root, "outputs/mcp-zoomchain.mp4"), 45, path.join(root, "outputs/mcp-zoomchain-f45.mp4"));
+await frameMp4(path.join(root, "outputs/mcp-zoomchain.mp4"), 90, path.join(root, "outputs/mcp-zoomchain-f90.mp4"));
+await frameMp4(path.join(root, "outputs/mcp-zoomchain.mp4"), 165, path.join(root, "outputs/mcp-zoomchain-f165.mp4"));
+await expectedChainFrame(1, "scale=1280:720", path.join(root, "outputs/mcp-zoomchain-exp-full1.mp4"));
+await expectedChainFrame(45, "crop=640:360:0:180,scale=1280:720", path.join(root, "outputs/mcp-zoomchain-exp-red.mp4"));
+await expectedChainFrame(45, "scale=1280:720", path.join(root, "outputs/mcp-zoomchain-exp-full45.mp4"));
+await expectedChainFrame(90, "scale=1280:720", path.join(root, "outputs/mcp-zoomchain-exp-full90.mp4"));
+await expectedChainFrame(165, "crop=640:360:640:180,scale=1280:720", path.join(root, "outputs/mcp-zoomchain-exp-blue.mp4"));
+const zcF1 = await psnrY(path.join(root, "outputs/mcp-zoomchain-exp-full1.mp4"), path.join(root, "outputs/mcp-zoomchain-f1.mp4"));
+const zcF45Red = await psnrY(path.join(root, "outputs/mcp-zoomchain-exp-red.mp4"), path.join(root, "outputs/mcp-zoomchain-f45.mp4"));
+const zcF45Full = await psnrY(path.join(root, "outputs/mcp-zoomchain-exp-full45.mp4"), path.join(root, "outputs/mcp-zoomchain-f45.mp4"));
+const zcF90 = await psnrY(path.join(root, "outputs/mcp-zoomchain-exp-full90.mp4"), path.join(root, "outputs/mcp-zoomchain-f90.mp4"));
+const zcF165Blue = await psnrY(path.join(root, "outputs/mcp-zoomchain-exp-blue.mp4"), path.join(root, "outputs/mcp-zoomchain-f165.mp4"));
+console.log("zoom_pan chain PSNR: f1 vs full =", zcF1, "| f45 vs red =", zcF45Red, "vs full =", zcF45Full, "| f90 vs full =", zcF90, "| f165 vs blue =", zcF165Blue);
+checkOk(zcF1 !== null && zcF1 > 40, "zoom_pan chain frame 1 is the full frame (before the first chain)", `PSNR ${zcF1}`);
+checkOk(zcF45Red !== null && zcF45Red > 40 && zcF45Full !== null && zcF45Red > zcF45Full + 10, "zoom_pan chain frame 45 is the 2x left window, solid red (not the full frame)", `red ${zcF45Red} vs full ${zcF45Full}`);
+checkOk(zcF90 !== null && zcF90 > 40, "zoom_pan chain frame 90 is the full frame again (between chains)", `PSNR ${zcF90}`);
+checkOk(zcF165Blue !== null && zcF165Blue > 40, "zoom_pan chain frame 165 is the 2x right window, solid blue", `PSNR ${zcF165Blue}`);
+// One chain, pan left -> right: hold red at t=1.5, hold blue at
+// t=2.5 (pan arrived at 2.0), full frame again at t=4.0.
+const zoomPanChainRes = await client.callTool({
+  name: "zoom_pan",
+  arguments: { input: path.join(root, "test/zoomchain-source.mp4"), output: path.join(root, "outputs/mcp-zoomchain-pan.mp4"), events_file: path.join(root, "test/zoomchain-pan-events.json") },
+});
+const zoomPanChainJson = JSON.parse(zoomPanChainRes.content[0].text);
+checkOk(zoomPanChainJson.chains?.length === 1 && zoomPanChainJson.chains[0].unzoomAt === 2.8, "zoom_pan pan chain is one chain holding to 2.8s", JSON.stringify(zoomPanChainJson.chains));
+await frameMp4(path.join(root, "outputs/mcp-zoomchain-pan.mp4"), 45, path.join(root, "outputs/mcp-zoomchain-pan-f45.mp4"));
+await frameMp4(path.join(root, "outputs/mcp-zoomchain-pan.mp4"), 75, path.join(root, "outputs/mcp-zoomchain-pan-f75.mp4"));
+await frameMp4(path.join(root, "outputs/mcp-zoomchain-pan.mp4"), 120, path.join(root, "outputs/mcp-zoomchain-pan-f120.mp4"));
+await expectedChainFrame(75, "crop=640:360:640:180,scale=1280:720", path.join(root, "outputs/mcp-zoomchain-pan-exp-blue.mp4"));
+await expectedChainFrame(120, "scale=1280:720", path.join(root, "outputs/mcp-zoomchain-pan-exp-full120.mp4"));
+const zcpF45 = await psnrY(path.join(root, "outputs/mcp-zoomchain-exp-red.mp4"), path.join(root, "outputs/mcp-zoomchain-pan-f45.mp4"));
+const zcpF75 = await psnrY(path.join(root, "outputs/mcp-zoomchain-pan-exp-blue.mp4"), path.join(root, "outputs/mcp-zoomchain-pan-f75.mp4"));
+const zcpF120 = await psnrY(path.join(root, "outputs/mcp-zoomchain-pan-exp-full120.mp4"), path.join(root, "outputs/mcp-zoomchain-pan-f120.mp4"));
+console.log("zoom_pan pan-chain PSNR: f45 vs red =", zcpF45, "| f75 vs blue =", zcpF75, "| f120 vs full =", zcpF120);
+checkOk(zcpF45 !== null && zcpF45 > 40, "zoom_pan pan chain frame 45 holds the left window (red)", `PSNR ${zcpF45}`);
+checkOk(zcpF75 !== null && zcpF75 > 40, "zoom_pan pan chain frame 75 holds the right window (blue) after the pan", `PSNR ${zcpF75}`);
+checkOk(zcpF120 !== null && zcpF120 > 40, "zoom_pan pan chain frame 120 is the full frame again (after zoom-out)", `PSNR ${zcpF120}`);
+// Chain dry-run: exact command, chains echoed, nothing written.
+const zoomChainDryRes = await client.callTool({
+  name: "zoom_pan",
+  arguments: { input: path.join(root, "test/zoomchain-source.mp4"), output: path.join(root, "outputs/mcp-zoomchain-dry.mp4"), events_file: path.join(root, "test/zoomchain-pan-events.json"), dry_run: true },
+});
+const zoomChainDryJson = JSON.parse(zoomChainDryRes.content[0].text);
+checkOk(zoomChainDryJson.dry_run === true && zoomChainDryJson.mode === "chain" && zoomChainDryJson.frames === null && zoomChainDryJson.chains?.length === 1 && !existsSync(path.join(root, "outputs/mcp-zoomchain-dry.mp4")), "zoom_pan chain dry-run reports 1 chain, frames null, writes nothing", JSON.stringify(zoomChainDryJson).slice(0, 300));
+checkOk(zoomChainDryJson.commands?.length === 1 && zoomChainDryJson.commands[0].includes("zoompan=z=") && zoomChainDryJson.commands[0].includes("fps=30") && zoomChainDryJson.commands[0].includes("d=1"), "zoom_pan chain dry-run command carries the zoompan filter at input fps with d=1", zoomChainDryJson.commands?.[0]?.slice(0, 200) ?? "");
+// Chain refusals: image input, missing events file, bad zoom.
+const zoomChainImg = await callExpectThrow("zoom_pan", { input: path.join(root, "test/kenburns.png"), output: path.join(root, "outputs/mcp-zoomchain-bad.mp4"), events_file: path.join(root, "test/zoomchain-events.json") });
+checkOk(/needs a video/.test(zoomChainImg), "zoom_pan chain mode refuses a still image input", zoomChainImg.slice(0, 200));
+const zoomChainMissing = await callExpectThrow("zoom_pan", { input: path.join(root, "test/zoomchain-source.mp4"), output: path.join(root, "outputs/mcp-zoomchain-bad2.mp4"), events_file: path.join(root, "outputs/mcp-zoomchain-nope.json") });
+checkOk(/not found/.test(zoomChainMissing), "zoom_pan chain mode refuses a missing events file", zoomChainMissing.slice(0, 200));
+const zoomChainBadZoom = await callExpectThrow("zoom_pan", { input: path.join(root, "test/zoomchain-source.mp4"), output: path.join(root, "outputs/mcp-zoomchain-bad3.mp4"), events_file: path.join(root, "test/zoomchain-events.json"), zoom: 0 });
+checkOk(/zoom/.test(zoomChainBadZoom), "zoom_pan chain mode refuses zoom below 1", zoomChainBadZoom.slice(0, 200));
 
 // image_to_video: one still image -> fixed-duration video that holds
 // still. Frame 0 must match the source scaled to 640x360 (PSNR > 40,

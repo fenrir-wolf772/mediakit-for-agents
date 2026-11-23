@@ -8094,9 +8094,207 @@ export async function chromaKey({ input, output, color = "00FF00", similarity = 
 // Frame 0 is exactly the full image (zoom z0, focus start) and the
 // last frame is exactly the zoomed window (zoom z1, focus end) —
 // the test suite verifies both against crops computed independently.
-export async function zoomPan({ input, output, duration = 5, fps = 30, zoomFrom = 1, zoomTo = 1.5, focusX = 0.5, focusY = 0.5, focusEndX = null, focusEndY = null, width = 1280, height = 720, crf = 23, onProgress = null, dryRun = false }) {
+//
+// Chain mode (--events-file, Pagecast's zoom-chain idea, lượt 152):
+// the SAME zoompan filter, but on a VIDEO input (d=1, so one output
+// frame per input frame — no stretch) driven by an event timeline
+// instead of a linear interpolation. Events are {time, x, y, hold?}
+// focus points the camera must be on; events closer than
+// --chain-gap group into one chain (camera stays zoomed and pans
+// between targets), wider gaps split chains (camera zooms out to
+// the full frame between them). Timing per chain mirrors Pagecast:
+// zoom in starts --pre-lead before the first event, takes
+// --transition to reach full zoom, holds the last target --hold
+// past its time, then zooms out over --transition; pans arrive at
+// the next target exactly at its time, starting --pan earlier.
+// All moves use an inline smoothstep (no st()/ld() storage —
+// Pagecast notes those are not thread-safe in ffmpeg's evaluator).
+// Why zoompan and not Pagecast's crop filter: measured 2026-11-23
+// on ffmpeg 8.1.2, crop's w/h expressions are evaluated ONCE at
+// init (a w='if(between(t,1.1,1.8),640,iw)' stays full-frame at
+// t=1.5, while an x expression on the same build DOES move per
+// frame) — so a crop-based zoom cannot change size over time on
+// this build, and zoompan (z/x/y all evaluated per frame, driven
+// by `time`, x/y reading the live `zoom`) is the mechanism that
+// works. zoompan's fps defaults to 25, so the filter is always
+// given the input fps explicitly.
+function zoomChainFmt(n) {
+  return (+n).toFixed(3);
+}
+function zoomChainSmooth(from, to, t0, t1) {
+  const d = t1 - t0;
+  if (d <= 0) return String(to);
+  const p = `clip((time-${zoomChainFmt(t0)})/${zoomChainFmt(d)},0,1)`;
+  const s = `${p}*${p}*(3-2*${p})`;
+  return `${from}+(${to}-${from})*(${s})`;
+}
+// Piecewise time expression: segments [{a, b, expr}] in time order
+// plus a default. Earliest segment is outermost, so a shared
+// boundary resolves to the earlier segment — continuous anyway,
+// because every smoothstep meets its hold value at both ends.
+function zoomChainPiecewise(segments, def) {
+  let e = def;
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const s = segments[i];
+    e = `if(between(time,${zoomChainFmt(s.a)},${zoomChainFmt(s.b)}),${s.expr},${e})`;
+  }
+  return e;
+}
+// Focus (0-1) along one axis over time: hold each target, pan to
+// the next so the camera arrives exactly at the next event's time.
+function zoomChainFocusExpr(chains, axis) {
+  const segs = [];
+  for (const c of chains) {
+    const tg = c.targets;
+    segs.push({ a: c.startZoom, b: tg[0].time, expr: String(tg[0][axis]) });
+    for (let i = 0; i < tg.length - 1; i++) {
+      const cur = tg[i], nxt = tg[i + 1];
+      const panEnd = nxt.time;
+      const panStart = Math.max(cur.time + 0.05, panEnd - c.panDuration);
+      if (panStart < panEnd && cur[axis] !== nxt[axis]) {
+        segs.push({ a: cur.time, b: panStart, expr: String(cur[axis]) });
+        segs.push({ a: panStart, b: panEnd, expr: zoomChainSmooth(cur[axis], nxt[axis], panStart, panEnd) });
+      } else {
+        segs.push({ a: cur.time, b: panEnd, expr: String(cur[axis]) });
+      }
+    }
+    segs.push({ a: tg[tg.length - 1].time, b: c.endZoom, expr: String(tg[tg.length - 1][axis]) });
+  }
+  return zoomChainPiecewise(segs, "0.5");
+}
+function zoomChainZoomExpr(chains) {
+  const segs = [];
+  for (const c of chains) {
+    segs.push({ a: c.startZoom, b: c.zoomedAt, expr: zoomChainSmooth(1, c.zoomLevel, c.startZoom, c.zoomedAt) });
+    segs.push({ a: c.zoomedAt, b: c.unzoomAt, expr: String(c.zoomLevel) });
+    segs.push({ a: c.unzoomAt, b: c.endZoom, expr: zoomChainSmooth(c.zoomLevel, 1, c.unzoomAt, c.endZoom) });
+  }
+  return zoomChainPiecewise(segs, "1");
+}
+// Group validated events into chains and time each chain. Pure —
+// exported so the test suite can pin the timing without ffmpeg.
+// Timings are rounded to milliseconds: raw float sums like
+// 2.8 + 0.3 = 3.0999999999999996 leak into the echoed plan and
+// break exact comparisons downstream (the suite pins endZoom 3.1).
+function zoomChainRound3(n) {
+  return Math.round(n * 1000) / 1000;
+}
+export function buildZoomChains(events, { zoom = 2, chainGapSeconds = 2.5, transitionSeconds = 0.3, preLeadSeconds = 0.2, panSeconds = 0.25, holdSeconds = 0.8 } = {}, duration) {
+  const groups = [[events[0]]];
+  for (let i = 1; i < events.length; i++) {
+    const prev = events[i - 1];
+    if (events[i].time - (prev.time + prev.hold) > chainGapSeconds) groups.push([events[i]]);
+    else groups[groups.length - 1].push(events[i]);
+  }
+  const chains = groups.map((g) => {
+    const first = g[0];
+    const targets = g.map((e) => ({ time: e.time, holdUntil: zoomChainRound3(e.time + e.hold), x: e.x, y: e.y }));
+    const startZoom = zoomChainRound3(Math.max(0, first.time - preLeadSeconds));
+    const zoomedAt = zoomChainRound3(Math.min(startZoom + transitionSeconds, duration));
+    const unzoomAt = zoomChainRound3(Math.min(targets[targets.length - 1].holdUntil, duration));
+    const endZoom = zoomChainRound3(Math.min(unzoomAt + transitionSeconds, duration));
+    return { startZoom, zoomedAt, unzoomAt, endZoom, targets, zoomLevel: zoom, panDuration: panSeconds };
+  });
+  for (let i = 1; i < chains.length; i++) {
+    if (chains[i].startZoom < chains[i - 1].endZoom) {
+      throw new MediaKitError(
+        `zoom_pan chains overlap: chain ${i + 1} starts zooming at ${chains[i].startZoom}s but chain ${i} only finishes zooming out at ${chains[i - 1].endZoom}s — raise --chain-gap or lower --transition so chains stay apart`,
+        "INVALID_ARG",
+      );
+    }
+  }
+  return chains;
+}
+// Validate + normalize a parsed events file against the video
+// duration. Accepts a bare array or {"events": [...]}. Pure.
+export function parseZoomChainEvents(value, duration) {
+  const list = Array.isArray(value) ? value : value?.events;
+  if (!Array.isArray(list) || list.length === 0) {
+    throw new MediaKitError("zoom_pan events_file must hold a JSON array of events (or {\"events\": [...]}) with at least one {time, x, y} event", "INVALID_ARG");
+  }
+  let prevTime = -Infinity;
+  return list.map((raw, i) => {
+    const label = `event ${i + 1}`;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new MediaKitError(`zoom_pan ${label} must be an object {time, x, y, hold?}`, "INVALID_ARG");
+    }
+    const time = Number(raw.time);
+    if (!Number.isFinite(time) || time < 0 || time > duration) {
+      throw new MediaKitError(`zoom_pan ${label} time must be within the video (0–${duration}s), got ${raw.time}`, "INVALID_ARG");
+    }
+    if (time <= prevTime) {
+      throw new MediaKitError(`zoom_pan events must be sorted by time, strictly increasing — ${label} at ${time}s is not after the previous event at ${prevTime}s`, "INVALID_ARG");
+    }
+    prevTime = time;
+    const x = Number(raw.x), y = Number(raw.y);
+    if (!Number.isFinite(x) || x < 0 || x > 1) throw new MediaKitError(`zoom_pan ${label} x must be 0–1 (fraction of frame width), got ${raw.x}`, "INVALID_ARG");
+    if (!Number.isFinite(y) || y < 0 || y > 1) throw new MediaKitError(`zoom_pan ${label} y must be 0–1 (fraction of frame height), got ${raw.y}`, "INVALID_ARG");
+    const hold = raw.hold === undefined || raw.hold === null ? 0.8 : Number(raw.hold);
+    if (!Number.isFinite(hold) || hold < 0 || hold > 10) {
+      throw new MediaKitError(`zoom_pan ${label} hold must be 0–10 seconds, got ${raw.hold}`, "INVALID_ARG");
+    }
+    return { time, x, y, hold };
+  });
+}
+// The zoompan filter for a chain plan. Pure — x/y read the live
+// `zoom`, so the window tracks the zoom level through transitions.
+export function buildZoomChainFilter(chains, width, height, fps) {
+  const fx = zoomChainFocusExpr(chains, "x");
+  const fy = zoomChainFocusExpr(chains, "y");
+  const z = zoomChainZoomExpr(chains);
+  const xExpr = `min(max(${fx}*iw-iw/zoom/2,0),iw-iw/zoom)`;
+  const yExpr = `min(max(${fy}*ih-ih/zoom/2,0),ih-ih/zoom)`;
+  return `zoompan=z='${z}':x='${xExpr}':y='${yExpr}':d=1:s=${width}x${height}:fps=${fps}`;
+}
+export async function zoomPan({ input, output, duration = 5, fps = 30, zoomFrom = 1, zoomTo = 1.5, focusX = 0.5, focusY = 0.5, focusEndX = null, focusEndY = null, width = 1280, height = 720, crf = 23, onProgress = null, dryRun = false, eventsFile = null, zoom = 2, chainGapSeconds = 2.5, transitionSeconds = 0.3, preLeadSeconds = 0.2, panSeconds = 0.25, holdSeconds = 0.8 }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
+  const c = num(crf, "crf", { min: 0, max: 51, integer: true });
+  const meta = await probe(inPath);
+  if (eventsFile !== null && eventsFile !== undefined) {
+    // ---- chain mode: video input, event timeline drives the camera.
+    const z = num(zoom, "zoom", { min: 1, max: 8 });
+    const chainGap = num(chainGapSeconds, "chain_gap_seconds", { min: 0.1, max: 60 });
+    const transition = num(transitionSeconds, "transition_seconds", { min: 0.05, max: 2 });
+    const preLead = num(preLeadSeconds, "pre_lead_seconds", { min: 0, max: 2 });
+    const pan = num(panSeconds, "pan_seconds", { min: 0.05, max: 2 });
+    const hold = num(holdSeconds, "hold_seconds", { min: 0, max: 10 });
+    if (!meta.video || meta.duration_seconds === null) {
+      throw new MediaKitError("zoom_pan --events-file needs a video input — a still image has no timeline for the camera to follow (use the plain Ken Burns mode for images)", "INVALID_ARG");
+    }
+    const eventsPath = await requireInput(eventsFile, "events_file");
+    let rawEvents;
+    try {
+      rawEvents = JSON.parse(await readFile(eventsPath, "utf8"));
+    } catch (e) {
+      throw new MediaKitError(`zoom_pan events_file is not valid JSON: ${e.message}`, "INVALID_ARG");
+    }
+    const events = parseZoomChainEvents(rawEvents, meta.duration_seconds);
+    const chains = buildZoomChains(events, { zoom: z, chainGapSeconds: chainGap, transitionSeconds: transition, preLeadSeconds: preLead, panSeconds: pan, holdSeconds: hold }, meta.duration_seconds);
+    const dims = displayDims(meta);
+    const W = dims.width, H = dims.height;
+    const fpsIn = meta.video.fps ?? 30;
+    const vf = buildZoomChainFilter(chains, W, H, fpsIn);
+    const args = ["-y", "-i", inPath, "-vf", vf, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", String(c), "-preset", "medium"];
+    if (meta.audio) args.push("-c:a", "aac", ...audioBitrateArgs("aac"));
+    args.push(outPath);
+    const base = {
+      operation: "zoom_pan", mode: "chain", input: inPath, output: outPath,
+      dimensions: `${W}x${H}`, fps: fpsIn, has_audio: Boolean(meta.audio),
+      events_file: eventsPath, events, chains,
+      zoom: z, chain_gap_seconds: chainGap, transition_seconds: transition,
+      pre_lead_seconds: preLead, pan_seconds: pan, hold_seconds: hold,
+      note: "Chain mode: the image-mode options (duration/fps/width/height/focus/zoom_from/zoom_to) are ignored — the output keeps the input's dimensions, fps and duration.",
+    };
+    if (dryRun) {
+      return { ...base, dry_run: true, duration_seconds: null, expected_duration_seconds: meta.duration_seconds, frames: null, size_bytes: null, commands: [formatCommand(args)] };
+    }
+    await runFfmpegWithProgress(args, { totalSeconds: meta.duration_seconds, onProgress });
+    const info = await fileInfo(outPath);
+    const out = await probe(outPath);
+    const frames = await countVideoFrames(outPath);
+    return { ...base, duration_seconds: out.duration_seconds, frames, size_bytes: info.size_bytes };
+  }
   const dur = num(duration, "duration", { min: 0.5, max: 600 });
   const f = num(fps, "fps", { min: 1, max: 120, integer: true });
   const z0 = num(zoomFrom, "zoom_from", { min: 1, max: 10 });
@@ -8108,11 +8306,9 @@ export async function zoomPan({ input, output, duration = 5, fps = 30, zoomFrom 
   const w = num(width, "width", { min: 2, max: 7680, integer: true });
   const h = num(height, "height", { min: 2, max: 4320, integer: true });
   if (w % 2 || h % 2) throw new MediaKitError(`zoom_pan width/height must be even (got ${w}x${h})`, "INVALID_ARG");
-  const c = num(crf, "crf", { min: 0, max: 51, integer: true });
-  const meta = await probe(inPath);
   if (!meta.video) throw new MediaKitError("zoom_pan needs a still image input", "INVALID_ARG");
   if (meta.audio || meta.duration_seconds !== null) {
-    throw new MediaKitError("zoom_pan takes a still image, not a video (zoompan would stretch a video by d frames per input frame — extract a frame first)", "INVALID_ARG");
+    throw new MediaKitError("zoom_pan takes a still image, not a video (zoompan would stretch a video by d frames per input frame — extract a frame first, or pass --events-file for the camera-chain mode)", "INVALID_ARG");
   }
   const n = Math.max(2, Math.round(dur * f));
   const preW = Math.ceil((w * 1.25) / 2) * 2;
@@ -8133,7 +8329,7 @@ export async function zoomPan({ input, output, duration = 5, fps = 30, zoomFrom 
   ];
   if (dryRun) {
     return {
-      operation: "zoom_pan", dry_run: true, input: inPath, output: outPath,
+      operation: "zoom_pan", mode: "image", dry_run: true, input: inPath, output: outPath,
       duration_seconds: null,
       expected_duration_seconds: dur,
       dimensions: `${w}x${h}`,
@@ -8150,7 +8346,7 @@ export async function zoomPan({ input, output, duration = 5, fps = 30, zoomFrom 
   const out = await probe(outPath);
   const frames = await countVideoFrames(outPath);
   return {
-    operation: "zoom_pan", input: inPath, output: outPath,
+    operation: "zoom_pan", mode: "image", input: inPath, output: outPath,
     duration_seconds: out.duration_seconds,
     dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
     fps: out.video?.fps ?? null, frames,

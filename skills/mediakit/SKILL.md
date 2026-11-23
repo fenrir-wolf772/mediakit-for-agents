@@ -1236,11 +1236,17 @@ Ken Burns clip: zoom `--zoom-from` → `--zoom-to` while the focus
 point travels from (`--focus-x`, `--focus-y`) to (`--focus-end-x`,
 `--focus-end-y`), 0–1 fractions of the frame. A video input is
 refused (zoompan would stretch it by `d` frames per input frame) —
-extract a frame first. Verify a zoom the same way the test suite
-does: frame 0 against the full image scaled, the last frame against
-the zoomed window cropped by hand — both must match within a few dB
-of PSNR, and the last frame must be clearly closer to the zoomed
-crop than to the full image.
+unless `--events-file` is set: chain mode takes a video and an
+event timeline `[{time, x, y, hold?}]` (Pagecast's zoom-chain idea)
+and drives the camera through it — close events group into one
+chain that pans between targets, wide gaps split chains with a
+zoom-out to the full frame in between (`--zoom`/`--chain-gap`/
+`--transition`/`--pre-lead`/`--pan`/`--hold`; output keeps the
+input's dimensions, fps and duration). Verify a zoom the same way
+the test suite does: frame 0 against the full image scaled, the
+last frame against the zoomed window cropped by hand — both must
+match within a few dB of PSNR, and the last frame must be clearly
+closer to the zoomed crop than to the full image.
 
 ### 43. Cut words by transcript, never by hand-typed times
 `transcribe --word-timestamps` returns the words with 0-based
