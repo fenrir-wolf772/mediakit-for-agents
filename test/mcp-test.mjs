@@ -8491,6 +8491,35 @@ const assembleApprovalPath = path.join(assembleStage.dir, "assemble-film.assembl
 const assembleValidateRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleStage.manifestPath, mode: "validate" } });
 const assembleValidateJson = JSON.parse(assembleValidateRes.content[0].text);
 checkOk(assembleValidateJson.total_seconds === 10 && assembleValidateJson.total_frames === 300 && assembleValidateJson.shots?.length === 4 && assembleValidateJson.voice?.duration_seconds === 9 && /^[0-9a-f]{64}$/.test(assembleValidateJson.fingerprint ?? ""), "assemble validate reports 10s / 300 frames / 4 shots / 9s voice + fingerprint", JSON.stringify(assembleValidateJson).slice(0, 200));
+// Lượt 148: assemble --mode plan — the director's storyboard disclosure
+// (kinocut's video_direct idea): the resolved timeline, frame-exact,
+// with joins, the audio timeline and chapters with ends. Fixture
+// test/assemble-film-transitions.json: same 10s film, fades/dissolve
+// into s2/s3/s4, 9s music bed, sfx beep at 2s.
+const planStage = await stageAssembleManifest("assemble-film-transitions.json");
+const planRes = await client.callTool({ name: "assemble", arguments: { manifest_path: planStage.manifestPath, mode: "plan" } });
+const planJson = JSON.parse(planRes.content[0].text);
+checkOk(planJson.mode === "plan" && planJson.total_seconds === 10 && planJson.total_frames === 300 && planJson.timeline?.length === 4 && typeof planJson.note === "string" && /does not approve/.test(planJson.note), "assemble plan reports mode plan, 10s / 300 frames / 4 timeline shots, and says it is not an approval", JSON.stringify({ mode: planJson.mode, total: planJson.total_seconds, shots: planJson.timeline?.length }));
+checkOk(JSON.stringify(planJson.timeline?.map((t) => [t.id, t.start_seconds, t.end_seconds, t.start_frame, t.end_frame])) === JSON.stringify([["s1", 0, 4, 0, 120], ["s2", 4, 8, 120, 240], ["s3", 8, 9, 240, 270], ["s4", 9, 10, 270, 300]]), "assemble plan timeline is frame-exact: s1 0-4s/0-120f, s2 4-8s, s3 8-9s, s4 9-10s", JSON.stringify(planJson.timeline?.map((t) => `${t.id}:${t.start_seconds}-${t.end_seconds}s/${t.start_frame}-${t.end_frame}f`)));
+checkOk(JSON.stringify(planJson.joins?.map((j) => [j.into_shot, j.type, j.offset_seconds])) === JSON.stringify([["s2", "fade", 3.5], ["s3", "dissolve", 7.733], ["s4", "fade", 8.733]]), "assemble plan joins: fade into s2 at 3.5s, dissolve into s3 at 7.733s, fade into s4 at 8.733s", JSON.stringify(planJson.joins));
+checkOk(planJson.audio?.voice?.lead_seconds === 0.5 && planJson.audio?.voice?.voice_seconds === 9 && planJson.audio?.voice?.tail_seconds === 0.5 && planJson.audio?.voice?.voice_start_seconds === 0.5 && planJson.audio?.voice?.voice_end_seconds === 9.5, "assemble plan audio: voice window 0.5-9.5s inside lead 0.5 + tail 0.5", JSON.stringify(planJson.audio?.voice));
+checkOk(planJson.audio?.music?.duration_seconds === 9 && planJson.audio?.music?.loops === 2 && planJson.audio?.music?.volume === 0.3 && planJson.audio?.music?.duck_db === 12, "assemble plan audio: 9s music bed loops 2x over the 10s film", JSON.stringify(planJson.audio?.music));
+checkOk(planJson.audio?.sfx?.[0]?.at_seconds === 2 && planJson.audio?.sfx?.[0]?.duration_seconds === 0.5 && planJson.audio?.sfx?.[0]?.end_seconds === 2.5, "assemble plan audio: sfx beep at 2s, 0.5s long, ends 2.5s", JSON.stringify(planJson.audio?.sfx));
+const planChaptersStage = await stageAssembleManifest("assemble-chapters.json");
+const planChaptersRes = await client.callTool({ name: "assemble", arguments: { manifest_path: planChaptersStage.manifestPath, mode: "plan" } });
+const planChaptersJson = JSON.parse(planChaptersRes.content[0].text);
+checkOk(JSON.stringify(planChaptersJson.chapters?.map((c) => [c.title, c.at_seconds, c.end_seconds])) === JSON.stringify([["Intro", 0, 3.5], ["The turn", 3.5, 7], ["The payoff", 7, 10]]), "assemble plan chapters carry ends: Intro 0-3.5, The turn 3.5-7, The payoff 7-10", JSON.stringify(planChaptersJson.chapters));
+const planTextStage = await stageAssembleManifest("assemble-text.json");
+const planTextRes = await client.callTool({ name: "assemble", arguments: { manifest_path: planTextStage.manifestPath, mode: "plan" } });
+const planTextJson = JSON.parse(planTextRes.content[0].text);
+const planT1 = planTextJson.timeline?.find((t) => t.id === "t1");
+const planT2 = planTextJson.timeline?.find((t) => t.id === "t2");
+checkOk(planT1?.text_layers?.[0]?.film_start_seconds === 0.5 && planT1?.text_layers?.[0]?.film_end_seconds === 1.5 && planT2?.text_layers?.[0]?.film_start_seconds === 3 && planT2?.text_layers?.[0]?.film_end_seconds === 5, "assemble plan text layers carry film-time windows: t1 0.5-1.5s, t2 3-5s (shot starts 0s / 2s + layer 1-3s)", JSON.stringify([planT1?.text_layers?.[0], planT2?.text_layers?.[0]].map((l) => `${l?.film_start_seconds}-${l?.film_end_seconds}s`)));
+const planGapText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-gap.json"), mode: "plan" });
+checkOk(/short by 15 frames/.test(planGapText ?? ""), "assemble plan refuses shots 15 frames short, like validate", planGapText ?? "");
+checkOk(!existsSync(path.join(planStage.dir, "assemble-film-transitions.assemble-approval.json")), "assemble plan writes no approval file (a plan is a disclosure, not an approval)", planStage.dir);
+const planCli = await runCliJson(["assemble", planStage.manifestPath, "--mode", "plan"]);
+checkOk(planCli.mode === "plan" && planCli.timeline?.length === 4 && planCli.joins?.length === 3 && planCli.audio?.music?.loops === 2, "CLI assemble --mode plan returns the same disclosure", JSON.stringify({ mode: planCli.mode, shots: planCli.timeline?.length, joins: planCli.joins?.length }));
 const assembleGapText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-gap.json"), mode: "validate" });
 checkOk(/short by 15 frames/.test(assembleGapText ?? ""), "assemble validate refuses shots 15 frames short of the voice timeline", assembleGapText ?? "");
 const assembleStaticText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-static.json"), mode: "validate" });

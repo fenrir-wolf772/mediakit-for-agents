@@ -10,11 +10,20 @@ This is NOT the `manifest` tool. `manifest` runs a linear edit pipeline
 (input → steps → output). `assemble` builds a film from many shots on
 one timeline, with the voice as the master clock.
 
-## The four modes
+## The five modes
 
 1. **`validate`** — reads the manifest, probes the voice and every
    asset, checks the timeline math. Writes nothing. Run this before
    anything renders; a typo fails here in seconds.
+2. **`plan`** — the director's storyboard disclosure (kinocut's
+   `video_direct` idea): the resolved timeline as the director would
+   read it — every shot with its film-time start/end in seconds AND
+   frames, every transition with its blend offset, the audio timeline
+   (voice window, music loops, SFX with ends), chapters with ends.
+   Writes nothing and records nothing: a plan is a disclosure, not
+   an approval — preview + approve are still required before render.
+   Run it after `validate` when you want to read the film before
+   you see it.
 2. **`preview`** — renders the first N seconds (default 20) at half
    resolution, with voice, music, SFX and captions, and writes
    `preview.mp4` + `preview.json` (with the fingerprint). Show the
@@ -479,6 +488,7 @@ in a detached worker process. Poll it with the `job` tool:
 
 ```bash
 mediakit assemble film.json --mode validate
+mediakit assemble film.json --mode plan
 mediakit assemble film.json --mode preview -o out/ --preview-seconds 20
 mediakit assemble film.json --mode approve -o out/
 mediakit assemble film.json --mode render -o out/

@@ -931,11 +931,11 @@ const COMMANDS = {
     ],
   },
   assemble: {
-    usage: "mediakit assemble <film.json> --mode validate|preview|approve|render [-o <output-dir>] [--preview-seconds 20] [--force] [--async]",
-    desc: "Film assembler: build a finished video from one declarative film manifest (shots on a voice-led timeline, mixed audio, burned captions, QA + receipt). The voice is the master clock — total = lead + measured voice + tail, and shots must cover it exactly in frames. validate checks the math and writes nothing; preview renders the first N seconds at half size; approve records the fingerprint of the previewed files (a human must have seen the preview); render needs a matching approval unless --force. --async (render mode only) returns a job_id immediately and renders in the background — poll with `mediakit job <id>`. Chapters [{title, at}] in the manifest become MP4 chapters in final.mp4. Shot segments are cached by content hash. Schema: skills/shorts-video/references/assemble-manifest.md.",
+    usage: "mediakit assemble <film.json> --mode validate|plan|preview|approve|render [-o <output-dir>] [--preview-seconds 20] [--force] [--async]",
+    desc: "Film assembler: build a finished video from one declarative film manifest (shots on a voice-led timeline, mixed audio, burned captions, QA + receipt). The voice is the master clock — total = lead + measured voice + tail, and shots must cover it exactly in frames. validate checks the math and writes nothing; plan discloses the resolved timeline (every shot with film-time start/end, joins, the voice/music/SFX audio timeline, chapters with ends) — also writes nothing and does NOT approve the film; preview renders the first N seconds at half size; approve records the fingerprint of the previewed files (a human must have seen the preview); render needs a matching approval unless --force. --async (render mode only) returns a job_id immediately and renders in the background — poll with `mediakit job <id>`. Chapters [{title, at}] in the manifest become MP4 chapters in final.mp4. Shot segments are cached by content hash. Schema: skills/shorts-video/references/assemble-manifest.md.",
     args: [{ name: "manifest", required: true }],
     options: [
-      ["--mode", "validate (default) | preview | approve | render"],
+      ["--mode", "validate (default) | plan | preview | approve | render"],
       ["--preview-seconds", "Preview length in seconds, 1-60 (default 20, preview mode only)"],
       ["--force", "Render without approval (recorded as approval:'forced' in the receipt)"],
       ["--async", "Render in the background (render mode only): validate + approval are checked now, then return a job_id immediately; poll with `mediakit job <id>`"],
@@ -2258,9 +2258,9 @@ async function main() {
         break;
       }
       case "assemble": {
-        if (!positional[0]) fail("missing manifest file: mediakit assemble <film.json> --mode validate|preview|approve|render [-o <output-dir>]");
+        if (!positional[0]) fail("missing manifest file: mediakit assemble <film.json> --mode validate|plan|preview|approve|render [-o <output-dir>]");
         if (opts.async === true) {
-          if ((opts.mode ?? "validate") !== "render") fail("assemble --async needs --mode render (validate/preview/approve are already fast)");
+          if ((opts.mode ?? "validate") !== "render") fail("assemble --async needs --mode render (validate/plan/preview/approve are already fast)");
           result = await core.startAssembleJob({
             manifestPath: positional[0],
             outputDir: opts.output ?? null,

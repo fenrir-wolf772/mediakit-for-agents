@@ -18981,8 +18981,76 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       shots: plan.shots.map((s) => ({ id: s.id, kind: s.kind, duration: s.duration, frames: s.frames, ...(s.role ? { role: s.role } : {}), ...(s.audio_level !== undefined && s.audio_level !== 1 ? { audio_level: s.audio_level } : {}), ...(s.template ? { template: s.template, params: s.params ?? null } : {}), ...(s.transition ? { transition: { type: s.transition.type, duration_seconds: s.transition.duration_seconds, frames: s.transition.frames } } : {}), ...(s.textLayers?.length ? { text_layers: s.textLayers.map((t) => ({ text: t.text, lines: t.lines, position: t.position, size: t.size, color: t.color, box: t.box, start_seconds: t.start_seconds, end_seconds: t.end_seconds })) } : {}), variants: s.variants.map((v) => ({ label: v.label, selected: v.selected, ...(v.hook ? { hook: v.hook } : {}), ...(v.source ? { source: v.source } : {}), ...(v.start !== undefined ? { start: v.start } : {}), ...(v.scene ? { scene: v.scene } : {}), ...(v.template ? { template: v.template } : {}), ...(v.color ? { color: v.color } : {}) })), selected_label: s.selected_label })),
     };
   }
+  if (mode === "plan") {
+    // Director plan disclosure (kinocut's `video_direct` idea, lượt 148):
+    // the resolved timeline as the director would read it off a
+    // storyboard — every shot with its film-time start/end in seconds
+    // AND frames (frame-exact, cumulative over the nominal shot
+    // durations), every transition with its blend offset, the audio
+    // timeline (voice window, music loops, SFX with ends), chapters
+    // with ends. Like validate it writes nothing — and unlike approve
+    // it records nothing: a plan is a disclosure, not an approval,
+    // so preview + approve are still required before render.
+    const { joins } = planAssembleVideo(plan.shots, plan.fps);
+    let frame = 0;
+    const timeline = plan.shots.map((s, i) => {
+      const startFrame = frame;
+      frame += s.frames;
+      const join = joins.find((j) => j.index === i);
+      return {
+        id: s.id, kind: s.kind,
+        ...(s.role ? { role: s.role } : {}),
+        start_frame: startFrame, end_frame: frame,
+        start_seconds: +(startFrame / plan.fps).toFixed(3),
+        end_seconds: +(frame / plan.fps).toFixed(3),
+        duration: s.duration, frames: s.frames,
+        ...(s.template ? { template: s.template, params: s.params ?? null } : {}),
+        ...(s.transition ? { transition: { type: s.transition.type, duration_seconds: s.transition.duration_seconds, frames: s.transition.frames, offset_seconds: join ? +join.offsetSeconds.toFixed(3) : null } } : {}),
+        ...(s.textLayers?.length ? { text_layers: s.textLayers.map((t) => ({ ...t, film_start_seconds: +((startFrame / plan.fps) + t.start_seconds).toFixed(3), film_end_seconds: +((startFrame / plan.fps) + t.end_seconds).toFixed(3) })) } : {}),
+        ...(s.audio_level !== undefined && s.audio_level !== 1 ? { audio_level: s.audio_level } : {}),
+        variants: s.variants.map((v) => ({ label: v.label, selected: v.selected, ...(v.hook ? { hook: v.hook } : {}), ...(v.source ? { source: v.source } : {}), ...(v.start !== undefined ? { start: v.start } : {}), ...(v.scene ? { scene: v.scene } : {}), ...(v.template ? { template: v.template } : {}), ...(v.color ? { color: v.color } : {}) })),
+        selected_label: s.selected_label,
+      };
+    });
+    let musicPlan = null;
+    if (plan.music) {
+      const musicMeta = await probe(plan.music.path);
+      const musicDur = musicMeta.duration_seconds;
+      musicPlan = {
+        path: plan.music.path, volume: plan.music.volume, duck_db: plan.music.duck_db,
+        ...(Number.isFinite(musicDur) ? { duration_seconds: +musicDur.toFixed(3), loops: Math.ceil(plan.total_seconds / musicDur) } : {}),
+      };
+    }
+    const sfxPlan = [];
+    for (const s of plan.sfx) {
+      const sfxMeta = await probe(s.file);
+      const sfxDur = sfxMeta.duration_seconds;
+      sfxPlan.push({
+        file: s.file, at_seconds: s.at_seconds, volume: s.volume,
+        ...(Number.isFinite(sfxDur) ? { duration_seconds: +sfxDur.toFixed(3), end_seconds: +(s.at_seconds + sfxDur).toFixed(3) } : {}),
+      });
+    }
+    const chaptersPlan = plan.chapters.map((c, i) => ({
+      title: c.title, at_seconds: c.at_seconds,
+      end_seconds: i + 1 < plan.chapters.length ? plan.chapters[i + 1].at_seconds : plan.total_seconds,
+    }));
+    return {
+      ...base,
+      note: "plan is a read-only disclosure of the resolved timeline — it writes nothing and does not approve the film; preview + approve are still required before render.",
+      timeline,
+      audio: {
+        voice: { path: plan.voice.path, lead_seconds: plan.voice.lead, voice_seconds: plan.voice.duration_seconds, tail_seconds: plan.voice.tail, voice_start_seconds: plan.voice.lead, voice_end_seconds: +(plan.voice.lead + plan.voice.duration_seconds).toFixed(3) },
+        music: musicPlan,
+        sfx: sfxPlan,
+      },
+      captions: plan.captions,
+      chapters: chaptersPlan,
+      hook: plan.hook,
+      joins: joins.map((j) => ({ into_shot: plan.shots[j.index]?.id ?? null, type: j.type, duration_seconds: +j.durationSeconds.toFixed(3), frames: j.frames, offset_seconds: +j.offsetSeconds.toFixed(3) })),
+    };
+  }
   if (!["preview", "approve", "render"].includes(mode)) {
-    throw new MediaKitError(`assemble mode must be validate, preview, approve or render, got: ${mode}`, "INVALID_ARG");
+    throw new MediaKitError(`assemble mode must be validate, plan, preview, approve or render, got: ${mode}`, "INVALID_ARG");
   }
   if (typeof outputDir !== "string" || !outputDir.trim()) {
     throw new MediaKitError(`assemble --mode ${mode} needs an output directory`, "INVALID_ARG");
