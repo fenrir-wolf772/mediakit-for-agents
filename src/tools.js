@@ -2533,7 +2533,7 @@ export function visibleTools() {
   return TOOL_DEFS.filter((t) => hot.has(t.name));
 }
 
-function toolSummary(tool) {
+export function toolSummary(tool) {
   // First sentence of the description — split on ". " but rejoin
   // across "e.g." / "i.e." / "etc." / "vs." (they end with a period
   // but are not sentence ends; "Reframe ... (e.g. 16:9 ...)" must

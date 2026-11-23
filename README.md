@@ -294,6 +294,22 @@ profile only changes what `tools/list` advertises; every tool stays
 callable either way, and an unknown profile value falls back to
 `full`.
 
+### Machine-readable contract (`SPEC.json`)
+
+For a client that wants the whole catalog without a live server —
+a code generator, a docs build, a compatibility check — the repo
+ships `SPEC.json` at the root: `spec_version`, `mediakit_version`,
+`tool_count`, `transports` (`stdio`, `http`), `families` with counts,
+and one entry per tool (name, family, safety tier, one-sentence
+summary, full description, full JSON input schema), plus
+`spec_hash` — the SHA-256 of the tools array, so one string tells
+you whether the contract changed. It is generated from the same
+`TOOL_DEFS` registry the servers register
+(`npm run spec` regenerates it); never hand-edit it. `npm run
+check` fails when the committed file does not match a fresh build,
+so a new tool, a renamed parameter or a tier change must ship with
+a regenerated `SPEC.json` in the same commit.
+
 ### Custom brands (`MEDIAKIT_BRANDS`)
 
 The three built-in brands (`amber-teal`, `warm-story`, `minimal-line`) live in `skills/shorts-video/brands.json` and are locked. To add your own channel look, point `MEDIAKIT_BRANDS` at a JSON file shaped the same way:

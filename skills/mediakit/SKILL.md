@@ -1971,7 +1971,14 @@ description + input schema of only the tool you are about to call.
 `init_project`, `release_checkpoint`) plus the two discovery tools
 — 20 total; default `full` lists everything, and the profile never
 changes what you can call. This is KyaniteLabs/kinocut's
-`list_operations` / `describe_operation` pattern.
+`list_operations` / `describe_operation` pattern. For the same
+catalog without a live server, read `SPEC.json` at the repo root
+(spec_version 1: name, family, tier, summary, description and full
+JSON input schema per tool, plus `spec_hash` — the SHA-256 of the
+tools array, so one string tells you whether the contract changed).
+It is generated from the same registry (`npm run spec`); never
+hand-edit it — `npm run check` fails when the committed file is
+stale.
 
 ### 58i. Scrub frozen footage without drowning in duplicates — `extract_frames --dedup`
 

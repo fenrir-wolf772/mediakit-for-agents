@@ -18,6 +18,7 @@ import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations
 import { applyContentBaseline, averageHash, compareDeterminismRuns, countClippedRuns, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, explainError, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, inspectionPointTimestamps, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
+import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
 import bounceTpl from "../src/canvas-scene-lib/templates/bounce.cjs";
 import slideInTpl from "../src/canvas-scene-lib/templates/slide-in.cjs";
 import springInTpl from "../src/canvas-scene-lib/templates/spring-in.cjs";
@@ -230,6 +231,33 @@ checkOk(listOperations({}).tools.length === 88 && listOperations({}).visible_too
 process.env.MEDIAKIT_TOOL_PROFILE = "bogus";
 checkOk(toolProfile() === "full" && visibleTools().length === 88, "an unknown MEDIAKIT_TOOL_PROFILE value falls back to full (88 visible)", `profile=${toolProfile()}`);
 delete process.env.MEDIAKIT_TOOL_PROFILE;
+// Machine-readable contract (lượt 149): SPEC.json is generated from
+// the same TOOL_DEFS registry — the committed file must equal a
+// fresh build, byte for byte, and every entry must carry a known
+// family/tier plus a real JSON Schema. `npm run check` runs the same
+// --check, so CI goes red the moment a tool ships without a
+// regenerated SPEC.json in the same commit.
+const specOnDisk = JSON.parse(await readFile(new URL("../SPEC.json", import.meta.url), "utf8"));
+const specFresh = await buildSpec();
+checkOk(specOnDisk.spec_version === SPEC_VERSION && specFresh.spec_version === SPEC_VERSION, "SPEC.json carries spec_version 1", `on-disk=${specOnDisk.spec_version} fresh=${specFresh.spec_version}`);
+const pkgJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+checkOk(specOnDisk.mediakit_version === pkgJson.version && specFresh.mediakit_version === pkgJson.version, "SPEC.json mediakit_version matches package.json", `spec=${specOnDisk.mediakit_version} pkg=${pkgJson.version}`);
+checkOk(specOnDisk.tool_count === 88 && specFresh.tool_count === 88 && specOnDisk.tools.length === 88, "SPEC.json lists all 88 tools", `on-disk=${specOnDisk.tool_count} fresh=${specFresh.tool_count}`);
+checkOk(specText(specOnDisk) === specText(specFresh), "committed SPEC.json equals a fresh build byte for byte (regenerate with `npm run spec` when it drifts)", `hash on-disk=${specOnDisk.spec_hash?.slice(0, 12)} fresh=${specFresh.spec_hash.slice(0, 12)}`);
+checkOk(specOnDisk.spec_hash === specHash(specOnDisk.tools) && specFresh.spec_hash === specHash(specFresh.tools), "SPEC spec_hash is the sha256 of its own tools array", `hash=${specOnDisk.spec_hash.slice(0, 12)}…`);
+checkOk(specOnDisk.transports.join(",") === "stdio,http" && specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:27 edit:35 text:6 image:7 assemble:11 meta:2" && specOnDisk.families.reduce((n, f) => n + f.count, 0) === 88, "SPEC families split 27/35/6/7/11/2, sum to 88, transports stdio+http", specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" "));
+checkOk(specOnDisk.tools.every((t) => typeof t.name === "string" && ["inspect", "edit", "text", "image", "assemble", "meta"].includes(t.family) && ["READ", "PLAN", "WRITE", "DESTRUCTIVE"].includes(t.tier) && typeof t.summary === "string" && t.summary.length > 10 && t.summary.length <= 161 && typeof t.description === "string" && t.description.length > t.summary.length && t.inputSchema?.type === "object" && typeof t.inputSchema.properties === "object" && (t.inputSchema.required === undefined || Array.isArray(t.inputSchema.required))), "every SPEC tool entry has a known family/tier, a one-sentence summary, a longer description and an object JSON Schema with properties (required present only when the tool has required params — an all-optional schema has none)", specOnDisk.tools.filter((t) => !(t.inputSchema?.type === "object")).map((t) => t.name).join(","));
+checkOk(JSON.stringify(specOnDisk.tools.map((t) => t.name)) === JSON.stringify(TOOL_DEFS.map((t) => t.name)), "SPEC tool order follows the TOOL_DEFS registry order", `first=${specOnDisk.tools[0].name} last=${specOnDisk.tools.at(-1).name}`);
+checkOk(specOnDisk.tools.find((t) => t.name === "probe")?.inputSchema.properties.input?.type === "string" && specOnDisk.tools.find((t) => t.name === "trim")?.inputSchema.properties.stream_copy?.type === "boolean" && specOnDisk.tools.find((t) => t.name === "patch_manifest")?.tier === "DESTRUCTIVE", "SPEC schemas carry real parameter types (probe.input string, trim.stream_copy boolean) and patch_manifest stays DESTRUCTIVE", "");
+// specDiff (pure): the --check failure message names the tool and the
+// field, so a stale SPEC is diagnosable without diffing JSON by hand.
+const specTampered = JSON.parse(JSON.stringify(specFresh));
+specTampered.tools.find((t) => t.name === "probe").tier = "WRITE";
+specTampered.tools.find((t) => t.name === "trim").description = "changed";
+specTampered.tools.splice(specTampered.tools.findIndex((t) => t.name === "mix"), 1);
+const specProblems = specDiff(specTampered, specFresh);
+checkOk(specDiff(specFresh, specFresh).length === 0, "specDiff of a spec against itself reports no problems", "");
+checkOk(specProblems.includes("tool probe: tier changed") && specProblems.includes("tool trim: description changed") && specProblems.includes("tool added: mix"), "specDiff names the changed tier, changed description and added tool", specProblems.join(" | "));
 // meanAbsDiffGray (pure): the dedup distance itself.
 checkOk(meanAbsDiffGray(Buffer.from([10, 20, 30]), Buffer.from([10, 20, 30])) === 0, "meanAbsDiffGray of identical thumbs is 0", "");
 checkOk(Math.abs(meanAbsDiffGray(Buffer.from([0, 0, 255]), Buffer.from([0, 10, 245])) - 20 / 3) < 1e-9, "meanAbsDiffGray([0,0,255],[0,10,245]) is 20/3", "");
