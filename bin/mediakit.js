@@ -157,8 +157,8 @@ const COMMANDS = {
     ],
   },
   "extract-frames": {
-    usage: "mediakit extract-frames <input> -o <directory> [--format png|jpg|webp] [--fps <n>] [--start <s|MM:SS>] [--end <s|MM:SS>] [--width <px>] [--quality <n>] [--dry-run]",
-    desc: "Export EVERY frame of a clip (or a time range) as a sequence of images (frame-0001.png, ...) into a directory — the full sequence, not N samples like frames. fps defaults to the source frame rate (every frame); set it lower for a sparser sequence. Frame i lands at start + i/fps, and the count is verified on disk against round((end-start) * fps). PNG is written rgba (keeps alpha). Refuses over 5000 frames — lower fps or shorten the range. --dry-run prints the exact ffmpeg command and writes no file.",
+    usage: "mediakit extract-frames <input> -o <directory> [--format png|jpg|webp] [--fps <n>] [--start <s|MM:SS>] [--end <s|MM:SS>] [--width <px>] [--quality <n>] [--dedup <0-10>] [--dry-run]",
+    desc: "Export EVERY frame of a clip (or a time range) as a sequence of images (frame-0001.png, ...) into a directory — the full sequence, not N samples like frames. fps defaults to the source frame rate (every frame); set it lower for a sparser sequence. Frame i lands at start + i/fps, and the count is verified on disk against round((end-start) * fps). PNG is written rgba (keeps alpha). Refuses over 5000 frames — lower fps or shorten the range. --dedup <0-10> drops near-duplicate frames after extraction (16x16 gray thumbs; 2.0 is reel-relay's summary default but collapses slow motion, 0.5-1 only drops frozen frames). --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--format", "Image format png (default) | jpg | webp"],
@@ -167,6 +167,7 @@ const COMMANDS = {
       ["--end", "Range end in seconds or MM:SS (default end of file)"],
       ["--width", "Scale frames to this width (keeps aspect)"],
       ["--quality", "jpg/webp quality 1-100 (default jpg q 2, webp libwebp 75); refused for png"],
+      ["--dedup", "Drop near-duplicate frames after extraction: mean abs diff on 16x16 gray thumbs, 0-10 (2.0 = reel-relay summary default, collapses slow motion; 0.5-1 only drops frozen frames)"],
       ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output directory (required, created if needed)"],
     ],
@@ -1500,6 +1501,7 @@ async function main() {
           end: opts.end ?? null,
           width: numOpt(opts, "width") ?? null,
           quality: numOpt(opts, "quality") ?? null,
+          dedup: numOpt(opts, "dedup") ?? null,
           dryRun: opts.dry_run === true,
         });
         break;

@@ -9,7 +9,7 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as core from "./core.js";
-import { TOOL_DEFS, toolAnnotations } from "./tools.js";
+import { TOOL_DEFS, toolAnnotations, visibleTools } from "./tools.js";
 import { recordToolCall } from "./audit.js";
 
 const server = new McpServer({
@@ -65,7 +65,11 @@ server.tool = (name, description, schema, annotations, handler) => registerTool(
   return res;
 });
 
-for (const tool of TOOL_DEFS) {
+// Progressive discovery (lượt 147): MEDIAKIT_TOOL_PROFILE=hot
+// registers only the 18 hot-path tools + list_operations /
+// describe_operation (20 total) — the rest is found through
+// list_operations. Default "full" registers everything, as before.
+for (const tool of visibleTools()) {
   // Safety tiers ride on the standard MCP annotations (lượt 141):
   // a client can see from tools/list that probe is read-only,
   // patch_manifest is destructive, and download touches the network.

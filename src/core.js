@@ -269,6 +269,37 @@ function run(cmd, args, { timeoutMs = ffmpegTimeoutMs() } = {}) {
   });
 }
 
+// Like run(), but stdout comes back as a Buffer instead of a UTF-8
+// string — for rawvideo pixel data, where decoding as text would
+// corrupt the bytes. Used by the extract_frames --dedup pass (16x16
+// gray thumbs, one decode, 256 bytes per frame).
+function runRaw(cmd, args, { timeoutMs = ffmpegTimeoutMs() } = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, encoding: "buffer" }, (err, stdout, stderr) => {
+      if (err) {
+        const detail = (stderr || "").toString().trim().split("\n").slice(-5).join(" | ");
+        reject(new MediaKitError(`${cmd} failed: ${err.message}${detail ? ` — ${detail}` : ""}`, "FFMPEG_FAILED"));
+      } else {
+        resolve({ stdout, stderr: (stderr || "").toString() });
+      }
+    });
+  });
+}
+
+// Mean absolute pixel difference between two equal-length grayscale
+// buffers (0-255 scale). Pure — unit-tested without spawning ffmpeg.
+// The dedup rule for extract_frames (idea: reel-relay's 16x16 gray
+// thumbs + DEDUP_THRESHOLD 2.0): a frame whose thumb differs from
+// the last KEPT thumb by <= threshold is a near-duplicate.
+export function meanAbsDiffGray(a, b) {
+  if (!a || !b || a.length !== b.length || a.length === 0) {
+    throw new MediaKitError("meanAbsDiffGray needs two equal-length non-empty buffers", "INVALID_ARG");
+  }
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i]);
+  return sum / a.length;
+}
+
 // ---------------------------------------------------------------- ffmpeg progress
 // Parse one chunk of ffmpeg `-progress pipe:1` output. Each block is
 // `key=value` lines terminated by a blank line, e.g.
@@ -2039,10 +2070,20 @@ export async function extractFrames({ input, outputDir, count = 6, format = "png
 // hour-long clip fails fast instead of filling the disk.)
 // Names are frame-0001.png ... zero-padded to the expected count
 // (min 4 digits), so a plain `ls` is already in timeline order.
+// `dedup` (lượt 147, idea: siemd2/reel-relay's DEDUP_THRESHOLD):
+// drop near-duplicate frames after extraction — one extra decode
+// with the same fps filter into 16x16 gray thumbs, a frame whose
+// thumb differs from the last KEPT thumb by <= threshold (mean abs
+// diff, 0-255 scale) is deleted from disk. Reel-relay uses 2.0 for
+// a "watch the reel" summary; measured on this machine, 2.0 keeps
+// 1/20 of a frozen clip but only 8/20 of steadily moving testsrc,
+// so 2.0 collapses slow motion — use 0.5-1 for gentle dedup of
+// truly frozen frames, 2 for a ruthless summary pass. Off by
+// default: scrubbing must never silently lose frames.
 
 export const MAX_SEQUENCE_FRAMES = 5000;
 
-export async function extractFramesSequence({ input, outputDir, format = "png", fps = null, start = null, end = null, width = null, quality = null, dryRun = false }) {
+export async function extractFramesSequence({ input, outputDir, format = "png", fps = null, start = null, end = null, width = null, quality = null, dedup = null, dryRun = false }) {
   const inPath = await requireInput(input);
   const fmt = (format || "png").toLowerCase();
   if (!["png", "jpg", "jpeg", "webp"].includes(fmt)) {
@@ -2080,6 +2121,7 @@ export async function extractFramesSequence({ input, outputDir, format = "png", 
   if (q !== null && ext === "png") {
     throw new MediaKitError("quality only applies to jpg/webp (png is lossless)", "INVALID_ARG");
   }
+  const dedupThreshold = dedup === null || dedup === undefined ? null : num(dedup, "dedup", { min: 0, max: 10 });
   const pad = Math.max(4, String(expected).length);
   const pattern = `frame-%0${pad}d.${ext}`;
   // Build the argv ONCE; dry-run prints it, the real run executes
@@ -2110,6 +2152,7 @@ export async function extractFramesSequence({ input, outputDir, format = "png", 
     frame_count_expected: expected,
     ...(w !== null ? { width: w } : {}),
     ...(q !== null ? { quality: q } : {}),
+    ...(dedupThreshold !== null ? { dedup_threshold: dedupThreshold } : {}),
   };
   if (dryRun) {
     return { ...base, dry_run: true, command: formatCommand(fullArgs), frames: null, frame_count: null, frames_verified: null };
@@ -2129,16 +2172,54 @@ export async function extractFramesSequence({ input, outputDir, format = "png", 
   // timestamp is arithmetic, not a second probe per file.
   const stamp = (i) => +(s + i / fpsEff).toFixed(3);
   const frames = entries.map((e, i) => ({ ...e, timestamp_seconds: stamp(i) }));
-  const sample = frames.length <= 8 ? frames : [...frames.slice(0, 3), ...frames.slice(-3)];
+  // Dedup pass (off by default): one extra decode with the SAME fps
+  // filter into 16x16 gray thumbs — same filter, same range, so thumb
+  // i belongs to frame i. A frame whose thumb differs from the last
+  // KEPT thumb by <= threshold is a near-duplicate: deleted from
+  // disk, dropped from the list. Kept frames keep their ORIGINAL
+  // timestamps (a dropped frame does not renumber the survivors).
+  // If the thumb count ever disagrees with the extracted count the
+  // pass is skipped with a note instead of deleting on bad data —
+  // the extraction itself already verified, so this never fails
+  // the whole call.
+  let keptFrames = frames;
+  let dedupInfo = null;
+  if (dedupThreshold !== null) {
+    const thumbArgs = ["-v", "error"];
+    if (s > 0) thumbArgs.push("-ss", String(s));
+    thumbArgs.push("-i", inPath, "-t", String(+clipLen.toFixed(3)), "-vf", `fps=${fpsEff},scale=16:16,format=gray`, "-f", "rawvideo", "-");
+    const { stdout: thumbBuf } = await runRaw(FFMPEG, thumbArgs);
+    if (thumbBuf.length === frames.length * 256) {
+      const droppedFiles = [];
+      keptFrames = [];
+      let lastKept = null;
+      for (let i = 0; i < frames.length; i++) {
+        const thumb = thumbBuf.subarray(i * 256, (i + 1) * 256);
+        if (lastKept !== null && meanAbsDiffGray(thumb, lastKept) <= dedupThreshold) {
+          await unlink(path.join(dir, frames[i].file)).catch(() => {});
+          droppedFiles.push(frames[i].file);
+          continue;
+        }
+        lastKept = thumb;
+        keptFrames.push(frames[i]);
+      }
+      dedupInfo = { threshold: dedupThreshold, kept: keptFrames.length, dropped: droppedFiles.length, dropped_files: droppedFiles };
+    } else {
+      dedupInfo = { threshold: dedupThreshold, kept: frames.length, dropped: 0, dropped_files: [], note: `thumb count mismatch (${thumbBuf.length} bytes for ${frames.length} frames) — dedup skipped, nothing deleted` };
+    }
+  }
+  const sample = keptFrames.length <= 8 ? keptFrames : [...keptFrames.slice(0, 3), ...keptFrames.slice(-3)];
   return {
     ...base,
-    frame_count: frames.length,
+    frame_count_extracted: frames.length,
+    frame_count: keptFrames.length,
     frames_verified: frames.length === expected,
     count_diff: frames.length - expected,
-    first_timestamp_seconds: frames.length ? stamp(0) : null,
-    last_timestamp_seconds: frames.length ? stamp(frames.length - 1) : null,
+    first_timestamp_seconds: keptFrames.length ? keptFrames[0].timestamp_seconds : null,
+    last_timestamp_seconds: keptFrames.length ? keptFrames[keptFrames.length - 1].timestamp_seconds : null,
     frames_sample: sample,
-    frames_truncated: frames.length > 8,
+    frames_truncated: keptFrames.length > 8,
+    ...(dedupInfo !== null ? { dedup: dedupInfo } : {}),
   };
 }
 
@@ -11368,7 +11449,7 @@ const TOOL_REQUIREMENTS = {
   qa_report: { filters: ["loudnorm", "blackdetect", "freezedetect", "silencedetect", "astats", "ametadata", "select"] },
   concat: { filters: ["concat", "xfade", "acrossfade", "fps", "scale", "pad"] },
   frames: { filters: ["scale", "convolution", "signalstats"] },
-  extract_frames: { filters: ["fps", "scale"] },
+  extract_frames: { filters: ["fps", "scale", "format"] },
   export_gif: { filters: ["palettegen", "paletteuse", "fps", "scale"] },
   burn_captions: { filters: ["subtitles", "ass"] },
   reframe: { filters: ["crop", "scale", "pad", "gblur", "overlay"], encoders: ["libx264"] },
@@ -11505,6 +11586,10 @@ const TOOL_REQUIREMENTS = {
   // estimate_conversion sample-encodes with libx264 or libx265
   // (the two codecs it accepts) — at least one must be present.
   estimate_conversion: { encoders: ["libx264", "libx265"] },
+  // list_operations / describe_operation are pure catalog lookups
+  // over TOOL_DEFS in tools.js — no ffmpeg capability needed.
+  list_operations: {},
+  describe_operation: {},
 };
 
 async function listCapabilities(kind) {

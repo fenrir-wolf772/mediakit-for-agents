@@ -14,7 +14,8 @@ import { createCanvas } from "canvas";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { applyContentBaseline, averageHash, compareDeterminismRuns, countClippedRuns, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, explainError, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, inspectionPointTimestamps, localTempoCurve, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
+import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
+import { applyContentBaseline, averageHash, compareDeterminismRuns, countClippedRuns, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, explainError, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, inspectionPointTimestamps, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import bounceTpl from "../src/canvas-scene-lib/templates/bounce.cjs";
@@ -199,10 +200,42 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut", "clean_voice", "measure_pace", "highlights", "align_voice", "safety", "estimate_conversion", "release_checkpoint"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut", "clean_voice", "measure_pace", "highlights", "align_voice", "safety", "estimate_conversion", "release_checkpoint", "list_operations", "describe_operation"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 86 tools present");
-checkOk(missing.length === 0, "tools/list has all 86 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 88 tools present");
+checkOk(missing.length === 0, "tools/list has all 88 tools", `missing: ${missing.join(", ")}`);
+
+// Progressive discovery (lượt 147, idea: KyaniteLabs/kinocut):
+// the compact catalog first, full schema only on demand.
+const discAll = listOperations({});
+console.log("list_operations:", discAll.tools.length, "tools | families", discAll.families.map((f) => `${f.name}:${f.count}`).join(" "));
+checkOk(discAll.total_tools === 88 && discAll.tools.length === 88 && discAll.profile === "full" && discAll.visible_tools === 88, "list_operations (pure) lists all 88 tools in full profile", JSON.stringify({ total: discAll.total_tools, visible: discAll.visible_tools, profile: discAll.profile }));
+checkOk(discAll.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:27 edit:35 text:6 image:7 assemble:11 meta:2", "list_operations families split 27/35/6/7/11/2", discAll.families.map((f) => `${f.name}:${f.count}`).join(" "));
+checkOk(discAll.tools.every((t) => typeof t.name === "string" && ["inspect", "edit", "text", "image", "assemble", "meta"].includes(t.family) && ["READ", "PLAN", "WRITE", "DESTRUCTIVE"].includes(t.tier) && typeof t.summary === "string" && t.summary.length > 10 && t.summary.length <= 161 && (t.summary.endsWith(".") || t.summary.endsWith("…"))), "every list_operations entry has a known family, a tier and a one-sentence summary (<=160 chars, ends . or …)", discAll.tools.filter((t) => !(t.summary.endsWith(".") || t.summary.endsWith("…"))).map((t) => t.name).join(","));
+checkOk(Object.keys(TOOL_FAMILY_OF).length === 88 && TOOL_DEFS.every((t) => TOOL_FAMILY_OF[t.name] !== undefined) && new Set(Object.values(TOOL_FAMILY_OF)).size === 6, "TOOL_FAMILY_OF covers every TOOL_DEFS entry exactly once, in 6 families", `map=${Object.keys(TOOL_FAMILY_OF).length} defs=${TOOL_DEFS.length}`);
+const discEdit = listOperations({ family: "edit" });
+checkOk(discEdit.tools.length === 35 && discEdit.tools.every((t) => t.family === "edit"), "list_operations family=edit narrows to the 35 edit tools", `got ${discEdit.tools.length}`);
+let discBadFamily = null;
+try { listOperations({ family: "nope" }); } catch (e) { discBadFamily = e; }
+checkOk(discBadFamily?.code === "INVALID_ARG" && /inspect, edit/.test(discBadFamily?.message ?? ""), "list_operations rejects an unknown family with INVALID_ARG + the family list", discBadFamily?.message ?? "");
+const descTrim = describeOperation({ name: "trim" });
+checkOk(descTrim.family === "edit" && descTrim.tier === "WRITE" && typeof descTrim.description === "string" && descTrim.inputSchema?.properties?.start?.type === "number" && (descTrim.inputSchema.required ?? []).includes("input"), "describe_operation trim returns family/tier/description + full JSON schema (start is a number, input required)", JSON.stringify(Object.keys(descTrim.inputSchema?.properties ?? {})));
+let descBad = null;
+try { describeOperation({ name: "nope" }); } catch (e) { descBad = e; }
+checkOk(descBad?.code === "INVALID_ARG" && /list_operations/.test(descBad?.message ?? ""), "describe_operation rejects an unknown name with INVALID_ARG + a hint to browse list_operations", descBad?.message ?? "");
+checkOk(toolProfile() === "full" && visibleTools().length === 88 && HOT_TOOLS.length === 18 && HOT_TOOLS.every((n) => TOOL_DEFS.some((t) => t.name === n)), "default profile is full (88 visible) and the 18 hot tools all exist", `profile=${toolProfile()} hot=${HOT_TOOLS.length}`);
+process.env.MEDIAKIT_TOOL_PROFILE = "hot";
+checkOk(toolProfile() === "hot" && visibleTools().length === 20 && visibleTools().some((t) => t.name === "list_operations") && visibleTools().some((t) => t.name === "describe_operation") && !visibleTools().some((t) => t.name === "chroma_key"), "hot profile narrows tools/list to 20 (18 hot + 2 discovery), chroma_key hidden", `visible=${visibleTools().length}`);
+checkOk(listOperations({}).tools.length === 88 && listOperations({}).visible_tools === 20, "list_operations still reports the FULL 88-tool catalog in hot profile (visible_tools 20)", JSON.stringify({ tools: listOperations({}).tools.length, visible: listOperations({}).visible_tools }));
+process.env.MEDIAKIT_TOOL_PROFILE = "bogus";
+checkOk(toolProfile() === "full" && visibleTools().length === 88, "an unknown MEDIAKIT_TOOL_PROFILE value falls back to full (88 visible)", `profile=${toolProfile()}`);
+delete process.env.MEDIAKIT_TOOL_PROFILE;
+// meanAbsDiffGray (pure): the dedup distance itself.
+checkOk(meanAbsDiffGray(Buffer.from([10, 20, 30]), Buffer.from([10, 20, 30])) === 0, "meanAbsDiffGray of identical thumbs is 0", "");
+checkOk(Math.abs(meanAbsDiffGray(Buffer.from([0, 0, 255]), Buffer.from([0, 10, 245])) - 20 / 3) < 1e-9, "meanAbsDiffGray([0,0,255],[0,10,245]) is 20/3", "");
+let madBad = null;
+try { meanAbsDiffGray(Buffer.from([1, 2]), Buffer.from([1])); } catch (e) { madBad = e; }
+checkOk(madBad?.code === "INVALID_ARG", "meanAbsDiffGray refuses unequal-length buffers with INVALID_ARG", madBad?.message ?? "");
 
 const probeRes = await client.callTool({
   name: "probe",
@@ -2096,6 +2129,7 @@ checkOk(doctorJson.tools.fit?.available === true, "doctor: fit is available");
 checkOk(doctorJson.tools.generate_srt?.available === true, "doctor: generate_srt is available (pure Node, no ffmpeg filter needed)");
 checkOk(doctorJson.tools.export_gif?.available === true, "doctor: export_gif is available (palettegen/paletteuse present)");
 checkOk(doctorJson.tools.extract_frames?.available === true, "doctor: extract_frames is available (fps/scale present)");
+checkOk(doctorJson.tools.list_operations?.available === true && doctorJson.tools.describe_operation?.available === true, "doctor: list_operations + describe_operation are available (pure catalog lookups, no ffmpeg capability needed)");
 checkOk(doctorJson.tools.grade?.available === true, "doctor: grade is available (eq/hue/colorbalance/lutrgb present)");
 checkOk(doctorJson.tools.check?.available === true, "doctor: check is available (astats/ametadata present for the peaks scan)");
 checkOk(doctorJson.tools.reverse?.available === true, "doctor: reverse is available (reverse/areverse filters present)");
@@ -2828,6 +2862,61 @@ const seqAudioRes = await client.callTool({
 });
 const seqAudioJson = JSON.parse(seqAudioRes.content[0].text);
 checkOk(seqAudioRes.isError === true && /needs a video input/.test(seqAudioJson.error ?? ""), "extract_frames refuses an audio-only input", JSON.stringify(seqAudioJson));
+
+// extract_frames --dedup (lượt 147, idea: siemd2/reel-relay's
+// 16x16 gray thumbs + DEDUP_THRESHOLD 2.0, last-kept comparison).
+// Fixtures generated here, same lavfi as the probe: frozen red 2s
+// (all 20 thumbs identical, diff 0) and moving testsrc 2s.
+await execFileAsync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "color=c=red:s=320x180:d=2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30", "-y", path.join(root, "outputs/mcp-dedup-static.mp4")]);
+await execFileAsync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "testsrc=s=320x180:d=2:r=30", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-y", path.join(root, "outputs/mcp-dedup-moving.mp4")]);
+const dedupStaticRes = await client.callTool({
+  name: "extract_frames",
+  arguments: { input: path.join(root, "outputs/mcp-dedup-static.mp4"), output_dir: path.join(root, "outputs/mcp-dedup-static-out"), format: "png", fps: 10, dedup: 2 },
+});
+const dedupStaticJson = JSON.parse(dedupStaticRes.content[0].text);
+const dedupStaticFiles = readdirSync(path.join(root, "outputs/mcp-dedup-static-out")).filter((f) => /^frame-\d+\.png$/.test(f));
+console.log("dedup static @2:", dedupStaticJson.frame_count_extracted, "->", dedupStaticJson.frame_count, "| dropped", dedupStaticJson.dedup?.dropped, "| files on disk", dedupStaticFiles.length);
+checkOk(dedupStaticJson.frame_count_extracted === 20 && dedupStaticJson.frame_count === 1 && dedupStaticJson.frames_verified === true && dedupStaticJson.dedup?.threshold === 2 && dedupStaticJson.dedup?.dropped === 19 && dedupStaticJson.dedup?.dropped_files?.length === 19 && dedupStaticFiles.length === 1 && dedupStaticFiles[0] === "frame-0001.png", "extract_frames --dedup 2 on a frozen clip keeps 1/20 (20 extracted, 19 dropped, 1 file on disk)", JSON.stringify({ extracted: dedupStaticJson.frame_count_extracted, kept: dedupStaticJson.frame_count, files: dedupStaticFiles.length }));
+const dedupMovingRes = await client.callTool({
+  name: "extract_frames",
+  arguments: { input: path.join(root, "outputs/mcp-dedup-moving.mp4"), output_dir: path.join(root, "outputs/mcp-dedup-moving-out"), format: "png", fps: 10, dedup: 2 },
+});
+const dedupMovingJson = JSON.parse(dedupMovingRes.content[0].text);
+console.log("dedup moving @2:", dedupMovingJson.frame_count_extracted, "->", dedupMovingJson.frame_count, "| kept ts", dedupMovingJson.frames_sample?.map((f) => f.timestamp_seconds).join(","));
+checkOk(dedupMovingJson.frame_count_extracted === 20 && dedupMovingJson.frame_count === 8 && dedupMovingJson.dedup?.dropped === 12 && JSON.stringify(dedupMovingJson.frames_sample?.map((f) => f.timestamp_seconds)) === JSON.stringify([0, 0.2, 0.5, 0.8, 1, 1.3, 1.6, 1.9]) && dedupMovingJson.first_timestamp_seconds === 0 && dedupMovingJson.last_timestamp_seconds === 1.9, "extract_frames --dedup 2 on moving testsrc keeps 8/20 at timestamps 0,0.2,0.5,0.8,1,1.3,1.6,1.9 (last-kept comparison, not previous-frame)", JSON.stringify({ kept: dedupMovingJson.frame_count, ts: dedupMovingJson.frames_sample?.map((f) => f.timestamp_seconds) }));
+const dedupGentleRes = await client.callTool({
+  name: "extract_frames",
+  arguments: { input: path.join(root, "outputs/mcp-dedup-moving.mp4"), output_dir: path.join(root, "outputs/mcp-dedup-moving-gentle-out"), format: "png", fps: 10, dedup: 0.5 },
+});
+const dedupGentleJson = JSON.parse(dedupGentleRes.content[0].text);
+checkOk(dedupGentleJson.frame_count_extracted === 20 && dedupGentleJson.frame_count === 20 && dedupGentleJson.dedup?.dropped === 0, "extract_frames --dedup 0.5 on moving testsrc keeps all 20 (gentle threshold only drops frozen frames)", JSON.stringify({ kept: dedupGentleJson.frame_count, dropped: dedupGentleJson.dedup?.dropped }));
+// dedup 11 is refused by the MCP schema itself (zod max 10) before
+// the tool runs — the client throws -32602, so callExpectThrow.
+const dedupRangeText = await callExpectThrow("extract_frames", { input: path.join(root, "outputs/mcp-dedup-static.mp4"), output_dir: path.join(root, "outputs/mcp-dedup-range-out"), format: "png", fps: 10, dedup: 11 });
+checkOk(/less than or equal to 10/.test(dedupRangeText) && /dedup/.test(dedupRangeText), "extract_frames refuses dedup 11 (max 10, MCP schema validation)", dedupRangeText.slice(0, 200));
+const dedupDryRes = await client.callTool({
+  name: "extract_frames",
+  arguments: { input: path.join(root, "outputs/mcp-dedup-static.mp4"), output_dir: path.join(root, "outputs/mcp-dedup-dry-out"), format: "png", fps: 10, dedup: 2, dry_run: true },
+});
+const dedupDryJson = JSON.parse(dedupDryRes.content[0].text);
+checkOk(dedupDryJson.dry_run === true && dedupDryJson.dedup_threshold === 2 && dedupDryJson.frames === null && !existsSync(path.join(root, "outputs/mcp-dedup-dry-out")), "extract_frames dry-run with dedup reports dedup_threshold 2 and writes nothing", JSON.stringify({ threshold: dedupDryJson.dedup_threshold, dry: dedupDryJson.dry_run }));
+const dedupCli = await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "extract-frames", path.join(root, "outputs/mcp-dedup-static.mp4"), "-o", path.join(root, "outputs/mcp-dedup-cli-out"), "--fps", "10", "--dedup", "2"]);
+const dedupCliJson = JSON.parse(dedupCli.stdout);
+checkOk(dedupCliJson.frame_count === 1 && dedupCliJson.dedup?.dropped === 19, "CLI extract-frames --dedup 2 keeps 1/20 on the frozen clip", JSON.stringify({ kept: dedupCliJson.frame_count, dropped: dedupCliJson.dedup?.dropped }));
+
+// list_operations / describe_operation over MCP (lượt 147).
+const listOpsRes = await client.callTool({ name: "list_operations", arguments: {} });
+const listOpsJson = JSON.parse(listOpsRes.content[0].text);
+checkOk(listOpsJson.total_tools === 88 && listOpsJson.tools?.length === 88 && listOpsJson.families?.find((f) => f.name === "edit")?.count === 35 && listOpsJson.tools?.every((t) => typeof t.summary === "string"), "MCP list_operations lists 88 tools with families (edit 35) and summaries", `total=${listOpsJson.total_tools}`);
+const listOpsEditRes = await client.callTool({ name: "list_operations", arguments: { family: "image" } });
+const listOpsEditJson = JSON.parse(listOpsEditRes.content[0].text);
+checkOk(listOpsEditJson.tools?.length === 7 && listOpsEditJson.tools?.every((t) => t.family === "image"), "MCP list_operations family=image returns the 7 image tools", `got ${listOpsEditJson.tools?.length}`);
+const descOpRes = await client.callTool({ name: "describe_operation", arguments: { name: "trim" } });
+const descOpJson = JSON.parse(descOpRes.content[0].text);
+checkOk(descOpJson.family === "edit" && descOpJson.tier === "WRITE" && descOpJson.inputSchema?.properties?.start?.type === "number", "MCP describe_operation trim returns the full schema over the wire", JSON.stringify(Object.keys(descOpJson.inputSchema?.properties ?? {})));
+const descOpBadRes = await client.callTool({ name: "describe_operation", arguments: { name: "nope" } });
+const descOpBadJson = JSON.parse(descOpBadRes.content[0].text);
+checkOk(descOpBadRes.isError === true && descOpBadJson.code === "INVALID_ARG" && /list_operations/.test(descOpBadJson.error ?? ""), "MCP describe_operation of an unknown name fails INVALID_ARG with a browse hint", JSON.stringify(descOpBadJson));
 
 const overlayRes = await client.callTool({
   name: "overlay",
@@ -7586,7 +7675,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 86 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 86 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 88 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 88 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -10157,7 +10246,7 @@ checkOk(explainSynth("REVISION_MISMATCH", "revision mismatch").kind === "fix-arg
 // the tier table, the MCP annotations, and the measured estimate.
 const safetyRes = await client.callTool({ name: "safety", arguments: {} });
 const safetyJson = JSON.parse(safetyRes.content[0].text);
-checkOk(safetyJson.total_tools === 86 && safetyJson.counts.READ === 24 && safetyJson.counts.PLAN === 4 && safetyJson.counts.WRITE === 57 && safetyJson.counts.DESTRUCTIVE === 1, "safety counts the tiers: 24 READ / 4 PLAN / 57 WRITE / 1 DESTRUCTIVE of 86 tools", JSON.stringify(safetyJson.counts));
+checkOk(safetyJson.total_tools === 88 && safetyJson.counts.READ === 26 && safetyJson.counts.PLAN === 4 && safetyJson.counts.WRITE === 57 && safetyJson.counts.DESTRUCTIVE === 1, "safety counts the tiers: 26 READ / 4 PLAN / 57 WRITE / 1 DESTRUCTIVE of 88 tools", JSON.stringify(safetyJson.counts));
 checkOk(JSON.stringify(safetyJson.tiers.DESTRUCTIVE.tools) === JSON.stringify(["patch_manifest"]), "patch_manifest is the only DESTRUCTIVE tool", JSON.stringify(safetyJson.tiers.DESTRUCTIVE.tools));
 const tierOf = {};
 for (const [tier, v] of Object.entries(safetyJson.tiers)) for (const n of v.tools) tierOf[n] = tier;
@@ -10323,7 +10412,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 86 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 88 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -10383,11 +10472,25 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 86, "GET /mcp reports name/version/transport and 86 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 88, "GET /mcp reports name/version/transport and 88 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 86 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 86 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 88 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 88 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+// Progressive discovery over HTTP (lượt 147): hot profile narrows
+// tools/list on the wire too — listTools() reads the env per call,
+// so flipping it here changes the same in-process server, and the
+// /mcp metadata count follows per request.
+process.env.MEDIAKIT_TOOL_PROFILE = "hot";
+const httpMetaHot = await httpCall("GET", "/mcp");
+const httpToolsHot = await httpCall("GET", "/mcp/tools");
+const hotNames = httpToolsHot.json?.tools?.map((t) => t.name) ?? [];
+checkOk(httpMetaHot.json?.tools === 20 && httpToolsHot.status === 200 && hotNames.length === 20 && hotNames.includes("list_operations") && hotNames.includes("describe_operation") && hotNames.includes("probe") && !hotNames.includes("chroma_key"), "hot profile over HTTP: /mcp reports 20 tools, /mcp/tools lists 20 (18 hot + 2 discovery), chroma_key hidden", `meta=${httpMetaHot.json?.tools} list=${hotNames.length}`);
+const httpRpcHot = await httpCall("POST", "/", { jsonrpc: "2.0", id: 7, method: "tools/list" });
+checkOk(httpRpcHot.status === 200 && httpRpcHot.json?.result?.tools?.length === 20, "JSON-RPC tools/list in hot profile also returns 20 tools", `count=${httpRpcHot.json?.result?.tools?.length}`);
+delete process.env.MEDIAKIT_TOOL_PROFILE;
+const httpToolsFull = await httpCall("GET", "/mcp/tools");
+checkOk(httpToolsFull.json?.tools?.length === 88, "clearing MEDIAKIT_TOOL_PROFILE restores the full 88-tool list", `count=${httpToolsFull.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -10488,7 +10591,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 86, "JSON-RPC tools/list returns the same 86 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 88, "JSON-RPC tools/list returns the same 88 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

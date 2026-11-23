@@ -16,7 +16,9 @@ video or audio file, and instead of writing one-off ffmpeg shell commands.
   images with timestamps — read several) or `thumbnail` (one contact sheet).
   To scrub a shot frame by frame (a fast move, a blink, a lip-sync slip):
   `extract_frames` (the full sequence, `frame-0001.png` … — `--fps` to
-  thin it out; refuses over 5000 frames).
+  thin it out; refuses over 5000 frames; `--dedup 0.5` drops only
+  truly frozen frames, `--dedup 2` is reel-relay's ruthless summary
+  default and collapses slow motion).
 - **Audio is too quiet/loud or inconsistent**: `loudness` (default −14 LUFS).
 - **User asks to join clips**: `concat`. For a smooth join instead of a
   hard cut: `concat` with `transition` (`fade`, `wipeleft`, `dissolve`,
@@ -1952,6 +1954,40 @@ to it. The CLI exits 0 on pass, 1 on fail — stop a delivery
 script on it. This is KyaniteLabs/kinocut's `release-checkpoint`
 idea, with the sheet timestamps borrowed from Synkinema's
 `get_inspection_points`. Not in `batch`/`manifest` in v1.
+
+### 58h. Browse the catalog before you dump it — progressive discovery
+
+88 tools is too many schemas to pay for in every turn. Don't start
+from `tools/list` — start from `list_operations`: one compact line
+per tool (name, family, tier, one-sentence summary), optionally
+narrowed with `family` (`inspect`, `edit`, `text`, `image`,
+`assemble`, `meta`). Then `describe_operation` for the full
+description + input schema of only the tool you are about to call.
+`list_operations` always reports the full catalog. With
+`MEDIAKIT_TOOL_PROFILE=hot`, `tools/list` itself returns only the
+18 hot-path tools (`probe`, `check`, `trim`, `concat`, `assemble`,
+`manifest`, `loudness`, `mix`, `transcribe`, `hook`, `frames`,
+`thumbnail`, `download`, `convert`, `diagnose`, `verify`,
+`init_project`, `release_checkpoint`) plus the two discovery tools
+— 20 total; default `full` lists everything, and the profile never
+changes what you can call. This is KyaniteLabs/kinocut's
+`list_operations` / `describe_operation` pattern.
+
+### 58i. Scrub frozen footage without drowning in duplicates — `extract_frames --dedup`
+
+`extract_frames` exports every frame, so a frozen shot at 30 fps
+is 300 copies of the same picture. `dedup` (0–10) drops the
+near-duplicates after extraction: one extra decode into 16×16
+gray thumbs, and a frame whose thumb differs from the last kept
+thumb by ≤ threshold (mean abs diff, 0–255 scale) is deleted
+from disk — the survivors keep their original timestamps, so
+nothing renumbers. This is siemd2/reel-relay's dedup rule, and
+their 2.0 default is tuned for a "watch the reel" summary, not
+for scrubbing: measured on this machine, 2.0 keeps 1/20 of a
+frozen clip but only 8/20 of steadily moving testsrc — it
+collapses slow motion. Use 0.5–1 to drop only truly frozen
+frames, 2 for a ruthless summary pass. Off by default: scrubbing
+must never silently lose frames.
 
 ## Workflow: vertical captioned clip from a landscape source
 

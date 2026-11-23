@@ -53,7 +53,7 @@
 import { createServer } from "node:http";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
-import { TOOL_DEFS, toolAnnotations } from "./tools.js";
+import { TOOL_DEFS, toolAnnotations, visibleTools } from "./tools.js";
 import { explainError, getJob, listJobs, cancelJob } from "./core.js";
 import { recordToolCall } from "./audit.js";
 
@@ -201,7 +201,9 @@ export function toolInputSchema(tool) {
 }
 
 export function listTools() {
-  return TOOL_DEFS.map((t) => ({
+  // Progressive discovery (lượt 147): MEDIAKIT_TOOL_PROFILE=hot
+  // returns only the 18 hot-path tools + the two discovery tools.
+  return visibleTools().map((t) => ({
     name: t.name,
     description: t.description,
     inputSchema: toolInputSchema(t),
@@ -310,7 +312,7 @@ const METADATA = {
   name: NAME,
   version: VERSION,
   transport: "http",
-  tools: TOOL_DEFS.length,
+  tools: visibleTools().length,
   endpoints: {
     metadata: "GET /mcp",
     tools: "GET /mcp/tools",
@@ -397,7 +399,10 @@ export function createHttpServer() {
       const url = new URL(req.url ?? "/", "http://localhost");
       const path = url.pathname;
       if (req.method === "GET" && (path === "/" || path === "/mcp")) {
-        sendJson(res, 200, METADATA);
+        // The tool count is read per request, not frozen in METADATA:
+        // a server started with MEDIAKIT_TOOL_PROFILE=hot advertises
+        // 20 here, a full-profile server 88.
+        sendJson(res, 200, { ...METADATA, tools: visibleTools().length });
         return;
       }
       if (req.method === "GET" && path === "/mcp/tools") {
@@ -511,7 +516,7 @@ if (isMain) {
   });
   server.listen(port, host, () => {
     const addr = server.address();
-    console.log(`mediakit MCP over HTTP on http://${addr.address}:${addr.port} (${TOOL_DEFS.length} tools)`);
+    console.log(`mediakit MCP over HTTP on http://${addr.address}:${addr.port} (${visibleTools().length} tools)`);
     if (addr.address !== "127.0.0.1" && addr.address !== "::1") {
       console.error(`warning: bound to ${addr.address} — no auth on this server, only bind it on a trusted network`);
     }

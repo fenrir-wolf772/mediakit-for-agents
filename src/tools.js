@@ -10,6 +10,7 @@
  * missing) on the other. Add a tool here and it appears on both.
  */
 import { z } from "zod";
+import { zodToJsonSchema } from "zod-to-json-schema";
 import * as core from "./core.js";
 import { queryAudit } from "./audit.js";
 
@@ -295,7 +296,7 @@ export const TOOL_DEFS = [
   {
     name: "extract_frames",
     tier: "WRITE",
-    description: "Export EVERY frame of a clip (or a time range) as a sequence of images (frame-0001.png, ...) into a directory — the full sequence, not N samples like frames. Use it to scrub a shot frame by frame: a fast move, a blink, a lip-sync slip that a 6-frame sample hides. fps defaults to the source frame rate (every frame); set it lower for a sparser sequence. Frame i lands at start + i/fps, and the count is verified on disk against round((end-start) * fps). PNG is written rgba (keeps alpha, e.g. ProRes 4444 sources). Refuses over 5000 frames — lower fps or shorten the range instead of filling the disk. Set dry_run=true to print the exact ffmpeg command and write no file.",
+    description: "Export EVERY frame of a clip (or a time range) as a sequence of images (frame-0001.png, ...) into a directory — the full sequence, not N samples like frames. Use it to scrub a shot frame by frame: a fast move, a blink, a lip-sync slip that a 6-frame sample hides. fps defaults to the source frame rate (every frame); set it lower for a sparser sequence. Frame i lands at start + i/fps, and the count is verified on disk against round((end-start) * fps). PNG is written rgba (keeps alpha, e.g. ProRes 4444 sources). Refuses over 5000 frames — lower fps or shorten the range instead of filling the disk. Set dedup (0-10) to drop near-duplicate frames after extraction — one extra decode into 16x16 gray thumbs (siemd2/reel-relay's rule: a frame whose thumb differs from the last kept thumb by <= threshold is deleted); 2.0 is their summary default but collapses slow motion (measured: 8/20 of moving testsrc kept), so 0.5-1 only drops truly frozen frames. Set dry_run=true to print the exact ffmpeg command and write no file.",
     schema: {
     input: pathSchema,
     output_dir: pathSchema.describe("Directory to write the frame files into (created if needed)"),
@@ -305,6 +306,7 @@ export const TOOL_DEFS = [
     end: z.union([z.number(), z.string()]).optional().describe("Range end in seconds or MM:SS (default the end of the file)"),
     width: z.number().int().min(80).max(3840).optional().describe("Scale frames to this width (keeps aspect)"),
     quality: z.number().int().min(1).max(100).optional().describe("jpg/webp quality 1-100 (default jpg q 2, webp libwebp 75); refused for png, which is lossless"),
+    dedup: z.number().min(0).max(10).optional().describe("Near-duplicate removal threshold (mean abs diff on 16x16 gray thumbs, 0-255 scale; omit to keep every frame). 2.0 is reel-relay's summary default — it keeps 1/20 of a frozen clip but only 8/20 of steadily moving testsrc, so it collapses slow motion; 0.5-1 only drops truly frozen frames. Dropped frames are deleted from disk and keep their original timestamps on the survivors"),
     dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
     handler: async (a) => safe(() => core.extractFramesSequence({
@@ -316,6 +318,7 @@ export const TOOL_DEFS = [
     end: a.end ?? null,
     width: a.width ?? null,
     quality: a.quality ?? null,
+    dedup: a.dedup ?? null,
     dryRun: a.dry_run,
   })),
   },
@@ -2376,6 +2379,28 @@ export const TOOL_DEFS = [
     sheetFrames: a.sheet_frames ?? 9,
   })),
   },
+
+
+  {
+    name: "list_operations",
+    tier: "READ",
+    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 88 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+    schema: {
+    family: z.enum(["inspect", "edit", "text", "image", "assemble", "meta"]).optional().describe("Narrow to one family; omit for the whole catalog"),
+  },
+    handler: async (a) => safe(() => listOperations({ family: a.family ?? null })),
+  },
+
+
+  {
+    name: "describe_operation",
+    tier: "READ",
+    description: "Full detail for ONE tool by name: family, safety tier, the complete description and the full JSON input schema — the second half of progressive discovery (KyaniteLabs/kinocut's describe_operation idea). Call list_operations first to find the name, then this for the schema of only the tool you are about to call. Unknown names fail with INVALID_ARG and a hint to browse list_operations.",
+    schema: {
+    name: z.string().min(1).describe("Tool name, e.g. trim (see list_operations for the catalog)"),
+  },
+    handler: async (a) => safe(() => describeOperation({ name: a.name })),
+  },
 ];
 
 // ---------------------------------------------------------------- safety tiers
@@ -2425,5 +2450,137 @@ export function listSafetyTiers() {
       "DESTRUCTIVE tools replace a user artifact in place and must carry a human-checked guard (revision, backup, or explicit confirm).",
       "A tool's tier is a property of the tool, not its arguments: a WRITE tool with dry_run=true still reports WRITE.",
     ],
+  };
+}
+
+// ---------------------------------------------------------------- progressive discovery
+// The catalog is 88 tools and tools/list dumps the full JSON schema
+// of every one on every turn — kinocut's answer is progressive
+// discovery: a compact list first, full schema only for the tools
+// actually used (lượt 147, idea: KyaniteLabs/kinocut
+// list_operations / describe_operation, KINOCUT_TOOLS profiles).
+// Families group the catalog by job, not by ship order; the map
+// below must cover every TOOL_DEFS entry exactly once (asserted in
+// test/mcp-test.mjs — a tool without a family breaks the discovery
+// list instead of silently landing in "other").
+// MEDIAKIT_TOOL_PROFILE=hot makes tools/list (both transports)
+// return only the 18 hot-path tools + the two discovery tools
+// (20 total); default "full" keeps today's behaviour — every tool
+// listed, so existing clients never lose a tool they already call.
+// list_operations always reports the FULL catalog either way: its
+// job is to find the tools the hot list hides.
+export const TOOL_FAMILY_DESCRIPTIONS = {
+  inspect: "Measure a file and answer a question — probe, QC, tempo, hooks, chapters.",
+  edit: "Change one clip: cut, transform, grade, mix or convert it.",
+  text: "Words on screen and in audio: captions, titles, transcription.",
+  image: "Stills and frame sequences: sample, export or build from images.",
+  assemble: "Director workflow: film, manifest, jobs and release.",
+  meta: "The catalog itself: browse and describe tools.",
+};
+
+export const TOOL_FAMILY_OF = {
+  // inspect (27)
+  probe: "inspect", check: "inspect", cropdetect: "inspect", scenes: "inspect",
+  keyframes: "inspect", audio_levels: "inspect", motion: "inspect", bpm: "inspect",
+  beat_grid: "inspect", tempo_drift: "inspect", hook: "inspect", highlights: "inspect",
+  chapters: "inspect", measure_pace: "inspect", search_words: "inspect", find: "inspect",
+  determinism: "inspect", verify: "inspect", verify_cuts: "inspect", diagnose: "inspect",
+  transitions: "inspect", estimate_conversion: "inspect", doctor: "inspect",
+  qa_report: "inspect", audit: "inspect", safety: "inspect", receipt: "inspect",
+  // edit (35)
+  trim: "edit", crop: "edit", resize: "edit", extract_audio: "edit", extract_frame: "edit",
+  loudness: "edit", concat: "edit", grade: "edit", make_loopable: "edit", freeze: "edit",
+  fastforward: "edit", reverse: "edit", rotate: "edit", boomerang: "edit",
+  chroma_key: "edit", zoom_pan: "edit", interpolate: "edit", denoise: "edit",
+  segment: "edit", convert: "edit", compress: "edit", silence: "edit",
+  cut_words: "edit", remove_retakes: "edit", smart_cut: "edit", clean_voice: "edit",
+  mix: "edit", overlay: "edit", pip: "edit", broll: "edit", fit: "edit",
+  reframe: "edit", mux: "edit", burn_captions: "edit", download: "edit",
+  // text (6)
+  transcribe: "text", convert_captions: "text", generate_srt: "text",
+  titlecard: "text", intro: "text", align_voice: "text",
+  // image (7)
+  thumbnail: "image", frames: "image", extract_frames: "image", image_to_video: "image",
+  slideshow: "image", export_gif: "image", svg_animate: "image",
+  // assemble (11)
+  assemble: "assemble", manifest: "assemble", patch_manifest: "assemble",
+  init_project: "assemble", export_timeline: "assemble", job: "assemble",
+  release_checkpoint: "assemble", package: "assemble", publish_kit: "assemble",
+  social: "assemble", batch: "assemble",
+  // meta (2)
+  list_operations: "meta", describe_operation: "meta",
+};
+
+// The 18 tools a director reaches for first (kinocut's hot-path
+// idea, 8 hot + 8 family → MediaKit's 18 + 2 discovery = 20 in hot
+// mode): probe the source, check the gate, cut, join, assemble the
+// film, mix the sound, transcribe the words, find the hook.
+export const HOT_TOOLS = [
+  "probe", "check", "trim", "concat", "assemble", "manifest",
+  "loudness", "mix", "transcribe", "hook", "frames", "thumbnail",
+  "download", "convert", "diagnose", "verify", "init_project",
+  "release_checkpoint",
+];
+
+export function toolProfile() {
+  const p = (process.env.MEDIAKIT_TOOL_PROFILE ?? "full").trim().toLowerCase();
+  return p === "hot" ? "hot" : "full";
+}
+
+export function visibleTools() {
+  if (toolProfile() === "full") return TOOL_DEFS;
+  const hot = new Set([...HOT_TOOLS, "list_operations", "describe_operation"]);
+  return TOOL_DEFS.filter((t) => hot.has(t.name));
+}
+
+function toolSummary(tool) {
+  // First sentence of the description — split on ". " but rejoin
+  // across "e.g." / "i.e." / "etc." / "vs." (they end with a period
+  // but are not sentence ends; "Reframe ... (e.g. 16:9 ...)" must
+  // not summarise as "... (e.g."). A first sentence over 160 chars
+  // is cut at a word boundary with an ellipsis, so a summary stays
+  // one line in the compact catalog.
+  const parts = tool.description.split(". ");
+  let first = parts[0] ?? "";
+  for (let i = 1; i < parts.length && /(e\.g|i\.e|etc|vs)$/i.test(first); i++) {
+    first += `. ${parts[i]}`;
+  }
+  if (!first.endsWith(".")) first += ".";
+  if (first.length > 160) {
+    const cut = first.lastIndexOf(" ", 160);
+    first = `${first.slice(0, cut > 40 ? cut : 160)}…`;
+  }
+  return first;
+}
+
+export function listOperations({ family = null } = {}) {
+  if (family !== null && family !== undefined && !TOOL_FAMILY_DESCRIPTIONS[family]) {
+    throw new core.MediaKitError(`unknown family "${family}" (families: ${Object.keys(TOOL_FAMILY_DESCRIPTIONS).join(", ")})`, "INVALID_ARG");
+  }
+  const tools = TOOL_DEFS
+    .filter((t) => family == null || TOOL_FAMILY_OF[t.name] === family)
+    .map((t) => ({ name: t.name, family: TOOL_FAMILY_OF[t.name], tier: t.tier, summary: toolSummary(t) }));
+  return {
+    profile: toolProfile(),
+    total_tools: TOOL_DEFS.length,
+    visible_tools: visibleTools().length,
+    families: Object.entries(TOOL_FAMILY_DESCRIPTIONS).map(([name, description]) => ({
+      name, description, count: TOOL_DEFS.filter((t) => TOOL_FAMILY_OF[t.name] === name).length,
+    })),
+    tools,
+  };
+}
+
+export function describeOperation({ name }) {
+  const tool = TOOL_DEFS.find((t) => t.name === name);
+  if (!tool) {
+    throw new core.MediaKitError(`unknown operation "${name}" — use list_operations to browse the catalog`, "INVALID_ARG");
+  }
+  return {
+    name: tool.name,
+    family: TOOL_FAMILY_OF[tool.name],
+    tier: tool.tier,
+    description: tool.description,
+    inputSchema: zodToJsonSchema(z.object(tool.schema), { target: "jsonSchema7" }),
   };
 }
