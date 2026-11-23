@@ -8892,6 +8892,40 @@ const vcBadVideoText = await callExpectThrow("verify_cuts", { manifest_path: vcS
 checkOk(/needs a video input/.test(vcBadVideoText ?? ""), "verify_cuts refuses an audio-only video input", (vcBadVideoText ?? "").slice(0, 160));
 const vcBadManifestText = await callExpectThrow("verify_cuts", { manifest_path: "/tmp/no-such-film-xyz.json", video: vcFinalPath });
 checkOk(/not found|not readable/.test(vcBadManifestText ?? ""), "verify_cuts refuses a missing manifest", (vcBadManifestText ?? "").slice(0, 160));
+// verify_cuts --strips (turn 151): one 4-tile review strip per
+// boundary, frames at cut-0.5/-0.1/+0.1/+0.5s from the delivered
+// video, labelled with offset + timestamp. Default stays probe-only.
+checkOk(vcJson.strips === null && vcJson.strips_dir === null, "verify_cuts without strips writes no strips (strips null, probe-only)", JSON.stringify({ strips: vcJson.strips, strips_dir: vcJson.strips_dir }));
+const vcStripsDir = path.join(vcStage.dir, "strips");
+const vcStripsRes = await client.callTool({ name: "verify_cuts", arguments: { manifest_path: vcStage.manifestPath, video: vcFinalPath, strips: true, strips_dir: vcStripsDir } }, undefined, { timeout: 300000 });
+const vcStripsJson = JSON.parse(vcStripsRes.content[0].text);
+const vcStripFrames = (vcStripsJson.strips ?? []).map((s) => s.frames?.map((f) => f.seconds));
+checkOk(vcStripsJson.ok === true && vcStripsJson.strips?.length === 3 && vcStripsJson.strips_dir === vcStripsDir
+  && JSON.stringify(vcStripFrames) === JSON.stringify([[0.5, 0.9, 1.1, 1.5], [1.5, 1.9, 2.1, 2.5], [2.5, 2.9, 3.1, 3.5]])
+  && vcStripsJson.strips.every((s) => s.file && existsSync(s.file) && s.skipped_reason === null)
+  && vcStripsJson.strips[0].file.endsWith("cut-01-1.000s.png") && vcStripsJson.strips[1].file.endsWith("cut-02-2.000s.png") && vcStripsJson.strips[2].file.endsWith("cut-03-3.000s.png"),
+  "verify_cuts --strips writes 3 strips with exact frames at cut±0.5/±0.1s into the requested dir", JSON.stringify(vcStripsJson.strips?.map((s) => s.file)));
+const vcStripProbe = await probeStreams(vcStripsJson.strips[0].file);
+checkOk(vcStripProbe.streams?.[0]?.width === 1280 && vcStripProbe.streams?.[0]?.height === 568, "strip 1 is 4 tiles of 320px on the 540x960 portrait film (1280x568)", JSON.stringify(vcStripProbe.streams?.[0]));
+// CLI: --strips writes the default <stem>.cut-strips/ dir.
+const vcCliStripsJson = await runCliJson(["verify-cuts", vcStage.manifestPath, vcFinalPath, "--strips"]);
+checkOk(vcCliStripsJson.strips?.length === 3 && vcCliStripsJson.strips_dir === path.join(vcOut, "final.cut-strips") && vcCliStripsJson.strips.every((s) => existsSync(s.file)), "CLI verify-cuts --strips writes the default <stem>.cut-strips/ dir next to the video", JSON.stringify(vcCliStripsJson.strips_dir));
+// Edge clamps: cuts at 0.5s and 3.5s on a 4s film — offsets clamp
+// into [0, duration-0.05] instead of going negative/past the end.
+// (Shots are 0.5/3.0/0.5s: assemble refuses shots under 0.5s, so
+// 0.5s is the earliest a first cut can sit and 3.5s the latest a
+// last cut can sit on a 4s film.)
+const vcEdgeStage = await stageAssembleManifest("verify-cuts-strips-film.json");
+const vcEdgeOut = path.join(vcEdgeStage.dir, "out");
+const vcEdgeRenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: vcEdgeStage.manifestPath, mode: "render", output_dir: vcEdgeOut, force: true } }, undefined, { timeout: 300000 });
+const vcEdgeRenderJson = JSON.parse(vcEdgeRenderRes.content[0].text);
+checkOk(vcEdgeRenderJson.final?.frames === 120, "edge film renders 4s / 120 frames", JSON.stringify(vcEdgeRenderJson.final));
+const vcEdgePath = path.join(vcEdgeOut, "final.mp4");
+const vcEdgeRes = await client.callTool({ name: "verify_cuts", arguments: { manifest_path: vcEdgeStage.manifestPath, video: vcEdgePath, strips: true } }, undefined, { timeout: 300000 });
+const vcEdgeJson = JSON.parse(vcEdgeRes.content[0].text);
+const vcEdgeFrames = (vcEdgeJson.strips ?? []).map((s) => s.frames?.map((f) => f.seconds));
+checkOk(vcEdgeJson.strips?.length === 2 && JSON.stringify(vcEdgeFrames) === JSON.stringify([[0, 0.4, 0.6, 1], [3, 3.4, 3.6, 3.96]]) && vcEdgeJson.strips.every((s) => s.file && existsSync(s.file) && s.skipped_reason === null) && vcEdgeJson.strips_dir === path.join(vcEdgeOut, "final.cut-strips"),
+  "verify_cuts --strips clamps offsets at the film edges (cut 0.5s -> [0,0.4,0.6,1.0], cut 3.5s -> [3.0,3.4,3.6,3.96])", JSON.stringify(vcEdgeFrames));
 
 // release_checkpoint (turn 145): one QC gate — verify + platform +
 // loudness + clipping + cuts + contact sheet, one JSON verdict.
@@ -10246,7 +10280,12 @@ const dlTravRedir = JSON.parse(dlTravRedirRes.content[0].text);
 checkOk(dlTravRedir.redirects === 1 && dlTravRedir.final_url.endsWith("/..%2f..%2fevil.mp4") && dlTravRedir.size_bytes === downloadFixture.length && dlNoEvil(), "a redirect to a traversal path is followed but still writes only the caller output (redirects=1)", JSON.stringify({ redirects: dlTravRedir.redirects, final_url: dlTravRedir.final_url }));
 // The cache branch too: same hostile URL, cache:true — the entry must
 // live under a sha256-hex directory, and the second call must be a hit.
+// The test server runs on an ephemeral port, so the URL (and its
+// sha256) differs every suite run — start from an empty cache dir or
+// a previous run's entry would make the "exactly one entry" count
+// fail on the second run in a row (caught by luot 151 run 2).
 const dlTravCacheDir = path.join(root, "outputs/dl-cache-trav");
+await rm(dlTravCacheDir, { recursive: true, force: true });
 const dlTravCache1Res = await client.callTool({ name: "download", arguments: { url: `${dlBase}/..%2f..%2fevil.mp4`, output: path.join(root, "outputs/mcp-download-travcache.mp4"), cache: true, cache_dir: dlTravCacheDir } });
 const dlTravCache1 = JSON.parse(dlTravCache1Res.content[0].text);
 checkOk(dlTravCache1.cached === false && dlTravCache1.size_bytes === downloadFixture.length && dlNoEvil(), "first cached download of a traversal URL is a miss that still writes only the caller output", JSON.stringify({ cached: dlTravCache1.cached }));

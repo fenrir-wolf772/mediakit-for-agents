@@ -2141,7 +2141,7 @@ export const TOOL_DEFS = [
   {
     name: "verify_cuts",
     tier: "PLAN",
-    description: "Verify an assemble render cuts where its film manifest promises: downscale the delivered video to a 270p draft, measure the real hard cuts with the content scene detector, and compare them against the manifest's shot boundaries — a hard cut must land within tolerance (default 0.25s) of its promised time, a transition must show a real visual change across its blend window (measured as a frame diff, since a fade fires no scene cut), and any extra cut is reported as unexpected. Duration is checked against the voice timeline (±0.2s). Returns ok plus one entry per boundary (confirmed/missing/invisible_transition/unmeasured) and the list of unexpected cuts. Probe-only: writes nothing except a temp draft, removed afterwards unless keep_draft.",
+    description: "Verify an assemble render cuts where its film manifest promises: downscale the delivered video to a 270p draft, measure the real hard cuts with the content scene detector, and compare them against the manifest's shot boundaries — a hard cut must land within tolerance (default 0.25s) of its promised time, a transition must show a real visual change across its blend window (measured as a frame diff, since a fade fires no scene cut), and any extra cut is reported as unexpected. Duration is checked against the voice timeline (±0.2s). Returns ok plus one entry per boundary (confirmed/missing/invisible_transition/unmeasured) and the list of unexpected cuts. Probe-only: writes nothing except a temp draft, removed afterwards unless keep_draft. With strips:true it also writes one 4-tile review strip per boundary (frames at cut-0.5/-0.1/+0.1/+0.5s, captured from the delivered video and labelled with offset + timestamp) into <video-stem>.cut-strips/ next to the video, or into strips_dir when given — the eye-check the numbers cannot give: open the strip and look at both sides of each seam.",
     schema: {
     manifest_path: pathSchema.describe("Path to the film manifest JSON file (same schema as assemble)"),
     video: pathSchema.describe("Path to the rendered video to check (final.mp4 from a full assemble render)"),
@@ -2149,6 +2149,8 @@ export const TOOL_DEFS = [
     threshold: z.number().min(0).max(1).optional().describe("Content scene-detector threshold (default 0.05 — the calibrated content-detector default; raise it only if smooth animation inside a shot is reported as a cut)"),
     draft_height: z.number().int().min(16).max(4320).default(270).describe("Draft height in px for the scene-detection pass (default 270 — detection is resolution-insensitive; raise it only if a cut is missed on the draft)"),
     keep_draft: z.boolean().default(false).describe("Keep the temp draft render and report its path (default false = removed afterwards)"),
+    strips: z.boolean().default(false).describe("Also write one 4-tile review strip per boundary (frames at cut-0.5/-0.1/+0.1/+0.5s from the delivered video, labelled with offset + timestamp) — default false, the verify stays probe-only"),
+    strips_dir: pathSchema.optional().describe("Directory for the review strips (default <video-stem>.cut-strips/ next to the video; ignored unless strips is true)"),
   },
     handler: async (a) => safe(() => core.verifyAssembleCuts({
     manifestPath: a.manifest_path,
@@ -2157,6 +2159,8 @@ export const TOOL_DEFS = [
     threshold: a.threshold ?? null,
     draftHeight: a.draft_height,
     keepDraft: a.keep_draft === true,
+    strips: a.strips === true,
+    stripsDir: a.strips_dir ?? null,
   })),
   },
 
@@ -2298,7 +2302,7 @@ export const TOOL_DEFS = [
   {
     name: "safety",
     tier: "READ",
-    description: "Safety tiers for every MediaKit tool (EncodeX's safety-tier idea): READ tools only probe and write nothing (probe, check, hook, diagnose); PLAN tools answer a question by transient work and leave no artifact (determinism renders to a hidden work dir that is removed, verify_cuts renders a draft to temp, estimate_conversion sample-encodes to temp, job only reads/cancels job state); WRITE tools produce a file the caller asked for and never overwrite their own input (prepareOutput refuses that); DESTRUCTIVE tools replace or remove a user artifact in place — only patch_manifest, and it is guarded by expected_revision plus a .bak backup. Returns the tier table with every tool named, the counts, and the rules. Read this before letting an agent loose on a workspace.",
+    description: "Safety tiers for every MediaKit tool (EncodeX's safety-tier idea): READ tools only probe and write nothing (probe, check, hook, diagnose); PLAN tools answer a question by transient work and leave no artifact (determinism renders to a hidden work dir that is removed, verify_cuts renders a draft to temp — plus caller-requested review strips when strips:true, estimate_conversion sample-encodes to temp, job only reads/cancels job state); WRITE tools produce a file the caller asked for and never overwrite their own input (prepareOutput refuses that); DESTRUCTIVE tools replace or remove a user artifact in place — only patch_manifest, and it is guarded by expected_revision plus a .bak backup. Returns the tier table with every tool named, the counts, and the rules. Read this before letting an agent loose on a workspace.",
     schema: {},
     handler: async () => safe(() => listSafetyTiers()),
   },

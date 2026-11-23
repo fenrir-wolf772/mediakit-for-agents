@@ -983,14 +983,16 @@ const COMMANDS = {
     ],
   },
   "verify-cuts": {
-    usage: "mediakit verify-cuts <film.json> <video.mp4> [--tolerance 0.25] [--threshold 0.05] [--draft-height 270] [--keep-draft]",
-    desc: "Verify an assemble render cuts where its film manifest promises: downscale the video to a 270p draft, measure the real hard cuts with the content scene detector, and compare them against the manifest's shot boundaries — a hard cut must land within --tolerance (default 0.25s) of its promised time, a transition must show a real visual change across its blend window (a fade fires no scene cut, so the frames just outside the window are diffed instead), and any extra cut is reported as unexpected. Duration is checked against the voice timeline (±0.2s). Probe-only: writes nothing except a temp draft, removed afterwards unless --keep-draft.",
+    usage: "mediakit verify-cuts <film.json> <video.mp4> [--tolerance 0.25] [--threshold 0.05] [--draft-height 270] [--keep-draft] [--strips] [--strips-dir <dir>]",
+    desc: "Verify an assemble render cuts where its film manifest promises: downscale the video to a 270p draft, measure the real hard cuts with the content scene detector, and compare them against the manifest's shot boundaries — a hard cut must land within --tolerance (default 0.25s) of its promised time, a transition must show a real visual change across its blend window (a fade fires no scene cut, so the frames just outside the window are diffed instead), and any extra cut is reported as unexpected. Duration is checked against the voice timeline (±0.2s). Probe-only: writes nothing except a temp draft, removed afterwards unless --keep-draft. With --strips it also writes one 4-tile review strip per boundary (frames at cut-0.5/-0.1/+0.1/+0.5s from the delivered video) into <video-stem>.cut-strips/ next to the video, or into --strips-dir when given.",
     args: [{ name: "manifest", required: true }, { name: "video", required: true }],
     options: [
       ["--tolerance", "How far a measured cut may drift from its promised time, in seconds (default 0.25)"],
       ["--threshold", "Content scene-detector threshold (default 0.05)"],
       ["--draft-height", "Draft height in px for the scene-detection pass (default 270)"],
       ["--keep-draft", "Keep the temp draft render and report its path"],
+      ["--strips", "Also write one 4-tile review strip per boundary (frames at cut-0.5/-0.1/+0.1/+0.5s from the delivered video)"],
+      ["--strips-dir", "Directory for the review strips (default <video-stem>.cut-strips/ next to the video; ignored unless --strips)"],
     ],
   },
   diagnose: {
@@ -2329,6 +2331,8 @@ async function main() {
           threshold: numOpt(opts, "threshold") ?? null,
           draftHeight: numOpt(opts, "draft_height") ?? 270,
           keepDraft: opts.keep_draft === true,
+          strips: opts.strips === true,
+          stripsDir: opts.strips_dir ?? null,
         });
         break;
       }

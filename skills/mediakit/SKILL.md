@@ -1882,7 +1882,8 @@ carries the same tiers as standard annotations
 prose. READ (24 tools) only probes and writes nothing; PLAN (4)
 answers a question by transient work and leaves no artifact —
 `determinism` renders to a hidden work dir that is removed,
-`verify_cuts` renders a draft to temp, `estimate_conversion`
+`verify_cuts` renders a draft to temp (plus caller-requested
+review strips when `strips: true`), `estimate_conversion`
 sample-encodes to temp, `job` only reads/cancels job state; WRITE
 (57) produces a file the caller asked for and never overwrites its
 own input; DESTRUCTIVE (1 — `patch_manifest`, guarded by
@@ -1998,6 +1999,26 @@ frozen clip but only 8/20 of steadily moving testsrc — it
 collapses slow motion. Use 0.5–1 to drop only truly frozen
 frames, 2 for a ruthless summary pass. Off by default: scrubbing
 must never silently lose frames.
+
+### 58j. Look at both sides of every seam — `verify_cuts --strips`
+
+`verify_cuts` proves the render cuts where the manifest promises,
+but a number cannot tell you the seam *looks* right — a
+"confirmed" cut between two near-identical frames still reads
+wrong to a viewer. With `--strips` (MCP `strips: true`) it also
+writes one 4-tile review strip per boundary into
+`<video-stem>.cut-strips/` next to the video (or `--strips-dir`
+when given): frames at cut−0.5/−0.1/+0.1/+0.5s, captured from
+the delivered video — not the 270p draft — and labelled with
+offset + timestamp. Open the strip and look: the two left tiles
+must be the outgoing shot, the two right tiles the incoming one.
+Offsets clamp into `[0, duration−0.05]` at the film edges, so a
+cut at 0.5s still gets `[0, 0.4, 0.6, 1.0]`; a strip with fewer
+than 2 distinct frames is skipped and the reason recorded
+instead of failing the verify. This generalizes kpr17ch/outtake's
+`check_frame` — one frame pulled out for a human or agent eye to
+look at — into a strip around each seam. Off by default — without it the
+verify stays probe-only.
 
 ## Workflow: vertical captioned clip from a landscape source
 

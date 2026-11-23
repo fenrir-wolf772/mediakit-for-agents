@@ -5193,7 +5193,7 @@
       "family": "inspect",
       "tier": "PLAN",
       "summary": "Verify an assemble render cuts where its film manifest promises: downscale the delivered video to a 270p draft, measure the real hard cuts with the content…",
-      "description": "Verify an assemble render cuts where its film manifest promises: downscale the delivered video to a 270p draft, measure the real hard cuts with the content scene detector, and compare them against the manifest's shot boundaries — a hard cut must land within tolerance (default 0.25s) of its promised time, a transition must show a real visual change across its blend window (measured as a frame diff, since a fade fires no scene cut), and any extra cut is reported as unexpected. Duration is checked against the voice timeline (±0.2s). Returns ok plus one entry per boundary (confirmed/missing/invisible_transition/unmeasured) and the list of unexpected cuts. Probe-only: writes nothing except a temp draft, removed afterwards unless keep_draft.",
+      "description": "Verify an assemble render cuts where its film manifest promises: downscale the delivered video to a 270p draft, measure the real hard cuts with the content scene detector, and compare them against the manifest's shot boundaries — a hard cut must land within tolerance (default 0.25s) of its promised time, a transition must show a real visual change across its blend window (measured as a frame diff, since a fade fires no scene cut), and any extra cut is reported as unexpected. Duration is checked against the voice timeline (±0.2s). Returns ok plus one entry per boundary (confirmed/missing/invisible_transition/unmeasured) and the list of unexpected cuts. Probe-only: writes nothing except a temp draft, removed afterwards unless keep_draft. With strips:true it also writes one 4-tile review strip per boundary (frames at cut-0.5/-0.1/+0.1/+0.5s, captured from the delivered video and labelled with offset + timestamp) into <video-stem>.cut-strips/ next to the video, or into strips_dir when given — the eye-check the numbers cannot give: open the strip and look at both sides of each seam.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -5231,6 +5231,16 @@
             "type": "boolean",
             "default": false,
             "description": "Keep the temp draft render and report its path (default false = removed afterwards)"
+          },
+          "strips": {
+            "type": "boolean",
+            "default": false,
+            "description": "Also write one 4-tile review strip per boundary (frames at cut-0.5/-0.1/+0.1/+0.5s from the delivered video, labelled with offset + timestamp) — default false, the verify stays probe-only"
+          },
+          "strips_dir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Directory for the review strips (default <video-stem>.cut-strips/ next to the video; ignored unless strips is true)"
           }
         },
         "required": [
@@ -5442,7 +5452,7 @@
       "family": "inspect",
       "tier": "READ",
       "summary": "Safety tiers for every MediaKit tool (EncodeX's safety-tier idea): READ tools only probe and write nothing (probe, check, hook, diagnose); PLAN tools answer a…",
-      "description": "Safety tiers for every MediaKit tool (EncodeX's safety-tier idea): READ tools only probe and write nothing (probe, check, hook, diagnose); PLAN tools answer a question by transient work and leave no artifact (determinism renders to a hidden work dir that is removed, verify_cuts renders a draft to temp, estimate_conversion sample-encodes to temp, job only reads/cancels job state); WRITE tools produce a file the caller asked for and never overwrite their own input (prepareOutput refuses that); DESTRUCTIVE tools replace or remove a user artifact in place — only patch_manifest, and it is guarded by expected_revision plus a .bak backup. Returns the tier table with every tool named, the counts, and the rules. Read this before letting an agent loose on a workspace.",
+      "description": "Safety tiers for every MediaKit tool (EncodeX's safety-tier idea): READ tools only probe and write nothing (probe, check, hook, diagnose); PLAN tools answer a question by transient work and leave no artifact (determinism renders to a hidden work dir that is removed, verify_cuts renders a draft to temp — plus caller-requested review strips when strips:true, estimate_conversion sample-encodes to temp, job only reads/cancels job state); WRITE tools produce a file the caller asked for and never overwrite their own input (prepareOutput refuses that); DESTRUCTIVE tools replace or remove a user artifact in place — only patch_manifest, and it is guarded by expected_revision plus a .bak backup. Returns the tier table with every tool named, the counts, and the rules. Read this before letting an agent loose on a workspace.",
       "inputSchema": {
         "type": "object",
         "properties": {},
@@ -5655,5 +5665,5 @@
       }
     }
   ],
-  "spec_hash": "4b6e6a04d8760a51011814d805b2dd1b553da3095cd292223f7e942266abd158"
+  "spec_hash": "037fe52f510737db0fc9386df1d4c9fd7cf5ed156b8c9399a5fa65b16c840c76"
 }

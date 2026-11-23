@@ -19848,15 +19848,32 @@ export async function verifyRender({ receipt, rerender = false, outputDir = null
 // that no boundary explains is an unexpected cut: the render changes
 // picture where the manifest promises one continuous shot. Duration
 // is checked against the voice timeline (±0.2s, vedit's verify
-// number). Probe-only: the only file written is the temp draft,
-// removed afterwards unless keep_draft.
+// number). Probe-only by default: the only file written is the
+// temp draft, removed afterwards unless keep_draft. With
+// `strips: true` it also writes one 4-tile review strip per
+// boundary (frames at cut-0.5/-0.1/+0.1/+0.5s from the delivered
+// video) into `<stem>.cut-strips/` next to the video, or into
+// `stripsDir` when given.
 const VERIFY_CUTS_TOLERANCE_DEFAULT = 0.25;
 const VERIFY_CUTS_DURATION_TOLERANCE = 0.2;
 const VERIFY_CUTS_DRAFT_HEIGHT = 270;
 const VERIFY_CUTS_MIN_SCENE_LEN_FRAMES = 3;
 const VERIFY_CUTS_TRANSITION_DIFF_FLOOR = 1.0;
+// Review strips (the eye-check pattern from kpr17ch/outtake's
+// `check_frame` — a single frame pulled out for a human/agent to
+// look at — applied here as one 4-tile strip per boundary, so the
+// verify pass ends with something a human eye can actually check):
+// one 4-tile strip per boundary, frames at cut-0.5/-0.1/+0.1/+0.5s
+// captured from the DELIVERED video (not the 270p draft — the strip
+// is for a human eye, so it shows the real picture), each tile
+// labelled with its offset + timestamp. A strip is the eye-check
+// the numbers cannot give: a "confirmed" cut whose two sides look
+// identical still reads wrong to a viewer, and a missing cut shows
+// up here as four tiles of the same shot.
+const VERIFY_CUTS_STRIP_OFFSETS = [-0.5, -0.1, 0.1, 0.5];
+const VERIFY_CUTS_STRIP_WIDTH = 320;
 
-export async function verifyAssembleCuts({ manifestPath, video, tolerance = VERIFY_CUTS_TOLERANCE_DEFAULT, threshold = null, draftHeight = VERIFY_CUTS_DRAFT_HEIGHT, keepDraft = false }) {
+export async function verifyAssembleCuts({ manifestPath, video, tolerance = VERIFY_CUTS_TOLERANCE_DEFAULT, threshold = null, draftHeight = VERIFY_CUTS_DRAFT_HEIGHT, keepDraft = false, strips = false, stripsDir = null }) {
   const tol = num(tolerance, "tolerance", { min: 0, max: 5 });
   const dh = num(draftHeight, "draft_height", { min: 16, max: 4320, integer: true });
   const manifestAbs = await requireInput(manifestPath, "manifest");
@@ -19957,6 +19974,52 @@ export async function verifyAssembleCuts({ manifestPath, video, tolerance = VERI
     const durationOk = duration !== null && Number.isFinite(duration) && Math.abs(duration - plan.total_seconds) <= VERIFY_CUTS_DURATION_TOLERANCE;
     if (!durationOk) warnings.push(`duration ${duration}s differs from the manifest timeline ${plan.total_seconds}s by more than ${VERIFY_CUTS_DURATION_TOLERANCE}s`);
     const ok = warnings.length === 0;
+    // Review strips (opt-in): one 4-tile strip per boundary, captured
+    // from the delivered video at cut-0.5/-0.1/+0.1/+0.5s. Offsets are
+    // clamped into [0, duration-0.05] and de-duplicated — a cut near
+    // the start or end still gets a strip, just with fewer distinct
+    // frames; under 2 distinct frames the strip is skipped and the
+    // reason is recorded instead of failing the whole verify.
+    let stripsResult = null;
+    let stripsDirAbs = null;
+    if (strips === true) {
+      if (duration === null || !Number.isFinite(duration) || duration <= 0) {
+        throw new MediaKitError("verify_cuts --strips needs a readable video duration", "PROBE_FAILED");
+      }
+      const stem = path.parse(videoAbs).name;
+      stripsDirAbs = await prepareOutputDir(stripsDir ?? path.join(path.dirname(videoAbs), `${stem}.cut-strips`));
+      stripsResult = [];
+      const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-verify-strips-"));
+      try {
+        for (const b of cuts) {
+          const cutT = b.expected_seconds;
+          const times = [];
+          for (const off of VERIFY_CUTS_STRIP_OFFSETS) {
+            const t = +Math.min(Math.max(cutT + off, 0), Math.max(0, duration - 0.05)).toFixed(3);
+            if (!times.some((x) => x.seconds === t)) times.push({ seconds: t, offset_seconds: off });
+          }
+          const entry = { boundary_index: b.index, type: b.type, expected_seconds: cutT, status: b.status, file: null, frames: times, skipped_reason: null };
+          stripsResult.push(entry);
+          if (times.length < 2) {
+            entry.skipped_reason = "fewer than 2 distinct frames around the cut";
+            continue;
+          }
+          const prefix = `b${b.index}-tile-`;
+          for (let i = 0; i < times.length; i++) {
+            const tilePath = path.join(tmpDir, `${prefix}${String(i + 1).padStart(3, "0")}.png`);
+            const labelFile = path.join(tmpDir, `${prefix}label-${i}.txt`);
+            const off = times[i].offset_seconds;
+            await writeFile(labelFile, `${off > 0 ? "+" : ""}${off}s  ${prettyTimestamp(times[i].seconds)}`, "utf8");
+            await captureFrameAt(videoAbs, times[i].seconds, tilePath, { width: VERIFY_CUTS_STRIP_WIDTH, labelFile });
+          }
+          const stripPath = path.join(stripsDirAbs, `cut-${String(b.index).padStart(2, "0")}-${cutT.toFixed(3)}s.png`);
+          await run(FFMPEG, ["-y", "-framerate", "1", "-i", path.join(tmpDir, `${prefix}%03d.png`), "-vf", `tile=${times.length}x1`, "-frames:v", "1", "-q:v", "2", stripPath]);
+          entry.file = stripPath;
+        }
+      } finally {
+        await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      }
+    }
     return {
       operation: "verify_cuts",
       manifest: manifestAbs,
@@ -19969,6 +20032,8 @@ export async function verifyAssembleCuts({ manifestPath, video, tolerance = VERI
       threshold: threshold ?? CONTENT_DETECTOR_DEFAULT_THRESHOLD,
       draft_height: dh,
       draft: draftMade && keepDraft ? draftPath : null,
+      strips: stripsResult,
+      strips_dir: stripsDirAbs,
       cuts,
       unexpected_cuts: unexpected,
       warnings,
