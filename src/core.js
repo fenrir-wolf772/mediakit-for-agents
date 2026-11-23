@@ -9191,6 +9191,98 @@ async function writeDownloadProvenance({ outPath, url, finalUrl, redirects, cont
 // -movflags +faststart, which belongs to the mp4 muxer. --audio loops
 // a bed under the whole slideshow (a short bed loops, a long one is
 // cut by -t to the total).
+// Still-image extensions a slideshow glob may match. A bare `*`
+// must not pick up a .txt or a .mp4 sitting next to the slides —
+// the pattern already restricts the extension when it names one,
+// but the extension filter is what keeps `slides/*` honest.
+const SLIDESHOW_IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"];
+
+// Natural sort: split into digit / non-digit runs so shot-2 sorts
+// before shot-10 (plain lexicographic sort puts shot-10 first).
+// A slideshow glob lists slides in shooting order, not ASCII order.
+function naturalCompare(a, b) {
+  const ax = String(a).match(/\d+|\D+/g) ?? [];
+  const bx = String(b).match(/\d+|\D+/g) ?? [];
+  for (let i = 0; i < Math.max(ax.length, bx.length); i++) {
+    if (ax[i] === undefined) return -1;
+    if (bx[i] === undefined) return 1;
+    if (ax[i] === bx[i]) continue;
+    if (/^\d+$/.test(ax[i]) && /^\d+$/.test(bx[i])) return Number(ax[i]) - Number(bx[i]);
+    return ax[i] < bx[i] ? -1 : 1;
+  }
+  return 0;
+}
+
+// Expand a slideshow glob into slide files, in natural sort order
+// (the mcp-ffmpeg-helper follow-up from lượt 152: `slideshow`
+// should take a folder of images, not a hand-listed array). The
+// static prefix of the pattern is the walk base (`slides/*.png`
+// walks `slides/`, `**/*.jpg` walks the base dir recursively); the
+// rest matches with the same matcher `batch` uses, so a bare
+// `*.png` matches the basename at any depth. Only still images
+// count, hidden folders and node_modules/.git are skipped like
+// batch, symlinked directories are not followed, and the base stays
+// inside MEDIAKIT_WORKDIR when the sandbox is on. Errors name the
+// pattern: no matches (NO_MATCH), fewer than 2, or more than 32.
+export async function expandSlideshowGlob(pattern, baseDir = process.cwd()) {
+  if (typeof pattern !== "string" || !pattern.trim()) {
+    throw new MediaKitError("slideshow images_glob must be a glob pattern like \"slides/*.png\"", "INVALID_ARG");
+  }
+  const pat = pattern.trim();
+  if (!/[*?[]/.test(pat)) {
+    throw new MediaKitError(`slideshow images_glob needs a glob pattern (use * or ** to match files), got: ${JSON.stringify(pat)} — pass explicit files with images instead`, "INVALID_ARG");
+  }
+  const absolute = path.isAbsolute(pat);
+  const segs = pat.split("/").filter((s) => s !== "" && s !== ".");
+  const staticSegs = [];
+  for (const s of segs) {
+    if (/[*?[]/.test(s)) break;
+    staticSegs.push(s);
+  }
+  const restSegs = segs.slice(staticSegs.length);
+  const root = absolute ? path.parse(pat).root : baseDir;
+  const base = staticSegs.length ? path.resolve(root, ...staticSegs) : path.resolve(root);
+  await assertInsideWorkdir(base, "slideshow images_glob base");
+  let baseStat;
+  try {
+    baseStat = await stat(base);
+  } catch {
+    throw new MediaKitError(`slideshow images_glob base is not a directory: ${base} (from pattern ${JSON.stringify(pat)})`, "INVALID_ARG");
+  }
+  if (!baseStat.isDirectory()) {
+    throw new MediaKitError(`slideshow images_glob base is not a directory: ${base} (from pattern ${JSON.stringify(pat)})`, "INVALID_ARG");
+  }
+  const restPat = restSegs.join("/");
+  const found = [];
+  async function walk(dir, isRoot) {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        if (e.isSymbolicLink()) continue;
+        if (!isRoot && (e.name.startsWith(".") || FIND_SKIP_DIRS.has(e.name))) continue;
+        await walk(full, false);
+      } else if (e.isFile()) {
+        const ext = e.name.includes(".") ? e.name.split(".").pop().toLowerCase() : "";
+        if (!SLIDESHOW_IMAGE_EXTENSIONS.includes(ext)) continue;
+        const rel = path.relative(base, full).split(path.sep).join("/");
+        if (matchBatchPattern(restPat, rel)) found.push({ full, rel });
+      }
+    }
+  }
+  await walk(base, true);
+  found.sort((a, b) => naturalCompare(a.rel, b.rel));
+  if (!found.length) throw new MediaKitError(`slideshow images_glob matched no images: ${JSON.stringify(pat)} (base: ${base})`, "NO_MATCH");
+  if (found.length < 2) throw new MediaKitError(`slideshow images_glob needs at least 2 images, matched ${found.length}: ${JSON.stringify(pat)}`, "INVALID_ARG");
+  if (found.length > 32) throw new MediaKitError(`slideshow images_glob takes at most 32 images, matched ${found.length}: ${JSON.stringify(pat)} — narrow the pattern (a subfolder, or fewer images)`, "INVALID_ARG");
+  return found.map((f) => f.full);
+}
+
 function parseSlideshowImage(spec, idx) {
   if (typeof spec === "string") return { file: spec, duration: null };
   if (spec && typeof spec === "object" && !Array.isArray(spec)) {
@@ -9232,14 +9324,25 @@ async function runPool(items, limit, fn) {
   return results;
 }
 
-export async function slideshow({ images, output, duration = 3, durations = null, transition = "fade", transitionDuration = 1, transitions = null, transitionDurations = null, fps = 30, width = 1280, height = 720, audio = null, crf = 23, dryRun = false }) {
-  if (!Array.isArray(images) || images.length < 2) {
+export async function slideshow({ images = null, imagesGlob = null, output, duration = 3, durations = null, transition = "fade", transitionDuration = 1, transitions = null, transitionDurations = null, fps = 30, width = 1280, height = 720, audio = null, crf = 23, dryRun = false }) {
+  // Either an explicit list or a glob — never both, never neither.
+  // The glob expands here (relative to the caller's cwd), so every
+  // path below — validation, dry-run, cache key, result — sees the
+  // resolved slide list.
+  let resolvedImages = images;
+  if (imagesGlob !== null && imagesGlob !== undefined) {
+    if (Array.isArray(images) && images.length) {
+      throw new MediaKitError("slideshow takes either images or images_glob, not both", "INVALID_ARG");
+    }
+    resolvedImages = await expandSlideshowGlob(imagesGlob);
+  }
+  if (!Array.isArray(resolvedImages) || resolvedImages.length < 2) {
     throw new MediaKitError("slideshow needs at least 2 images", "INVALID_ARG");
   }
-  if (images.length > 32) {
-    throw new MediaKitError(`slideshow takes at most 32 images, got ${images.length}`, "INVALID_ARG");
+  if (resolvedImages.length > 32) {
+    throw new MediaKitError(`slideshow takes at most 32 images, got ${resolvedImages.length}`, "INVALID_ARG");
   }
-  const slides = images.map((s, i) => parseSlideshowImage(s, i + 1));
+  const slides = resolvedImages.map((s, i) => parseSlideshowImage(s, i + 1));
   const inPaths = [];
   for (const s of slides) inPaths.push(await requireInput(s.file, "slideshow image"));
   const outPath = await prepareOutput(output, inPaths);
@@ -9336,7 +9439,7 @@ export async function slideshow({ images, output, duration = 3, durations = null
         ? formatCommand(["-y", "-stream_loop", "-1", "-i", audioPath, "-i", joinPath, "-map", "1:v:0", "-map", "0:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-t", String(total), outPath])
         : null;
       return {
-        operation: "slideshow", dry_run: true, images: inPaths, output: outPath,
+        operation: "slideshow", dry_run: true, images: inPaths, images_glob: imagesGlob ?? null, output: outPath,
         slides: durs.map((d, i) => ({ file: inPaths[i], duration_seconds: d })),
         transition: ts.every((x) => x === ts[0]) ? ts[0] : null,
         transition_duration: tNums.every((x) => x === tNums[0]) ? tNums[0] : null,
@@ -9395,7 +9498,7 @@ export async function slideshow({ images, output, duration = 3, durations = null
   const out = await probe(outPath);
   const frames = await countVideoFrames(outPath);
   return {
-    operation: "slideshow", images: inPaths, output: outPath,
+    operation: "slideshow", images: inPaths, images_glob: imagesGlob ?? null, output: outPath,
     slides: durs.map((d, i) => ({ file: inPaths[i], duration_seconds: d })),
     // transition / transition_duration keep the old shape when every
     // join is the same, and are null otherwise — transitions /
@@ -15728,9 +15831,9 @@ export const BATCH_OPERATIONS = {
   // array exception). output_name is batch-only: the single output
   // file's name inside the output dir.
   slideshow: {
-    args: ["images", "durations", "duration", "transition", "transition_duration", "fps", "width", "height", "audio", "crf", "output_name"],
+    args: ["images", "images_glob", "durations", "duration", "transition", "transition_duration", "fps", "width", "height", "audio", "crf", "output_name"],
     run: (input, output, a) => slideshow({
-      images: a.images, output,
+      images: a.images ?? null, imagesGlob: a.images_glob ?? null, output,
       durations: a.durations ?? null,
       duration: a.duration ?? 3,
       transition: a.transition ?? "fade",
@@ -15739,9 +15842,19 @@ export const BATCH_OPERATIONS = {
       audio: a.audio ?? null, crf: a.crf ?? 23,
     }),
     // The slides are the input: their bytes belong in the cache
-    // key, or editing one image re-serves the old slideshow.
+    // key, or editing one image re-serves the old slideshow. A glob
+    // expands against the caller's cwd here (the manifest run loop
+    // expands it against the manifest dir first — see below — so
+    // this path only runs for a direct batch-style call).
     extraHash: async (input, a) => {
-      const files = slideshowImageFiles(a.images ?? []);
+      let files = slideshowImageFiles(a.images ?? []);
+      if (!files.length && typeof a.images_glob === "string") {
+        try {
+          files = await expandSlideshowGlob(a.images_glob);
+        } catch {
+          return null;
+        }
+      }
       if (!files.length) return null;
       const hashes = [];
       for (const f of files) hashes.push(await hashFile(f));
@@ -16393,13 +16506,23 @@ const MANIFEST_FILE_ARGS = ["captions", "overlay", "words_file", "background", "
 // per image. transitions/transition_durations arrays are NOT
 // exposed in v1 — one transition type for all joins in a manifest.
 function validateSlideshowManifestArgs(step, args, label) {
-  if (args.images === undefined || args.images === null) {
-    throw new MediaKitError(`${label} (slideshow) needs images — an array of 2-32 image paths (or {file, duration} objects)`, "INVALID_ARG");
+  const hasImages = args.images !== undefined && args.images !== null;
+  const hasGlob = args.images_glob !== undefined && args.images_glob !== null;
+  if (hasImages && hasGlob) {
+    throw new MediaKitError(`${label} (slideshow) takes either images or images_glob, not both`, "INVALID_ARG");
   }
-  if (!Array.isArray(args.images) || args.images.length < 2 || args.images.length > 32) {
-    throw new MediaKitError(`${label} (slideshow) images must be an array of 2-32 image paths (or {file, duration} objects), got: ${Array.isArray(args.images) ? `${args.images.length} entries` : typeof args.images}`, "INVALID_ARG");
-  }
-  args.images.forEach((s, j) => {
+  if (hasGlob) {
+    if (typeof args.images_glob !== "string" || !args.images_glob.trim()) {
+      throw new MediaKitError(`${label} (slideshow) images_glob must be a non-empty glob pattern like "slides/*.png"`, "INVALID_ARG");
+    }
+  } else {
+    if (!hasImages) {
+      throw new MediaKitError(`${label} (slideshow) needs images — an array of 2-32 image paths (or {file, duration} objects) — or images_glob, a pattern like "slides/*.png"`, "INVALID_ARG");
+    }
+    if (!Array.isArray(args.images) || args.images.length < 2 || args.images.length > 32) {
+      throw new MediaKitError(`${label} (slideshow) images must be an array of 2-32 image paths (or {file, duration} objects), got: ${Array.isArray(args.images) ? `${args.images.length} entries` : typeof args.images}`, "INVALID_ARG");
+    }
+    args.images.forEach((s, j) => {
       if (typeof s === "string") {
         if (!s.trim()) throw new MediaKitError(`${label} (slideshow) images[${j}] is an empty path`, "INVALID_ARG");
       } else if (s && typeof s === "object" && !Array.isArray(s)) {
@@ -16412,6 +16535,10 @@ function validateSlideshowManifestArgs(step, args, label) {
         throw new MediaKitError(`${label} (slideshow) images[${j}] must be a file path or {file, duration}`, "INVALID_ARG");
       }
   });
+  }
+  // Durations apply to a glob too (one number per matched image) —
+  // the count is only known after expansion, so the length check
+  // lives in slideshow() itself; lint only checks the shape here.
   if (args.durations !== undefined && args.durations !== null) {
     if (!Array.isArray(args.durations) || args.durations.some((d) => typeof d !== "number")) {
       throw new MediaKitError(`${label} (slideshow) durations must be an array of numbers, one per image`, "INVALID_ARG");
@@ -16502,9 +16629,13 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
   }
   // A download-first manifest has no local input file: the URL in
   // step 1 IS the input, so `input` may be omitted (any other
-  // manifest still needs one).
+  // manifest still needs one) — and the same holds for a
+  // slideshow-glob-first manifest: the glob in step 1 IS the input,
+  // there is no single first slide to name.
   const downloadFirst = Array.isArray(doc.steps) && doc.steps.length > 0 && doc.steps[0]?.tool === "download";
-  if ((typeof doc.input !== "string" || !doc.input.trim()) && !downloadFirst) {
+  const slideshowGlobFirst = Array.isArray(doc.steps) && doc.steps.length > 0 && doc.steps[0]?.tool === "slideshow"
+    && typeof doc.steps[0]?.args?.images_glob === "string" && doc.steps[0].args.images_glob.trim();
+  if ((typeof doc.input !== "string" || !doc.input.trim()) && !downloadFirst && !slideshowGlobFirst) {
     throw new MediaKitError("manifest needs an \"input\" file path", "INVALID_ARG");
   }
   if (!Array.isArray(doc.steps) || !doc.steps.length || doc.steps.length > MANIFEST_MAX_STEPS) {
@@ -16593,6 +16724,24 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
     }
     return { index: i, tool: step.tool, spec, args, resolved };
   });
+
+  // A slideshow step may name its slides with a glob instead of a
+  // list: expand it here (relative to the manifest), so the resolved
+  // files feed the step cache hash and the run — and a glob that
+  // matches nothing fails lint, before anything renders (the dry-run
+  // plan below runs after this, so it fails fast too). The cache key
+  // still carries the original args (the glob string), so changing
+  // the pattern re-runs the step even when the files do not.
+  for (const s of steps) {
+    if (s.tool === "slideshow" && typeof s.resolved.images_glob === "string") {
+      s.resolved.images = await expandSlideshowGlob(resolveRel(s.resolved.images_glob), manifestDir);
+      // The glob is spent: the step runs on the resolved list, and
+      // slideshow() refuses images + images_glob together. The
+      // original args (glob string included) still feed the cache
+      // key above, so changing the pattern re-runs the step.
+      delete s.resolved.images_glob;
+    }
+  }
 
   // Output extension follows the step chain (extract_audio changes
   // it); a mismatched output extension is adjusted and reported,

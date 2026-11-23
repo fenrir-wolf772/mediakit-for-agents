@@ -452,10 +452,11 @@ const COMMANDS = {
     ],
   },
   slideshow: {
-    usage: "mediakit slideshow <img1> <img2> [img3...] -o <output.mp4> [--duration 3] [--durations 3,5,2] [--transition fade] [--transition-duration 1] [--transitions fade,wipeleft] [--transition-durations 1,0.5] [--fps 30] [--width 1280] [--height 720] [--audio <file>] [--crf 23] [--dry-run]",
-    desc: "Turn 2-32 still images into one video with an xfade transition between every pair. Each image is visible for its own duration (total = sum of durations); the transition eats a handle, not slide time. --transitions/--transition-durations give a different transition per join (n-1 comma entries); otherwise one type applies to all pairs. --audio loops a bed under the whole slideshow. Output .mp4 only in v1. --dry-run prints the exact commands for all three stages and writes no file (one exact command per slide clip, the exact xfade join command, and the exact audio command when a bed is given — run them in order to reproduce the real output).",
-    args: [{ name: "images", required: true, variadic: true }],
+    usage: "mediakit slideshow <img1> <img2> [img3...] -o <output.mp4> [--duration 3] [--durations 3,5,2] [--transition fade] [--transition-duration 1] [--transitions fade,wipeleft] [--transition-durations 1,0.5] [--fps 30] [--width 1280] [--height 720] [--audio <file>] [--crf 23] [--dry-run]  OR  mediakit slideshow --images-glob 'slides/*.png' -o <output.mp4> [same options]",
+    desc: "Turn 2-32 still images into one video with an xfade transition between every pair. Each image is visible for its own duration (total = sum of durations); the transition eats a handle, not slide time. --transitions/--transition-durations give a different transition per join (n-1 comma entries); otherwise one type applies to all pairs. --audio loops a bed under the whole slideshow. Output .mp4 only in v1. --images-glob takes the slides from a pattern instead of a file list ('slides/*.png', '**/*.jpg') — matched images are used in natural sort order (shot-2 before shot-10), 2-32 images, only still-image files count; pass either files or --images-glob, not both. --dry-run prints the exact commands for all three stages and writes no file (one exact command per slide clip, the exact xfade join command, and the exact audio command when a bed is given — run them in order to reproduce the real output).",
+    args: [{ name: "images", required: false, variadic: true }],
     options: [
+      ["--images-glob", "Glob pattern for the slides instead of listing files, e.g. 'slides/*.png' — natural sort order, 2-32 images"],
       ["--duration", "Visible seconds per image (default 3)"],
       ["--durations", "Comma list, one visible duration per image, in order (overrides --duration)"],
       ["--transition", "xfade transition between every pair: fade (default), wipeleft, dissolve, circlecrop, ..."],
@@ -1728,7 +1729,9 @@ async function main() {
         });
         break;
       case "slideshow": {
-        if (positional.length < 2) fail("slideshow needs at least 2 image files");
+        const hasGlob = !!opts.images_glob;
+        if (hasGlob && positional.length) fail("slideshow takes either image files or --images-glob, not both");
+        if (!hasGlob && positional.length < 2) fail("slideshow needs at least 2 image files");
         const durations = opts.durations ? String(opts.durations).split(",").map((s) => {
           const n = Number(s.trim());
           if (!Number.isFinite(n)) fail(`--durations has a non-number entry: ${s}`);
@@ -1745,7 +1748,7 @@ async function main() {
           return n;
         }) : null;
         result = await core.slideshow({
-          images: positional, output: needOutput(opts),
+          images: hasGlob ? null : positional, imagesGlob: hasGlob ? String(opts.images_glob) : null, output: needOutput(opts),
           duration: numOpt(opts, "duration") ?? 3,
           durations,
           transition: opts.transition ?? "fade",

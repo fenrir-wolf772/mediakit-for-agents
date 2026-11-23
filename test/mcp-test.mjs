@@ -15,7 +15,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
-import { applyContentBaseline, averageHash, buildZoomChains, compareDeterminismRuns, countClippedRuns, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, explainError, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, inspectionPointTimestamps, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, parseZoomChainEvents, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
+import { applyContentBaseline, averageHash, buildZoomChains, compareDeterminismRuns, countClippedRuns, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, inspectionPointTimestamps, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, parseZoomChainEvents, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
@@ -2078,6 +2078,89 @@ const pairsF187Vs2 = await psnrY(path.join(root, "outputs/mcp-slideshow-exp-logo
 const pairsF187Vs3 = await psnrY(path.join(root, "outputs/mcp-slideshow-exp-green.mp4"), path.join(root, "outputs/mcp-slideshow-pairs-f187.mp4"));
 console.log("slideshow pairs f187 (mid wipeleft) vs slide2 =", pairsF187Vs2, "| vs slide3 =", pairsF187Vs3);
 checkOk(pairsF187Vs2 !== null && pairsF187Vs2 < 30 && pairsF187Vs3 !== null && pairsF187Vs3 < 30, "slideshow mid-wipeleft frame is a blend of slides 2 and 3 (neither pure slide)", `vs slide2 ${pairsF187Vs2}, vs slide3 ${pairsF187Vs3}`);
+// slideshow --images-glob (lượt 153): slides from a pattern, in
+// natural sort order — shot-1, shot-2, shot-10, NOT lexicographic
+// shot-1, shot-10, shot-2. Fixtures are flat colors so the order is
+// provable by pixel: red, green, blue. A notes.txt next to them
+// proves non-images are ignored.
+const globDir = path.join(root, "outputs/mcp-slideshow-glob");
+await mkdir(globDir, { recursive: true });
+for (const [name, color] of [["shot-1", "0xFF0000"], ["shot-2", "0x00FF00"], ["shot-10", "0x0000FF"]]) {
+  await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-f", "lavfi", "-i", `color=c=${color}:s=640x360:d=1`, "-frames:v", "1", path.join(globDir, `${name}.png`)]);
+  await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-i", path.join(globDir, `${name}.png`), "-vf", "scale=640:360", "-c:v", "libx264", "-pix_fmt", "yuv420p", path.join(root, `outputs/mcp-slideshow-glob-exp-${name}.mp4`)]);
+}
+await writeFile(path.join(globDir, "notes.txt"), "not an image\n");
+// Unit: the expander itself — natural order, non-images ignored.
+const globExpanded = await expandSlideshowGlob(path.join(globDir, "*.png"));
+checkOk(JSON.stringify(globExpanded.map((p) => path.basename(p))) === '["shot-1.png","shot-2.png","shot-10.png"]', "expandSlideshowGlob sorts shot-1, shot-2, shot-10 (natural, not lexicographic) and ignores notes.txt", JSON.stringify(globExpanded.map((p) => path.basename(p))));
+// `**` crosses directories (separate dir so the video tests below
+// keep exactly 3 slides).
+const globNestedDir = path.join(root, "outputs/mcp-slideshow-glob-nested");
+await mkdir(path.join(globNestedDir, "sub"), { recursive: true });
+await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=c=0xFFFF00:s=640x360:d=1", "-frames:v", "1", path.join(globNestedDir, "a.png")]);
+await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=c=0xFF00FF:s=640x360:d=1", "-frames:v", "1", path.join(globNestedDir, "sub", "b.png")]);
+const globDeep = await expandSlideshowGlob(path.join(globNestedDir, "**/*.png"));
+checkOk(globDeep.length === 2 && globDeep.map((p) => path.relative(globNestedDir, p).split(path.sep).join("/")).join(",") === "a.png,sub/b.png", "expandSlideshowGlob **/*.png crosses into sub/ (2 images)", JSON.stringify(globDeep.map((p) => path.relative(globNestedDir, p))));
+// MCP: glob -> 6s video, 180 frames, slides in natural order.
+const slideGlobRes = await client.callTool({
+  name: "slideshow",
+  arguments: { images_glob: path.join(globDir, "*.png"), output: path.join(root, "outputs/mcp-slideshow-glob.mp4"), durations: [2, 2, 2], transition_duration: 0.5, fps: 30, width: 640, height: 360 },
+});
+const slideGlobJson = JSON.parse(slideGlobRes.content[0].text);
+checkOk(slideGlobJson.frames === 180 && near(slideGlobJson.duration_seconds, 6, 0.1) && slideGlobJson.images_glob === path.join(globDir, "*.png") && JSON.stringify(slideGlobJson.images.map((p) => path.basename(p))) === '["shot-1.png","shot-2.png","shot-10.png"]', "slideshow images_glob makes a 6s video (180 frames) with slides in natural order", JSON.stringify(slideGlobJson.images));
+await frameMp4(path.join(root, "outputs/mcp-slideshow-glob.mp4"), 30, path.join(root, "outputs/mcp-slideshow-glob-f30.mp4"));
+await frameMp4(path.join(root, "outputs/mcp-slideshow-glob.mp4"), 90, path.join(root, "outputs/mcp-slideshow-glob-f90.mp4"));
+await frameMp4(path.join(root, "outputs/mcp-slideshow-glob.mp4"), 150, path.join(root, "outputs/mcp-slideshow-glob-f150.mp4"));
+const globF30Red = await psnrY(path.join(root, "outputs/mcp-slideshow-glob-exp-shot-1.mp4"), path.join(root, "outputs/mcp-slideshow-glob-f30.mp4"));
+const globF90Green = await psnrY(path.join(root, "outputs/mcp-slideshow-glob-exp-shot-2.mp4"), path.join(root, "outputs/mcp-slideshow-glob-f90.mp4"));
+const globF150Blue = await psnrY(path.join(root, "outputs/mcp-slideshow-glob-exp-shot-10.mp4"), path.join(root, "outputs/mcp-slideshow-glob-f150.mp4"));
+const globF30Green = await psnrY(path.join(root, "outputs/mcp-slideshow-glob-exp-shot-2.mp4"), path.join(root, "outputs/mcp-slideshow-glob-f30.mp4"));
+console.log("slideshow glob PSNR: f30 vs red =", globF30Red, "| f90 vs green =", globF90Green, "| f150 vs blue =", globF150Blue, "| f30 vs green =", globF30Green);
+checkOk(globF30Red !== null && globF30Red > 40, "slideshow glob frame at t=1s is shot-1 (red)", `PSNR ${globF30Red}`);
+checkOk(globF90Green !== null && globF90Green > 40, "slideshow glob frame at t=3s is shot-2 (green)", `PSNR ${globF90Green}`);
+checkOk(globF150Blue !== null && globF150Blue > 40, "slideshow glob frame at t=5s is shot-10 (blue)", `PSNR ${globF150Blue}`);
+checkOk(globF30Green !== null && globF30Green < 15, "slideshow glob plays in natural order (t=1s is not shot-2)", `PSNR ${globF30Green}`);
+// CLI: same glob, same result.
+const globCli = await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "slideshow", "--images-glob", path.join(globDir, "*.png"), "-o", path.join(root, "outputs/mcp-slideshow-glob-cli.mp4"), "--duration", "2", "--transition-duration", "0.5", "--width", "640", "--height", "360"]);
+const globCliJson = JSON.parse(globCli.stdout);
+checkOk(globCliJson.frames === 180 && near(globCliJson.duration_seconds, 6, 0.1), "CLI slideshow --images-glob makes the same 6s video (180 frames)", JSON.stringify(globCliJson.frames));
+// Dry-run resolves the glob and writes nothing.
+const slideGlobDryRes = await client.callTool({
+  name: "slideshow",
+  arguments: { images_glob: path.join(globDir, "*.png"), output: path.join(root, "outputs/mcp-slideshow-glob-dry.mp4"), durations: [2, 2, 2], transition_duration: 0.5, fps: 30, width: 640, height: 360, dry_run: true },
+});
+const slideGlobDryJson = JSON.parse(slideGlobDryRes.content[0].text);
+checkOk(slideGlobDryJson.dry_run === true && slideGlobDryJson.images.length === 3 && slideGlobDryJson.frames === null && !existsSync(path.join(root, "outputs/mcp-slideshow-glob-dry.mp4")), "slideshow images_glob dry-run resolves 3 slides, frames null, writes nothing", JSON.stringify(slideGlobDryJson.images?.map((p) => path.basename(p))));
+// Errors: both sources, no match, one match, no magic, over the cap.
+const globBoth = await callExpectThrow("slideshow", { images: [path.join(globDir, "shot-1.png"), path.join(globDir, "shot-2.png")], images_glob: path.join(globDir, "*.png"), output: path.join(root, "outputs/mcp-slideshow-glob-bad.mp4") });
+checkOk(/either images or images_glob/.test(globBoth), "slideshow refuses images + images_glob together", globBoth.slice(0, 200));
+const globNone = await callExpectThrow("slideshow", { images_glob: path.join(globDir, "*.jpg"), output: path.join(root, "outputs/mcp-slideshow-glob-bad2.mp4") });
+checkOk(/matched no images/.test(globNone), "slideshow refuses a glob that matches nothing", globNone.slice(0, 200));
+const globOne = await callExpectThrow("slideshow", { images_glob: path.join(globDir, "shot-2*.png"), output: path.join(root, "outputs/mcp-slideshow-glob-bad3.mp4") });
+checkOk(/at least 2 images/.test(globOne), "slideshow refuses a glob matching a single image", globOne.slice(0, 200));
+const globPlain = await callExpectThrow("slideshow", { images_glob: path.join(globDir, "shot-1.png"), output: path.join(root, "outputs/mcp-slideshow-glob-bad4.mp4") });
+checkOk(/needs a glob pattern/.test(globPlain), "slideshow refuses a plain path as images_glob (no magic)", globPlain.slice(0, 200));
+// Over the 32-image cap: 33 tiny stills.
+const globManyDir = path.join(root, "outputs/mcp-slideshow-glob-many");
+await mkdir(globManyDir, { recursive: true });
+for (let i = 0; i < 33; i++) {
+  await execFileAsync("ffmpeg", ["-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=c=0x808080:s=64x36:d=1", "-frames:v", "1", path.join(globManyDir, `s${String(i).padStart(2, "0")}.png`)]);
+}
+const globMany = await callExpectThrow("slideshow", { images_glob: path.join(globManyDir, "*.png"), output: path.join(root, "outputs/mcp-slideshow-glob-bad5.mp4") });
+checkOk(/at most 32 images/.test(globMany), "slideshow refuses a glob matching 33 images", globMany.slice(0, 200));
+// Manifest: a glob-first manifest needs no input; the glob expands
+// against the manifest dir, runs, and caches like an images list.
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+await writeFile(path.join(root, "outputs/mcp-slideshow-glob-manifest.json"), JSON.stringify({ version: 1, output: "mcp-slideshow-glob-manifest.mp4", steps: [{ tool: "slideshow", args: { images_glob: "mcp-slideshow-glob/*.png", durations: [2, 2, 2], transition_duration: 0.5, width: 640, height: 360 } }, { tool: "trim", args: { start: 0, end: 2 } }] }));
+const globManifestRes = await client.callTool({ name: "manifest", arguments: { manifest_path: path.join(root, "outputs/mcp-slideshow-glob-manifest.json") } });
+const globManifestJson = JSON.parse(globManifestRes.content[0].text);
+checkOk(globManifestJson.steps_run === 2 && globManifestJson.cache_hits === 0 && globManifestJson.steps.every((s) => s.status === "ok") && near(globManifestJson.final.duration_seconds, 2, 0.05), "manifest slideshow images_glob runs without an input (2 steps, final 2s)", JSON.stringify(globManifestJson.final?.duration_seconds));
+const globManifestRes2 = await client.callTool({ name: "manifest", arguments: { manifest_path: path.join(root, "outputs/mcp-slideshow-glob-manifest.json") } });
+const globManifestJson2 = JSON.parse(globManifestRes2.content[0].text);
+checkOk(globManifestJson2.steps_run === 0 && globManifestJson2.cache_hits === 2, "manifest slideshow images_glob re-run serves both steps from cache", JSON.stringify({ steps_run: globManifestJson2.steps_run, cache_hits: globManifestJson2.cache_hits }));
+await writeFile(path.join(root, "outputs/mcp-slideshow-glob-manifest-bad.json"), JSON.stringify({ version: 1, output: "mcp-slideshow-glob-manifest-bad.mp4", steps: [{ tool: "slideshow", args: { images_glob: "mcp-slideshow-glob/*.jpg" } }] }));
+const globManifestBad = await callExpectThrow("manifest", { manifest_path: path.join(root, "outputs/mcp-slideshow-glob-manifest-bad.json"), dry_run: true });
+checkOk(/matched no images/.test(globManifestBad), "manifest dry-run fails fast on a glob that matches nothing (lint before render)", globManifestBad.slice(0, 200));
 const slidePairsBadLen = await callExpectThrow("slideshow", { images: [path.join(root, "test/kenburns.png"), path.join(root, "test/logo.png"), path.join(root, "outputs/mcp-slideshow-green.png")], output: path.join(root, "outputs/mcp-slideshow-bad6.mp4"), transitions: ["fade"] });
 checkOk(/one entry per join/.test(slidePairsBadLen), "slideshow refuses a transitions list with the wrong length", slidePairsBadLen.slice(0, 200));
 const slidePairsBadName = await callExpectThrow("slideshow", { images: [path.join(root, "test/kenburns.png"), path.join(root, "test/logo.png"), path.join(root, "outputs/mcp-slideshow-green.png")], output: path.join(root, "outputs/mcp-slideshow-bad7.mp4"), transitions: ["fade", "swirl"] });

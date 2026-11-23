@@ -1108,8 +1108,8 @@ file instead of guessing. Only single-input steps chain
 `burn_captions`/`overlay`/`chroma_key`); multi-input work (`concat`, `mix`,
 `mux`, `pip`) stays a separate call before or after the manifest.
 `slideshow` is the one exception: it may only be step 1 — it builds a
-video from images in args, so the manifest input should be the first
-slide image, and later steps then trim, reframe or grade the slideshow
+video from images in args (or from an `images_glob` pattern — then the manifest `input` may be omitted entirely), so the manifest input should be the first
+slide image when images are listed, and later steps then trim, reframe or grade the slideshow
 like any clip. Editing a slide image re-runs the step: the image bytes
 are in the cache key, the same as a `chroma_key` background.
 `download` is the second exception: it may only be step 1 too — it
@@ -1342,6 +1342,14 @@ track, silent unless `--audio` loops a bed under the whole show.
 Verify a slideshow by its frames, not its log: the frame mid-slide
 must match its image (PSNR > 40 dB) and the frame mid-transition
 must match NEITHER neighbour (a blend).
+`--images-glob 'slides/*.png'` (MCP `images_glob`) lists the slides
+by pattern instead of by hand: matched images run in natural sort
+order (shot-2 before shot-10), 2–32 images, only still-image files
+count, `**` crosses directories, a bare `*.png` matches the basename
+at any depth (same rule as `batch`). Pass either files or a glob,
+never both. In a manifest the glob expands against the manifest dir
+at lint time, so a pattern that matches nothing fails before anything
+renders — and a glob-first manifest needs no `input`.
 In a manifest, a `chroma_key` background is either an image file
 or a hex color — and the cache treats them differently. An image
 background resolves relative to the manifest and its bytes are

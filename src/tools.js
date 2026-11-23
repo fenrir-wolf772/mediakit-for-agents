@@ -722,7 +722,7 @@ export const TOOL_DEFS = [
   {
     name: "slideshow",
     tier: "WRITE",
-    description: "Turn 2-32 still images into one video with an xfade transition between every pair. Each image is visible for its own duration — the transition eats a handle, not slide time — so the total is exactly the sum of the durations. One transition type for all pairs (transition/transition_duration), or a different one per join: transitions (one xfade name per join, n-1 entries) and transition_durations (one length per join, each shorter than both slides it joins). Images are rendered to clips in parallel first, then joined with the concat xfade chain. audio loops a bed under the whole slideshow. Output .mp4 only in v1. The result counts frames on the output file, so the duration is measured, not assumed. Set dry_run=true to print the exact commands for all three stages and write no file (one exact command per slide clip, the exact xfade join command — built by the same builder concat --transition runs — and the exact audio command when a bed is given; run them in order to reproduce the real output; duration/frames report null — measured on the real output).",
+    description: "Turn 2-32 still images into one video with an xfade transition between every pair. Each image is visible for its own duration — the transition eats a handle, not slide time — so the total is exactly the sum of the durations. One transition type for all pairs (transition/transition_duration), or a different one per join: transitions (one xfade name per join, n-1 entries) and transition_durations (one length per join, each shorter than both slides it joins). Images are rendered to clips in parallel first, then joined with the concat xfade chain. Pass the slides either as images (paths or {file, duration} objects, in display order) or as images_glob, a pattern like 'slides/*.png' — matched images are used in natural sort order (shot-2 before shot-10), 2-32 images, only still-image files count; pass exactly one of images / images_glob, not both. audio loops a bed under the whole slideshow. Output .mp4 only in v1. The result counts frames on the output file, so the duration is measured, not assumed. Set dry_run=true to print the exact commands for all three stages and write no file (one exact command per slide clip, the exact xfade join command — built by the same builder concat --transition runs — and the exact audio command when a bed is given; run them in order to reproduce the real output; duration/frames report null — measured on the real output).",
     schema: {
     images: z.array(z.union([
       z.string().describe("Image file path"),
@@ -730,7 +730,8 @@ export const TOOL_DEFS = [
         file: z.string().describe("Image file path"),
         duration: z.number().min(0.5).max(600).optional().describe("How long this image stays visible, in seconds (overrides duration/durations for this slide)"),
       }),
-    ])).min(2).max(32).describe("Images in display order, as paths or {file, duration} objects"),
+    ])).min(2).max(32).optional().describe("Images in display order, as paths or {file, duration} objects — or use images_glob instead"),
+    images_glob: z.string().optional().describe("Glob pattern for the slides instead of images, e.g. 'slides/*.png' or '**/*.jpg' — matched images are used in natural sort order (shot-2 before shot-10), 2-32 images, only still-image files count; pass either images or images_glob, not both"),
     output: pathSchema,
     duration: z.number().min(0.5).max(600).default(3).describe("Visible seconds per image when no per-image duration is given (default 3)"),
     durations: z.array(z.number().min(0.5).max(600)).min(2).max(32).optional().describe("One visible duration per image, in order (overrides duration; a per-image duration in images wins over this)"),
@@ -746,7 +747,8 @@ export const TOOL_DEFS = [
     dry_run: z.boolean().default(false).describe("Print the plan (one exact command per slide clip, the join as a plan, the exact audio command when a bed is given) and write no file"),
   },
     handler: async (a) => safe(() => core.slideshow({
-    images: a.images,
+    images: a.images ?? null,
+    imagesGlob: a.images_glob ?? null,
     output: a.output,
     duration: a.duration,
     durations: a.durations ?? null,
