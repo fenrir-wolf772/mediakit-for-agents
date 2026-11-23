@@ -8265,6 +8265,20 @@ export async function imageToVideo({ input, output, duration = 5, fps = 30, widt
 // Content-Type (mp4 served as .mp3) is refused instead of silently
 // mislabelled.
 //
+// Traversal audit (lượt 150, follow-up lượt 149 — the radzevich
+// lesson): the URL never supplies the filename. The only things a URL
+// contributes to the output path are (a) an extension, allowlisted
+// against DOWNLOAD_EXTENSIONS (or the fixed Content-Type map), and
+// (b) a cache key, which is sha256(url) hex. Content-Disposition is
+// never read — a server naming ../../evil.mp4 changes nothing — and
+// redirects are re-parsed through `new URL`, which normalizes %2e
+// dot segments. The manifest/batch path takes only the extension
+// too (batchOutputExt). Regression-tested in test/mcp-test.mjs
+// against encoded-traversal paths, an evil Content-Disposition, a
+// traversal-looking extension, a redirect to one, and the cache
+// branch: every case lands exactly at the caller-supplied output,
+// with no file outside it.
+//
 // HLS (.m3u8) / DASH (.mpd) playlists take a different fetcher — a
 // playlist is a list of segments, not a file, so the direct path's
 // streaming cap cannot apply. The playlist branch (downloadPlaylist-

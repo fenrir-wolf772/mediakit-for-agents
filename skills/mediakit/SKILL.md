@@ -940,7 +940,10 @@ every `download` writes `<output>.provenance.json` next to the file
 (source URL, final URL, redirects, content-type, SHA-256, versions) —
 the license is the caller's `--license` declaration, or `unknown`
 when none was given, never guessed from a filename or a domain;
-check the source before publishing.
+check the source before publishing. The URL never supplies the
+filename — only a validated extension is taken from it; a server's
+`Content-Disposition` filename is ignored, so a hostile URL cannot
+steer bytes outside the output the caller asked for.
 
 ### 33h. A style keeps its pace as numbers — measure it, then let diagnose score the edit
 A channel's cutting rhythm is not a feeling: it is cuts per minute

@@ -10131,6 +10131,27 @@ const downloadServer = createServer(async (req, res) => {
     res.writeHead(200, { "content-type": "video/mp4", "content-length": downloadFixture.length }); res.end(downloadFixture);
   } else if (req.url === "/slow") {
     // Never responds: the tool's timeout must fire, not the test's.
+  } else if (req.url === "/..%2f..%2fevil.mp4") {
+    // Traversal audit (lượt 150): a hostile path serves normally —
+    // the tool, not the server, decides where the bytes land.
+    res.writeHead(200, { "content-type": "video/mp4", "content-length": downloadFixture.length });
+    res.end(downloadFixture);
+  } else if (req.url === "/trav-disp") {
+    // Content-Disposition names ../../evil.mp4 — a downloader that
+    // trusted the header would write outside the workspace.
+    res.writeHead(200, {
+      "content-type": "video/mp4", "content-length": downloadFixture.length,
+      "content-disposition": 'attachment; filename="../../evil.mp4"; filename*=UTF-8\'\'..%2f..%2fevil.mp4',
+    });
+    res.end(downloadFixture);
+  } else if (req.url === "/clip.mp4%2f..%2f..%2fevil") {
+    // The URL "extension" here is traversal-looking garbage after a
+    // .mp4 — it must fall back to the Content-Type, never become a path.
+    res.writeHead(200, { "content-type": "video/mp4", "content-length": downloadFixture.length });
+    res.end(downloadFixture);
+  } else if (req.url === "/trav-redir") {
+    res.writeHead(302, { location: "/..%2f..%2fevil.mp4" });
+    res.end();
   } else if (req.url.startsWith("/hls/") || req.url.startsWith("/dash/")) {
     // A generated playlist fixture: the playlist, its segments and
     // init files, with the content-type a real CDN would send
@@ -10201,6 +10222,39 @@ const dlBadExtText = await callExpectThrow("download", { url: `${dlBase}/source.
 checkOk(/writes a media file/.test(dlBadExtText ?? ""), "download refuses a non-media output extension", dlBadExtText ?? "");
 const dlSlowText = await callExpectThrow("download", { url: `${dlBase}/slow`, output: path.join(root, "outputs/mcp-download-slow.mp4"), timeout_seconds: 1 });
 checkOk(/timed out after 1s/.test(dlSlowText ?? ""), "download times out after timeout_seconds on a silent server", dlSlowText ?? "");
+// Download traversal audit (lượt 150, follow-up lượt 149 — the
+// radzevich lesson): a hostile URL must never steer the output
+// filename. The URL contributes at most a validated extension, the
+// Content-Disposition header is never read, and the cache key is
+// sha256(url) — so these adversarial URLs must all land exactly where
+// the caller asked, and nowhere else. The canary is a file named
+// evil.mp4: it must never appear at the repo root or in outputs/.
+const dlEvilSpots = [path.join(root, "evil.mp4"), path.join(root, "outputs/evil.mp4")];
+const dlNoEvil = () => !dlEvilSpots.some((p) => existsSync(p));
+const dlTrav1Res = await client.callTool({ name: "download", arguments: { url: `${dlBase}/..%2f..%2fevil.mp4`, output: path.join(root, "outputs/mcp-download-trav1.mp4") } });
+const dlTrav1 = JSON.parse(dlTrav1Res.content[0].text);
+checkOk(dlTrav1.output === path.join(root, "outputs/mcp-download-trav1.mp4") && dlTrav1.size_bytes === downloadFixture.length && existsSync(dlTrav1.output), "download from an encoded-traversal URL path lands exactly at the caller-supplied output, exact fixture size", JSON.stringify({ output: dlTrav1.output, size_bytes: dlTrav1.size_bytes }));
+checkOk(dlNoEvil() && existsSync(path.join(root, "outputs/mcp-download-trav1.mp4.provenance.json")), "no evil.mp4 appears at the repo root or in outputs/ after the traversal URL, and provenance sits next to the real output", `evil=${dlEvilSpots.map((p) => existsSync(p)).join(",")}`);
+const dlTravDispRes = await client.callTool({ name: "download", arguments: { url: `${dlBase}/trav-disp`, output: path.join(root, "outputs/mcp-download-travdisp.mp4") } });
+const dlTravDisp = JSON.parse(dlTravDispRes.content[0].text);
+checkOk(dlTravDisp.size_bytes === downloadFixture.length && dlTravDisp.output.endsWith("mcp-download-travdisp.mp4") && dlNoEvil(), "a Content-Disposition filename of ../../evil.mp4 is ignored: bytes land at the caller output, no evil file", JSON.stringify({ output: dlTravDisp.output }));
+const dlTravExtRes = await client.callTool({ name: "download", arguments: { url: `${dlBase}/clip.mp4%2f..%2f..%2fevil`, output: path.join(root, "outputs/mcp-download-travext") } });
+const dlTravExt = JSON.parse(dlTravExtRes.content[0].text);
+checkOk(dlTravExt.output.endsWith(".mp4") && dlTravExt.size_bytes === downloadFixture.length && dlNoEvil(), "a traversal-looking URL extension falls back to the Content-Type (.mp4) and never becomes a path", dlTravExt.output);
+const dlTravRedirRes = await client.callTool({ name: "download", arguments: { url: `${dlBase}/trav-redir`, output: path.join(root, "outputs/mcp-download-travredir.mp4") } });
+const dlTravRedir = JSON.parse(dlTravRedirRes.content[0].text);
+checkOk(dlTravRedir.redirects === 1 && dlTravRedir.final_url.endsWith("/..%2f..%2fevil.mp4") && dlTravRedir.size_bytes === downloadFixture.length && dlNoEvil(), "a redirect to a traversal path is followed but still writes only the caller output (redirects=1)", JSON.stringify({ redirects: dlTravRedir.redirects, final_url: dlTravRedir.final_url }));
+// The cache branch too: same hostile URL, cache:true — the entry must
+// live under a sha256-hex directory, and the second call must be a hit.
+const dlTravCacheDir = path.join(root, "outputs/dl-cache-trav");
+const dlTravCache1Res = await client.callTool({ name: "download", arguments: { url: `${dlBase}/..%2f..%2fevil.mp4`, output: path.join(root, "outputs/mcp-download-travcache.mp4"), cache: true, cache_dir: dlTravCacheDir } });
+const dlTravCache1 = JSON.parse(dlTravCache1Res.content[0].text);
+checkOk(dlTravCache1.cached === false && dlTravCache1.size_bytes === downloadFixture.length && dlNoEvil(), "first cached download of a traversal URL is a miss that still writes only the caller output", JSON.stringify({ cached: dlTravCache1.cached }));
+const dlTravCache2Res = await client.callTool({ name: "download", arguments: { url: `${dlBase}/..%2f..%2fevil.mp4`, output: path.join(root, "outputs/mcp-download-travcache2.mp4"), cache: true, cache_dir: dlTravCacheDir } });
+const dlTravCache2 = JSON.parse(dlTravCache2Res.content[0].text);
+checkOk(dlTravCache2.cached === true && dlTravCache2.size_bytes === downloadFixture.length && dlNoEvil(), "second cached download of the same traversal URL is a cache hit, still no evil file", JSON.stringify({ cached: dlTravCache2.cached }));
+const dlTravCacheEntries = readdirSync(dlTravCacheDir);
+checkOk(dlTravCacheEntries.length === 1 && /^[0-9a-f]{64}$/.test(dlTravCacheEntries[0]) && !existsSync(path.join(dlTravCacheDir, "evil.mp4")), "the traversal cache holds exactly one entry, named by the sha256 hex of the URL — no traversal-named entry", JSON.stringify(dlTravCacheEntries));
 const dlDoctorRes = await client.callTool({ name: "doctor", arguments: {} });
 const dlDoctor = JSON.parse(dlDoctorRes.content[0].text);
 checkOk(dlDoctor.tools?.download?.available === true, "doctor reports download available (pure Node fetch + ffprobe, no ffmpeg filter needed)", JSON.stringify(dlDoctor.tools?.download));
