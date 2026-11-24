@@ -222,9 +222,13 @@ opening segment, and `diagnose` checks the arc (hook first,
 payoff last). Reach for a
 built-in scene template first (`"template": "bounce"` +
 `params`, registry in `scene-templates.json`: `title-card`,
-`bounce`, `slide-in`, `rings`) and write a custom scene file
+`bounce`, `slide-in`, `spring-in`, `rings`) and write a custom scene file
 only when no template fits — template params merge over
-defaults, unknown names fail validate. For one channel look
+defaults, unknown names fail validate. Each template also declares
+`faceSafe` + `timingHint` (only `rings` keeps the frame center clear;
+title-card/slide-in/spring-in are hook cards, bounce is a core beat),
+and `diagnose` warns when a template is used in the wrong slot or
+role. For one channel look
 across the whole film, set `"brand"` in the manifest
 (`amber-teal`, `warm-story`, `minimal-line`, registry in
 `brands.json` — or your own ids from a `MEDIAKIT_BRANDS` file):

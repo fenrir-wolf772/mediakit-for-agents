@@ -4534,10 +4534,21 @@ export async function getShortsStyles() {
     if (!s?.id || !tc || !tc.text_color || !tc.box_color || !Number.isFinite(tc.font_size)) {
       throw new MediaKitError(`shorts style library: style ${JSON.stringify(s?.id)} is missing locked.titlecard {text_color, box_color, font_size}`, "STYLE_LIBRARY_INVALID");
     }
+    // Slot metadata for the style's title card (same faceSafe /
+    // timingHint idea as the scene-template registry, lượt 162): a
+    // title card is a big centered box + centered text, so it covers
+    // the frame center (faceSafe false) and opens the video
+    // (timingHint hook) in every style.
+    if (typeof tc.faceSafe !== "boolean") {
+      throw new MediaKitError(`shorts style library: style ${JSON.stringify(s?.id)} titlecard needs faceSafe true or false, got: ${JSON.stringify(tc.faceSafe)}`, "STYLE_LIBRARY_INVALID");
+    }
+    if (typeof tc.timingHint !== "string" || !SCENE_TEMPLATE_TIMING_HINTS.includes(tc.timingHint)) {
+      throw new MediaKitError(`shorts style library: style ${JSON.stringify(s?.id)} titlecard timingHint must be one of ${SCENE_TEMPLATE_TIMING_HINTS.join(", ")}, got: ${JSON.stringify(tc.timingHint)}`, "STYLE_LIBRARY_INVALID");
+    }
     byId[s.id] = {
       id: s.id,
       name: s.name ?? s.id,
-      titlecard: { text_color: String(tc.text_color), box_color: String(tc.box_color), font_size: tc.font_size },
+      titlecard: { text_color: String(tc.text_color), box_color: String(tc.box_color), font_size: tc.font_size, face_safe: tc.faceSafe, timing_hint: tc.timingHint },
     };
   }
   const ids = Object.keys(byId).sort();
@@ -5211,6 +5222,8 @@ export async function titlecard({ text, output, width = 1080, height = 1920, fon
       operation: "titlecard", dry_run: true, output: outPath, text: String(text).trim(), lines,
       font_size: size, text_color: fg, box_color: bg,
       style: style ?? null, brand: brand ?? null,
+      titlecard_face_safe: locked ? locked.titlecard.face_safe : null,
+      titlecard_timing_hint: locked ? locked.titlecard.timing_hint : null,
       brand_applied: brandApplied, brand_overrides: brandOverrides, style_overrides: overrides,
       size_bytes: null, size_human: null, dimensions: `${w}x${h}`,
       commands: [formatCommand(args)],
@@ -5229,7 +5242,7 @@ export async function titlecard({ text, output, width = 1080, height = 1920, fon
   }
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
-  return { operation: "titlecard", output: outPath, text: String(text).trim(), lines, font_size: size, text_color: fg, box_color: bg, style: style ?? null, brand: brand ?? null, brand_applied: brandApplied, brand_overrides: brandOverrides, style_overrides: overrides, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null };
+  return { operation: "titlecard", output: outPath, text: String(text).trim(), lines, font_size: size, text_color: fg, box_color: bg, style: style ?? null, brand: brand ?? null, titlecard_face_safe: locked ? locked.titlecard.face_safe : null, titlecard_timing_hint: locked ? locked.titlecard.timing_hint : null, brand_applied: brandApplied, brand_overrides: brandOverrides, style_overrides: overrides, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null };
 }
 
 // ---------------------------------------------------------------- intro
@@ -5301,6 +5314,8 @@ export async function intro({ text, output, width = 1280, height = 720, duration
       operation: "intro", dry_run: true, output: outPath, text: String(text).trim(), lines,
       font_size: size, bg_color: bg, text_color: fg, fade_in: fi, fade_out: fo,
       style: style ?? null, brand: brand ?? null,
+      titlecard_face_safe: locked ? locked.titlecard.face_safe : null,
+      titlecard_timing_hint: locked ? locked.titlecard.timing_hint : null,
       brand_applied: brandApplied, brand_overrides: brandOverrides, style_overrides: overrides,
       size_bytes: null, size_human: null, dimensions: `${w}x${h}`, duration_seconds: null,
       expected_duration_seconds: d,
@@ -5315,7 +5330,7 @@ export async function intro({ text, output, width = 1280, height = 720, duration
   }
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
-  return { operation: "intro", output: outPath, text: String(text).trim(), lines, font_size: size, bg_color: bg, text_color: fg, fade_in: fi, fade_out: fo, style: style ?? null, brand: brand ?? null, brand_applied: brandApplied, brand_overrides: brandOverrides, style_overrides: overrides, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null, duration_seconds: out.duration_seconds };
+  return { operation: "intro", output: outPath, text: String(text).trim(), lines, font_size: size, bg_color: bg, text_color: fg, fade_in: fi, fade_out: fo, style: style ?? null, brand: brand ?? null, titlecard_face_safe: locked ? locked.titlecard.face_safe : null, titlecard_timing_hint: locked ? locked.titlecard.timing_hint : null, brand_applied: brandApplied, brand_overrides: brandOverrides, style_overrides: overrides, ...info, dimensions: out.video ? `${out.video.width}x${out.video.height}` : null, duration_seconds: out.duration_seconds };
 }
 
 // ---------------------------------------------------------------- svg_animate
@@ -18039,6 +18054,27 @@ export async function resolveAssemblePreset(preset) {
 // number / boolean / color, each with a default); the manifest may
 // override any of them, and an unknown param name fails validate.
 export const SCENE_TEMPLATE_IDS = ["title-card", "bounce", "slide-in", "spring-in", "rings"];
+// Slot metadata for a scene template (idea: AISEO-VirtualabDigital/
+// mcp-video-editor's effects catalog, src/data/effects.ts — every
+// effect carries faceSafe + timingHint, and apply warns when an
+// effect that layers over the face is used). faceSafe says the
+// template keeps the frame center clear of large opaque shapes —
+// true only for rings (thin strokes + a 0.02-min dot); the title
+// card (title at 0.5H), the bouncing ball (crosses x=W/2, 0.12-0.62H)
+// and both cards (0.8W x 0.28H, 0.36-0.64H) all cover the center.
+// timingHint says which slot the template is timed for: hook (an
+// opening card), core (a mid-film energy beat), payoff, or any.
+export const SCENE_TEMPLATE_TIMING_HINTS = ["hook", "core", "payoff", "any"];
+
+export function parseTemplateSlotMeta(t, where) {
+  if (typeof t?.faceSafe !== "boolean") {
+    throw new MediaKitError(`${where} needs faceSafe true or false, got: ${JSON.stringify(t?.faceSafe)}`, "PRESET_LIBRARY_INVALID");
+  }
+  if (typeof t?.timingHint !== "string" || !SCENE_TEMPLATE_TIMING_HINTS.includes(t.timingHint)) {
+    throw new MediaKitError(`${where} timingHint must be one of ${SCENE_TEMPLATE_TIMING_HINTS.join(", ")}, got: ${JSON.stringify(t?.timingHint)}`, "PRESET_LIBRARY_INVALID");
+  }
+  return { faceSafe: t.faceSafe, timingHint: t.timingHint };
+}
 const SCENE_TEMPLATES_PATH = fileURLToPath(new URL("../skills/shorts-video/scene-templates.json", import.meta.url));
 const SCENE_TEMPLATES_DIR = fileURLToPath(new URL("./canvas-scene-lib/templates/", import.meta.url));
 let cachedSceneTemplates = null;
@@ -18121,7 +18157,7 @@ export async function getSceneTemplates() {
       }
       params[name] = param;
     }
-    byId[t.id] = { id: t.id, name: t.name ?? t.id, description: t.description ?? "", file: fileAbs, params };
+    byId[t.id] = { id: t.id, name: t.name ?? t.id, description: t.description ?? "", file: fileAbs, params, ...parseTemplateSlotMeta(t, `assemble scene template library: template "${t.id}"`) };
   }
   const ids = Object.keys(byId).sort();
   if (JSON.stringify(ids) !== JSON.stringify([...SCENE_TEMPLATE_IDS].sort())) {
@@ -21998,6 +22034,58 @@ export async function diagnoseFilm({ manifestPath, styleFile = null, stamp = fal
       for (const msg of textIssues) add("text_layer", "warn", msg);
     } else if (plan.shots.some((s) => (s.textLayers ?? []).length)) {
       add("text_layer", "pass", "text layers fit: no tall blocks, none in the caption band");
+    }
+
+    // Template fit (mcp-video-editor's effects catalog, lượt 162):
+    // every scene template declares faceSafe + timingHint in the
+    // registry; diagnose warns when a template is used in the wrong
+    // slot or role. Only clear mistakes warn — a hook-timed card on
+    // a payoff role, a core-timed beat as the hook (role or hook
+    // slot), and a non-face-safe template under a CENTER text layer
+    // (its motion covers 0.5H, where the text sits). A top text
+    // layer does not collide: the cards end at 0.64H and the title
+    // sits at 0.5H, both clear of the top band (ends ~0.13H) — the
+    // bounce apex check above already covers the top band precisely.
+    // Position without a role is not warned: a spring-in card closing
+    // a film is a legitimate choice, not a storyboard mistake.
+    const templateShots = plan.shots.filter((s) => s.template);
+    if (templateShots.length) {
+      let slotMeta = null;
+      let slotError = null;
+      try {
+        slotMeta = await getSceneTemplates();
+      } catch (e) {
+        slotError = e instanceof MediaKitError ? e.message : `cannot read scene template library: ${e.message}`;
+      }
+      if (slotError) {
+        add("template_fit", "error", slotError);
+      } else {
+        const fitIssues = [];
+        const hookShot = plan.hook ? plan.shots.find((s) => s.id === plan.hook.shot) : null;
+        for (const s of templateShots) {
+          const meta = slotMeta[s.template];
+          if (!meta) continue; // validate already rejected unknown ids
+          if (s.role === "payoff" && meta.timingHint === "hook") {
+            fitIssues.push(`shot ${s.id} template "${s.template}" is timed for the hook but carries role "payoff" — an opening card closing the film; use a payoff-timed template or drop the role`);
+          } else if (s.role === "hook" && (meta.timingHint === "core" || meta.timingHint === "payoff")) {
+            fitIssues.push(`shot ${s.id} template "${s.template}" is timed for ${meta.timingHint} but carries role "hook" — the film opens on an energy beat instead of a title; use a hook-timed template for the opening shot`);
+          }
+          if (!meta.faceSafe && (s.textLayers ?? []).some((l) => l.position === "center")) {
+            fitIssues.push(`shot ${s.id} template "${s.template}" is not face-safe (its motion covers the frame center) and carries a center text layer — the template will cross the text; move the text to top or pick the rings template`);
+          }
+        }
+        if (hookShot?.template) {
+          const meta = slotMeta[hookShot.template];
+          if (meta && (meta.timingHint === "core" || meta.timingHint === "payoff")) {
+            fitIssues.push(`hook slot opens on shot ${hookShot.id} template "${hookShot.template}", timed for ${meta.timingHint} — the hook should open with a hook-timed template (title-card, slide-in, spring-in) or rings`);
+          }
+        }
+        if (fitIssues.length) {
+          for (const msg of fitIssues) add("template_fit", "warn", msg);
+        } else {
+          add("template_fit", "pass", `templates fit their slots (${templateShots.map((s) => `${s.id}:${s.template}`).join(", ")})`);
+        }
+      }
     }
   } finally {
     await rm(tmpDir, { recursive: true, force: true });

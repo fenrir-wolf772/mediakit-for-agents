@@ -15,7 +15,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
-import { analyzeSeamSamples, applyContentBaseline, averageHash, buildZoomChains, compareDeterminismRuns, countClippedRuns, cutSheetRows, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, endInPause, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, inspectionPointTimestamps, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseSpeechLevels, parseStyleFile, parseZoomChainEvents, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, snapKeepSegmentsToPauses, spectralFluxOnset, startInPause, suggestSeamFix, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
+import { analyzeSeamSamples, applyContentBaseline, averageHash, buildZoomChains, compareDeterminismRuns, countClippedRuns, cutSheetRows, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, endInPause, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, inspectionPointTimestamps, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseSpeechLevels, parseStyleFile, parseTemplateSlotMeta, parseZoomChainEvents, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, snapKeepSegmentsToPauses, spectralFluxOnset, startInPause, suggestSeamFix, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
@@ -5657,8 +5657,9 @@ for (const [id, want] of Object.entries(styleExpected)) {
     arguments: { text: "Style Check", output: path.join(root, `outputs/mcp-titlecard-${id}.png`), style: id },
   });
   const j = JSON.parse(r.content[0].text);
-  checkOk(j.style === id && j.text_color === want.text_color && j.box_color === want.box_color && j.font_size === want.font_size,
+  checkOk(j.style === id && j.text_color === want.text_color && j.box_color === want.box_color && j.font_size === want.font_size && j.titlecard_face_safe === false && j.titlecard_timing_hint === "hook",
     `titlecard --style ${id} resolves to the locked palette`, JSON.stringify({ style: j.style, text_color: j.text_color, box_color: j.box_color, font_size: j.font_size }));
+  checkOk(j.titlecard_face_safe === false && j.titlecard_timing_hint === "hook", `titlecard --style ${id} echoes the style's titlecard slot metadata (face-safe false, timed for the hook)`, JSON.stringify({ face_safe: j.titlecard_face_safe, timing_hint: j.titlecard_timing_hint }));
   checkOk(Array.isArray(j.style_overrides) && j.style_overrides.length === 0, `titlecard --style ${id} reports no overrides`, JSON.stringify(j.style_overrides));
 }
 const titleOverrideRes = await client.callTool({
@@ -6202,8 +6203,9 @@ const introStyleRes = await client.callTool({
 });
 const introStyleJson = JSON.parse(introStyleRes.content[0].text);
 console.log("intro --style call:", "bg", introStyleJson.bg_color, "| text", introStyleJson.text_color, "| font", introStyleJson.font_size, "| style", introStyleJson.style);
-checkOk(introStyleJson.style === "clean-bold" && introStyleJson.bg_color === "F97316" && introStyleJson.text_color === "FFD60A" && introStyleJson.font_size === 120,
+checkOk(introStyleJson.style === "clean-bold" && introStyleJson.bg_color === "F97316" && introStyleJson.text_color === "FFD60A" && introStyleJson.font_size === 120 && introStyleJson.titlecard_face_safe === false && introStyleJson.titlecard_timing_hint === "hook",
   "intro --style clean-bold resolves to the locked palette", JSON.stringify({ style: introStyleJson.style, bg_color: introStyleJson.bg_color, text_color: introStyleJson.text_color, font_size: introStyleJson.font_size }));
+checkOk(introStyleJson.titlecard_face_safe === false && introStyleJson.titlecard_timing_hint === "hook", "intro --style clean-bold echoes the style's titlecard slot metadata (face-safe false, timed for the hook)", JSON.stringify({ face_safe: introStyleJson.titlecard_face_safe, timing_hint: introStyleJson.titlecard_timing_hint }));
 checkOk(Array.isArray(introStyleJson.style_overrides) && introStyleJson.style_overrides.length === 0, "intro --style clean-bold reports no overrides", JSON.stringify(introStyleJson.style_overrides));
 const introStyleMidPng = path.join(root, "outputs/mcp-intro-style-mid.png");
 await execFileAsync("ffmpeg", ["-v", "error", "-y", "-ss", "1.5", "-i", path.join(root, "outputs/mcp-intro-style.mp4"), "-frames:v", "1", introStyleMidPng]);
@@ -9571,6 +9573,21 @@ const progressOutDuration = Number(progressOutStreams?.format?.duration);
 checkOk(progressFractions.length >= 3 && progressFractions.every((v, i) => i === 0 || v >= progressFractions[i - 1]) && progressFractions.at(-1) === 1 && progressFractions.some((v) => v > 0 && v < 0.9) && near(progressOutDuration, 10, 0.2), "runFfmpegWithProgress streams fractions during a 10s medium encode (>=3 callbacks, monotonic, a mid value <0.9, final 1, output 10s)", `fractions=${JSON.stringify(progressFractions)} duration=${progressOutDuration}`);
 await rm(progressOut, { force: true }).catch(() => {});
 
+// Template slot metadata (lượt 162, idea: mcp-video-editor's
+// effects catalog): every scene template declares faceSafe +
+// timingHint in the registry, and every style's titlecard block
+// declares the same pair. Pure checks first, then diagnose.
+const slotTemplates = await getSceneTemplates();
+checkOk(slotTemplates["title-card"]?.faceSafe === false && slotTemplates["title-card"]?.timingHint === "hook" && slotTemplates["bounce"]?.faceSafe === false && slotTemplates["bounce"]?.timingHint === "core" && slotTemplates["slide-in"]?.timingHint === "hook" && slotTemplates["spring-in"]?.timingHint === "hook" && slotTemplates["rings"]?.faceSafe === true && slotTemplates["rings"]?.timingHint === "any", "scene template registry carries faceSafe + timingHint: title-card/slide-in/spring-in hook, bounce core, rings face-safe any", JSON.stringify(Object.fromEntries(Object.entries(slotTemplates).map(([k, v]) => [k, `${v.faceSafe}/${v.timingHint}`]))));
+const slotValid = parseTemplateSlotMeta({ faceSafe: true, timingHint: "payoff" }, "test");
+checkOk(slotValid.faceSafe === true && slotValid.timingHint === "payoff", "parseTemplateSlotMeta passes a valid pair through", JSON.stringify(slotValid));
+for (const [bad, why] of [[{ faceSafe: "yes", timingHint: "hook" }, "string faceSafe"], [{ timingHint: "hook" }, "missing faceSafe"], [{ faceSafe: false, timingHint: "intro" }, "hint outside hook/core/payoff/any"], [{ faceSafe: false }, "missing timingHint"]]) {
+  let threw = null;
+  try { parseTemplateSlotMeta(bad, "test"); } catch (e) { threw = e.message; }
+  checkOk(typeof threw === "string" && threw.length > 0, `parseTemplateSlotMeta rejects ${why}`, threw ?? "no throw");
+}
+const slotStyles = await getShortsStyles();
+checkOk(["clean-bold", "minimal-line", "warm-story"].every((id) => slotStyles[id]?.titlecard?.face_safe === false && slotStyles[id]?.titlecard?.timing_hint === "hook"), "every style's titlecard carries faceSafe false + timingHint hook (big centered box+text opens the video)", JSON.stringify(Object.fromEntries(Object.entries(slotStyles).map(([k, v]) => [k, v.titlecard]))));
 // diagnose (turn 64): director preflight — validate + measured
 // judgement, probe-only. Fixtures: assemble-diagnose-pass.json (1
 // moving video shot, 1280x720, no extras) must pass clean;
@@ -9663,6 +9680,26 @@ await writeFile(diagBounceApexStage.manifestPath, JSON.stringify(diagBounceApexD
 const diagBounceApexRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagBounceApexStage.manifestPath } });
 const diagBounceApexJson = JSON.parse(diagBounceApexRes.content[0].text);
 checkOk(diagBounceApexJson.verdict === "pass" && diagBounceApexJson.warnings === 0 && !diagBounceApexJson.checks?.some((c) => c.id === "text_layer" && c.severity === "warn"), "diagnose passes the same film with bounce apex 0.35 (ball clears the top text band)", JSON.stringify({ verdict: diagBounceApexJson.verdict, warnings: diagBounceApexJson.warnings }));
+// Template fit in diagnose (lượt 162, idea: mcp-video-editor's
+// effects catalog): a hook-timed card on a payoff role, a core-timed
+// beat as the hook, a non-face-safe template under a center text
+// layer, and a hook slot opening on a core-timed template all warn;
+// a film that fits passes. Fixtures are 4s canvas films (voice
+// canvas-voice.mp3 3s + 0.5 lead/tail), so no geometry/motion
+// checks fire — only template_fit differs.
+const diagFitWarnStage = await stageAssembleManifest("assemble-template-fit-warn.json");
+const diagFitWarnRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagFitWarnStage.manifestPath } });
+const diagFitWarnJson = JSON.parse(diagFitWarnRes.content[0].text);
+const diagFitWarns = diagFitWarnJson.checks?.filter((c) => c.id === "template_fit" && c.severity === "warn") ?? [];
+checkOk(diagFitWarnJson.verdict === "warn" && diagFitWarns.length === 3 && /bounce" is timed for core but carries role "hook"/.test(diagFitWarns[0]?.message ?? "") && /title-card" is timed for the hook but carries role "payoff"/.test(diagFitWarns[1]?.message ?? "") && /spring-in" is not face-safe.*center text layer/.test(diagFitWarns[2]?.message ?? ""), "diagnose warns 3x on template_fit: bounce as hook role, title-card as payoff role, spring-in under a center text layer", JSON.stringify(diagFitWarns.map((c) => c.message)));
+const diagFitHookStage = await stageAssembleManifest("assemble-template-fit-hook.json");
+const diagFitHookRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagFitHookStage.manifestPath } });
+const diagFitHookJson = JSON.parse(diagFitHookRes.content[0].text);
+checkOk(diagFitHookJson.verdict === "warn" && diagFitHookJson.warnings === 1 && diagFitHookJson.checks?.some((c) => c.id === "template_fit" && c.severity === "warn" && /hook slot opens on shot s1 template "bounce", timed for core/.test(c.message)), "diagnose warns when the hook slot opens on a core-timed bounce template", JSON.stringify(diagFitHookJson.checks?.filter((c) => c.id === "template_fit")));
+const diagFitPassStage = await stageAssembleManifest("assemble-template-fit-pass.json");
+const diagFitPassRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagFitPassStage.manifestPath } });
+const diagFitPassJson = JSON.parse(diagFitPassRes.content[0].text);
+checkOk(diagFitPassJson.verdict === "pass" && diagFitPassJson.warnings === 0 && diagFitPassJson.checks?.some((c) => c.id === "template_fit" && c.severity === "pass" && /s1:title-card, s2:bounce, s3:rings/.test(c.message)), "diagnose passes a film whose templates fit their slots (title-card hook, bounce core, rings + top text)", JSON.stringify({ verdict: diagFitPassJson.verdict, checks: diagFitPassJson.checks?.filter((c) => c.id === "template_fit") }));
 // Style pace in diagnose (lượt 133, idea: Takes check_edit): the
 // 20s style fixtures are 4 canvas shots (no source files, so no
 // geometry/motion checks fire) — only the style_pace checks differ.

@@ -1,0 +1,1 @@
+{"preset":"vertical","version":1,"voice":{"lead":0.5,"path":"canvas-voice.mp3","tail":0.5},"title":"Template fit hook-slot fixture","hook":{"shot":"s1"},"shots":[{"duration":2.0,"id":"s1","kind":"canvas_scene","template":"bounce"},{"duration":2.0,"id":"s2","kind":"canvas_scene","template":"rings"}]}

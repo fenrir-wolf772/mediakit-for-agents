@@ -923,7 +923,17 @@ cut. The 15 chars/s bar is calibrated, not copied: their 6 is for
 Chinese dialogue (one character = one syllable), while Kokoro
 af_heart speed 1.0 English narration measures 10.8–14.0 chars/s — 6
 would warn on every normal English film. `.ass` captions are styled,
-so density is not measured for them. Probe-only by default — it writes
+so density is not measured for them. It also checks template fit
+(mcp-video-editor's effects catalog): every scene template declares
+`faceSafe` + `timingHint` in `scene-templates.json` — only `rings`
+keeps the frame center clear, title-card/slide-in/spring-in are hook
+cards, bounce is a core beat — and diagnose warns when a hook-timed
+card carries role `payoff`, a core-timed beat carries role `hook` or
+opens the film-level hook slot, or a non-face-safe template sits under
+a center text layer (its motion crosses the text; a top layer is
+clear of the cards, and the bounce apex check covers the top band).
+A template in the wrong position without a role is not warned — a
+spring-in card closing a film is a choice, not a mistake. Probe-only by default — it writes
 nothing unless `--stamp` is given. A broken manifest returns verdict
 `fail` with `format_error` instead of throwing, so fix the manifest and
 re-run diagnose in a loop — a `warn` verdict is still renderable, a
