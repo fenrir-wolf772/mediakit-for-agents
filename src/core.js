@@ -19809,6 +19809,91 @@ function assembleApprovalPath(plan) {
   return path.join(plan.manifestDir, `${stem}.assemble-approval.json`);
 }
 
+// Diff two fingerprint_parts objects into the changed part names, in
+// the fixed order the report uses (manifest first, so the first
+// difference is the most upstream cause). Pure — the stale-plan guard
+// and the stale-approval guard share it, so both name the same parts
+// for the same change.
+export function diffFingerprintParts(oldParts, newParts) {
+  const changed = [];
+  for (const k of ["manifest", "brand", "voice", "music", "captions"]) {
+    if (JSON.stringify(oldParts?.[k] ?? null) !== JSON.stringify(newParts?.[k] ?? null)) changed.push(k);
+  }
+  const oldSfx = oldParts?.sfx ?? [];
+  const newSfx = newParts?.sfx ?? [];
+  for (let i = 0; i < Math.max(oldSfx.length, newSfx.length); i++) {
+    if (JSON.stringify(oldSfx[i] ?? null) !== JSON.stringify(newSfx[i] ?? null)) changed.push(`sfx[${i}]`);
+  }
+  const oldAssets = oldParts?.assets ?? {};
+  const newAssets = newParts?.assets ?? {};
+  for (const id of Object.keys({ ...oldAssets, ...newAssets }).sort()) {
+    if (JSON.stringify(oldAssets[id] ?? null) !== JSON.stringify(newAssets[id] ?? null)) changed.push(`asset:${id}`);
+  }
+  return changed;
+}
+
+// Blockers that stop a film from exporting, computed from a plan's
+// already-probed audio timeline (MakeMyClip's checkExportable idea,
+// lượt 156 — a plan that cannot render must say so BEFORE the render,
+// not after ffmpeg silently clips something). Pure: music/sfx carry
+// the durations the plan branch probed. The sfx threshold (+0.05s)
+// matches diagnose's sfx_tail check, so plan and diagnose agree.
+// Captions need no blocker: validate already throws when a cue ends
+// past the film, and shots/assets are validated the same way.
+export function computePlanBlockers({ totalSeconds, music, sfx }) {
+  const blockers = [];
+  if (music && !Number.isFinite(music.duration_seconds)) {
+    blockers.push({ code: "music_duration_unknown", detail: "cannot measure the music bed duration, so the loop count is unknown — the render may loop it wrong" });
+  }
+  for (const s of sfx ?? []) {
+    if (!Number.isFinite(s.duration_seconds)) {
+      blockers.push({ code: "sfx_duration_unknown", detail: `sfx "${path.basename(s.file)}" at ${s.at_seconds}s has no measurable duration — cannot tell whether its tail fits the film` });
+    } else if (s.at_seconds + s.duration_seconds > totalSeconds + 0.05) {
+      blockers.push({ code: "sfx_overruns_film", detail: `sfx "${path.basename(s.file)}" at ${s.at_seconds}s ends at ${(s.at_seconds + s.duration_seconds).toFixed(3)}s, ${(s.at_seconds + s.duration_seconds - totalSeconds).toFixed(2)}s past the film end (${totalSeconds}s) — the tail is clipped in the render` });
+    }
+  }
+  return blockers;
+}
+
+// Read + parse a written plan file (shared by assemble --from-plan
+// and the async job start, so both reject the same bad files the
+// same way). Returns { doc, abs }.
+async function readPlanFile(planPath) {
+  const abs = await requireInput(planPath, "plan file");
+  let planRaw;
+  try {
+    planRaw = await readFile(abs, "utf8");
+  } catch (e) {
+    throw new MediaKitError(`cannot read plan file ${planPath}: ${e.message}`, "INVALID_INPUT");
+  }
+  let doc;
+  try {
+    doc = JSON.parse(planRaw);
+  } catch (e) {
+    throw new MediaKitError(`assemble plan file is not valid JSON: ${e.message}`, "INVALID_ARG");
+  }
+  return { doc, abs };
+}
+
+// Check a written plan file against the film as it stands now:
+// the plan must be for this manifest, and no input may have moved
+// since the plan was written. Pure apart from throwing. The manifest
+// check comes first — a plan for another film is stale even when
+// every hash happens to match.
+export function checkPlanAgainstCurrent(planDoc, current) {
+  if (!planDoc || typeof planDoc !== "object" || planDoc.operation !== "assemble" || planDoc.mode !== "plan" || typeof planDoc.fingerprint !== "string" || typeof planDoc.manifest !== "string") {
+    throw new MediaKitError("assemble --from-plan needs an assemble plan file (written by --mode plan --plan-file) — this file is not one", "INVALID_ARG");
+  }
+  if (planDoc.manifest !== current.manifestAbs) {
+    throw new MediaKitError(`assemble --from-plan is stale — the plan was written for a different manifest (${planDoc.manifest}) than this film (${current.manifestAbs}). Re-run --mode plan for this film.`, "INVALID_ARG");
+  }
+  const changed = diffFingerprintParts(planDoc.fingerprint_parts ?? {}, current.fingerprintParts);
+  if (changed.length || planDoc.fingerprint !== current.fingerprint) {
+    throw new MediaKitError(`assemble --from-plan is stale — changed since the plan was written: ${changed.length ? changed.join(", ") : "unknown"}. Re-run --mode plan (or drop --from-plan).`, "INVALID_ARG");
+  }
+  return planDoc;
+}
+
 // Approval gate for full renders, shared by the sync render path
 // and startAssembleJob: the async job must fail fast with the same
 // error instead of being born dead and hiding it behind a poll.
@@ -19822,13 +19907,7 @@ async function requireAssembleApproval(plan, force) {
     throw new MediaKitError("assemble render needs approval: run --mode preview, show it to the user, then --mode approve (or pass force:true to render without approval)", "INVALID_ARG");
   }
   if (approval.fingerprint !== plan.fingerprint) {
-    const changed = [];
-    const parts = approval.fingerprint_parts ?? {};
-    for (const k of ["manifest", "voice", "music", "captions", "brand"]) {
-      if (JSON.stringify(parts[k] ?? null) !== JSON.stringify(plan.fingerprint_parts[k] ?? null)) changed.push(k);
-    }
-    if (JSON.stringify(parts.assets ?? {}) !== JSON.stringify(plan.fingerprint_parts.assets ?? {})) changed.push("assets");
-    if (JSON.stringify(parts.sfx ?? []) !== JSON.stringify(plan.fingerprint_parts.sfx ?? [])) changed.push("sfx");
+    const changed = diffFingerprintParts(approval.fingerprint_parts ?? {}, plan.fingerprint_parts);
     throw new MediaKitError(
       `assemble approval is stale — changed since approval: ${changed.length ? changed.join(", ") : "unknown"}. Re-render the preview and approve again (or pass force:true).`,
       "INVALID_ARG",
@@ -19837,7 +19916,7 @@ async function requireAssembleApproval(plan, force) {
   return "approved";
 }
 
-export async function assemble({ manifestPath, mode = "validate", outputDir = null, previewSeconds = 20, force = false, onProgress = null, jobId = null, jobDir = null }) {
+export async function assemble({ manifestPath, mode = "validate", outputDir = null, previewSeconds = 20, force = false, onProgress = null, jobId = null, jobDir = null, planFile = null, fromPlan = null }) {
   const manifestAbs = await requireInput(manifestPath, "manifest");
   let raw;
   try {
@@ -19852,6 +19931,29 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
     throw new MediaKitError(`assemble manifest is not valid JSON: ${e.message}`, "INVALID_ARG");
   }
   const plan = await validateAssembleManifest(doc, manifestAbs);
+  // Plan-file guards (lượt 160 — MakeMyClip's checkExportable idea):
+  // --plan-file only makes sense in plan mode, --from-plan only on
+  // the modes that act on a plan. A plan that is not exportable
+  // still previews (the director needs to SEE the problem) but
+  // approve/render refuse it — the blocker list is the fix list.
+  if (planFile != null && mode !== "plan") {
+    throw new MediaKitError("assemble --plan-file only works with --mode plan", "INVALID_ARG");
+  }
+  if (fromPlan != null && !["preview", "approve", "render"].includes(mode)) {
+    throw new MediaKitError("assemble --from-plan needs --mode preview, approve or render", "INVALID_ARG");
+  }
+  let planDoc = null;
+  let planAbs = null;
+  if (fromPlan != null) {
+    const read = await readPlanFile(fromPlan);
+    planDoc = read.doc;
+    planAbs = read.abs;
+    checkPlanAgainstCurrent(planDoc, { manifestAbs, fingerprint: plan.fingerprint, fingerprintParts: plan.fingerprint_parts });
+    if (planDoc.exportable === false && mode !== "preview") {
+      const codes = (planDoc.blockers ?? []).map((b) => b.code ?? b).join(", ");
+      throw new MediaKitError(`assemble --from-plan refused: the plan is not exportable — blockers: ${codes || "unknown"}. Fix the film and re-run --mode plan.`, "INVALID_ARG");
+    }
+  }
   const startedAt = Date.now();
   const base = {
     operation: "assemble",
@@ -19938,9 +20040,19 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       title: c.title, at_seconds: c.at_seconds,
       end_seconds: i + 1 < plan.chapters.length ? plan.chapters[i + 1].at_seconds : plan.total_seconds,
     }));
-    return {
+    // Exportable + blockers (lượt 160): a plan that cannot render
+    // says so here, before any render is attempted. The durations
+    // above are the plan branch's own probes, so the blockers cost
+    // no extra decode.
+    const blockers = computePlanBlockers({ totalSeconds: plan.total_seconds, music: musicPlan, sfx: sfxPlan });
+    const planResult = {
       ...base,
-      note: "plan is a read-only disclosure of the resolved timeline — it writes nothing and does not approve the film; preview + approve are still required before render.",
+      note: planFile != null
+        ? "plan is a read-only disclosure of the resolved timeline — it writes only the plan file and does not approve the film; preview + approve are still required before render."
+        : "plan is a read-only disclosure of the resolved timeline — it writes nothing and does not approve the film; preview + approve are still required before render.",
+      exportable: blockers.length === 0,
+      blockers,
+      fingerprint_parts: plan.fingerprint_parts,
       timeline,
       audio: {
         voice: { path: plan.voice.path, lead_seconds: plan.voice.lead, voice_seconds: plan.voice.duration_seconds, tail_seconds: plan.voice.tail, voice_start_seconds: plan.voice.lead, voice_end_seconds: +(plan.voice.lead + plan.voice.duration_seconds).toFixed(3) },
@@ -19952,6 +20064,18 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       hook: plan.hook,
       joins: joins.map((j) => ({ into_shot: plan.shots[j.index]?.id ?? null, type: j.type, duration_seconds: +j.durationSeconds.toFixed(3), frames: j.frames, offset_seconds: +j.offsetSeconds.toFixed(3) })),
     };
+    if (planFile != null) {
+      // Durable plan (lượt 160): the same object, written atomically
+      // next to the film, so preview/approve/render --from-plan can
+      // refuse when any input moved since the plan was written.
+      // prepareOutput first so a plan file may never overwrite the
+      // manifest itself; writeStampFile then writes it atomically.
+      const abs = await prepareOutput(planFile, [manifestAbs]);
+      planResult.planned_at = new Date().toISOString();
+      planResult.plan_file = abs;
+      await writeStampFile(planFile, planResult);
+    }
+    return planResult;
   }
   if (!["preview", "approve", "render"].includes(mode)) {
     throw new MediaKitError(`assemble mode must be validate, plan, preview, approve or render, got: ${mode}`, "INVALID_ARG");
@@ -19981,7 +20105,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       approved_at: new Date().toISOString(),
     };
     await writeFile(approvalPath, JSON.stringify(approval, null, 2) + "\n", "utf8");
-    return { ...base, approval_file: approvalPath, preview: previewPath, approved_at: approval.approved_at };
+    return { ...base, approval_file: approvalPath, preview: previewPath, approved_at: approval.approved_at, ...(planDoc ? { plan_file: planAbs } : {}) };
   }
 
   const isPreview = mode === "preview";
@@ -20193,6 +20317,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
         ...(audioLevelsApplied.length ? { audio_levels: audioLevelsApplied } : {}),
         transition_warnings: previewWarnings,
         elapsed_seconds: elapsed,
+        ...(planDoc ? { plan_file: planAbs, ...(planDoc.exportable === false ? { plan_blockers: planDoc.blockers ?? [] } : {}) } : {}),
       };
       await writeFile(path.join(outDirAbs, "preview.json"), JSON.stringify(previewDoc, null, 2) + "\n", "utf8");
       completed = true;
@@ -20209,6 +20334,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       ...base,
       approval: approvalStatus,
       output: finalPath,
+      ...(planDoc ? { plan_file: planAbs } : {}),
       // Render manifest digests (leclap's render-manifest idea):
       // per-input content hashes + the paths they were read from, so
       // `verify` can re-hash every input and name exactly which one
@@ -22568,7 +22694,7 @@ export async function checkJobAdmission() {
   throw new MediaKitError(`job admission limit: ${a.reason} — retry in ~${a.retry_after_seconds}s`, "JOB_ADMISSION_LIMIT", { retryable: true, retryAfterSeconds: a.retry_after_seconds });
 }
 
-export async function startAssembleJob({ manifestPath, outputDir, force = false }) {
+export async function startAssembleJob({ manifestPath, outputDir, force = false, fromPlan = null }) {
   // Fail fast, before spawning anything: the manifest must validate
   // and the approval gate must pass — a job that is born dead hides
   // the real error behind a poll.
@@ -22587,6 +22713,20 @@ export async function startAssembleJob({ manifestPath, outputDir, force = false 
   }
   const plan = await validateAssembleManifest(doc, manifestAbs);
   const approvalStatus = await requireAssembleApproval(plan, force);
+  // The plan guard runs here too, before admission: a stale or
+  // non-exportable plan refuses the start, and the worker re-checks
+  // it at render time (the same helper, so both name the same parts).
+  let planAbs = null;
+  if (fromPlan != null) {
+    const read = await readPlanFile(fromPlan);
+    const planDoc = read.doc;
+    planAbs = read.abs;
+    checkPlanAgainstCurrent(planDoc, { manifestAbs, fingerprint: plan.fingerprint, fingerprintParts: plan.fingerprint_parts });
+    if (planDoc.exportable === false) {
+      const codes = (planDoc.blockers ?? []).map((b) => b.code ?? b).join(", ");
+      throw new MediaKitError(`assemble --from-plan refused: the plan is not exportable — blockers: ${codes || "unknown"}. Fix the film and re-run --mode plan.`, "INVALID_ARG");
+    }
+  }
   // Admission gate: refuse before creating a record or spawning a
   // worker, so a refused start leaves nothing behind to poll or cancel.
   await checkJobAdmission();
@@ -22602,6 +22742,7 @@ export async function startAssembleJob({ manifestPath, outputDir, force = false 
   const record = {
     job_id: jobId, operation: "assemble", status: "queued",
     manifest: manifestAbs, output_dir: outDirAbs, mode: "render", force: !!force,
+    ...(planAbs ? { from_plan: planAbs } : {}),
     approval: approvalStatus, title: plan.title,
     total_seconds: plan.total_seconds, total_frames: plan.total_frames,
     pid: null, progress: { stage: null, percent: 0, detail: null }, progress_history: [],
@@ -22621,6 +22762,7 @@ export async function startAssembleJob({ manifestPath, outputDir, force = false 
     child = spawn(process.execPath, [
       cliPath, "assemble", manifestAbs, "--mode", "render", "-o", outDirAbs,
       "--job-id", jobId, "--job-dir", jobDir, ...(force ? ["--force"] : []),
+      ...(planAbs ? ["--from-plan", planAbs] : []),
     ], { detached: true, stdio: ["ignore", logFd, logFd], env: process.env });
   } catch (e) {
     try { closeSync(logFd); } catch { /* already closed */ }

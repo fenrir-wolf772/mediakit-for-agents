@@ -8891,6 +8891,69 @@ checkOk(/short by 15 frames/.test(planGapText ?? ""), "assemble plan refuses sho
 checkOk(!existsSync(path.join(planStage.dir, "assemble-film-transitions.assemble-approval.json")), "assemble plan writes no approval file (a plan is a disclosure, not an approval)", planStage.dir);
 const planCli = await runCliJson(["assemble", planStage.manifestPath, "--mode", "plan"]);
 checkOk(planCli.mode === "plan" && planCli.timeline?.length === 4 && planCli.joins?.length === 3 && planCli.audio?.music?.loops === 2, "CLI assemble --mode plan returns the same disclosure", JSON.stringify({ mode: planCli.mode, shots: planCli.timeline?.length, joins: planCli.joins?.length }));
+// Lượt 160: assemble --mode plan is durable + exportable/blockers
+// (MakeMyClip's checkExportable idea): --plan-file writes the plan
+// (timeline + fingerprint + exportable/blockers, atomic), and
+// --from-plan refuses a stale plan (changed inputs named) or a
+// non-exportable one at approve/render. Fixture: the 10s transitions
+// film is exportable; test/assemble-plan-blocked.json moves the sfx
+// beep to 9.8s so its tail runs 0.3s past the film end.
+checkOk(planJson.exportable === true && JSON.stringify(planJson.blockers) === "[]" && typeof planJson.fingerprint_parts?.voice === "string" && planJson.fingerprint_parts?.manifest?.length === 64, "assemble plan reports exportable + empty blockers + fingerprint_parts", JSON.stringify({ exportable: planJson.exportable, blockers: planJson.blockers, parts: Object.keys(planJson.fingerprint_parts ?? {}) }));
+const planFilePath = path.join(planStage.dir, "film.plan.json");
+const planFileRes = await client.callTool({ name: "assemble", arguments: { manifest_path: planStage.manifestPath, mode: "plan", plan_file: planFilePath } });
+const planFileJson = JSON.parse(planFileRes.content[0].text);
+const planFileOnDisk = JSON.parse(await readFile(planFilePath, "utf8"));
+checkOk(planFileJson.plan_file === planFilePath && planFileOnDisk.fingerprint === planJson.fingerprint && planFileOnDisk.exportable === true && typeof planFileOnDisk.planned_at === "string" && JSON.stringify(planFileOnDisk.fingerprint_parts) === JSON.stringify(planJson.fingerprint_parts), "assemble plan --plan-file writes the plan atomically (same fingerprint + parts, exportable, planned_at)", JSON.stringify({ file: planFileJson.plan_file, planned_at: planFileOnDisk.planned_at }));
+checkOk(!existsSync(`${planFilePath}.partial`), "no .partial left behind after the plan write", planFilePath);
+const planPreviewRes = await client.callTool({ name: "assemble", arguments: { manifest_path: planStage.manifestPath, mode: "preview", output_dir: path.join(planStage.dir, "plan-out"), preview_seconds: 1, from_plan: planFilePath } });
+const planPreviewJson = JSON.parse(planPreviewRes.content[0].text);
+checkOk(planPreviewRes.isError !== true && planPreviewJson.plan_file === planFilePath && planPreviewJson.preview_seconds === 1 && planPreviewJson.final?.duration_seconds >= 0.9, "assemble preview --from-plan passes on the unchanged film and echoes the plan file", JSON.stringify({ plan_file: planPreviewJson.plan_file, seconds: planPreviewJson.preview_seconds }));
+// Stale manifest: edit only the title in the staged copy, so the
+// film still validates but the manifest hash moves.
+const planStaleStage = await stageAssembleManifest("assemble-film-transitions.json");
+const planStalePlanPath = path.join(planStaleStage.dir, "film.plan.json");
+await client.callTool({ name: "assemble", arguments: { manifest_path: planStaleStage.manifestPath, mode: "plan", plan_file: planStalePlanPath } });
+const planStaleDoc = JSON.parse(await readFile(planStaleStage.manifestPath, "utf8"));
+planStaleDoc.title = "Edited title";
+await writeFile(planStaleStage.manifestPath, JSON.stringify(planStaleDoc), "utf8");
+const planStaleText = await callExpectThrow("assemble", { manifest_path: planStaleStage.manifestPath, mode: "preview", output_dir: path.join(planStaleStage.dir, "out"), preview_seconds: 1, from_plan: planStalePlanPath });
+checkOk(/is stale/.test(planStaleText ?? "") && /manifest/.test(planStaleText ?? ""), "assemble preview --from-plan refuses a title edit, naming manifest as the changed part", (planStaleText ?? "").slice(0, 200));
+// Stale voice: point the staged film at a staged copy of the voice,
+// write the plan, then replace the voice bytes with a different file
+// of the SAME measured duration (mix-music.mp3 is also 9s, so the
+// timeline still fits and only the voice hash moves — re-encoding a
+// tone could shift the probed duration by a frame and fail validate
+// before the stale guard runs).
+const planVoiceStage = await stageAssembleManifest("assemble-film-transitions.json");
+const planVoicePath = path.join(planVoiceStage.dir, "voice.mp3");
+await copyFile(path.join(root, "test/mix-voice.mp3"), planVoicePath);
+const planVoiceDoc = JSON.parse(await readFile(planVoiceStage.manifestPath, "utf8"));
+planVoiceDoc.voice.path = planVoicePath;
+await writeFile(planVoiceStage.manifestPath, JSON.stringify(planVoiceDoc), "utf8");
+const planVoicePlanPath = path.join(planVoiceStage.dir, "film.plan.json");
+await client.callTool({ name: "assemble", arguments: { manifest_path: planVoiceStage.manifestPath, mode: "plan", plan_file: planVoicePlanPath } });
+await copyFile(path.join(root, "test/mix-music.mp3"), planVoicePath);
+const planVoiceText = await callExpectThrow("assemble", { manifest_path: planVoiceStage.manifestPath, mode: "preview", output_dir: path.join(planVoiceStage.dir, "out"), preview_seconds: 1, from_plan: planVoicePlanPath });
+checkOk(/is stale/.test(planVoiceText ?? "") && /voice/.test(planVoiceText ?? ""), "assemble preview --from-plan refuses a replaced voice file, naming voice as the changed part", (planVoiceText ?? "").slice(0, 200));
+// Wrong film: the transitions plan used against the plain film.
+const planWrongText = await callExpectThrow("assemble", { manifest_path: assembleStage.manifestPath, mode: "preview", output_dir: path.join(assembleStage.dir, "plan-out"), preview_seconds: 1, from_plan: planFilePath });
+checkOk(/different manifest/.test(planWrongText ?? ""), "assemble preview --from-plan refuses a plan written for another manifest", (planWrongText ?? "").slice(0, 200));
+// Blocked film: sfx tail past the film end is a blocker, not a warning.
+const planBlockedStage = await stageAssembleManifest("assemble-plan-blocked.json");
+const planBlockedPath = path.join(planBlockedStage.dir, "film.plan.json");
+const planBlockedRes = await client.callTool({ name: "assemble", arguments: { manifest_path: planBlockedStage.manifestPath, mode: "plan", plan_file: planBlockedPath } });
+const planBlockedJson = JSON.parse(planBlockedRes.content[0].text);
+checkOk(planBlockedJson.exportable === false && planBlockedJson.blockers?.[0]?.code === "sfx_overruns_film" && /0\.30s past the film end/.test(planBlockedJson.blockers?.[0]?.detail ?? ""), "assemble plan on the blocked film reports exportable false + sfx_overruns_film (0.30s past the end)", JSON.stringify(planBlockedJson.blockers));
+const planBlockedPreview = await client.callTool({ name: "assemble", arguments: { manifest_path: planBlockedStage.manifestPath, mode: "preview", output_dir: path.join(planBlockedStage.dir, "out"), preview_seconds: 1, from_plan: planBlockedPath } });
+const planBlockedPreviewJson = JSON.parse(planBlockedPreview.content[0].text);
+checkOk(planBlockedPreview.isError !== true && JSON.stringify(planBlockedPreviewJson.plan_blockers?.map((b) => b.code)) === '["sfx_overruns_film"]', "assemble preview --from-plan still runs on a blocked plan but echoes plan_blockers", JSON.stringify(planBlockedPreviewJson.plan_blockers));
+const planBlockedRenderText = await callExpectThrow("assemble", { manifest_path: planBlockedStage.manifestPath, mode: "render", output_dir: path.join(planBlockedStage.dir, "out"), force: true, from_plan: planBlockedPath });
+checkOk(/not exportable/.test(planBlockedRenderText ?? "") && /sfx_overruns_film/.test(planBlockedRenderText ?? ""), "assemble render --from-plan --force refuses a non-exportable plan, naming the blocker", (planBlockedRenderText ?? "").slice(0, 200));
+// Flag misuse: --plan-file outside plan mode, --from-plan in validate.
+const planMisuseCli = await runCli(["assemble", planStage.manifestPath, "--mode", "validate", "--plan-file", path.join(planStage.dir, "x.json")]);
+checkOk(planMisuseCli.code !== 0 && /--plan-file only works with --mode plan/.test(planMisuseCli.out), "CLI assemble --plan-file outside plan mode exits non-zero naming the rule", planMisuseCli.out.slice(0, 200));
+const planMisuseCli2 = await runCli(["assemble", planStage.manifestPath, "--mode", "validate", "--from-plan", planFilePath]);
+checkOk(planMisuseCli2.code !== 0 && /--from-plan needs --mode preview, approve or render/.test(planMisuseCli2.out), "CLI assemble --from-plan in validate mode exits non-zero naming the rule", planMisuseCli2.out.slice(0, 200));
 const assembleGapText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-gap.json"), mode: "validate" });
 checkOk(/short by 15 frames/.test(assembleGapText ?? ""), "assemble validate refuses shots 15 frames short of the voice timeline", assembleGapText ?? "");
 const assembleStaticText = await callExpectThrow("assemble", { manifest_path: path.join(root, "test/assemble-bad-static.json"), mode: "validate" });

@@ -182,8 +182,15 @@ don't debug a blank manifest into existence. The voice is
 the master clock: shots must cover `lead + voice + tail` exactly
 in frames, a still without zoom (and a color card) may last at
 most 2.5s, and captions burn with the locked style's values.
-The modes run in order: `validate` → `preview` (show it to the
-user) → `approve` → `render`. Never approve your own technical
+The modes run in order: `validate` → `plan` (read the resolved
+timeline + `exportable`/`blockers` before you render — a plan that
+cannot render says so here) → `preview` (show it to the
+user) → `approve` → `render`. `plan --plan-file <path>` writes the
+plan to a file; preview/approve/render `--from-plan <path>` refuse
+a stale plan (any input changed since the plan was written — the
+changed parts are named) and refuse a non-exportable plan at
+approve/render, so a film edited after planning cannot slip into
+a render unnoticed. Never approve your own technical
 checks — approval means the user saw the preview and said yes.
 A render without approval fails loudly unless the user
 explicitly asks for `--force`. A background render (`--async`)

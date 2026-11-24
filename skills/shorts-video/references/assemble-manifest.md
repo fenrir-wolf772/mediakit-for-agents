@@ -20,10 +20,22 @@ one timeline, with the voice as the master clock.
    read it — every shot with its film-time start/end in seconds AND
    frames, every transition with its blend offset, the audio timeline
    (voice window, music loops, SFX with ends), chapters with ends.
-   Writes nothing and records nothing: a plan is a disclosure, not
-   an approval — preview + approve are still required before render.
-   Run it after `validate` when you want to read the film before
-   you see it.
+   It also reports `exportable` (true when the film can render) and
+   `blockers` (the render-breaking findings, e.g. an SFX tail that
+   runs past the film end — the same +0.05s threshold `diagnose`
+   warns on as `sfx_tail`). Writes nothing and records nothing by
+   default: a plan is a disclosure, not an approval — preview +
+   approve are still required before render. Run it after `validate`
+   when you want to read the film before you see it.
+   `--plan-file <path>` writes the plan to a file (the same object,
+   plus `fingerprint_parts` and `planned_at`, written atomically):
+   `--from-plan <path>` on preview/approve/render then refuses a
+   stale plan — a plan written for another manifest, or any input
+   changed since the plan was written (the changed parts are named:
+   `manifest`, `voice`, `music`, `sfx[0]`, `asset:s1`, …) — and
+   approve/render also refuse a non-exportable plan, naming its
+   blockers. A blocked plan still previews, and the preview echoes
+   `plan_blockers`, so the director can see the problem first.
 2. **`preview`** — renders the first N seconds (default 20) at half
    resolution, with voice, music, SFX and captions, and writes
    `preview.mp4` + `preview.json` (with the fingerprint). Show the
