@@ -2456,7 +2456,7 @@ export const TOOL_DEFS = [
   {
     name: "list_operations",
     tier: "READ",
-    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 89 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 90 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
     schema: {
     family: z.enum(["inspect", "edit", "text", "image", "assemble", "meta"]).optional().describe("Narrow to one family; omit for the whole catalog"),
   },
@@ -2472,6 +2472,21 @@ export const TOOL_DEFS = [
     name: z.string().min(1).describe("Tool name, e.g. trim (see list_operations for the catalog)"),
   },
     handler: async (a) => safe(() => describeOperation({ name: a.name })),
+  },
+
+
+  {
+    name: "list_templates",
+    tier: "READ",
+    description: "Browse the assemble scene-template catalog without rendering anything — the director's shelf for canvas_scene shots. One compact card per template (id, name, category, motion_type, recommended duration_seconds, tags, face_safe, timing_hint, description); filters combine (category title|motion|card|ambient, face_safe, timing_hint hook|core|payoff|any, tag). Pass template for the full detail of one template: every param spec, a directing prompt (what to change, what to keep) plus a ready-to-paste example_shot (kind canvas_scene, duration = the midpoint of the recommended range, params = the defaults). Call this before writing a film.json instead of guessing template names — the registry is the only source of truth, and an unknown category/timing hint fails loudly while an unknown tag simply matches nothing.",
+    schema: {
+    category: z.string().min(1).optional().describe("Narrow to one category: title, motion, card, ambient"),
+    face_safe: z.boolean().optional().describe("Only templates that keep the frame center clear (true) or cover it (false)"),
+    timing_hint: z.string().min(1).optional().describe("Narrow to one slot: hook, core, payoff, any"),
+    tag: z.string().min(1).optional().describe("Narrow to templates carrying this tag (e.g. physics, text, calm)"),
+    template: z.string().min(1).optional().describe("Full detail for ONE template by id, e.g. rings — returns its params plus an example_shot"),
+  },
+    handler: async (a) => safe(() => core.listSceneTemplates({ category: a.category ?? null, faceSafe: a.face_safe ?? null, timingHint: a.timing_hint ?? null, tag: a.tag ?? null, template: a.template ?? null })),
   },
 ];
 
@@ -2526,7 +2541,7 @@ export function listSafetyTiers() {
 }
 
 // ---------------------------------------------------------------- progressive discovery
-// The catalog is 89 tools and tools/list dumps the full JSON schema
+// The catalog is 90 tools and tools/list dumps the full JSON schema
 // of every one on every turn — kinocut's answer is progressive
 // discovery: a compact list first, full schema only for the tools
 // actually used (lượt 147, idea: KyaniteLabs/kinocut
@@ -2574,11 +2589,11 @@ export const TOOL_FAMILY_OF = {
   // image (7)
   thumbnail: "image", frames: "image", extract_frames: "image", image_to_video: "image",
   slideshow: "image", export_gif: "image", svg_animate: "image",
-  // assemble (11)
+  // assemble (12)
   assemble: "assemble", manifest: "assemble", patch_manifest: "assemble",
   init_project: "assemble", export_timeline: "assemble", job: "assemble",
   release_checkpoint: "assemble", package: "assemble", publish_kit: "assemble",
-  social: "assemble", batch: "assemble",
+  social: "assemble", batch: "assemble", list_templates: "assemble",
   // meta (2)
   list_operations: "meta", describe_operation: "meta",
 };

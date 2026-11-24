@@ -222,7 +222,12 @@ opening segment, and `diagnose` checks the arc (hook first,
 payoff last). Reach for a
 built-in scene template first (`"template": "bounce"` +
 `params`, registry in `scene-templates.json`: `title-card`,
-`bounce`, `slide-in`, `spring-in`, `rings`) and write a custom scene file
+`bounce`, `slide-in`, `spring-in`, `rings` — browse the shelf
+with `mediakit list-templates`, one card per template with its
+category, motion, recommended duration and tags, or
+`--template <id>` for the full detail — a directing prompt
+(what to change, what to keep) plus a ready-to-paste
+example shot) and write a custom scene file
 only when no template fits — template params merge over
 defaults, unknown names fail validate. Each template also declares
 `faceSafe` + `timingHint` (only `rings` keeps the frame center clear;

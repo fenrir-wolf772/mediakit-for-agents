@@ -1036,6 +1036,19 @@ const COMMANDS = {
       ["--use-stamp", "Reuse the QC stamp instead of re-running the preflight when the film, the style and the toolchain all still match; reports stamp.used=false with the stale reason when they do not"],
     ],
   },
+  "list-templates": {
+    usage: "mediakit list-templates [--category title|motion|card|ambient] [--face-safe | --no-face-safe] [--timing-hint hook|core|payoff|any] [--tag <tag>] [--template <id>]",
+    desc: "Browse the assemble scene-template catalog without rendering anything — the director's shelf for canvas_scene shots. One compact card per template (id, name, category, motion_type, recommended duration_seconds, tags, face_safe, timing_hint, description); filters combine. --template <id> prints the full detail of one template: every param spec, a directing prompt (what to change, what to keep), plus a ready-to-paste example_shot (kind canvas_scene, duration = the midpoint of the recommended range, params = the defaults). Call this before writing a film.json instead of guessing template names.",
+    args: [],
+    options: [
+      ["--category", "Narrow to one category: title, motion, card, ambient"],
+      ["--face-safe", "Only templates that keep the frame center clear"],
+      ["--no-face-safe", "Only templates that cover the frame center"],
+      ["--timing-hint", "Narrow to one slot: hook, core, payoff, any"],
+      ["--tag", "Narrow to templates carrying this tag (e.g. physics, text, calm)"],
+      ["--template", "Full detail for ONE template by id, e.g. rings"],
+    ],
+  },
   "align-voice": {
     usage: "mediakit align-voice <film.json> [--lines <lines.json>] [--threshold-db -40] [--min-silence 0.25] [--snap-window-ms 600] [--apply -o <aligned-film.json>] [--expected-key <hex>]",
     desc: "Align an assemble film's shot durations to its voice: split the voice across the shots that speak, in proportion to each shot's dialogue characters, then snap each interior boundary to the middle of the nearest pause within --snap-window-ms (default 600) so a cut never clips a word. Dialogue comes from each shot's `dialogue` field, overridden per shot by --lines [{shot, dialogue}]; shots with no dialogue keep their durations. Plan mode (default) writes nothing and reports the dialogue_key, per-shot durations/deltas/snap info, and violations. --apply writes the aligned film (never over the input) and embeds the dialogue it aligned from; it refuses when there are violations or when --expected-key differs from the computed key.",
@@ -2409,6 +2422,15 @@ async function main() {
         });
         break;
       }
+      case "list-templates":
+        result = await core.listSceneTemplates({
+          category: opts.category ?? null,
+          faceSafe: opts.face_safe === undefined ? null : opts.face_safe === true,
+          timingHint: opts.timing_hint ?? null,
+          tag: opts.tag ?? null,
+          template: opts.template ?? null,
+        });
+        break;
       case "align-voice": {
         if (!positional[0]) fail("missing manifest file: mediakit align-voice <film.json>");
         result = await core.alignVoice({

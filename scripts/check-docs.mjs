@@ -73,6 +73,18 @@ const probedMuxers = probeList("DOCTOR_MUXERS");
 const reqMatch = coreSrc.match(/const TOOL_REQUIREMENTS = \{([\s\S]*?)\n\};/);
 if (!reqMatch) problems.push("could not find TOOL_REQUIREMENTS in src/core.js");
 if (reqMatch) {
+  // Coverage guard (lượt 163): every TOOL_DEFS entry must have a
+  // TOOL_REQUIREMENTS entry — a tool missing here is invisible to
+  // doctor, so videos://workspace/info undercounts tools_total
+  // (list_templates shipped as tool 90 while doctor still reported
+  // 89, caught only by the resource test). A pure tool takes `{}`.
+  const reqNames = [...reqMatch[1].matchAll(/^  ([a-z0-9_]+): \{/gm)].map((m) => m[1]);
+  for (const t of serverTools) {
+    if (!reqNames.includes(t)) problems.push(`tool "${t}" is in TOOL_DEFS but missing from TOOL_REQUIREMENTS — doctor would not report it (use {} for a pure tool)`);
+  }
+  for (const t of reqNames) {
+    if (!serverTools.includes(t)) problems.push(`TOOL_REQUIREMENTS names "${t}" but it is not in TOOL_DEFS`);
+  }
   for (const [, list, kind] of [...reqMatch[1].matchAll(/(filters|encoders|decoders|muxers): \[([^\]]*)\]/g)]) {
     const probed = kind === "filters" ? probedFilters : kind === "encoders" ? probedEncoders : kind === "decoders" ? probedDecoders : probedMuxers;
     for (const name of [...list.matchAll(/"([a-z0-9_]+)"/g)].map((x) => x[1])) {

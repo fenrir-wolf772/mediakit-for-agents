@@ -12417,6 +12417,9 @@ const TOOL_REQUIREMENTS = {
   // over TOOL_DEFS in tools.js — no ffmpeg capability needed.
   list_operations: {},
   describe_operation: {},
+  // list_templates is a pure catalog lookup over the scene-template
+  // registry — same as the discovery tools above, no ffmpeg needed.
+  list_templates: {},
 };
 
 async function listCapabilities(kind) {
@@ -18066,6 +18069,46 @@ export const SCENE_TEMPLATE_IDS = ["title-card", "bounce", "slide-in", "spring-i
 // opening card), core (a mid-film energy beat), payoff, or any.
 export const SCENE_TEMPLATE_TIMING_HINTS = ["hook", "core", "payoff", "any"];
 
+// Catalog categories for the scene-template library (idea:
+// AISEO-VirtualabDigital/mcp-video-editor's shot library, src/data/
+// shots.ts — 10 categories + shot cards with motionType /
+// durationSeconds / tags; MediaKit's registry only carried the
+// render params + the faceSafe/timingHint slot meta from lượt 162,
+// so a director could not browse it). A category says what job the
+// shot does in a film: title opens with one big line, motion is a
+// moving object with no text, card carries one short line of text,
+// ambient is calm background motion for intros/outros/breathing
+// room. durationSeconds is the RECOMMENDED shot length (a range,
+// not a render limit — assemble still accepts any duration);
+// motionType is one short phrase naming the motion, grounded in
+// the template's .cjs; tags are free-form search words.
+export const SCENE_TEMPLATE_CATEGORIES = {
+  title: "Opening titles — one big line that names the film.",
+  motion: "Physics motion — a moving object, no text.",
+  card: "A card that carries one short line of text.",
+  ambient: "Calm background motion for intros, outros and breathing room.",
+};
+
+export function parseTemplateCatalogMeta(t, where) {
+  if (typeof t?.category !== "string" || !SCENE_TEMPLATE_CATEGORIES[t.category]) {
+    throw new MediaKitError(`${where} category must be one of ${Object.keys(SCENE_TEMPLATE_CATEGORIES).join(", ")}, got: ${JSON.stringify(t?.category)}`, "PRESET_LIBRARY_INVALID");
+  }
+  if (typeof t?.motionType !== "string" || !t.motionType.trim()) {
+    throw new MediaKitError(`${where} motionType must be a non-empty string, got: ${JSON.stringify(t?.motionType)}`, "PRESET_LIBRARY_INVALID");
+  }
+  const d = t?.durationSeconds;
+  if (!d || typeof d !== "object" || Array.isArray(d) || typeof d.min !== "number" || !Number.isFinite(d.min) || typeof d.max !== "number" || !Number.isFinite(d.max) || d.min <= 0 || d.min > d.max) {
+    throw new MediaKitError(`${where} durationSeconds must be {min, max} with 0 < min <= max, got: ${JSON.stringify(d)}`, "PRESET_LIBRARY_INVALID");
+  }
+  if (!Array.isArray(t?.tags) || t.tags.length === 0 || !t.tags.every((g) => typeof g === "string" && g.trim()) || new Set(t.tags).size !== t.tags.length) {
+    throw new MediaKitError(`${where} tags must be a non-empty array of unique non-empty strings, got: ${JSON.stringify(t?.tags)}`, "PRESET_LIBRARY_INVALID");
+  }
+  if (typeof t?.prompt !== "string" || !t.prompt.trim()) {
+    throw new MediaKitError(`${where} prompt must be a non-empty string, got: ${JSON.stringify(t?.prompt)}`, "PRESET_LIBRARY_INVALID");
+  }
+  return { category: t.category, motionType: t.motionType.trim(), durationSeconds: { min: d.min, max: d.max }, tags: [...t.tags], prompt: t.prompt.trim() };
+}
+
 export function parseTemplateSlotMeta(t, where) {
   if (typeof t?.faceSafe !== "boolean") {
     throw new MediaKitError(`${where} needs faceSafe true or false, got: ${JSON.stringify(t?.faceSafe)}`, "PRESET_LIBRARY_INVALID");
@@ -18157,7 +18200,7 @@ export async function getSceneTemplates() {
       }
       params[name] = param;
     }
-    byId[t.id] = { id: t.id, name: t.name ?? t.id, description: t.description ?? "", file: fileAbs, params, ...parseTemplateSlotMeta(t, `assemble scene template library: template "${t.id}"`) };
+    byId[t.id] = { id: t.id, name: t.name ?? t.id, description: t.description ?? "", file: fileAbs, params, ...parseTemplateSlotMeta(t, `assemble scene template library: template "${t.id}"`), ...parseTemplateCatalogMeta(t, `assemble scene template library: template "${t.id}"`) };
   }
   const ids = Object.keys(byId).sort();
   if (JSON.stringify(ids) !== JSON.stringify([...SCENE_TEMPLATE_IDS].sort())) {
@@ -18177,6 +18220,82 @@ export async function resolveSceneTemplate(id) {
     throw new MediaKitError(`assemble scene template must be one of ${SCENE_TEMPLATE_IDS.join(", ")}, got: ${id}`, "INVALID_ARG");
   }
   return found;
+}
+
+// Browse the scene-template catalog without rendering anything —
+// the director's shelf: one compact card per template (list) or the
+// full detail of one template (template), with filters that combine
+// (AND). A card carries what a storyboard decision needs — category,
+// motionType, recommended durationSeconds, tags, faceSafe,
+// timingHint — and the detail adds the full param specs plus a
+// ready-to-paste example_shot (kind canvas_scene, duration = the
+// midpoint of the recommended range, params = the defaults). An
+// unknown category/timingHint or a non-boolean face_safe fails
+// loudly (a typo that silently returned an empty shelf would look
+// like "no template fits"); an unknown tag simply matches nothing,
+// because tags are open vocabulary, not an allowlist.
+function sceneTemplateCard(t) {
+  return {
+    id: t.id,
+    name: t.name,
+    category: t.category,
+    motion_type: t.motionType,
+    duration_seconds: { ...t.durationSeconds },
+    tags: [...t.tags],
+    face_safe: t.faceSafe,
+    timing_hint: t.timingHint,
+    description: t.description,
+  };
+}
+
+export async function listSceneTemplates({ category = null, faceSafe = null, timingHint = null, tag = null, template = null } = {}) {
+  if (template !== null && template !== undefined) {
+    const found = await resolveSceneTemplate(template);
+    const mid = Math.round(((found.durationSeconds.min + found.durationSeconds.max) / 2) * 10) / 10;
+    const params = {};
+    for (const [name, spec] of Object.entries(found.params)) params[name] = spec.default;
+    return {
+      template: {
+        ...sceneTemplateCard(found),
+        // Directing prompt (idea: 01sy/remotion-template-library's
+        // per-template prompt): what an agent may change and what it
+        // must keep, so the detail alone is enough to adapt the shot
+        // without reading the .cjs. The compact card stays compact —
+        // the prompt lives only in the detail.
+        prompt: found.prompt,
+        params: found.params,
+        example_shot: { kind: "canvas_scene", template: found.id, duration: mid, params },
+      },
+    };
+  }
+  if (category !== null && category !== undefined && !SCENE_TEMPLATE_CATEGORIES[category]) {
+    throw new MediaKitError(`unknown template category "${category}" (categories: ${Object.keys(SCENE_TEMPLATE_CATEGORIES).join(", ")})`, "INVALID_ARG");
+  }
+  if (timingHint !== null && timingHint !== undefined && !SCENE_TEMPLATE_TIMING_HINTS.includes(timingHint)) {
+    throw new MediaKitError(`unknown timing hint "${timingHint}" (hints: ${SCENE_TEMPLATE_TIMING_HINTS.join(", ")})`, "INVALID_ARG");
+  }
+  if (faceSafe !== null && faceSafe !== undefined && typeof faceSafe !== "boolean") {
+    throw new MediaKitError(`face_safe must be true or false, got: ${JSON.stringify(faceSafe)}`, "INVALID_ARG");
+  }
+  if (tag !== null && tag !== undefined && (typeof tag !== "string" || !tag.trim())) {
+    throw new MediaKitError(`tag must be a non-empty string, got: ${JSON.stringify(tag)}`, "INVALID_ARG");
+  }
+  const templates = await getSceneTemplates();
+  const all = Object.values(templates).sort((a, b) => a.id.localeCompare(b.id));
+  const matching = all.filter((t) =>
+    (category == null || t.category === category) &&
+    (faceSafe == null || t.faceSafe === faceSafe) &&
+    (timingHint == null || t.timingHint === timingHint) &&
+    (tag == null || t.tags.includes(tag)));
+  return {
+    total_templates: all.length,
+    matching: matching.length,
+    categories: Object.entries(SCENE_TEMPLATE_CATEGORIES).map(([name, description]) => ({
+      name, description, count: all.filter((t) => t.category === name).length,
+    })),
+    filters: { category: category ?? null, face_safe: faceSafe ?? null, timing_hint: timingHint ?? null, tag: tag ?? null },
+    templates: matching.map(sceneTemplateCard),
+  };
 }
 
 // Merge a template's defaults with the shot's params: shot values
