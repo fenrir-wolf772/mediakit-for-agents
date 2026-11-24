@@ -2012,6 +2012,25 @@ script on it. This is KyaniteLabs/kinocut's `release-checkpoint`
 idea, with the sheet timestamps borrowed from Synkinema's
 `get_inspection_points`. Not in `batch`/`manifest` in v1.
 
+`verify_cuts --audio` is the same idea applied to the sound at
+each hard cut: it decodes 0.06s each side of the promised seam to
+raw PCM and reads it in pure Node — RMS energy above −30 dBFS on
+either side flags `suspect_word` (the cut may land mid-word), the
+largest sample-to-sample jump ±40ms around the seam above 0.35
+flags `click` (butt-splice click); either flag warns and fails
+`ok`. The verdict uses RMS, not peak: a single AAC pre-echo
+sample can trip a peak test inside true silence (measured: a
+−24.41 dBFS peak in one 10ms sliver of a silent window whose RMS
+was −51.8 dBFS). Opt-in and off by default — a canvas_scene film
+mixes one continuous voice across every visual cut by design, so
+with `--audio` every hard cut there flags `suspect_word`; the
+check is for dialogue edits, where cuts belong in silence.
+Transitions are never measured (their blend is continuous by
+design); a video with no audio stream skips the check with a
+note. The 0.35 click threshold comes from
+mrpaidsocial/video-editor-agent and is not yet calibrated on
+MediaKit footage — treat a `click` flag as "listen to this seam".
+
 ### 58h. Browse the catalog before you dump it — progressive discovery
 
 89 tools is too many schemas to pay for in every turn. Don't start

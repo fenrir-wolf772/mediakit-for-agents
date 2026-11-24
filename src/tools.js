@@ -2190,7 +2190,7 @@ export const TOOL_DEFS = [
   {
     name: "verify_cuts",
     tier: "PLAN",
-    description: "Verify an assemble render cuts where its film manifest promises: downscale the delivered video to a 270p draft, measure the real hard cuts with the content scene detector, and compare them against the manifest's shot boundaries — a hard cut must land within tolerance (default 0.25s) of its promised time, a transition must show a real visual change across its blend window (measured as a frame diff, since a fade fires no scene cut), and any extra cut is reported as unexpected. Duration is checked against the voice timeline (±0.2s). Returns ok plus one entry per boundary (confirmed/missing/invisible_transition/unmeasured) and the list of unexpected cuts. Probe-only: writes nothing except a temp draft, removed afterwards unless keep_draft. With strips:true it also writes one 4-tile review strip per boundary (frames at cut-0.5/-0.1/+0.1/+0.5s, captured from the delivered video and labelled with offset + timestamp) into <video-stem>.cut-strips/ next to the video, or into strips_dir when given — the eye-check the numbers cannot give: open the strip and look at both sides of each seam.",
+    description: "Verify an assemble render cuts where its film manifest promises: downscale the delivered video to a 270p draft, measure the real hard cuts with the content scene detector, and compare them against the manifest's shot boundaries — a hard cut must land within tolerance (default 0.25s) of its promised time, a transition must show a real visual change across its blend window (measured as a frame diff, since a fade fires no scene cut), and any extra cut is reported as unexpected. Duration is checked against the voice timeline (±0.2s). Returns ok plus one entry per boundary (confirmed/missing/invisible_transition/unmeasured) and the list of unexpected cuts. Probe-only: writes nothing except a temp draft, removed afterwards unless keep_draft. With strips:true it also writes one 4-tile review strip per boundary (frames at cut-0.5/-0.1/+0.1/+0.5s, captured from the delivered video and labelled with offset + timestamp) into <video-stem>.cut-strips/ next to the video, or into strips_dir when given — the eye-check the numbers cannot give: open the strip and look at both sides of each seam. With audio:true it also measures the SOUND at every hard cut (transitions are not measured — their blend is continuous by design): the RMS energy 0.06s each side of the seam and the largest sample-to-sample jump ±40ms around it; RMS above -30 dBFS on either side flags suspect_word (the cut may land mid-word), a jump above 0.35 flags click (butt-splice click) — either flag warns and fails ok. Peak per side is reported too, but the verdict uses RMS: a single lossy-codec pre-echo sample can trip a peak test inside true silence (measured: -24.4 dBFS peak in one 10ms sliver of a silent window, RMS -51.8 dBFS). Opt-in because a canvas_scene film mixes one continuous voice across every visual cut by design, so with audio on every hard cut there flags suspect_word; the check is for dialogue edits, where cuts belong in silence. A video with no audio stream skips the audio check with a note, never a fake pass.",
     schema: {
     manifest_path: pathSchema.describe("Path to the film manifest JSON file (same schema as assemble)"),
     video: pathSchema.describe("Path to the rendered video to check (final.mp4 from a full assemble render)"),
@@ -2200,6 +2200,7 @@ export const TOOL_DEFS = [
     keep_draft: z.boolean().default(false).describe("Keep the temp draft render and report its path (default false = removed afterwards)"),
     strips: z.boolean().default(false).describe("Also write one 4-tile review strip per boundary (frames at cut-0.5/-0.1/+0.1/+0.5s from the delivered video, labelled with offset + timestamp) — default false, the verify stays probe-only"),
     strips_dir: pathSchema.optional().describe("Directory for the review strips (default <video-stem>.cut-strips/ next to the video; ignored unless strips is true)"),
+    audio: z.boolean().default(false).describe("Also measure the SOUND at every hard cut: RMS energy 0.06s each side of the seam (above -30 dBFS flags suspect_word — the cut may land mid-word; peak per side is reported too, but the verdict uses RMS because a single lossy-codec pre-echo sample can trip a peak test inside true silence) and the largest sample jump ±40ms around it (above 0.35 flags click) — either flag warns and fails ok. Default false: a canvas_scene film mixes one continuous voice across every visual cut by design, so this check is for dialogue edits, where cuts belong in silence"),
   },
     handler: async (a) => safe(() => core.verifyAssembleCuts({
     manifestPath: a.manifest_path,
@@ -2210,6 +2211,7 @@ export const TOOL_DEFS = [
     keepDraft: a.keep_draft === true,
     strips: a.strips === true,
     stripsDir: a.strips_dir ?? null,
+    audio: a.audio === true,
   })),
   },
 

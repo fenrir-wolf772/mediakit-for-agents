@@ -20554,8 +20554,118 @@ const VERIFY_CUTS_TRANSITION_DIFF_FLOOR = 1.0;
 // up here as four tiles of the same shot.
 const VERIFY_CUTS_STRIP_OFFSETS = [-0.5, -0.1, 0.1, 0.5];
 const VERIFY_CUTS_STRIP_WIDTH = 320;
+// Audio seam check (opt-in `audio: true`, idea: MakeMyClip/editor's
+// `checkCuts` (0.06s window + -30 dBFS) + mrpaidsocial/video-editor-agent's
+// `video-qa/src/layer2-transcript.ts` (±40ms astats jump + 0.35 click
+// threshold — NOT their verify_cuts.ts, which re-transcribes instead),
+// lượt 157 — the visual half of verify_cuts proves the picture cuts
+// where promised; this half proves the SOUND does not get cut
+// mid-word). For every HARD cut (transitions blend by design, so
+// they are not measured), one small window of the delivered audio is
+// decoded to raw PCM and read in pure Node — no filter's promise:
+//  - peak each side of the seam in a 0.06s window (their 0.06s
+//    window, same as the backlog): a peak above -30 dBFS on either
+//    side means the cut may land mid-word — flag `suspect_word`.
+//    A cut through digital silence is `clean`.
+//  - butt-splice click (their layer-2 check: `astats` Max
+//    difference in ±40ms around the seam): the largest
+//    sample-to-sample jump, normalized 0..1; above 0.35 flags
+//    `click`. A smooth tone's steepest step is ~0.03 at 440 Hz, so
+//    0.35 separates a real discontinuity from ordinary speech —
+//    but the threshold is theirs, calibrated on their footage, NOT
+//    yet calibrated on MediaKit footage; treat a `click` flag as
+//    "listen to this seam", not proof of a defect.
+// The check is opt-in because a canvas_scene film mixes one
+// continuous voice across every visual cut BY DESIGN — with audio
+// on, every hard cut in a report video flags `suspect_word`. The
+// check is for dialogue edits, where cuts belong in silence.
+// Measurement is at the PROMISED cut time (the manifest's), not the
+// measured visual cut — the audio seam exists there whether or not
+// the picture cut was detected.
+const VERIFY_CUTS_AUDIO_WINDOW = 0.06;
+const VERIFY_CUTS_AUDIO_PEAK_DB = -30;
+const VERIFY_CUTS_AUDIO_CLICK_WINDOW = 0.04;
+const VERIFY_CUTS_AUDIO_CLICK_MAX_DIFF = 0.35;
+const VERIFY_CUTS_AUDIO_SAMPLE_RATE = 48000;
 
-export async function verifyAssembleCuts({ manifestPath, video, tolerance = VERIFY_CUTS_TOLERANCE_DEFAULT, threshold = null, draftHeight = VERIFY_CUTS_DRAFT_HEIGHT, keepDraft = false, strips = false, stripsDir = null }) {
+// Analyze one seam from decoded mono PCM samples (Int16Array).
+// cutIndex is the index of the first sample AFTER the cut. Pure —
+// unit-tested without spawning ffmpeg. A side with no samples, or
+// all-zero samples, reports peak_db null (digital silence), which
+// counts as below the threshold.
+export function analyzeSeamSamples(samples, cutIndex, { windowSeconds = VERIFY_CUTS_AUDIO_WINDOW, clickWindowSeconds = VERIFY_CUTS_AUDIO_CLICK_WINDOW, sampleRate = VERIFY_CUTS_AUDIO_SAMPLE_RATE } = {}) {
+  if (!samples || !(samples instanceof Int16Array) || samples.length === 0) {
+    throw new MediaKitError("analyzeSeamSamples needs a non-empty Int16Array of PCM samples", "INVALID_ARG");
+  }
+  const ci = num(cutIndex, "cutIndex", { min: 0, max: samples.length, integer: true });
+  const win = Math.max(1, Math.round(num(windowSeconds, "windowSeconds", { min: 0.001, max: 5 }) * sampleRate));
+  const clickWin = Math.max(1, Math.round(num(clickWindowSeconds, "clickWindowSeconds", { min: 0.001, max: 5 }) * sampleRate));
+  const peakDb = (from, to) => {
+    let peak = 0;
+    for (let i = from; i < to; i++) { const a = Math.abs(samples[i]); if (a > peak) peak = a; }
+    return peak === 0 ? null : +(20 * Math.log10(peak / 32768)).toFixed(2);
+  };
+  // RMS over the same window — the VERDICT uses RMS, not peak:
+  // peak alone false-positives on lossy audio (measured lượt 157:
+  // a cut inside true digital silence still showed a -24.4 dBFS
+  // peak, confined to one 10ms sliver at the window's far edge —
+  // AAC pre-echo of the tone that resumes 60ms after the cut;
+  // the same window's RMS was -51.8 dBFS). Energy is what a
+  // listener hears at the seam; peak is kept as evidence.
+  const rmsDb = (from, to) => {
+    if (to <= from) return null;
+    let sum = 0;
+    for (let i = from; i < to; i++) { const v = samples[i] / 32768; sum += v * v; }
+    const mean = sum / (to - from);
+    return mean === 0 ? null : +(10 * Math.log10(mean)).toFixed(2);
+  };
+  const leftPeakDb = peakDb(Math.max(0, ci - win), ci);
+  const rightPeakDb = peakDb(ci, Math.min(samples.length, ci + win));
+  const leftRmsDb = rmsDb(Math.max(0, ci - win), ci);
+  const rightRmsDb = rmsDb(ci, Math.min(samples.length, ci + win));
+  let clickMaxDiff = 0;
+  const cs = Math.max(0, ci - clickWin);
+  const ce = Math.min(samples.length - 1, ci + clickWin);
+  for (let i = cs; i < ce; i++) { const d = Math.abs(samples[i + 1] - samples[i]) / 32768; if (d > clickMaxDiff) clickMaxDiff = d; }
+  clickMaxDiff = +clickMaxDiff.toFixed(4);
+  const flags = [];
+  if ((leftRmsDb !== null && leftRmsDb > VERIFY_CUTS_AUDIO_PEAK_DB) || (rightRmsDb !== null && rightRmsDb > VERIFY_CUTS_AUDIO_PEAK_DB)) flags.push("suspect_word");
+  if (clickMaxDiff > VERIFY_CUTS_AUDIO_CLICK_MAX_DIFF) flags.push("click");
+  return {
+    left_peak_db: leftPeakDb,
+    right_peak_db: rightPeakDb,
+    left_rms_db: leftRmsDb,
+    right_rms_db: rightRmsDb,
+    click_max_diff: clickMaxDiff,
+    peak_threshold_db: VERIFY_CUTS_AUDIO_PEAK_DB,
+    click_threshold: VERIFY_CUTS_AUDIO_CLICK_MAX_DIFF,
+    flags,
+    verdict: flags.length === 0 ? "clean" : "suspect",
+  };
+}
+
+// Decode one small window around a cut to raw PCM and analyze the
+// seam. Accurate seek (-ss after -i): the window is 0.12s, so the
+// decode cost is bounded by the cut's position in the file, not by
+// the file's length — a 10-minute film costs one decode to the cut
+// per boundary, which verify_cuts already pays for its draft.
+export async function measureCutSeam({ video, cutSeconds, windowSeconds = VERIFY_CUTS_AUDIO_WINDOW }) {
+  const videoAbs = await requireInput(video, "video");
+  const cut = num(cutSeconds, "cutSeconds", { min: 0 });
+  const win = num(windowSeconds, "windowSeconds", { min: 0.001, max: 5 });
+  const meta = await probe(videoAbs);
+  if (!meta.audio) throw new MediaKitError("measureCutSeam needs an audio stream in the input", "INVALID_ARG");
+  const duration = meta.duration_seconds;
+  const start = Math.max(0, cut - win);
+  const end = Math.min(duration ?? cut + win, cut + win);
+  const len = Math.max(0.001, end - start);
+  const { stdout } = await runRaw(FFMPEG, ["-hide_banner", "-nostats", "-i", videoAbs, "-ss", String(start), "-t", String(len), "-vn", "-ac", "1", "-ar", String(VERIFY_CUTS_AUDIO_SAMPLE_RATE), "-f", "s16le", "-"]);
+  const samples = new Int16Array(stdout.buffer, stdout.byteOffset, Math.floor(stdout.length / 2));
+  const cutIndex = Math.min(samples.length, Math.max(0, Math.round((cut - start) * VERIFY_CUTS_AUDIO_SAMPLE_RATE)));
+  return { cut_seconds: cut, window_seconds: win, sample_rate: VERIFY_CUTS_AUDIO_SAMPLE_RATE, samples: samples.length, ...analyzeSeamSamples(samples, cutIndex, { windowSeconds: win }) };
+}
+
+export async function verifyAssembleCuts({ manifestPath, video, tolerance = VERIFY_CUTS_TOLERANCE_DEFAULT, threshold = null, draftHeight = VERIFY_CUTS_DRAFT_HEIGHT, keepDraft = false, strips = false, stripsDir = null, audio = false }) {
   const tol = num(tolerance, "tolerance", { min: 0, max: 5 });
   const dh = num(draftHeight, "draft_height", { min: 16, max: 4320, integer: true });
   const manifestAbs = await requireInput(manifestPath, "manifest");
@@ -20655,6 +20765,36 @@ export async function verifyAssembleCuts({ manifestPath, video, tolerance = VERI
     for (const m of unexpected) warnings.push(`unexpected cut at ${m}s — the render changes picture where the manifest promises one continuous shot`);
     const durationOk = duration !== null && Number.isFinite(duration) && Math.abs(duration - plan.total_seconds) <= VERIFY_CUTS_DURATION_TOLERANCE;
     if (!durationOk) warnings.push(`duration ${duration}s differs from the manifest timeline ${plan.total_seconds}s by more than ${VERIFY_CUTS_DURATION_TOLERANCE}s`);
+    // Audio seam check (opt-in): every hard cut gets an `audio`
+    // measurement at its PROMISED time; transitions get audio: null
+    // (their blend is continuous by design). A suspect seam warns,
+    // like any other verify problem — so with audio on, a cut
+    // through loud audio fails `ok` until the editor moves it into
+    // silence. No audio stream: the check is skipped with a note,
+    // never a fake pass or a failure.
+    let audioChecked = false;
+    let audioNote = null;
+    if (audio === true) {
+      if (!meta.audio) {
+        audioNote = "no audio stream in the video — audio seam check skipped";
+        for (const c of cuts) c.audio = null;
+      } else {
+        audioChecked = true;
+        for (const c of cuts) {
+          if (c.type !== "cut") { c.audio = null; continue; }
+          const seam = await measureCutSeam({ video: videoAbs, cutSeconds: c.expected_seconds });
+          c.audio = seam;
+          if (seam.verdict === "suspect") {
+            const why = [];
+            if (seam.flags.includes("suspect_word")) why.push(`audio is loud on ${seam.left_rms_db !== null && seam.left_rms_db > VERIFY_CUTS_AUDIO_PEAK_DB ? "the left" : "the right"} side (RMS left ${seam.left_rms_db ?? "silent"} dBFS / right ${seam.right_rms_db ?? "silent"} dBFS, threshold ${VERIFY_CUTS_AUDIO_PEAK_DB} dBFS) — the cut may land mid-word`);
+            if (seam.flags.includes("click")) why.push(`butt-splice click at the seam (max sample jump ${seam.click_max_diff}, threshold ${VERIFY_CUTS_AUDIO_CLICK_MAX_DIFF})`);
+            warnings.push(`cut ${c.index} at ${c.expected_seconds}s: ${why.join("; ")}`);
+          }
+        }
+      }
+    } else {
+      for (const c of cuts) c.audio = null;
+    }
     const ok = warnings.length === 0;
     // Review strips (opt-in): one 4-tile strip per boundary, captured
     // from the delivered video at cut-0.5/-0.1/+0.1/+0.5s. Offsets are
@@ -20716,6 +20856,8 @@ export async function verifyAssembleCuts({ manifestPath, video, tolerance = VERI
       draft: draftMade && keepDraft ? draftPath : null,
       strips: stripsResult,
       strips_dir: stripsDirAbs,
+      audio_checked: audioChecked,
+      ...(audioNote ? { audio_note: audioNote } : {}),
       cuts,
       unexpected_cuts: unexpected,
       warnings,

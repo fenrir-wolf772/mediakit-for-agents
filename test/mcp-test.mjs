@@ -15,7 +15,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
-import { applyContentBaseline, averageHash, buildZoomChains, compareDeterminismRuns, countClippedRuns, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, inspectionPointTimestamps, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, parseZoomChainEvents, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
+import { analyzeSeamSamples, applyContentBaseline, averageHash, buildZoomChains, compareDeterminismRuns, countClippedRuns, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, inspectionPointTimestamps, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, parseZoomChainEvents, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
@@ -9198,6 +9198,56 @@ const vcEdgeJson = JSON.parse(vcEdgeRes.content[0].text);
 const vcEdgeFrames = (vcEdgeJson.strips ?? []).map((s) => s.frames?.map((f) => f.seconds));
 checkOk(vcEdgeJson.strips?.length === 2 && JSON.stringify(vcEdgeFrames) === JSON.stringify([[0, 0.4, 0.6, 1], [3, 3.4, 3.6, 3.96]]) && vcEdgeJson.strips.every((s) => s.file && existsSync(s.file) && s.skipped_reason === null) && vcEdgeJson.strips_dir === path.join(vcEdgeOut, "final.cut-strips"),
   "verify_cuts --strips clamps offsets at the film edges (cut 0.5s -> [0,0.4,0.6,1.0], cut 3.5s -> [3.0,3.4,3.6,3.96])", JSON.stringify(vcEdgeFrames));
+// verify_cuts --audio (turn 157, idea: MakeMyClip checkCuts +
+// mrpaidsocial layer2-transcript.ts): the SOUND at each hard cut — RMS
+// energy 0.06s each side (above -30 dBFS flags suspect_word) and
+// the largest sample jump ±40ms around the seam (above 0.35 flags
+// click). Pure helper first, on synthetic PCM (48 kHz): a silent
+// seam is clean with null peaks; a smooth 440.25 Hz tone at -6 dBFS
+// is suspect_word with a tiny click (0.029); the same tone with
+// its sign flipped at the seam is suspect_word + click (~0.69).
+const seamSr = 48000;
+const seamTone = (flip) => {
+  const n = seamSr; const s = new Int16Array(n);
+  // 440.25 Hz, not 440: at the 0.5s seam a 440 Hz tone sits exactly
+  // on a zero crossing, so a sign flip there makes no jump at all.
+  for (let i = 0; i < n; i++) { const v = 0.5 * Math.sin(2 * Math.PI * 440.25 * (i / seamSr)); s[i] = Math.round(v * 32767 * (flip && i >= n / 2 ? -1 : 1)); }
+  return s;
+};
+const seamSilent = new Int16Array(seamSr);
+const seamClean = analyzeSeamSamples(seamSilent, seamSr / 2);
+checkOk(seamClean.verdict === "clean" && seamClean.flags.length === 0 && seamClean.left_peak_db === null && seamClean.right_rms_db === null && seamClean.click_max_diff === 0, "analyzeSeamSamples: digital silence both sides is clean (peaks/rms null, click 0)", JSON.stringify(seamClean));
+const seamToneRes = analyzeSeamSamples(seamTone(false), seamSr / 2);
+checkOk(seamToneRes.verdict === "suspect" && JSON.stringify(seamToneRes.flags) === JSON.stringify(["suspect_word"]) && near(seamToneRes.left_rms_db, -9.03, 0.1) && near(seamToneRes.right_peak_db, -6.02, 0.1) && seamToneRes.click_max_diff < 0.1, "analyzeSeamSamples: smooth 440Hz tone is suspect_word only (RMS -9.03, peak -6.02, click < 0.1)", JSON.stringify(seamToneRes));
+const seamFlipRes = analyzeSeamSamples(seamTone(true), seamSr / 2);
+checkOk(seamFlipRes.verdict === "suspect" && JSON.stringify(seamFlipRes.flags) === JSON.stringify(["suspect_word", "click"]) && seamFlipRes.click_max_diff > 0.35, "analyzeSeamSamples: sign-flipped tone at the seam is suspect_word + click (jump > 0.35)", JSON.stringify(seamFlipRes));
+// MCP on the fixtures: the audio film (test/verify-cuts-audio.mp4,
+// 3 colour shots, voice 440Hz with a 0.94-1.06s silence gap) cuts
+// at 1.0s inside the gap and at 2.0s mid-tone. The click film
+// (test/verify-cuts-click.mp4, 2 colour shots, voice sign-flipped
+// at 2.0s) cuts through the discontinuity.
+const vcAudioRes = await client.callTool({ name: "verify_cuts", arguments: { manifest_path: path.join(root, "test/verify-cuts-audio-film.json"), video: path.join(root, "test/verify-cuts-audio.mp4"), audio: true } }, undefined, { timeout: 300000 });
+const vcAudioJson = JSON.parse(vcAudioRes.content[0].text);
+checkOk(vcAudioJson.audio_checked === true && vcAudioJson.ok === false && vcAudioJson.cuts?.length === 2 && vcAudioJson.cuts[0]?.status === "confirmed" && vcAudioJson.cuts[0]?.audio?.verdict === "clean" && vcAudioJson.cuts[0]?.audio?.flags?.length === 0 && vcAudioJson.cuts[0]?.audio?.left_rms_db < -30 && vcAudioJson.cuts[0]?.audio?.right_rms_db < -30 && vcAudioJson.cuts[0]?.audio?.click_max_diff < 0.01, "verify_cuts --audio: cut at 1.0s inside the silence gap is clean (RMS both sides < -30, click < 0.01) — the -24.41 dBFS peak on the right is AAC pre-echo in one 10ms sliver and must not trip the verdict", JSON.stringify(vcAudioJson.cuts?.[0]?.audio));
+checkOk(vcAudioJson.cuts[1]?.status === "confirmed" && vcAudioJson.cuts[1]?.audio?.verdict === "suspect" && JSON.stringify(vcAudioJson.cuts[1]?.audio?.flags) === JSON.stringify(["suspect_word"]) && near(vcAudioJson.cuts[1]?.audio?.left_rms_db, -9.02, 0.5) && vcAudioJson.cuts[1]?.audio?.click_max_diff < 0.1 && vcAudioJson.warnings?.some((w) => w.startsWith("cut 2 at 2s:")), "verify_cuts --audio: cut at 2.0s mid-tone is suspect_word (RMS -9.02, click < 0.1) and warns, so ok is false", JSON.stringify({ audio: vcAudioJson.cuts?.[1]?.audio, warnings: vcAudioJson.warnings }));
+const vcClickRes = await client.callTool({ name: "verify_cuts", arguments: { manifest_path: path.join(root, "test/verify-cuts-click-film.json"), video: path.join(root, "test/verify-cuts-click.mp4"), audio: true } }, undefined, { timeout: 300000 });
+const vcClickJson = JSON.parse(vcClickRes.content[0].text);
+checkOk(vcClickJson.audio_checked === true && vcClickJson.ok === false && vcClickJson.cuts?.length === 1 && vcClickJson.cuts[0]?.status === "confirmed" && vcClickJson.cuts[0]?.audio?.verdict === "suspect" && JSON.stringify(vcClickJson.cuts[0]?.audio?.flags) === JSON.stringify(["suspect_word", "click"]) && vcClickJson.cuts[0]?.audio?.click_max_diff > 0.35 && vcClickJson.warnings?.some((w) => w.includes("butt-splice click")), "verify_cuts --audio: cut through the sign-flipped tone is suspect_word + click (jump > 0.35) with a butt-splice warning", JSON.stringify(vcClickJson.cuts?.[0]?.audio));
+// Default stays visual-only (back-compat): the same audio film
+// without audio:true passes with audio null on every cut.
+const vcAudioOffRes = await client.callTool({ name: "verify_cuts", arguments: { manifest_path: path.join(root, "test/verify-cuts-audio-film.json"), video: path.join(root, "test/verify-cuts-audio.mp4") } }, undefined, { timeout: 300000 });
+const vcAudioOffJson = JSON.parse(vcAudioOffRes.content[0].text);
+checkOk(vcAudioOffJson.audio_checked === false && vcAudioOffJson.ok === true && vcAudioOffJson.cuts?.every((c) => c.audio === null), "verify_cuts without audio stays visual-only (audio_checked false, audio null on every cut, ok true)", JSON.stringify({ checked: vcAudioOffJson.audio_checked, ok: vcAudioOffJson.ok }));
+// No audio stream: the check is skipped with a note, never a fake
+// pass or a failure (the vc film's manifest against the no-audio
+// clip still fails on the missing visual cuts — only the audio
+// fields are asserted here).
+const vcNoAudioRes = await client.callTool({ name: "verify_cuts", arguments: { manifest_path: vcStage.manifestPath, video: path.join(root, "test/broll-blue-noaudio.mp4"), audio: true } }, undefined, { timeout: 300000 });
+const vcNoAudioJson = JSON.parse(vcNoAudioRes.content[0].text);
+checkOk(vcNoAudioJson.audio_checked === false && /no audio stream/.test(vcNoAudioJson.audio_note ?? "") && vcNoAudioJson.cuts?.every((c) => c.audio === null), "verify_cuts --audio on a video with no audio stream skips the check with a note (audio_checked false)", JSON.stringify({ checked: vcNoAudioJson.audio_checked, note: vcNoAudioJson.audio_note }));
+// CLI --audio matches the MCP result on the same film.
+const vcAudioCli = JSON.parse((await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "verify-cuts", path.join(root, "test/verify-cuts-audio-film.json"), path.join(root, "test/verify-cuts-audio.mp4"), "--audio"])).stdout);
+checkOk(vcAudioCli.audio_checked === true && vcAudioCli.cuts?.[0]?.audio?.verdict === "clean" && vcAudioCli.cuts?.[1]?.audio?.verdict === "suspect", "CLI verify-cuts --audio matches the MCP result (cut 1 clean, cut 2 suspect)", JSON.stringify(vcAudioCli.cuts?.map((c) => c.audio?.verdict)));
 
 // release_checkpoint (turn 145): one QC gate — verify + platform +
 // loudness + clipping + cuts + contact sheet, one JSON verdict.
