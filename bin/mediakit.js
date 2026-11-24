@@ -1050,6 +1050,12 @@ const COMMANDS = {
       ["--readiness", "Readiness level to show: ready (default), preview, draft, or all"],
     ],
   },
+  "validate-template-package": {
+    usage: "mediakit validate-template-package <dir>",
+    desc: "Validate an external scene-template package before assemble is ever asked to trust it — a directory holding template.json (ONE template entry, the same schema as one registry entry) + the .cjs scene module it names + any extra files. Three layers, each reported separately: magic_bytes (content, not extension — JSON must parse, a .cjs must be valid UTF-8 text that parses as JavaScript without executing it, images must carry their format's magic bytes), traversal (the manifest's file must be a bare .cjs filename; every symlink must resolve inside the package root), completeness (template.json at the root, the entry passes the same validation as a built-in template, the scene module exists, is non-empty and statically exports draw). Probe-only, writes nothing; a bad package returns valid:false with the issues listed instead of throwing — only a missing package directory throws.",
+    args: [{ name: "package", required: true }],
+    options: [],
+  },
   "align-voice": {
     usage: "mediakit align-voice <film.json> [--lines <lines.json>] [--threshold-db -40] [--min-silence 0.25] [--snap-window-ms 600] [--apply -o <aligned-film.json>] [--expected-key <hex>]",
     desc: "Align an assemble film's shot durations to its voice: split the voice across the shots that speak, in proportion to each shot's dialogue characters, then snap each interior boundary to the middle of the nearest pause within --snap-window-ms (default 600) so a cut never clips a word. Dialogue comes from each shot's `dialogue` field, overridden per shot by --lines [{shot, dialogue}]; shots with no dialogue keep their durations. Plan mode (default) writes nothing and reports the dialogue_key, per-shot durations/deltas/snap info, and violations. --apply writes the aligned film (never over the input) and embeds the dialogue it aligned from; it refuses when there are violations or when --expected-key differs from the computed key.",
@@ -2432,6 +2438,10 @@ async function main() {
           template: opts.template ?? null,
           readiness: opts.readiness ?? null,
         });
+        break;
+      case "validate-template-package":
+        if (!positional[0]) fail("missing package directory: mediakit validate-template-package <dir>");
+        result = await core.validateTemplatePackage({ packagePath: positional[0] });
         break;
       case "align-voice": {
         if (!positional[0]) fail("missing manifest file: mediakit align-voice <film.json>");

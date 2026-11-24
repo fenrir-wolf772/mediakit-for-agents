@@ -2456,7 +2456,7 @@ export const TOOL_DEFS = [
   {
     name: "list_operations",
     tier: "READ",
-    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 90 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 91 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
     schema: {
     family: z.enum(["inspect", "edit", "text", "image", "assemble", "meta"]).optional().describe("Narrow to one family; omit for the whole catalog"),
   },
@@ -2488,6 +2488,16 @@ export const TOOL_DEFS = [
     readiness: z.string().min(1).optional().describe("Readiness level to show: ready (default), preview, draft, or all — the shelf hides non-ready templates unless asked"),
   },
     handler: async (a) => safe(() => core.listSceneTemplates({ category: a.category ?? null, faceSafe: a.face_safe ?? null, timingHint: a.timing_hint ?? null, tag: a.tag ?? null, template: a.template ?? null, readiness: a.readiness ?? null })),
+  },
+
+  {
+    name: "validate_template_package",
+    tier: "READ",
+    description: "Validate an external scene-template package before assemble is ever asked to trust it — a directory holding template.json (ONE template entry, the same schema as one registry entry) + the .cjs scene module it names + any extra files. Three layers, each reported separately: magic_bytes (content, not extension — JSON must parse, a .cjs must be valid UTF-8 text that parses as JavaScript without executing it, images must carry their format's magic bytes), traversal (the manifest's file must be a bare .cjs filename; every symlink must resolve inside the package root), completeness (template.json at the root, the entry passes the same validation as a built-in template, the scene module exists, is non-empty and statically exports draw). Probe-only, writes nothing; a bad package returns valid:false with the issues listed instead of throwing — only a missing package directory throws.",
+    schema: {
+    package: z.string().min(1).describe("Path to the template package directory (holds template.json + the .cjs scene module it names)"),
+  },
+    handler: async (a) => safe(() => core.validateTemplatePackage({ packagePath: a.package })),
   },
 ];
 
@@ -2542,7 +2552,7 @@ export function listSafetyTiers() {
 }
 
 // ---------------------------------------------------------------- progressive discovery
-// The catalog is 90 tools and tools/list dumps the full JSON schema
+// The catalog is 91 tools and tools/list dumps the full JSON schema
 // of every one on every turn — kinocut's answer is progressive
 // discovery: a compact list first, full schema only for the tools
 // actually used (lượt 147, idea: KyaniteLabs/kinocut
@@ -2590,11 +2600,12 @@ export const TOOL_FAMILY_OF = {
   // image (7)
   thumbnail: "image", frames: "image", extract_frames: "image", image_to_video: "image",
   slideshow: "image", export_gif: "image", svg_animate: "image",
-  // assemble (12)
+  // assemble (13)
   assemble: "assemble", manifest: "assemble", patch_manifest: "assemble",
   init_project: "assemble", export_timeline: "assemble", job: "assemble",
   release_checkpoint: "assemble", package: "assemble", publish_kit: "assemble",
   social: "assemble", batch: "assemble", list_templates: "assemble",
+  validate_template_package: "assemble",
   // meta (2)
   list_operations: "meta", describe_operation: "meta",
 };

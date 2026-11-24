@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
+import vm from "node:vm";
 import { auditStatus } from "./audit.js";
 
 export const MEDIAKIT_VERSION = "0.1.0";
@@ -12420,6 +12421,9 @@ const TOOL_REQUIREMENTS = {
   // list_templates is a pure catalog lookup over the scene-template
   // registry — same as the discovery tools above, no ffmpeg needed.
   list_templates: {},
+  // validate_template_package is pure Node (JSON parse, magic bytes,
+  // vm.Script syntax check, symlink walk) — no ffmpeg needed.
+  validate_template_package: {},
 };
 
 async function listCapabilities(kind) {
@@ -18142,12 +18146,80 @@ const SCENE_TEMPLATES_PATH = fileURLToPath(new URL("../skills/shorts-video/scene
 const SCENE_TEMPLATES_DIR = fileURLToPath(new URL("./canvas-scene-lib/templates/", import.meta.url));
 let cachedSceneTemplates = null;
 const SCENE_TEMPLATE_PARAM_TYPES = ["string", "number", "boolean", "color"];
+// A scene module is named by ONE bare filename — no directory, no
+// `..`, no absolute path. The registry and the package validator
+// both enforce this; a manifest that names `../escape.cjs` fails
+// traversal here, not at render time.
+const SCENE_TEMPLATE_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.cjs$/;
 
 function normalizeSceneTemplateColor(value, where) {
   if (typeof value !== "string" || !/^#?[0-9a-fA-F]{6}$/.test(value)) {
     throw new MediaKitError(`${where} must be a 6-digit hex color (RRGGBB or #RRGGBB), got: ${JSON.stringify(value)}`, "PRESET_LIBRARY_INVALID");
   }
   return value.startsWith("#") ? value.toUpperCase() : `#${value.toUpperCase()}`;
+}
+
+// Validate one scene-template entry (one element of the registry's
+// `templates` array, or the `template.json` of an external template
+// package) and return it normalized — the same checks the registry
+// loader has always run, in one place, so a package that passes
+// validation here is exactly as well-formed as a built-in template.
+// The `file` in the result is still the bare filename from the
+// entry; the caller resolves it against its own root (the built-in
+// templates dir for the registry, the package dir for a package)
+// and checks the file exists there. Throws MediaKitError on the
+// first problem; `where` names the source in the message.
+export function validateSceneTemplateEntry(t, where) {
+  if (typeof t?.id !== "string" || !t.id) throw new MediaKitError(`${where}: template without an id`, "PRESET_LIBRARY_INVALID");
+  if (typeof t.file !== "string" || !SCENE_TEMPLATE_FILE_RE.test(t.file)) {
+    throw new MediaKitError(`${where}: template "${t.id}" has a bad file ${JSON.stringify(t.file)} (one .cjs filename, no path)`, "PRESET_LIBRARY_INVALID");
+  }
+  if (t.params !== undefined && (typeof t.params !== "object" || t.params === null || Array.isArray(t.params))) {
+    throw new MediaKitError(`${where}: template "${t.id}" params must be an object`, "PRESET_LIBRARY_INVALID");
+  }
+  const params = {};
+  for (const [name, spec] of Object.entries(t.params ?? {})) {
+    const paramWhere = `${where}: template "${t.id}" param "${name}"`;
+    if (!spec || typeof spec !== "object" || !SCENE_TEMPLATE_PARAM_TYPES.includes(spec.type)) {
+      throw new MediaKitError(`${paramWhere} needs a type (one of ${SCENE_TEMPLATE_PARAM_TYPES.join(", ")})`, "PRESET_LIBRARY_INVALID");
+    }
+    if (!("default" in spec)) throw new MediaKitError(`${paramWhere} needs a default`, "PRESET_LIBRARY_INVALID");
+    const param = { type: spec.type, default: spec.default, description: spec.description ?? "" };
+    if (spec.type === "string") {
+      if (typeof spec.default !== "string") throw new MediaKitError(`${paramWhere} default must be a string`, "PRESET_LIBRARY_INVALID");
+      if (spec.enum !== undefined) {
+        if (!Array.isArray(spec.enum) || spec.enum.length === 0 || !spec.enum.every((v) => typeof v === "string")) throw new MediaKitError(`${paramWhere} enum must be a non-empty array of strings`, "PRESET_LIBRARY_INVALID");
+        if (!spec.enum.includes(spec.default)) throw new MediaKitError(`${paramWhere} default ${JSON.stringify(spec.default)} is not in enum (${spec.enum.join(", ")})`, "PRESET_LIBRARY_INVALID");
+        param.enum = [...spec.enum];
+      }
+      if (spec.maxLength !== undefined) {
+        if (!Number.isInteger(spec.maxLength) || spec.maxLength < 1) throw new MediaKitError(`${paramWhere} maxLength must be a positive integer`, "PRESET_LIBRARY_INVALID");
+        if (spec.default.length > spec.maxLength) throw new MediaKitError(`${paramWhere} default is longer than maxLength ${spec.maxLength}`, "PRESET_LIBRARY_INVALID");
+        param.maxLength = spec.maxLength;
+      }
+    } else if (spec.type === "boolean") {
+      if (typeof spec.default !== "boolean") throw new MediaKitError(`${paramWhere} default must be true or false`, "PRESET_LIBRARY_INVALID");
+    } else if (spec.type === "color") {
+      param.default = normalizeSceneTemplateColor(spec.default, paramWhere);
+    } else {
+      if (typeof spec.default !== "number" || !Number.isFinite(spec.default)) throw new MediaKitError(`${paramWhere} default must be a number`, "PRESET_LIBRARY_INVALID");
+      if (spec.integer) param.integer = true;
+      if (spec.min !== undefined) {
+        if (typeof spec.min !== "number" || !Number.isFinite(spec.min)) throw new MediaKitError(`${paramWhere} min must be a number`, "PRESET_LIBRARY_INVALID");
+        param.min = spec.min;
+      }
+      if (spec.max !== undefined) {
+        if (typeof spec.max !== "number" || !Number.isFinite(spec.max)) throw new MediaKitError(`${paramWhere} max must be a number`, "PRESET_LIBRARY_INVALID");
+        param.max = spec.max;
+      }
+      if (param.min !== undefined && param.max !== undefined && param.min > param.max) throw new MediaKitError(`${paramWhere} min ${param.min} is above max ${param.max}`, "PRESET_LIBRARY_INVALID");
+      if (param.min !== undefined && spec.default < param.min) throw new MediaKitError(`${paramWhere} default ${spec.default} is below min ${param.min}`, "PRESET_LIBRARY_INVALID");
+      if (param.max !== undefined && spec.default > param.max) throw new MediaKitError(`${paramWhere} default ${spec.default} is above max ${param.max}`, "PRESET_LIBRARY_INVALID");
+      if (param.integer && !Number.isInteger(spec.default)) throw new MediaKitError(`${paramWhere} default must be a whole number`, "PRESET_LIBRARY_INVALID");
+    }
+    params[name] = param;
+  }
+  return { id: t.id, name: t.name ?? t.id, description: t.description ?? "", file: t.file, params, ...parseTemplateSlotMeta(t, `${where}: template "${t.id}"`), ...parseTemplateCatalogMeta(t, `${where}: template "${t.id}"`), ...parseTemplateReadiness(t, `${where}: template "${t.id}"`) };
 }
 
 export async function getSceneTemplates() {
@@ -18163,64 +18235,16 @@ export async function getSceneTemplates() {
   }
   const byId = {};
   for (const t of doc.templates) {
-    if (typeof t?.id !== "string" || !t.id) throw new MediaKitError("assemble scene template library: template without an id", "PRESET_LIBRARY_INVALID");
-    if (byId[t.id]) throw new MediaKitError(`assemble scene template library: duplicate template id "${t.id}"`, "PRESET_LIBRARY_INVALID");
-    if (typeof t.file !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*\.cjs$/.test(t.file)) {
-      throw new MediaKitError(`assemble scene template library: template "${t.id}" has a bad file ${JSON.stringify(t.file)} (one .cjs filename, no path)`, "PRESET_LIBRARY_INVALID");
-    }
-    const fileAbs = path.join(SCENE_TEMPLATES_DIR, t.file);
+    const entry = validateSceneTemplateEntry(t, "assemble scene template library");
+    if (byId[entry.id]) throw new MediaKitError(`assemble scene template library: duplicate template id "${entry.id}"`, "PRESET_LIBRARY_INVALID");
+    const fileAbs = path.join(SCENE_TEMPLATES_DIR, entry.file);
     try {
       const st = await stat(fileAbs);
       if (!st.isFile()) throw new Error("not a file");
     } catch {
-      throw new MediaKitError(`assemble scene template library: template "${t.id}" file ${t.file} is missing under src/canvas-scene-lib/templates/`, "PRESET_LIBRARY_INVALID");
+      throw new MediaKitError(`assemble scene template library: template "${entry.id}" file ${entry.file} is missing under src/canvas-scene-lib/templates/`, "PRESET_LIBRARY_INVALID");
     }
-    if (t.params !== undefined && (typeof t.params !== "object" || t.params === null || Array.isArray(t.params))) {
-      throw new MediaKitError(`assemble scene template library: template "${t.id}" params must be an object`, "PRESET_LIBRARY_INVALID");
-    }
-    const params = {};
-    for (const [name, spec] of Object.entries(t.params ?? {})) {
-      const where = `assemble scene template library: template "${t.id}" param "${name}"`;
-      if (!spec || typeof spec !== "object" || !SCENE_TEMPLATE_PARAM_TYPES.includes(spec.type)) {
-        throw new MediaKitError(`${where} needs a type (one of ${SCENE_TEMPLATE_PARAM_TYPES.join(", ")})`, "PRESET_LIBRARY_INVALID");
-      }
-      if (!("default" in spec)) throw new MediaKitError(`${where} needs a default`, "PRESET_LIBRARY_INVALID");
-      const param = { type: spec.type, default: spec.default, description: spec.description ?? "" };
-      if (spec.type === "string") {
-        if (typeof spec.default !== "string") throw new MediaKitError(`${where} default must be a string`, "PRESET_LIBRARY_INVALID");
-        if (spec.enum !== undefined) {
-          if (!Array.isArray(spec.enum) || spec.enum.length === 0 || !spec.enum.every((v) => typeof v === "string")) throw new MediaKitError(`${where} enum must be a non-empty array of strings`, "PRESET_LIBRARY_INVALID");
-          if (!spec.enum.includes(spec.default)) throw new MediaKitError(`${where} default ${JSON.stringify(spec.default)} is not in enum (${spec.enum.join(", ")})`, "PRESET_LIBRARY_INVALID");
-          param.enum = [...spec.enum];
-        }
-        if (spec.maxLength !== undefined) {
-          if (!Number.isInteger(spec.maxLength) || spec.maxLength < 1) throw new MediaKitError(`${where} maxLength must be a positive integer`, "PRESET_LIBRARY_INVALID");
-          if (spec.default.length > spec.maxLength) throw new MediaKitError(`${where} default is longer than maxLength ${spec.maxLength}`, "PRESET_LIBRARY_INVALID");
-          param.maxLength = spec.maxLength;
-        }
-      } else if (spec.type === "boolean") {
-        if (typeof spec.default !== "boolean") throw new MediaKitError(`${where} default must be true or false`, "PRESET_LIBRARY_INVALID");
-      } else if (spec.type === "color") {
-        param.default = normalizeSceneTemplateColor(spec.default, where);
-      } else {
-        if (typeof spec.default !== "number" || !Number.isFinite(spec.default)) throw new MediaKitError(`${where} default must be a number`, "PRESET_LIBRARY_INVALID");
-        if (spec.integer) param.integer = true;
-        if (spec.min !== undefined) {
-          if (typeof spec.min !== "number" || !Number.isFinite(spec.min)) throw new MediaKitError(`${where} min must be a number`, "PRESET_LIBRARY_INVALID");
-          param.min = spec.min;
-        }
-        if (spec.max !== undefined) {
-          if (typeof spec.max !== "number" || !Number.isFinite(spec.max)) throw new MediaKitError(`${where} max must be a number`, "PRESET_LIBRARY_INVALID");
-          param.max = spec.max;
-        }
-        if (param.min !== undefined && param.max !== undefined && param.min > param.max) throw new MediaKitError(`${where} min ${param.min} is above max ${param.max}`, "PRESET_LIBRARY_INVALID");
-        if (param.min !== undefined && spec.default < param.min) throw new MediaKitError(`${where} default ${spec.default} is below min ${param.min}`, "PRESET_LIBRARY_INVALID");
-        if (param.max !== undefined && spec.default > param.max) throw new MediaKitError(`${where} default ${spec.default} is above max ${param.max}`, "PRESET_LIBRARY_INVALID");
-        if (param.integer && !Number.isInteger(spec.default)) throw new MediaKitError(`${where} default must be a whole number`, "PRESET_LIBRARY_INVALID");
-      }
-      params[name] = param;
-    }
-    byId[t.id] = { id: t.id, name: t.name ?? t.id, description: t.description ?? "", file: fileAbs, params, ...parseTemplateSlotMeta(t, `assemble scene template library: template "${t.id}"`), ...parseTemplateCatalogMeta(t, `assemble scene template library: template "${t.id}"`), ...parseTemplateReadiness(t, `assemble scene template library: template "${t.id}"`) };
+    byId[entry.id] = { ...entry, file: fileAbs };
   }
   const ids = Object.keys(byId).sort();
   if (JSON.stringify(ids) !== JSON.stringify([...SCENE_TEMPLATE_IDS].sort())) {
@@ -18330,6 +18354,240 @@ export async function listSceneTemplates({ category = null, faceSafe = null, tim
     })),
     filters: { category: category ?? null, face_safe: faceSafe ?? null, timing_hint: timingHint ?? null, tag: tag ?? null, readiness: effectiveReadiness },
     templates: matching.map(sceneTemplateCard),
+  };
+}
+
+// Validate an external scene-template package (idea:
+// 01sy/remotion-template-library's 3-layer template-package
+// validation, lượt 163) — a directory a director drops in before
+// assemble is ever asked to trust it. A package is one root holding
+// `template.json` (ONE template entry, the same schema as one
+// element of the registry's `templates` array) + the `.cjs` scene
+// module its `file` names + any extra files (assets). Three layers,
+// each reported separately so a failure names its layer:
+//   1. magic_bytes — content, not extension, decides what a file
+//      is: template.json + every other .json must parse; a .cjs
+//      must be valid UTF-8 text with no NUL bytes and must compile
+//      as JavaScript (vm.Script — syntax only, NEVER executed, so a
+//      hostile package cannot run code during validation); a
+//      .png/.jpg/.jpeg/.webp/.gif must carry that format's magic
+//      bytes. Other extensions are noted as unchecked, not failed.
+//   2. traversal — the manifest's `file` must be a bare filename
+//      (the same regex the registry enforces — no `/`, `\` or
+//      `..`); every symlink in the tree must resolve inside the
+//      package root (a symlink to /etc/passwd fails here, not at
+//      render time).
+//   3. completeness — template.json exists at the root; the entry
+//      passes the same validateSceneTemplateEntry the registry
+//      runs; the .cjs it names exists under the root, is non-empty,
+//      and statically exports `draw` (the one export assemble
+//      calls — checked by source text, not by loading the module).
+// Probe-only (READ): writes nothing. A bad package returns
+// valid:false with the issues listed — like `check`, it reports
+// instead of throwing; only a missing/unreadable package dir (or a
+// non-directory) throws, like `find`.
+const TEMPLATE_PACKAGE_MAGIC = {
+  png: { label: "PNG", bytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] },
+  jpg: { label: "JPEG", bytes: [0xff, 0xd8, 0xff] },
+  jpeg: { label: "JPEG", bytes: [0xff, 0xd8, 0xff] },
+  webp: { label: "WebP", bytes: [0x52, 0x49, 0x46, 0x46], suffix: [0x57, 0x45, 0x42, 0x50], suffixAt: 8 },
+  gif: { label: "GIF", bytes: [0x47, 0x49, 0x46, 0x38] },
+};
+const TEMPLATE_PACKAGE_MAX_FILE_BYTES = 50 * 1024 * 1024;
+const TEMPLATE_DRAW_EXPORT = /(?:module\.exports\.draw\s*=|exports\.draw\s*=|module\.exports\s*=\s*\{[^}]*\bdraw\b)/;
+
+export async function validateTemplatePackage({ packagePath }) {
+  const root = await requireInput(packagePath, "template package");
+  const dirStat = await stat(root);
+  if (!dirStat.isDirectory()) throw new MediaKitError(`not a directory: ${packagePath}`, "INVALID_ARG");
+  const realRoot = await realpath(root);
+  const issues = [];
+  const layers = {
+    magic_bytes: { passed: true, checks: [] },
+    traversal: { passed: true, checks: [] },
+    completeness: { passed: true, checks: [] },
+  };
+  const fail = (layer, message) => {
+    layers[layer].passed = false;
+    issues.push(message);
+  };
+  const check = (layer, file, ok, detail) => {
+    layers[layer].checks.push({ file, ok, detail });
+    if (!ok) fail(layer, `${file}: ${detail}`);
+  };
+
+  // Walk the whole tree once (symlinks are not followed — a symlink
+  // is reported as a file of its own so layer 2 can judge it).
+  const files = [];
+  async function walk(dir, relBase) {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const rel = relBase ? `${relBase}/${e.name}` : e.name;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        await walk(full, rel);
+      } else {
+        files.push({ rel, full, isSymlink: e.isSymbolicLink() });
+      }
+    }
+  }
+  await walk(realRoot, "");
+  files.sort((a, b) => a.rel.localeCompare(b.rel));
+
+  // Layer 2 — traversal: symlinks must stay inside the root. (The
+  // manifest's `file` is checked in layer 3 against the same bare-
+  // filename regex the registry enforces.)
+  for (const f of files) {
+    if (!f.isSymlink) continue;
+    let target;
+    try {
+      target = await realpath(f.full);
+    } catch {
+      check("traversal", f.rel, false, "symlink target cannot be resolved");
+      continue;
+    }
+    const inside = target === realRoot || isInsideDir(realRoot, target);
+    check("traversal", f.rel, inside, inside ? "symlink stays inside the package" : `symlink escapes the package root (points at ${target})`);
+  }
+  if (!layers.traversal.checks.length) {
+    layers.traversal.checks.push({ file: ".", ok: true, detail: "no symlinks in the package" });
+  }
+
+  // Layer 1 — magic bytes / content type, one check per file.
+  let manifestDoc = null;
+  let sceneSrc = null;
+  for (const f of files) {
+    const ext = f.rel.includes(".") ? f.rel.split(".").pop().toLowerCase() : "";
+    let buf;
+    try {
+      const st = await stat(f.full);
+      if (st.isDirectory()) {
+        layers.magic_bytes.checks.push({ file: f.rel, ok: true, detail: "directory entry (a symlink to a directory), not a file" });
+        continue;
+      }
+      if (st.size > TEMPLATE_PACKAGE_MAX_FILE_BYTES) {
+        check("magic_bytes", f.rel, false, `file is ${st.size} bytes (over the ${TEMPLATE_PACKAGE_MAX_FILE_BYTES}-byte validation cap)`);
+        continue;
+      }
+      buf = await readFile(f.full);
+    } catch {
+      check("magic_bytes", f.rel, false, "file cannot be read");
+      continue;
+    }
+    if (ext === "json") {
+      try {
+        const parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buf));
+        check("magic_bytes", f.rel, true, "valid JSON");
+        if (f.rel === "template.json") manifestDoc = parsed;
+      } catch {
+        check("magic_bytes", f.rel, false, "not valid JSON (or not valid UTF-8)");
+      }
+    } else if (ext === "cjs" || ext === "js" || ext === "mjs") {
+      if (buf.includes(0)) {
+        check("magic_bytes", f.rel, false, "binary content (NUL byte) in a JavaScript file");
+      } else {
+        let src;
+        try {
+          src = new TextDecoder("utf-8", { fatal: true }).decode(buf);
+        } catch {
+          check("magic_bytes", f.rel, false, "not valid UTF-8 text");
+          continue;
+        }
+        try {
+          new vm.Script(src, { filename: f.rel });
+          check("magic_bytes", f.rel, true, "valid UTF-8 text, parses as JavaScript (not executed)");
+        } catch (err) {
+          check("magic_bytes", f.rel, false, `JavaScript syntax error: ${err.message.split("\n")[0]}`);
+        }
+      }
+    } else if (TEMPLATE_PACKAGE_MAGIC[ext]) {
+      const magic = TEMPLATE_PACKAGE_MAGIC[ext];
+      const headOk = magic.bytes.every((b, i) => buf[i] === b);
+      const suffixOk = !magic.suffix || magic.suffix.every((b, i) => buf[magic.suffixAt + i] === b);
+      check("magic_bytes", f.rel, headOk && suffixOk, headOk && suffixOk ? `magic bytes match ${magic.label}` : `magic bytes do not match ${magic.label} (extension says .${ext})`);
+    } else {
+      layers.magic_bytes.checks.push({ file: f.rel, ok: true, detail: `unchecked extension .${ext || "(none)"} — content not verified` });
+    }
+  }
+  if (!files.length) {
+    layers.magic_bytes.checks.push({ file: ".", ok: true, detail: "package is empty (no files to check)" });
+  }
+
+  // Layer 2 (continued) — the manifest's `file` itself: it must be
+  // a bare .cjs filename, so `../escape.cjs` fails traversal even
+  // though no symlink is involved. Recorded here (after layer 1
+  // parsed the manifest) but counted in the traversal layer.
+  if (manifestDoc && typeof manifestDoc === "object" && typeof manifestDoc.file === "string") {
+    const bare = SCENE_TEMPLATE_FILE_RE.test(manifestDoc.file);
+    check("traversal", "template.json:file", bare, bare ? `"${manifestDoc.file}" is a bare .cjs filename (no path, no traversal)` : `"${manifestDoc.file}" is not a bare .cjs filename — a manifest path must not contain /, \\ or ..`);
+  }
+
+  // Layer 3 — completeness: one root, one manifest, one scene
+  // module, and the entry is as well-formed as a built-in template.
+  const manifestFile = files.find((f) => f.rel === "template.json");
+  if (!manifestFile) {
+    check("completeness", "template.json", false, "missing at the package root");
+  } else if (manifestDoc === null || manifestDoc === undefined) {
+    check("completeness", "template.json", false, "does not parse as JSON, so the entry cannot be validated");
+  } else {
+    let entry = null;
+    try {
+      entry = validateSceneTemplateEntry(manifestDoc, "template package");
+      check("completeness", "template.json", true, `entry "${entry.id}" passes the registry validation (params, slot meta, catalog meta, readiness)`);
+    } catch (err) {
+      check("completeness", "template.json", false, err instanceof MediaKitError ? err.message : String(err.message ?? err));
+    }
+    if (entry) {
+      const sceneFile = files.find((f) => f.rel === entry.file);
+      if (!sceneFile) {
+        check("completeness", entry.file, false, `scene module named by template.json is missing under the package root`);
+      } else {
+        check("completeness", entry.file, true, "scene module exists under the package root");
+        // Re-read the scene source here for the draw-export check
+        // — the file is small and the read is cheap, and it keeps
+        // layer 1 independent of layer 3.
+        try {
+          sceneSrc = new TextDecoder("utf-8", { fatal: true }).decode(await readFile(sceneFile.full));
+        } catch {
+          sceneSrc = null;
+        }
+        if (sceneSrc === null) {
+          check("completeness", entry.file, false, "scene module cannot be read as UTF-8 text");
+        } else if (!sceneSrc.trim()) {
+          check("completeness", entry.file, false, "scene module is empty");
+        } else {
+          check("completeness", entry.file, TEMPLATE_DRAW_EXPORT.test(sceneSrc), TEMPLATE_DRAW_EXPORT.test(sceneSrc) ? "statically exports draw (the export assemble calls)" : "does not statically export draw — assemble would fail at render time");
+        }
+      }
+      // The entry validation above already enforced the bare-
+      // filename rule (recorded in the traversal layer), so reaching
+      // here means the name is safe to resolve under the root.
+    }
+  }
+
+  const valid = layers.magic_bytes.passed && layers.traversal.passed && layers.completeness.passed;
+  let template = null;
+  if (manifestDoc && typeof manifestDoc === "object") {
+    try {
+      const entry = validateSceneTemplateEntry(manifestDoc, "template package");
+      template = { id: entry.id, name: entry.name, category: entry.category, readiness: entry.readiness, file: entry.file };
+    } catch {
+      template = null;
+    }
+  }
+  return {
+    operation: "validate_template_package",
+    package: realRoot,
+    valid,
+    template,
+    files_checked: files.length,
+    layers,
+    issues,
   };
 }
 

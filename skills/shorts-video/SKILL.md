@@ -237,7 +237,20 @@ and `readiness` (`ready` — a shipped film verified its cuts;
 never shipped). `list-templates` shows only ready templates by
 default (`--readiness all` to see the whole shelf), and `diagnose`
 warns when a template is used in the wrong slot or role, or when a
-film leans on a preview/draft template. For one channel look
+film leans on a preview/draft template. An external template
+package — a directory someone hands you, holding `template.json`
+(one entry, the same schema as one registry entry) + the `.cjs`
+scene module it names — must pass `mediakit
+validate-template-package <dir>` before you trust it: three
+layers, each reported separately (`magic_bytes` — content, not
+extension: JSON parses, a `.cjs` parses as JavaScript without
+executing it, images carry their format's magic bytes;
+`traversal` — the manifest's `file` is a bare `.cjs` filename and
+every symlink resolves inside the package; `completeness` —
+the entry passes the same validation as a built-in template and
+the scene module exists and statically exports `draw`). A bad
+package returns `valid:false` with the issues listed; only a
+missing directory throws. For one channel look
 across the whole film, set `"brand"` in the manifest
 (`amber-teal`, `warm-story`, `minimal-line`, registry in
 `brands.json` — or your own ids from a `MEDIAKIT_BRANDS` file):
