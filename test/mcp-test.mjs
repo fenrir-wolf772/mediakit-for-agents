@@ -9293,6 +9293,40 @@ await client.callTool({ name: "assemble", arguments: { manifest_path: vcSameFade
 const vcSameFadeRes = await client.callTool({ name: "verify_cuts", arguments: { manifest_path: vcSameFadeStage.manifestPath, video: path.join(vcSameFadeOut, "final.mp4") } }, undefined, { timeout: 300000 });
 const vcSameFadeJson = JSON.parse(vcSameFadeRes.content[0].text);
 checkOk(vcSameFadeJson.ok === false && vcSameFadeJson.cuts?.length === 1 && vcSameFadeJson.cuts?.[0]?.status === "invisible_transition" && vcSameFadeJson.cuts?.[0]?.transition_diff === 0 && vcSameFadeJson.unexpected_cuts?.length === 0, "verify_cuts fails on a fade between identical color shots (invisible_transition, diff 0)", JSON.stringify(vcSameFadeJson.cuts));
+// verify_cuts --step fallback (turn 161): a hard cut between two
+// dark canvas_scene shots that the content scene detector cannot see
+// at all (it compares frame means — both shots are dark, low-sat,
+// similar-mean, so the whole film scores <= 0.011 against the 0.05
+// threshold). The fixture renders rings #0F172A -> spring-in
+// #1E293B; the scenes tool must find 0 cuts on it (otherwise this
+// test would pass through the normal detector path and prove
+// nothing), and verify_cuts must still confirm the cut by the
+// per-pixel frame-diff step, with measured_seconds null (no detector
+// timestamp exists) and the evidence attached.
+const vcDarkStage = await stageAssembleManifest("verify-cuts-dark.json");
+const vcDarkOut = path.join(vcDarkStage.dir, "out");
+await client.callTool({ name: "assemble", arguments: { manifest_path: vcDarkStage.manifestPath, mode: "render", output_dir: vcDarkOut, force: true } }, undefined, { timeout: 300000 });
+const vcDarkPath = path.join(vcDarkOut, "final.mp4");
+const vcDarkScenesRes = await client.callTool({ name: "scenes", arguments: { input: vcDarkPath, detector: "content" } });
+const vcDarkScenesJson = JSON.parse(vcDarkScenesRes.content[0].text);
+checkOk(vcDarkScenesJson.count === 0 && vcDarkScenesJson.scene_changes?.length === 0, "scenes content detector is blind on the dark film (0 cuts) — the fixture really exercises the fallback", JSON.stringify(vcDarkScenesJson.scene_changes));
+const vcDarkRes = await client.callTool({ name: "verify_cuts", arguments: { manifest_path: vcDarkStage.manifestPath, video: vcDarkPath } }, undefined, { timeout: 300000 });
+const vcDarkJson = JSON.parse(vcDarkRes.content[0].text);
+checkOk(vcDarkJson.ok === true && vcDarkJson.cuts?.length === 1 && vcDarkJson.cuts?.[0]?.status === "confirmed_by_diff" && vcDarkJson.cuts?.[0]?.measured_seconds === null && vcDarkJson.cuts?.[0]?.frame_diff?.confirmed === true && vcDarkJson.cuts?.[0]?.frame_diff?.at >= 1 && vcDarkJson.cuts?.[0]?.frame_diff?.at >= 2 * Math.min(vcDarkJson.cuts[0].frame_diff.before, vcDarkJson.cuts[0].frame_diff.after) && vcDarkJson.unexpected_cuts?.length === 0, "verify_cuts confirms the dark hard cut by frame-diff step (confirmed_by_diff, no detector timestamp, step evidence attached)", JSON.stringify(vcDarkJson.cuts));
+// release_checkpoint must count confirmed_by_diff as confirmed too
+// (lượt 161 dogfood caught it reporting "0/1 boundaries confirmed"
+// on a film whose only cut is confirmed_by_diff): the cuts check on
+// the dark render passes and names 1/1.
+const vcDarkRcRes = await client.callTool({ name: "release_checkpoint", arguments: { input: vcDarkPath, manifest_path: vcDarkStage.manifestPath, receipt: path.join(vcDarkOut, "assemble-receipt.json") } }, undefined, { timeout: 300000 });
+const vcDarkRcJson = JSON.parse(vcDarkRcRes.content[0].text);
+const vcDarkRcCuts = (vcDarkRcJson.checks ?? []).find((c) => c.name === "cuts");
+checkOk(vcDarkRcCuts?.status === "pass" && vcDarkRcCuts?.confirmed === 1 && /1\/1 boundaries confirmed/.test(vcDarkRcCuts?.detail ?? ""), "release_checkpoint counts a confirmed_by_diff cut as confirmed (1/1, cuts pass)", JSON.stringify(vcDarkRcCuts));
+// The wrong-timeline negative still holds with the fallback on: the
+// promised cut at 1.5s lands mid-bounce-shot, where the step
+// evidence fails (diff across ~= diffs beside it), so it stays
+// missing and carries confirmed:false evidence instead of a false
+// confirmation.
+checkOk(vcWrongJson.cuts?.[0]?.frame_diff?.confirmed === false, "verify_cuts step fallback does not false-confirm a mid-shot boundary on the wrong timeline (frame_diff.confirmed false)", JSON.stringify(vcWrongJson.cuts?.[0]?.frame_diff));
 // verify_cuts refuses a non-video input and a missing manifest.
 const vcBadVideoText = await callExpectThrow("verify_cuts", { manifest_path: vcStage.manifestPath, video: path.join(root, "test/canvas-voice.mp3") });
 checkOk(/needs a video input/.test(vcBadVideoText ?? ""), "verify_cuts refuses an audio-only video input", (vcBadVideoText ?? "").slice(0, 160));

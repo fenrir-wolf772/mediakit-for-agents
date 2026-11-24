@@ -20878,6 +20878,38 @@ const VERIFY_CUTS_DURATION_TOLERANCE = 0.2;
 const VERIFY_CUTS_DRAFT_HEIGHT = 270;
 const VERIFY_CUTS_MIN_SCENE_LEN_FRAMES = 3;
 const VERIFY_CUTS_TRANSITION_DIFF_FLOOR = 1.0;
+// Hard-cut step fallback (lượt 161): the content scene detector is
+// blind on dark, low-saturation canvas_scene shots — it compares
+// frame MEANS (Y/U/V averaged over the whole frame), so two dark
+// shots with similar means score ~0.001-0.011 against the 0.05
+// threshold even though the picture changes completely (measured on
+// the lượt 160 report film: max contentScore 0.0110 over 858 frames,
+// detector found 0 cuts). No threshold tweak fixes that — the
+// threshold would have to drop below encoder noise. The fallback
+// measures the same per-pixel mean-abs-diff frameDiffMean already
+// uses for transitions, but as a STEP: diff across the boundary vs
+// the diffs just before/after it. A real hard cut is a step — its
+// across-boundary diff stands out from the local motion on the
+// quieter side — while a dropped cut inside a moving shot shows the
+// same diff everywhere (rings mid-shot: 3.71/3.58/3.45, ratio 1.04).
+// Calibrated on 8 cases (270p drafts, 0-255 scale): real cuts
+// before/at/after 3.77/6.69/1.30, 1.40/5.22/11.38, 3.88/40.74/0.88,
+// 1.27/17.44/7.12, 4.51/19.75/18.51 (ratio vs min neighbor >= 3.73);
+// no-cuts 3.71/3.58/3.45, 0.86/0.87/0.89, 0/0/0 (ratio <= 1.04, or
+// at = 0). Rule: at >= floor AND at >= RATIO x the quieter
+// neighbor. MIN (not max) neighbor is deliberate: the incoming shot
+// may itself move hard right after the cut (spring-in: after 11.38
+// and 18.51), so the max neighbor would veto real cuts; the min
+// neighbor is the side that proves the step. A cut between two
+// fast-moving shots can still miss (ratio < 2) — that keeps today's
+// behavior, it just does not improve it. PySceneDetect's
+// ContentDetector scores the same per-pixel mean abs diff of
+// hue/sat/lum (its AdaptiveDetector is the same idea one level up:
+// trigger on deviation from the LOCAL average, not an absolute
+// threshold) — this fallback is that idea, applied only where the
+// manifest says a cut must be, so it needs no global threshold.
+const VERIFY_CUTS_STEP_DIFF_FLOOR = 1.0;
+const VERIFY_CUTS_STEP_RATIO = 2;
 // Review strips (the eye-check pattern from kpr17ch/outtake's
 // `check_frame` — a single frame pulled out for a human/agent to
 // look at — applied here as one 4-tile strip per boundary, so the
@@ -21078,6 +21110,30 @@ export async function measureCutSeam({ video, cutSeconds, windowSeconds = VERIFY
   return { cut_seconds: cut, window_seconds: win, sample_rate: VERIFY_CUTS_AUDIO_SAMPLE_RATE, samples: samples.length, ...analyzeSeamSamples(samples, cutIndex, { windowSeconds: win }) };
 }
 
+// Step evidence for one expected hard cut: per-pixel mean-abs-diff
+// (frameDiffMean, 0-255) across the boundary vs the same diff just
+// before and just after it. Windows are clamped into [0, duration]:
+// a pair that collapses (cut within 0.1s of a film edge) measures
+// null and is dropped from the neighbor list, so a cut with no
+// measurable neighbor is judged on the floor alone. Exported for
+// the MCP test's calibration fixture, not a tool.
+export async function cutStepEvidence(file, cutSeconds, fps, duration) {
+  const t = num(cutSeconds, "cutSeconds", { min: 0 });
+  const end = Number.isFinite(duration) && duration > 0 ? duration : t + 0.2;
+  const clampT = (x) => +Math.min(Math.max(x, 0), Math.max(0, end - 0.05)).toFixed(3);
+  const pair = async (a, b) => {
+    const x = clampT(a), y = clampT(b);
+    if (y - x < 0.01) return null;
+    return frameDiffMean(file, x, y, fps);
+  };
+  const before = await pair(t - 0.2, t - 0.1);
+  const at = await pair(t - 0.1, t + 0.1);
+  const after = await pair(t + 0.1, t + 0.2);
+  const neighbors = [before, after].filter((v) => v !== null);
+  const confirmed = at !== null && at >= VERIFY_CUTS_STEP_DIFF_FLOOR && (neighbors.length === 0 || at >= VERIFY_CUTS_STEP_RATIO * Math.min(...neighbors));
+  return { before, at, after, floor: VERIFY_CUTS_STEP_DIFF_FLOOR, ratio: VERIFY_CUTS_STEP_RATIO, confirmed };
+}
+
 export async function verifyAssembleCuts({ manifestPath, video, tolerance = VERIFY_CUTS_TOLERANCE_DEFAULT, threshold = null, draftHeight = VERIFY_CUTS_DRAFT_HEIGHT, keepDraft = false, strips = false, stripsDir = null, audio = false, cutSheet = false, cutSheetPath = null }) {
   const tol = num(tolerance, "tolerance", { min: 0, max: 5 });
   const dh = num(draftHeight, "draft_height", { min: 16, max: 4320, integer: true });
@@ -21149,8 +21205,21 @@ export async function verifyAssembleCuts({ manifestPath, video, tolerance = VERI
           const m = remaining.splice(best, 1)[0];
           cuts.push({ ...b, status: "confirmed", measured_seconds: m, drift_seconds: +(m - b.expected_seconds).toFixed(3) });
         } else {
-          cuts.push({ ...b, status: "missing", measured_seconds: null, drift_seconds: null });
-          warnings.push(`cut ${b.index} at ${b.expected_seconds}s was not found in the render (nearest measured cut: ${best >= 0 ? `${remaining[best]}s` : "none"}) — the two shots look identical at the boundary, or the render dropped the cut`);
+          // Step fallback (lượt 161): the scene detector is blind on
+          // dark low-contrast shots, so a "missing" cut gets one more
+          // measurement — the per-pixel step across the boundary —
+          // before it is called missing. confirmed_by_diff counts as
+          // confirmed (the picture does cut there); the detector just
+          // could not see it. A dropped cut inside a moving shot and
+          // a cut between identical frames both stay missing: their
+          // step evidence fails the floor/ratio rule.
+          const step = await cutStepEvidence(draftPath, b.expected_seconds, fps, duration);
+          if (step.confirmed) {
+            cuts.push({ ...b, status: "confirmed_by_diff", measured_seconds: null, drift_seconds: null, frame_diff: step });
+          } else {
+            cuts.push({ ...b, status: "missing", measured_seconds: null, drift_seconds: null, frame_diff: step });
+            warnings.push(`cut ${b.index} at ${b.expected_seconds}s was not found in the render (nearest measured cut: ${best >= 0 ? `${remaining[best]}s` : "none"}) — the two shots look identical at the boundary, or the render dropped the cut (frame diff across the boundary ${step.at ?? "unmeasured"}, neighbors ${step.before ?? "—"}/${step.after ?? "—"})`);
+          }
         }
       } else {
         const [ws, we] = b.window_seconds;
@@ -21322,7 +21391,7 @@ export async function verifyAssembleCuts({ manifestPath, video, tolerance = VERI
       warnings,
       ok,
       summary: ok
-        ? `All ${boundaries.length} boundaries confirmed (${cuts.filter((c) => c.status === "confirmed").length} confirmed, 0 missing, 0 unexpected) and duration matches the timeline.`
+        ? `All ${boundaries.length} boundaries confirmed (${cuts.filter((c) => c.status === "confirmed" || c.status === "confirmed_by_diff").length} confirmed${cuts.some((c) => c.status === "confirmed_by_diff") ? `, of which ${cuts.filter((c) => c.status === "confirmed_by_diff").length} by frame-diff step` : ""}, 0 missing, 0 unexpected) and duration matches the timeline.`
         : `${warnings.length} problem(s): ${warnings.join(" ")}`,
     };
   } finally {
@@ -21452,7 +21521,7 @@ export async function releaseCheckpoint({ input, manifest = null, receipt = null
     const vc = await verifyAssembleCuts({ manifestPath: manifest, video: inPath });
     const missing = vc.cuts.filter((c) => c.status === "missing").length;
     const unexpected = vc.unexpected_cuts.length;
-    const confirmed = vc.cuts.filter((c) => c.status === "confirmed").length;
+    const confirmed = vc.cuts.filter((c) => c.status === "confirmed" || c.status === "confirmed_by_diff").length;
     const status = missing > 0 || unexpected > 0 ? "fail" : vc.warnings.length > 0 ? "warn" : "pass";
     add("cuts", status,
       `${confirmed}/${vc.cuts.length} boundaries confirmed, ${missing} missing, ${unexpected} unexpected${vc.duration_ok ? "" : ", duration mismatch"}`,
