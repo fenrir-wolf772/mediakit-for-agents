@@ -1290,7 +1290,16 @@ only to the file edges — so a cut never lands exactly on a kept
 word's onset. It deliberately keeps up to that much of the
 neighbouring removed word's edge, and a buffer wider than the gap
 between two kept runs merges them (the cut between them disappears).
-Read `cut_check.swallowed` before trusting the cut: a
+`--snap-to-pause` moves each keep edge into the real pause the
+transcript points at instead of the fixed pads: the audio is measured
+at 10 ms frames, the quiet threshold is set from the take's own
+levels (5th percentile + 10 dB, 95th percentile − 20 dB), and the cut
+lands 0.1s into the pause (room tone on both sides). Whisper's word
+edges run late at sentence ends, so a transcript-only cut keeps the
+start of the next sentence — snap fixes that. An edge with no pause,
+an ambiguous one (two pauses ≥ 0.12s in reach), or a snap that would
+cross a kept word keeps its padded value, with the reason in `snap`.
+Refuses files over 1200s. Read `cut_check.swallowed` before trusting the cut: a
 kept word listed there ended up mostly outside the keep segments
 (usually a `--min-keep` sliver) — play it, then pass `--keep` for
 its index. `--dry-run` prints the plan first (removed words, keep

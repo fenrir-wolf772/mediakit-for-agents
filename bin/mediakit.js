@@ -643,8 +643,8 @@ const COMMANDS = {
     ],
   },
   "cut-words": {
-    usage: "mediakit cut-words <input> --words-file <words.json> -o <output> [--remove um,uh | --fillers | --indices 0-5,96-98] [--keep 3,7-9] [--pad-before 0.06] [--pad-after 0.12] [--min-keep 0.2] [--edge-buffer 0.1] [--dry-run]",
-    desc: "Cut words out of a talking-head clip by transcript: filler words (um/uh), false starts and restarts, using word timings from transcribe --word-timestamps (save its printed JSON and pass it as --words-file). Select by word text (--remove 'um,uh'), the built-in filler set (--fillers: um, umm, uh, uhh, uhm, erm, er, hmm, mm, mhm, ah, eh), or 0-based word-index ranges (--indices '0-5,96-98'); --keep rescues indices even when matched. Keep runs are padded 0.06s before / 0.12s after, clamped so a cut never keeps a fragment of the word it removed; kept words that end up mostly cut out are reported in cut_check.swallowed. --edge-buffer (0-1s, default 0) widens every keep segment past its pads, clamped only to the file edges — Outtake's 0.1s clip-edge buffer, so a cut never lands exactly on a kept word's onset; it deliberately keeps up to that much of the neighbouring removed word's edge, and a buffer wider than the gap between two kept runs merges them. --dry-run prints the plan and writes nothing. No match copies the input unchanged.",
+    usage: "mediakit cut-words <input> --words-file <words.json> -o <output> [--remove um,uh | --fillers | --indices 0-5,96-98] [--keep 3,7-9] [--pad-before 0.06] [--pad-after 0.12] [--min-keep 0.2] [--edge-buffer 0.1] [--snap-to-pause] [--dry-run]",
+    desc: "Cut words out of a talking-head clip by transcript: filler words (um/uh), false starts and restarts, using word timings from transcribe --word-timestamps (save its printed JSON and pass it as --words-file). Select by word text (--remove 'um,uh'), the built-in filler set (--fillers: um, umm, uh, uhh, uhm, erm, er, hmm, mm, mhm, ah, eh), or 0-based word-index ranges (--indices '0-5,96-98'); --keep rescues indices even when matched. Keep runs are padded 0.06s before / 0.12s after, clamped so a cut never keeps a fragment of the word it removed; kept words that end up mostly cut out are reported in cut_check.swallowed. --edge-buffer (0-1s, default 0) widens every keep segment past its pads, clamped only to the file edges — Outtake's 0.1s clip-edge buffer, so a cut never lands exactly on a kept word's onset; it deliberately keeps up to that much of the neighbouring removed word's edge, and a buffer wider than the gap between two kept runs merges them. --snap-to-pause moves each keep edge into the real pause the transcript points at (measured from the take's own audio at 10 ms frames, threshold from the take's own levels, 0.1s of room tone kept each side) instead of the fixed pads — Whisper's word edges run late at sentence ends, so a transcript-only cut keeps the start of the next sentence; an edge with no pause, an ambiguous one, or a snap that would cross a kept word keeps its padded value, with the reason in snap. Refuses files over 1200s. --dry-run prints the plan and writes nothing. No match copies the input unchanged.",
     args: [{ name: "input", required: true }],
     options: [
       ["--words-file", "Transcript JSON with a words array (required) — the stdout of `transcribe --word-timestamps` saved to a file"],
@@ -656,6 +656,7 @@ const COMMANDS = {
       ["--pad-after", "Seconds kept after each kept-word run (default 0.12)"],
       ["--min-keep", "Drop keep segments shorter than this many seconds (default 0.2)"],
       ["--edge-buffer", "Seconds of handle kept past each edge of every keep segment (0-1, default 0), clamped only to the file edges — a buffer wider than the gap between two kept runs merges them"],
+      ["--snap-to-pause", "Snap each keep edge into the real pause the transcript points at (measured levels, 0.1s room tone each side) instead of the fixed pads; an edge with no pause or an ambiguous one keeps its padded value"],
       ["--dry-run", "Print the cut plan (removed words, keep segments, cut_check) and write no file"],
       ["-o, --output", "Output file (required unless --dry-run)"],
     ],
@@ -1946,6 +1947,7 @@ async function main() {
           padAfter: numOpt(opts, "pad_after") ?? 0.12,
           minKeep: numOpt(opts, "min_keep") ?? 0.2,
           edgeBuffer: numOpt(opts, "edge_buffer") ?? 0,
+          snapToPause: opts.snap_to_pause === true,
           dryRun: opts.dry_run === true,
         });
         break;

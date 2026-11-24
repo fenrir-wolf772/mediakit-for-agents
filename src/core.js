@@ -11088,6 +11088,191 @@ export async function silence({ input, output = null, thresholdDb = -40, minDura
   };
 }
 
+// ---------------------------------------------------------------- speech pauses
+// Adaptive pause detection for cut edges (idea: MakeMyClip/editor
+// src/timeline/pauses.ts + src/ffmpeg/args/speech-levels.ts — no
+// code copied, the algorithm re-implemented in Node). Whisper's word
+// edges run late at sentence ends: it gives each pause to the word
+// before it, so a cut placed by the transcript alone keeps the start
+// of the next sentence. Measured levels show where the voice
+// actually stops, so an edge is moved into the pause the transcript
+// points at. The threshold is adaptive — floor = 5th percentile of
+// the levels + 10 dB, speech = 95th percentile − 20 dB — so the same
+// code works on a quiet room and a loud take without a hand-tuned
+// silence threshold (silencedetect's fixed −40 dBFS cannot do that).
+// One decode pass measures the whole file at 10 ms frames (16 kHz
+// mono, astats reset per 160-sample frame); at ~10 KB/s of stderr
+// the 16 MB run() cap is hit past ~1600 s, so files over 1200 s are
+// refused when snapping is on (same ceiling as hook).
+const PAUSE_FRAME_SEC = 0.01;
+const PAUSE_SEARCH_BEFORE_SEC = 0.9;
+const PAUSE_SEARCH_AFTER_SEC = 0.05;
+const PAUSE_ABOVE_FLOOR_DB = 10;
+const PAUSE_BELOW_SPEECH_DB = 20;
+const PAUSE_MIN_SEC = 0.08;
+const PAUSE_MAX_BLIP_SEC = 0.04;
+const PAUSE_COMPETING_SEC = 0.12;
+const PAUSE_KEEP_SEC = 0.1;
+const PAUSE_SILENT_DB = -120;
+const PAUSE_DIGITAL_SILENCE_DB = -100;
+const PAUSE_MAX_DURATION_SEC = 1200;
+
+// Parse the RMS_level lines astats prints (one per 10 ms frame) into
+// SpeechLevels {fromSec, frameSec, db}. "-inf" (digital silence)
+// becomes PAUSE_SILENT_DB; the frame's absolute time is fromSec +
+// index * frameSec (aresample async=1 + first_pts=0 makes frame n
+// always n x 10 ms after the seek point).
+export function parseSpeechLevels(stderr, fromSec = 0) {
+  const db = [];
+  for (const m of String(stderr ?? "").matchAll(/lavfi\.astats\.Overall\.RMS_level=(\S+)/g)) {
+    const v = Number(m[1]);
+    db.push(Number.isFinite(v) ? Math.max(v, PAUSE_SILENT_DB) : PAUSE_SILENT_DB);
+  }
+  return { fromSec, frameSec: PAUSE_FRAME_SEC, db };
+}
+
+// Every pause in the levels, by a threshold set from the levels
+// themselves. Digital silence (<= -100 dBFS: padding where the audio
+// starts late, or a muted stretch) is quiet, but it is NOT the
+// room's floor: it is left out of the percentile estimate, or the
+// room tone between sentences would count as sound. A short burst
+// of sound inside a pause (a click, a lip noise, <= 40 ms) does not
+// end the pause; a quiet stretch counts only at >= 80 ms.
+export function findPauses(levels) {
+  const sorted = levels.db.filter((l) => l > PAUSE_DIGITAL_SILENCE_DB).sort((a, b) => a - b);
+  const at = (q) => sorted[Math.floor(q * (sorted.length - 1))] ?? PAUSE_SILENT_DB;
+  const threshold = Math.min(at(0.05) + PAUSE_ABOVE_FLOOR_DB, at(0.95) - PAUSE_BELOW_SPEECH_DB);
+  const quiet = levels.db.map((l) => l <= PAUSE_DIGITAL_SILENCE_DB || l <= threshold);
+  const maxBlip = Math.round(PAUSE_MAX_BLIP_SEC / levels.frameSec);
+  for (let i = 0; i < quiet.length;) {
+    if (quiet[i]) { i++; continue; }
+    let j = i;
+    while (j < quiet.length && !quiet[j]) j++;
+    if (i > 0 && j < quiet.length && j - i <= maxBlip) quiet.fill(true, i, j);
+    i = j;
+  }
+  const pauses = [];
+  for (let i = 0; i < quiet.length;) {
+    if (!quiet[i]) { i++; continue; }
+    let j = i;
+    while (j < quiet.length && quiet[j]) j++;
+    if ((j - i) * levels.frameSec >= PAUSE_MIN_SEC - 1e-9) {
+      pauses.push({ start: +(levels.fromSec + i * levels.frameSec).toFixed(3), end: +(levels.fromSec + j * levels.frameSec).toFixed(3) });
+    }
+    i = j;
+  }
+  return pauses;
+}
+
+// The pause at a transcript boundary: the longest pause reaching
+// into [boundary - 0.9s, boundary + 0.05s] that is still going after
+// the word the boundary ends has started (not the pause before that
+// word). Returns the pause, "none" when there is none (speech runs
+// on, or music under it), or "ambiguous" when two pauses of >= 0.12s
+// are in reach — the transcript cannot say which one it means, so
+// the caller keeps the padded edge instead of guessing.
+export function pauseAt(levels, boundarySec, wordBeforeStartSec = -Infinity) {
+  const from = Math.max(boundarySec - PAUSE_SEARCH_BEFORE_SEC, wordBeforeStartSec + PAUSE_SEARCH_AFTER_SEC);
+  const to = boundarySec + PAUSE_SEARCH_AFTER_SEC;
+  const inReach = findPauses(levels).filter((p) => p.end > from && p.start < to);
+  if (inReach.length === 0) return "none";
+  if (inReach.filter((p) => p.end - p.start >= PAUSE_COMPETING_SEC - 1e-9).length > 1) return "ambiguous";
+  return inReach.reduce((a, b) => (b.end - b.start > a.end - a.start ? b : a));
+}
+
+// Where a keep segment ends in a pause: a little room tone after
+// the voice stops. Where it starts: a little room tone before the
+// voice. Never more than half the pause, so a short pause still
+// leaves silence on both sides of the cut.
+export function endInPause(pause) {
+  return +(pause.start + Math.min(PAUSE_KEEP_SEC, (pause.end - pause.start) / 2)).toFixed(3);
+}
+export function startInPause(pause) {
+  return +(pause.end - Math.min(PAUSE_KEEP_SEC, (pause.end - pause.start) / 2)).toFixed(3);
+}
+
+// Measure a source's per-frame RMS levels (one ffmpeg decode).
+export async function measureSpeechLevels(input) {
+  const { stderr } = await run(FFMPEG, [
+    "-hide_banner", "-nostats",
+    "-i", input, "-map", "0:a:0",
+    "-af", "aresample=16000:async=1:first_pts=0,aformat=channel_layouts=mono,asetnsamples=n=160:p=0,astats=metadata=1:reset=1,ametadata=mode=print:key=lavfi.astats.Overall.RMS_level",
+    "-f", "null", "-",
+  ]);
+  return parseSpeechLevels(stderr, 0);
+}
+
+// Snap keep segments' edges into the real pauses the transcript
+// points at (pure: levels are passed in, unit-tested directly).
+// The start edge snaps into the pause BEFORE the first kept word
+// (startInPause), the end edge into the pause AFTER the last kept
+// word (endInPause). An edge that finds no pause, an ambiguous one,
+// or a snap that would cross a kept word, a neighbour segment or
+// the minKeep floor keeps its padded value, with the reason in the
+// returned snap record — a snap never eats speech, never overlaps
+// the next segment, and never invents a timestamp.
+export function snapKeepSegmentsToPauses(words, keep, segmentIndices, levels, { minKeep = 0.2 } = {}) {
+  const snapped = keep.map((s) => ({ ...s }));
+  const snap = keep.map(() => ({ start: { mode: "kept", reason: "no pause found" }, end: { mode: "kept", reason: "no pause found" } }));
+  keep.forEach((seg, i) => {
+    const indices = segmentIndices[i];
+    const firstIdx = indices[0];
+    const lastIdx = indices[indices.length - 1];
+    // End edge: the pause after the last kept word.
+    const endPause = pauseAt(levels, seg.end, words[lastIdx].start);
+    if (endPause !== "none" && endPause !== "ambiguous") {
+      const to = endInPause(endPause);
+      const nextStart = i + 1 < keep.length ? snapped[i + 1].start : Infinity;
+      if (to > words[lastIdx].end + 0.005 && to < nextStart - 0.005 && to - snapped[i].start >= minKeep) {
+        snap[i].end = { mode: "pause", from: seg.end, to, pause_start: endPause.start, pause_end: endPause.end };
+        snapped[i].end = to;
+        snapped[i].duration = +(to - snapped[i].start).toFixed(3);
+      } else {
+        snap[i].end = { mode: "kept", reason: "pause snap would cross a kept word or the next segment" };
+      }
+    } else if (endPause === "ambiguous") {
+      snap[i].end = { mode: "kept", reason: "ambiguous — two pauses >= 0.12s in reach" };
+    }
+    // Start edge: the pause before the first kept word.
+    const wordBeforeStart = firstIdx === 0 ? -Infinity : words[firstIdx - 1].start;
+    const startPause = pauseAt(levels, seg.start, wordBeforeStart);
+    if (startPause !== "none" && startPause !== "ambiguous") {
+      const to = startInPause(startPause);
+      const prevEnd = i > 0 ? snapped[i - 1].end : -Infinity;
+      if (to < words[firstIdx].start - 0.005 && to > prevEnd + 0.005 && snapped[i].end - to >= minKeep) {
+        snap[i].start = { mode: "pause", from: seg.start, to, pause_start: startPause.start, pause_end: startPause.end };
+        snapped[i].start = to;
+        snapped[i].duration = +(snapped[i].end - to).toFixed(3);
+      } else {
+        snap[i].start = { mode: "kept", reason: "pause snap would cross a kept word or the previous segment" };
+      }
+    } else if (startPause === "ambiguous") {
+      snap[i].start = { mode: "kept", reason: "ambiguous — two pauses >= 0.12s in reach" };
+    }
+  });
+  // A start snap moves an edge EARLIER than its padded value, so a
+  // later segment's start can land on the previous segment's snapped
+  // end even though each edge passed its own guard: re-check the
+  // chain and revert the offending edge(s) to the padded value.
+  // Reverting a start restores the padded gap; if the previous end
+  // also snapped past it, revert that too.
+  for (let i = 1; i < snapped.length; i++) {
+    if (snapped[i].start < snapped[i - 1].end + 0.005) {
+      if (snap[i].start.mode === "pause") {
+        snapped[i].start = keep[i].start;
+        snapped[i].duration = +(snapped[i].end - snapped[i].start).toFixed(3);
+        snap[i].start = { mode: "kept", reason: "pause snap would overlap the previous segment" };
+      }
+      if (snapped[i].start < snapped[i - 1].end + 0.005 && snap[i - 1].end.mode === "pause") {
+        snapped[i - 1].end = keep[i - 1].end;
+        snapped[i - 1].duration = +(snapped[i - 1].end - snapped[i - 1].start).toFixed(3);
+        snap[i - 1].end = { mode: "kept", reason: "pause snap would overlap the next segment" };
+      }
+    }
+  }
+  return { keep: snapped, snap };
+}
+
 // ---------------------------------------------------------------- cut_words
 // Edit by transcript (transcriptcut + kevs-talking-head-editor's
 // filler_cut.py, idea only — no code copied): cut filler words, false
@@ -11230,10 +11415,13 @@ export function buildKeepSegmentsFromWords(words, cutSet, duration, { padBefore 
     const cov = keep.reduce((s, k) => s + Math.max(0, Math.min(w.end, k.end) - Math.max(w.start, k.start)), 0);
     if (cov / (w.end - w.start) < 0.5) swallowed.push({ index: i, word: w.word, start: w.start });
   });
-  return { keep, swallowed };
+  // segment_indices parallels keep: the kept word indices of each
+  // segment, for snapKeepSegmentsToPauses (kept OUT of the keep
+  // entries so keep_segments stays exactly {start, end, duration}).
+  return { keep, swallowed, segment_indices: merged.map((s) => s.indices) };
 }
 
-export async function cutWords({ input, output = null, wordsFile, remove = null, fillers = false, indices = null, keep = null, padBefore = 0.06, padAfter = 0.12, minKeep = 0.2, edgeBuffer = 0, dryRun = false }) {
+export async function cutWords({ input, output = null, wordsFile, remove = null, fillers = false, indices = null, keep = null, padBefore = 0.06, padAfter = 0.12, minKeep = 0.2, edgeBuffer = 0, snapToPause = false, dryRun = false }) {
   const inPath = await requireInput(input);
   const wordsPath = await requireInput(wordsFile, "words file");
   const padB = num(padBefore, "pad_before", { min: 0, max: 1 });
@@ -11275,7 +11463,24 @@ export async function cutWords({ input, output = null, wordsFile, remove = null,
   const duration = meta.duration_seconds;
   if (duration === null) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
   const removedWords = [...cut].sort((a, b) => a - b).map((i) => ({ index: i, word: words[i].word, start: words[i].start, end: words[i].end }));
-  const { keep: kept, swallowed } = buildKeepSegmentsFromWords(words, cut, duration, { padBefore: padB, padAfter: padA, minKeep: minK, edgeBuffer: eb });
+  const { keep: kept0, swallowed, segment_indices } = buildKeepSegmentsFromWords(words, cut, duration, { padBefore: padB, padAfter: padA, minKeep: minK, edgeBuffer: eb });
+  // Snap edges into real pauses (opt-in): one level measurement
+  // over the whole take, then each keep edge moves into the pause
+  // the transcript points at. Skipped when nothing is cut (no cut
+  // edges to snap) and in dry-run the snapped plan is what prints.
+  // Files over 1200 s are refused: the 10 ms frame log would pass
+  // run()'s 16 MB stderr cap.
+  let kept = kept0;
+  let snap = null;
+  if (snapToPause === true && removedWords.length > 0) {
+    if (duration > PAUSE_MAX_DURATION_SEC) {
+      throw new MediaKitError(`cut_words --snap-to-pause refuses files over ${PAUSE_MAX_DURATION_SEC}s (the 10 ms level log would exceed the capture buffer) — trim a section first`, "INVALID_ARG");
+    }
+    const levels = await measureSpeechLevels(inPath);
+    const res = snapKeepSegmentsToPauses(words, kept0, segment_indices, levels, { minKeep: minK });
+    kept = res.keep;
+    snap = res.snap;
+  }
   const keptTotal = kept.reduce((s, k) => s + k.duration, 0);
   const base = {
     operation: "cut_words",
@@ -11291,6 +11496,8 @@ export async function cutWords({ input, output = null, wordsFile, remove = null,
     pad_after: padA,
     min_keep: minK,
     edge_buffer: eb,
+    snap_to_pause: snapToPause === true,
+    snap,
     cut_check: { swallowed, warnings: swallowed.map((s) => `kept word #${s.index} '${s.word}' @${s.start}s is mostly cut out — play it, then pass --keep ${s.index}`) },
   };
   if (dryRun === true) return { ...base, dry_run: true };
@@ -12011,6 +12218,7 @@ const DOCTOR_FILTERS = [
   "format", "colorchannelmixer", "atempo", "aloop", "geq", "color",
   "palettegen", "paletteuse", "adelay", "apad", "pan",
   "astats", "ametadata", "eq", "hue", "colorbalance", "lutrgb",
+  "aformat", "asetnsamples",
   "reverse", "areverse",
   "transpose", "hflip", "vflip",
   "minterpolate", "hqdn3d", "nlmeans",
@@ -12072,7 +12280,7 @@ const TOOL_REQUIREMENTS = {
   compress: { filters: ["scale"], encoders: ["libx264", "aac"] },
   receipt: { filters: ["loudnorm"] },
   silence: { filters: ["silencedetect", "trim", "atrim", "concat", "afade"], encoders: ["libx264", "aac"] },
-  cut_words: { filters: ["trim", "atrim", "concat", "setpts", "asetpts", "afade"], encoders: ["libx264", "aac"] },
+  cut_words: { filters: ["trim", "atrim", "concat", "setpts", "asetpts", "afade", "aresample", "aformat", "asetnsamples", "astats", "ametadata"], encoders: ["libx264", "aac"] },
   remove_retakes: { filters: ["trim", "atrim", "concat", "setpts", "asetpts", "afade"], encoders: ["libx264", "aac"] },
   smart_cut: { filters: ["trim", "atrim", "concat", "setpts", "asetpts", "afade"], encoders: ["libx264", "aac"] },
   cropdetect: { filters: ["cropdetect"] },
@@ -16018,12 +16226,12 @@ export const BATCH_OPERATIONS = {
   // there is no plain `words_file` arg here; a file with no words
   // file fails its own row only, the rest of the batch still runs.
   cut_words: {
-    args: ["words_dir", "remove", "fillers", "indices", "keep", "pad_before", "pad_after", "min_keep", "edge_buffer"],
+    args: ["words_dir", "remove", "fillers", "indices", "keep", "pad_before", "pad_after", "min_keep", "edge_buffer", "snap_to_pause"],
     run: (input, output, a) => cutWords({
       input, output,
       wordsFile: cutWordsFileFor(input, a.words_dir),
       remove: a.remove ?? null, fillers: a.fillers ?? false, indices: a.indices ?? null, keep: a.keep ?? null,
-      padBefore: a.pad_before ?? 0.06, padAfter: a.pad_after ?? 0.12, minKeep: a.min_keep ?? 0.2, edgeBuffer: a.edge_buffer ?? 0,
+      padBefore: a.pad_before ?? 0.06, padAfter: a.pad_after ?? 0.12, minKeep: a.min_keep ?? 0.2, edgeBuffer: a.edge_buffer ?? 0, snapToPause: a.snap_to_pause ?? false,
     }),
     // Two byte-identical clips with different words files are
     // different jobs: the words bytes belong in the cache key, or
@@ -16764,11 +16972,11 @@ export const MANIFEST_STEPS = {
   // Manifest overrides the batch shape: a manifest is one input, so
   // the step takes one words file, not a words directory.
   cut_words: {
-    args: ["words_file", "remove", "fillers", "indices", "keep", "pad_before", "pad_after", "min_keep", "edge_buffer"],
+    args: ["words_file", "remove", "fillers", "indices", "keep", "pad_before", "pad_after", "min_keep", "edge_buffer", "snap_to_pause"],
     run: (input, output, a) => cutWords({
       input, output, wordsFile: a.words_file,
       remove: a.remove ?? null, fillers: a.fillers ?? false, indices: a.indices ?? null, keep: a.keep ?? null,
-      padBefore: a.pad_before ?? 0.06, padAfter: a.pad_after ?? 0.12, minKeep: a.min_keep ?? 0.2, edgeBuffer: a.edge_buffer ?? 0,
+      padBefore: a.pad_before ?? 0.06, padAfter: a.pad_after ?? 0.12, minKeep: a.min_keep ?? 0.2, edgeBuffer: a.edge_buffer ?? 0, snapToPause: a.snap_to_pause ?? false,
     }),
   },
   // Same override for remove_retakes: one words file for the one input.
