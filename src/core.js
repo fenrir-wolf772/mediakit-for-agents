@@ -10111,6 +10111,135 @@ export async function convert({ input, output, videoCodec = null, audioCodec = n
   };
 }
 
+// ---------------------------------------------------------------- normalize
+// One-call canonicalization for the director workflow (yubraaj11/
+// ffmpeg-mcp's normalize-then-join idea, made a reusable step instead
+// of a hidden concat detail): bring any clip to the pipeline profile
+// — libx264, yuv420p, even dims, CFR at the source fps (or --fps),
+// AAC 192k at 48 kHz, faststart for MP4 — so assemble/concat never
+// have to guess what a clip is. Optional --width/--height fits the
+// frame inside that box (aspect kept, dims forced even); optional
+// --target-lufs runs the same two-pass loudnorm loudness() uses,
+// measured on the input first so the command is exact. The result
+// reports before/after (probe-measured, not assumed) plus a `changes`
+// list in words, and verifies the output codec + faststart on disk.
+// Always re-encodes: a normalize step that sometimes stream-copied
+// would leave rotation metadata / odd dims / a VFR timebase in the
+// chain, which is exactly what the step exists to remove.
+export async function normalize({ input, output, width = null, height = null, fps = null, crf = 23, preset = "medium", targetLufs = null, dryRun = false }) {
+  const inPath = await requireInput(input);
+  const outPath = await prepareOutput(output, [inPath]);
+  const c = num(crf, "crf", { min: 0, max: 51, integer: true });
+  const fpsReq = (fps === null || fps === undefined) ? null : num(fps, "fps", { min: 1, max: 120 });
+  const wReq = (width === null || width === undefined) ? null : num(width, "width", { min: 16, max: 8192, integer: true });
+  const hReq = (height === null || height === undefined) ? null : num(height, "height", { min: 16, max: 8192, integer: true });
+  if (wReq !== null && wReq % 2 !== 0) throw new MediaKitError("normalize --width must be even (H.264 yuv420p needs even dimensions)", "INVALID_ARG");
+  if (hReq !== null && hReq % 2 !== 0) throw new MediaKitError("normalize --height must be even (H.264 yuv420p needs even dimensions)", "INVALID_ARG");
+  const target = (targetLufs === null || targetLufs === undefined) ? null : num(targetLufs, "target_lufs", { min: -70, max: 0 });
+  const meta = await probe(inPath);
+  if (!meta.video && !meta.audio) throw new MediaKitError("normalize needs a video or audio stream in the input", "INVALID_ARG");
+  const ext = path.extname(outPath).slice(1).toLowerCase();
+  if (meta.video && !["mp4", "mov", "m4v"].includes(ext)) {
+    throw new MediaKitError(`normalize writes MP4 (libx264 + faststart) for video — got .${ext}; use convert for other containers`, "INVALID_ARG");
+  }
+  if (!meta.video && !(ext in AUDIO_FORMATS)) {
+    throw new MediaKitError(`normalize needs an audio output for an audio-only input (.${ext} is not an audio format)`, "INVALID_ARG");
+  }
+  if (target !== null && !meta.audio) throw new MediaKitError("normalize --target-lufs needs an audio stream in the input", "INVALID_ARG");
+  // The video chain: fps first (CFR), then the fit inside the
+  // requested box (aspect kept), then even dims + yuv420p + square
+  // pixels. Decode autorotates, so the scale sees display dims —
+  // a phone clip stored 1280x720 with rotation 90 normalizes to
+  // 720x1280 and the rotation metadata is gone with the re-encode.
+  const vf = [];
+  if (fpsReq !== null) vf.push(`fps=${fpsReq}`);
+  if (wReq !== null && hReq !== null) vf.push(`scale=${wReq}:${hReq}:force_original_aspect_ratio=decrease:flags=lanczos`);
+  else if (wReq !== null) vf.push(`scale=${wReq}:-2:flags=lanczos`);
+  else if (hReq !== null) vf.push(`scale=-2:${hReq}:flags=lanczos`);
+  vf.push("scale=trunc(iw/2)*2:trunc(ih/2)*2", "format=yuv420p", "setsar=1");
+  // Two-pass loudnorm needs the input measured first (same as
+  // loudness()); the measurement is read-only, so dry-run prints
+  // the exact command the real run executes.
+  let measured = null;
+  if (target !== null) measured = await measureLoudnessFull(inPath);
+  const args = ["-y", "-i", inPath];
+  if (meta.video) {
+    args.push("-vf", vf.join(","), "-c:v", "libx264", "-crf", String(c), "-preset", preset, "-pix_fmt", "yuv420p");
+    if (fpsReq !== null) args.push("-fps_mode", "cfr");
+  }
+  if (meta.audio) {
+    const codec = meta.video ? "aac" : AUDIO_FORMATS[ext];
+    if (target !== null) {
+      if (measured) args.push("-af", `loudnorm=I=${target}:TP=-2:LRA=11:measured_I=${measured.i}:measured_TP=${measured.tp}:measured_LRA=${measured.lra}:measured_thresh=${measured.thresh}:offset=${measured.offset}:linear=true`);
+      else args.push("-af", `loudnorm=I=${target}:TP=-2:LRA=11`);
+    }
+    args.push("-ar", "48000", "-c:a", codec, ...audioBitrateArgs(codec));
+  }
+  if (meta.video) args.push("-movflags", "+faststart");
+  args.push(outPath);
+  const summarize = (m, lufs) => ({
+    codec: m.video?.codec ?? null,
+    dimensions: m.video ? `${m.video.width}x${m.video.height}` : null,
+    display_dimensions: m.video ? `${m.video.display_width}x${m.video.display_height}` : null,
+    fps: m.video?.fps ?? null,
+    pixel_format: m.video?.pixel_format ?? null,
+    audio_codec: m.audio?.codec ?? null,
+    audio_bitrate_kbps: m.audio?.bit_rate ? Math.round(m.audio.bit_rate / 1000) : null,
+    lufs: lufs ?? null,
+  });
+  const before = summarize(meta, measured?.i ?? null);
+  if (dryRun) {
+    return {
+      operation: "normalize", dry_run: true, input: inPath, output: outPath,
+      before, after: null, changes: null, faststart: null, codec_verified: null,
+      target_lufs: target, input_lufs: measured?.i ?? null, output_lufs: null,
+      output_true_peak_db: null, two_pass: measured !== null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. The after/verification fields are measured on the real output, so they report null here.",
+    };
+  }
+  await run(FFMPEG, args);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  let codecVerified = null;
+  if (meta.video) {
+    codecVerified = out.video?.codec === "h264";
+    if (!codecVerified) {
+      throw new MediaKitError(`normalize wrote codec ${out.video?.codec ?? "none"} but the canonical profile is h264 — the output codec does not match`, "VERIFY_FAILED");
+    }
+  }
+  const fs = meta.video ? await probeFaststart(outPath) : null;
+  // Measure the file on disk (not the filter's promise): the encode
+  // after loudnorm can move the true peak, same as loudness().
+  const outFull = target !== null && out.audio ? await measureLoudnessFull(outPath) : null;
+  const outputLufs = outFull === null ? null : +outFull.i.toFixed(1);
+  const outputTp = outFull === null ? null : outFull.tp;
+  const after = summarize(out, outputLufs);
+  const changes = [];
+  if (before.codec && after.codec && before.codec !== after.codec) changes.push(`video codec: ${before.codec} → ${after.codec}`);
+  if (before.pixel_format && after.pixel_format && before.pixel_format !== after.pixel_format) changes.push(`pixel format: ${before.pixel_format} → ${after.pixel_format}`);
+  if (before.display_dimensions && after.display_dimensions && before.display_dimensions !== after.display_dimensions) changes.push(`dimensions: ${before.display_dimensions} → ${after.display_dimensions}`);
+  if (before.fps !== null && after.fps !== null && before.fps !== after.fps) changes.push(`frame rate: ${before.fps} → ${after.fps} fps`);
+  if (before.audio_codec && after.audio_codec && before.audio_codec !== after.audio_codec) changes.push(`audio codec: ${before.audio_codec} → ${after.audio_codec}`);
+  if (before.audio_bitrate_kbps !== null && after.audio_bitrate_kbps !== null && before.audio_bitrate_kbps !== after.audio_bitrate_kbps) changes.push(`audio bitrate: ${before.audio_bitrate_kbps} → ${after.audio_bitrate_kbps} kbps`);
+  if (before.lufs !== null && after.lufs !== null && Math.abs(before.lufs - after.lufs) > 0.05) changes.push(`loudness: ${before.lufs} → ${after.lufs} LUFS`);
+  const warnings = [];
+  if (target !== null && outputLufs !== null && Math.abs(outputLufs - target) > 0.5) {
+    warnings.push(`reached ${outputLufs} LUFS, ${Math.abs(+(outputLufs - target).toFixed(1))} LUFS ${outputLufs < target ? "below" : "above"} target — input is peak-limited (true peak caps the gain); high-pass sub-bass or compress first, then normalize again`);
+  }
+  if (outputTp !== null && outputTp > -0.3) {
+    warnings.push(`true peak ${outputTp} dBTP is over the -0.3 dBTP delivery ceiling — the file fails qa_report on true_peak`);
+  }
+  return {
+    operation: "normalize", input: inPath, output: outPath,
+    before, after, changes, faststart: fs?.faststart ?? null, codec_verified: codecVerified,
+    target_lufs: target, input_lufs: measured?.i ?? null, output_lufs: outputLufs,
+    output_true_peak_db: outputTp, two_pass: measured !== null,
+    ...(warnings.length ? { warning: warnings.join("; ") } : {}),
+    ...info, duration_seconds: out.duration_seconds,
+  };
+}
+
 // ---------------------------------------------------------------- estimate_conversion
 // Estimate a convert’s output size + time BEFORE running it (EncodeX’s
 // estimate_conversion idea, lượt 119; harken’s transcribe_status
@@ -11939,6 +12068,7 @@ const TOOL_REQUIREMENTS = {
   denoise: { filters: ["hqdn3d", "nlmeans"], encoders: ["libx264"] },
   segment: {},
   convert: { encoders: ["libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4"] },
+  normalize: { filters: ["scale", "fps", "format", "loudnorm"], encoders: ["libx264", "aac"] },
   compress: { filters: ["scale"], encoders: ["libx264", "aac"] },
   receipt: { filters: ["loudnorm"] },
   silence: { filters: ["silencedetect", "trim", "atrim", "concat", "afade"], encoders: ["libx264", "aac"] },
@@ -15822,6 +15952,10 @@ export const BATCH_OPERATIONS = {
   convert: {
     args: ["video_codec", "audio_codec", "crf", "preset", "gop", "gop_seconds", "encoder"],
     run: (input, output, a) => convert({ input, output, videoCodec: a.video_codec ?? null, audioCodec: a.audio_codec ?? null, crf: a.crf ?? 23, preset: a.preset ?? "medium", gop: a.gop ?? null, gopSeconds: a.gop_seconds ?? null, encoder: a.encoder ?? null }),
+  },
+  normalize: {
+    args: ["width", "height", "fps", "crf", "preset", "target_lufs"],
+    run: (input, output, a) => normalize({ input, output, width: a.width ?? null, height: a.height ?? null, fps: a.fps ?? null, crf: a.crf ?? 23, preset: a.preset ?? "medium", targetLufs: a.target_lufs ?? null }),
   },
   extract_audio: {
     args: ["format", "whisper", "channel"],

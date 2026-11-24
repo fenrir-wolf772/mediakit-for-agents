@@ -1,0 +1,1 @@
+{"input":"normalize-source.mp4","output":"../outputs/mcp-manifest-normalize.mp4","steps":[{"args":{"fps":30},"tool":"normalize"}],"version":1}

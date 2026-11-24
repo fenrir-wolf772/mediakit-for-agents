@@ -875,6 +875,35 @@ export const TOOL_DEFS = [
 
 
   {
+    name: "normalize",
+    tier: "WRITE",
+    description: "Bring a clip to the canonical pipeline profile in one call — the reusable pre-assemble step (yubraaj11/ffmpeg-mcp's normalize-then-join idea): video becomes libx264 + yuv420p + even dimensions + CFR at the source frame rate (or fps), audio becomes AAC 192k at 48 kHz, and MP4 outputs get +faststart, so assemble/concat never have to guess what a clip is. Optional width/height fits the frame inside that box (aspect kept, dims forced even — odd values are refused); optional fps caps the frame rate; optional target_lufs runs the same two-pass loudnorm loudness() uses (measured on the input first). Decode autorotates, so a phone clip stored 1280x720 with rotation 90 normalizes to 720x1280 and the rotation metadata is gone with the re-encode. Always re-encodes — a normalize that sometimes stream-copied would leave odd dims / a VFR timebase in the chain. The result reports before/after (probe-measured) plus a changes list in words, and verifies the output codec + faststart on disk. Video inputs must write .mp4/.mov/.m4v (use convert for other containers); audio-only inputs write an audio format. Set dry_run=true to print the exact ffmpeg command and write no file.",
+    schema: {
+    input: pathSchema,
+    output: pathSchema,
+    width: z.number().int().min(16).max(8192).optional().describe("Fit the frame inside this width (aspect kept, must be even)"),
+    height: z.number().int().min(16).max(8192).optional().describe("Fit the frame inside this height (aspect kept, must be even)"),
+    fps: z.number().min(1).max(120).optional().describe("Cap the frame rate (constant frame rate)"),
+    crf: z.number().int().min(0).max(51).default(23),
+    preset: z.string().default("medium"),
+    target_lufs: z.number().min(-70).max(0).optional().describe("Also normalize loudness to this target (two-pass loudnorm, default off)"),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file (before/after report null — measured on the real output)"),
+  },
+    handler: async (a) => safe(() => core.normalize({
+    input: a.input,
+    output: a.output,
+    width: a.width ?? null,
+    height: a.height ?? null,
+    fps: a.fps ?? null,
+    crf: a.crf,
+    preset: a.preset,
+    targetLufs: a.target_lufs ?? null,
+    dryRun: a.dry_run,
+  })),
+  },
+
+
+  {
     name: "compress",
     tier: "WRITE",
     description: "Shrink a file with one named quality preset instead of guessing CRF numbers: low (CRF 32), medium (CRF 26), high (CRF 20) or email-25mb (targets 18 MB so the file still fits a 25 MB email attachment after base64 inflation), each with its own x264 preset and audio bitrate. Optional max_width scales the video down first. Set target_size_mb to hit an exact size instead (e.g. 10 for a Discord upload): two-pass ABR encoding from the size + duration budget, with a 10% safety margin; reports target_met measured on disk. In target-size mode a resolution ladder steps the frame down (1080→720→480→360→240) when the bitrate buys less than 0.045 bits per pixel per frame, so a starved encode stays watchable instead of mush; set resolution_ladder=false to keep the source frame. Target-size mode also returns a quality_proof: SSIM measured against the source at 3 sample points plus PSNR mid-clip and a verdict in words (indistinguishable / looks_the_same / slight_softening / visible_loss / clearly_degraded) — VMAF is measured at the mid point when the ffmpeg build has libvmaf (default vmaf_v0.6.1 model); otherwise SSIM is the measured proxy and the proof says so, and the proof rates encode fidelity at the delivered resolution (it does not penalize the ladder's resolution drop; compare dimensions and bpp_after for that tradeoff). Set quality_proof=false to skip the measurement. target_size_mb ignores quality and cannot be combined with crf. Returns the size before/after and the reduction percent actually measured on disk, so the agent can check the tradeoff worked. Set dry_run=true to print the exact ffmpeg command(s) — two passes in target-size video mode — and write no file (bitrate/ladder are computed from the input, so they are exact; size_after/target_met/reduction/quality_proof report null — measured on the real output).",
@@ -1709,9 +1738,9 @@ export const TOOL_DEFS = [
   {
     name: "batch",
     tier: "WRITE",
-    description: "Apply ONE operation to many files matching a glob under a folder, in one call: loudness, resize, reframe, compress, convert, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, trim, silence, chroma_key, cut_words, remove_retakes, smart_cut, clean_voice, slideshow, hook, bpm, beat_grid, tempo_drift, audio_levels, search_words, measure_pace or highlights — the same args for every file. Outputs are named <stem>-<operation>.<ext> under the output directory, mirroring the input tree. Returns one row per file (input order) with status ok/error/cached/skipped plus counts, so a failure in one file never hides the rest. Unchanged files are skipped via a content-hash cache (.mediakit-batch-cache.json in the output dir, verified against the output's size + sha256); jobs runs up to 8 files at once under one shared timeout_seconds budget; dry_run lists the planned outputs and writes nothing. cut_words, remove_retakes, smart_cut and search_words find each clip's words file by convention (<words_dir>/<stem>.words.json, default the input's own folder) — a clip with no words file fails its own row only. clean_voice writes .wav always (48 kHz mono float), whatever the input was, and a take whose plan needs clearvoice/sr fails its own row (pass steps without them to clean anyway). slideshow is the exception: a SET operation — the whole matched set of images (2-32) becomes ONE slideshow video (output_name, default slideshow.mp4) instead of one output per file, and the per-file cache does not apply. hook, bpm, beat_grid, tempo_drift, audio_levels, search_words, measure_pace and highlights are the probe-only exceptions: they write no file (output is null, output_suffix is null) — the measurement comes back in each row's result, and the cache stores that result instead of a file. Exit codes follow harken's scheme: the summary carries exit_code — 0 when every row is done/cached/skipped, 1 when any row failed — and the CLI exits with that code (2 for input errors: unknown operation, bad pattern/args, no matches), printing 'batch complete: X done, Y cached, Z skipped, W failed (of N)' to stderr. batch-manifest.jsonl streams one JSON line per finished row (completion order, index = the row's position in input order) as rows complete, so a batch killed mid-run still leaves a partial record; it is fresh-truncated each run so it always matches that run's batch-manifest.json.",
+    description: "Apply ONE operation to many files matching a glob under a folder, in one call: loudness, resize, reframe, compress, convert, normalize, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, trim, silence, chroma_key, cut_words, remove_retakes, smart_cut, clean_voice, slideshow, hook, bpm, beat_grid, tempo_drift, audio_levels, search_words, measure_pace or highlights — the same args for every file. Outputs are named <stem>-<operation>.<ext> under the output directory, mirroring the input tree. Returns one row per file (input order) with status ok/error/cached/skipped plus counts, so a failure in one file never hides the rest. Unchanged files are skipped via a content-hash cache (.mediakit-batch-cache.json in the output dir, verified against the output's size + sha256); jobs runs up to 8 files at once under one shared timeout_seconds budget; dry_run lists the planned outputs and writes nothing. cut_words, remove_retakes, smart_cut and search_words find each clip's words file by convention (<words_dir>/<stem>.words.json, default the input's own folder) — a clip with no words file fails its own row only. clean_voice writes .wav always (48 kHz mono float), whatever the input was, and a take whose plan needs clearvoice/sr fails its own row (pass steps without them to clean anyway). slideshow is the exception: a SET operation — the whole matched set of images (2-32) becomes ONE slideshow video (output_name, default slideshow.mp4) instead of one output per file, and the per-file cache does not apply. hook, bpm, beat_grid, tempo_drift, audio_levels, search_words, measure_pace and highlights are the probe-only exceptions: they write no file (output is null, output_suffix is null) — the measurement comes back in each row's result, and the cache stores that result instead of a file. Exit codes follow harken's scheme: the summary carries exit_code — 0 when every row is done/cached/skipped, 1 when any row failed — and the CLI exits with that code (2 for input errors: unknown operation, bad pattern/args, no matches), printing 'batch complete: X done, Y cached, Z skipped, W failed (of N)' to stderr. batch-manifest.jsonl streams one JSON line per finished row (completion order, index = the row's position in input order) as rows complete, so a batch killed mid-run still leaves a partial record; it is fresh-truncated each run so it always matches that run's batch-manifest.json.",
     schema: {
-    operation: z.enum(["loudness", "resize", "reframe", "compress", "convert", "extract_audio", "reverse", "rotate", "boomerang", "make_loopable", "freeze", "grade", "fit", "trim", "silence", "chroma_key", "cut_words", "remove_retakes", "smart_cut", "clean_voice", "slideshow", "hook", "bpm", "beat_grid", "tempo_drift", "audio_levels", "search_words", "measure_pace", "highlights"]).describe("The operation to apply to every matched file"),
+    operation: z.enum(["loudness", "resize", "reframe", "compress", "convert", "normalize", "extract_audio", "reverse", "rotate", "boomerang", "make_loopable", "freeze", "grade", "fit", "trim", "silence", "chroma_key", "cut_words", "remove_retakes", "smart_cut", "clean_voice", "slideshow", "hook", "bpm", "beat_grid", "tempo_drift", "audio_levels", "search_words", "measure_pace", "highlights"]).describe("The operation to apply to every matched file"),
     pattern: z.string().min(1).describe("Glob matched against paths under input_dir: **/*.mp4 for every mp4 at any depth, sub/*.mp4 for one folder, or a bare *.mp4 (matches the basename at any depth)"),
     input_dir: pathSchema.describe("Folder to search under (recursive; hidden dirs, .git, node_modules and .next are skipped)"),
     output_dir: pathSchema.describe("Directory to write outputs + batch-manifest.json + batch-manifest.jsonl into (created if needed; files under it are never treated as inputs)"),
@@ -1744,7 +1773,7 @@ export const TOOL_DEFS = [
   {
     name: "manifest",
     tier: "WRITE",
-    description: "Run a whole edit pipeline from ONE declarative JSON manifest file: {version: 1, input, output, steps: [{tool, args}], qa?} — paths in the manifest are relative to the manifest file. Steps run in order, each feeding the next (slideshow as step 1 only — it builds a video from images in args, so the manifest input should be the first slide image; download as step 1 only — it fetches from a URL in args, and when it is step 1 the manifest input may be omitted entirely; then trim, resize, reframe, compress, convert, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, silence, denoise, interpolate, burn_captions, overlay, chroma_key, cut_words, remove_retakes, smart_cut; hook, bpm, beat_grid, tempo_drift, audio_levels, search_words, measure_pace and highlights are the probe-only steps — they analyze the chain file at that point and pass it through unchanged, so their results record WHY the next trim cuts where it does); the whole plan is validated before anything renders, so a typo fails in seconds. Each step is cached by content hash (input bytes + tool + args + sidecar-file bytes, verified against the cached output's size + sha256; a probe-only step stores only its result, there is no file to verify) — re-running an unchanged manifest re-encodes nothing, and editing step 3 only re-runs from step 3. Set qa to a platform (or 'any') to run qa_report on the final file. dry_run prints the plan and writes nothing — the approve-before-render gate. A step failure aborts the run and keeps the intermediates for inspection.",
+    description: "Run a whole edit pipeline from ONE declarative JSON manifest file: {version: 1, input, output, steps: [{tool, args}], qa?} — paths in the manifest are relative to the manifest file. Steps run in order, each feeding the next (slideshow as step 1 only — it builds a video from images in args, so the manifest input should be the first slide image; download as step 1 only — it fetches from a URL in args, and when it is step 1 the manifest input may be omitted entirely; then trim, resize, reframe, compress, convert, normalize, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, silence, denoise, interpolate, burn_captions, overlay, chroma_key, cut_words, remove_retakes, smart_cut; hook, bpm, beat_grid, tempo_drift, audio_levels, search_words, measure_pace and highlights are the probe-only steps — they analyze the chain file at that point and pass it through unchanged, so their results record WHY the next trim cuts where it does); the whole plan is validated before anything renders, so a typo fails in seconds. Each step is cached by content hash (input bytes + tool + args + sidecar-file bytes, verified against the cached output's size + sha256; a probe-only step stores only its result, there is no file to verify) — re-running an unchanged manifest re-encodes nothing, and editing step 3 only re-runs from step 3. Set qa to a platform (or 'any') to run qa_report on the final file. dry_run prints the plan and writes nothing — the approve-before-render gate. A step failure aborts the run and keeps the intermediates for inspection.",
     schema: {
     manifest_path: pathSchema.describe("Path to the manifest JSON file"),
     output: pathSchema.optional().describe("Output file path (overrides the manifest's output; the extension is adjusted to the step chain's final format when needed)"),
@@ -2412,7 +2441,7 @@ export const TOOL_DEFS = [
   {
     name: "list_operations",
     tier: "READ",
-    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 88 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 89 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
     schema: {
     family: z.enum(["inspect", "edit", "text", "image", "assemble", "meta"]).optional().describe("Narrow to one family; omit for the whole catalog"),
   },
@@ -2482,7 +2511,7 @@ export function listSafetyTiers() {
 }
 
 // ---------------------------------------------------------------- progressive discovery
-// The catalog is 88 tools and tools/list dumps the full JSON schema
+// The catalog is 89 tools and tools/list dumps the full JSON schema
 // of every one on every turn — kinocut's answer is progressive
 // discovery: a compact list first, full schema only for the tools
 // actually used (lượt 147, idea: KyaniteLabs/kinocut
@@ -2515,12 +2544,12 @@ export const TOOL_FAMILY_OF = {
   determinism: "inspect", verify: "inspect", verify_cuts: "inspect", diagnose: "inspect",
   transitions: "inspect", estimate_conversion: "inspect", doctor: "inspect",
   qa_report: "inspect", audit: "inspect", safety: "inspect", receipt: "inspect",
-  // edit (35)
+  // edit (36)
   trim: "edit", crop: "edit", resize: "edit", extract_audio: "edit", extract_frame: "edit",
   loudness: "edit", concat: "edit", grade: "edit", make_loopable: "edit", freeze: "edit",
   fastforward: "edit", reverse: "edit", rotate: "edit", boomerang: "edit",
   chroma_key: "edit", zoom_pan: "edit", interpolate: "edit", denoise: "edit",
-  segment: "edit", convert: "edit", compress: "edit", silence: "edit",
+  segment: "edit", convert: "edit", normalize: "edit", compress: "edit", silence: "edit",
   cut_words: "edit", remove_retakes: "edit", smart_cut: "edit", clean_voice: "edit",
   mix: "edit", overlay: "edit", pip: "edit", broll: "edit", fit: "edit",
   reframe: "edit", mux: "edit", burn_captions: "edit", download: "edit",

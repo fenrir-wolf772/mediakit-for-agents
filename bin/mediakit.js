@@ -528,6 +528,21 @@ const COMMANDS = {
       ["-o, --output", "Output file (required)"],
     ],
   },
+  normalize: {
+    usage: "mediakit normalize <input> -o <output.mp4> [--width <n>] [--height <n>] [--fps <n>] [--crf <n>] [--preset <p>] [--target-lufs <n>] [--dry-run]",
+    desc: "Bring a clip to the canonical pipeline profile in one call: libx264 + yuv420p + even dims + CFR (source fps or --fps), AAC 192k at 48 kHz, +faststart for MP4; --width/--height fits inside that box (aspect kept, must be even); --target-lufs also normalizes loudness (two-pass loudnorm). Video inputs must write .mp4/.mov/.m4v. --dry-run prints the exact ffmpeg command and writes no file.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--width", "Fit inside this width, aspect kept (must be even)"],
+      ["--height", "Fit inside this height, aspect kept (must be even)"],
+      ["--fps", "Cap the frame rate, constant frame rate (1-120)"],
+      ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["--preset", "Encoding preset (default medium)"],
+      ["--target-lufs", "Also normalize loudness to this target (two-pass loudnorm)"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
+      ["-o, --output", "Output file (required)"],
+    ],
+  },
   silence: {
     usage: "mediakit silence <input> -o <output> [--threshold-db <n>] [--min-duration <s>] [--margin <s>] [--detect-only] [--dry-run]",
     desc: "Remove silent stretches, keeping a margin of silence around speech. --detect-only reports segments without writing. --dry-run prints the exact ffmpeg command and writes no file (needs -o, like a real run; with nothing worth cutting the command is a stream-copy).",
@@ -1597,6 +1612,18 @@ async function main() {
           gopSeconds: numOpt(opts, "gop_seconds") ?? null,
           dryRun: opts.dry_run === true,
           encoder: opts.encoder ?? null,
+        });
+        break;
+      case "normalize":
+        result = await core.normalize({
+          input: needInput(), output: needOutput(opts),
+          width: numOpt(opts, "width") ?? null,
+          height: numOpt(opts, "height") ?? null,
+          fps: numOpt(opts, "fps") ?? null,
+          crf: numOpt(opts, "crf") ?? 23,
+          preset: opts.preset ?? "medium",
+          targetLufs: numOpt(opts, "target_lufs") ?? null,
+          dryRun: opts.dry_run === true,
         });
         break;
       case "grade": {

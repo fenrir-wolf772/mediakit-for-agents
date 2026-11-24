@@ -201,21 +201,21 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut", "clean_voice", "measure_pace", "highlights", "align_voice", "safety", "estimate_conversion", "release_checkpoint", "list_operations", "describe_operation"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "normalize", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut", "clean_voice", "measure_pace", "highlights", "align_voice", "safety", "estimate_conversion", "release_checkpoint", "list_operations", "describe_operation"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 88 tools present");
-checkOk(missing.length === 0, "tools/list has all 88 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 89 tools present");
+checkOk(missing.length === 0, "tools/list has all 89 tools", `missing: ${missing.join(", ")}`);
 
 // Progressive discovery (lượt 147, idea: KyaniteLabs/kinocut):
 // the compact catalog first, full schema only on demand.
 const discAll = listOperations({});
 console.log("list_operations:", discAll.tools.length, "tools | families", discAll.families.map((f) => `${f.name}:${f.count}`).join(" "));
-checkOk(discAll.total_tools === 88 && discAll.tools.length === 88 && discAll.profile === "full" && discAll.visible_tools === 88, "list_operations (pure) lists all 88 tools in full profile", JSON.stringify({ total: discAll.total_tools, visible: discAll.visible_tools, profile: discAll.profile }));
-checkOk(discAll.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:27 edit:35 text:6 image:7 assemble:11 meta:2", "list_operations families split 27/35/6/7/11/2", discAll.families.map((f) => `${f.name}:${f.count}`).join(" "));
+checkOk(discAll.total_tools === 89 && discAll.tools.length === 89 && discAll.profile === "full" && discAll.visible_tools === 89, "list_operations (pure) lists all 89 tools in full profile", JSON.stringify({ total: discAll.total_tools, visible: discAll.visible_tools, profile: discAll.profile }));
+checkOk(discAll.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:27 edit:36 text:6 image:7 assemble:11 meta:2", "list_operations families split 27/36/6/7/11/2", discAll.families.map((f) => `${f.name}:${f.count}`).join(" "));
 checkOk(discAll.tools.every((t) => typeof t.name === "string" && ["inspect", "edit", "text", "image", "assemble", "meta"].includes(t.family) && ["READ", "PLAN", "WRITE", "DESTRUCTIVE"].includes(t.tier) && typeof t.summary === "string" && t.summary.length > 10 && t.summary.length <= 161 && (t.summary.endsWith(".") || t.summary.endsWith("…"))), "every list_operations entry has a known family, a tier and a one-sentence summary (<=160 chars, ends . or …)", discAll.tools.filter((t) => !(t.summary.endsWith(".") || t.summary.endsWith("…"))).map((t) => t.name).join(","));
-checkOk(Object.keys(TOOL_FAMILY_OF).length === 88 && TOOL_DEFS.every((t) => TOOL_FAMILY_OF[t.name] !== undefined) && new Set(Object.values(TOOL_FAMILY_OF)).size === 6, "TOOL_FAMILY_OF covers every TOOL_DEFS entry exactly once, in 6 families", `map=${Object.keys(TOOL_FAMILY_OF).length} defs=${TOOL_DEFS.length}`);
+checkOk(Object.keys(TOOL_FAMILY_OF).length === 89 && TOOL_DEFS.every((t) => TOOL_FAMILY_OF[t.name] !== undefined) && new Set(Object.values(TOOL_FAMILY_OF)).size === 6, "TOOL_FAMILY_OF covers every TOOL_DEFS entry exactly once, in 6 families", `map=${Object.keys(TOOL_FAMILY_OF).length} defs=${TOOL_DEFS.length}`);
 const discEdit = listOperations({ family: "edit" });
-checkOk(discEdit.tools.length === 35 && discEdit.tools.every((t) => t.family === "edit"), "list_operations family=edit narrows to the 35 edit tools", `got ${discEdit.tools.length}`);
+checkOk(discEdit.tools.length === 36 && discEdit.tools.every((t) => t.family === "edit"), "list_operations family=edit narrows to the 36 edit tools", `got ${discEdit.tools.length}`);
 let discBadFamily = null;
 try { listOperations({ family: "nope" }); } catch (e) { discBadFamily = e; }
 checkOk(discBadFamily?.code === "INVALID_ARG" && /inspect, edit/.test(discBadFamily?.message ?? ""), "list_operations rejects an unknown family with INVALID_ARG + the family list", discBadFamily?.message ?? "");
@@ -224,12 +224,12 @@ checkOk(descTrim.family === "edit" && descTrim.tier === "WRITE" && typeof descTr
 let descBad = null;
 try { describeOperation({ name: "nope" }); } catch (e) { descBad = e; }
 checkOk(descBad?.code === "INVALID_ARG" && /list_operations/.test(descBad?.message ?? ""), "describe_operation rejects an unknown name with INVALID_ARG + a hint to browse list_operations", descBad?.message ?? "");
-checkOk(toolProfile() === "full" && visibleTools().length === 88 && HOT_TOOLS.length === 18 && HOT_TOOLS.every((n) => TOOL_DEFS.some((t) => t.name === n)), "default profile is full (88 visible) and the 18 hot tools all exist", `profile=${toolProfile()} hot=${HOT_TOOLS.length}`);
+checkOk(toolProfile() === "full" && visibleTools().length === 89 && HOT_TOOLS.length === 18 && HOT_TOOLS.every((n) => TOOL_DEFS.some((t) => t.name === n)), "default profile is full (89 visible) and the 18 hot tools all exist", `profile=${toolProfile()} hot=${HOT_TOOLS.length}`);
 process.env.MEDIAKIT_TOOL_PROFILE = "hot";
 checkOk(toolProfile() === "hot" && visibleTools().length === 20 && visibleTools().some((t) => t.name === "list_operations") && visibleTools().some((t) => t.name === "describe_operation") && !visibleTools().some((t) => t.name === "chroma_key"), "hot profile narrows tools/list to 20 (18 hot + 2 discovery), chroma_key hidden", `visible=${visibleTools().length}`);
-checkOk(listOperations({}).tools.length === 88 && listOperations({}).visible_tools === 20, "list_operations still reports the FULL 88-tool catalog in hot profile (visible_tools 20)", JSON.stringify({ tools: listOperations({}).tools.length, visible: listOperations({}).visible_tools }));
+checkOk(listOperations({}).tools.length === 89 && listOperations({}).visible_tools === 20, "list_operations still reports the FULL 89-tool catalog in hot profile (visible_tools 20)", JSON.stringify({ tools: listOperations({}).tools.length, visible: listOperations({}).visible_tools }));
 process.env.MEDIAKIT_TOOL_PROFILE = "bogus";
-checkOk(toolProfile() === "full" && visibleTools().length === 88, "an unknown MEDIAKIT_TOOL_PROFILE value falls back to full (88 visible)", `profile=${toolProfile()}`);
+checkOk(toolProfile() === "full" && visibleTools().length === 89, "an unknown MEDIAKIT_TOOL_PROFILE value falls back to full (89 visible)", `profile=${toolProfile()}`);
 delete process.env.MEDIAKIT_TOOL_PROFILE;
 // Machine-readable contract (lượt 149): SPEC.json is generated from
 // the same TOOL_DEFS registry — the committed file must equal a
@@ -242,10 +242,10 @@ const specFresh = await buildSpec();
 checkOk(specOnDisk.spec_version === SPEC_VERSION && specFresh.spec_version === SPEC_VERSION, "SPEC.json carries spec_version 1", `on-disk=${specOnDisk.spec_version} fresh=${specFresh.spec_version}`);
 const pkgJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 checkOk(specOnDisk.mediakit_version === pkgJson.version && specFresh.mediakit_version === pkgJson.version, "SPEC.json mediakit_version matches package.json", `spec=${specOnDisk.mediakit_version} pkg=${pkgJson.version}`);
-checkOk(specOnDisk.tool_count === 88 && specFresh.tool_count === 88 && specOnDisk.tools.length === 88, "SPEC.json lists all 88 tools", `on-disk=${specOnDisk.tool_count} fresh=${specFresh.tool_count}`);
+checkOk(specOnDisk.tool_count === 89 && specFresh.tool_count === 89 && specOnDisk.tools.length === 89, "SPEC.json lists all 89 tools", `on-disk=${specOnDisk.tool_count} fresh=${specFresh.tool_count}`);
 checkOk(specText(specOnDisk) === specText(specFresh), "committed SPEC.json equals a fresh build byte for byte (regenerate with `npm run spec` when it drifts)", `hash on-disk=${specOnDisk.spec_hash?.slice(0, 12)} fresh=${specFresh.spec_hash.slice(0, 12)}`);
 checkOk(specOnDisk.spec_hash === specHash(specOnDisk.tools) && specFresh.spec_hash === specHash(specFresh.tools), "SPEC spec_hash is the sha256 of its own tools array", `hash=${specOnDisk.spec_hash.slice(0, 12)}…`);
-checkOk(specOnDisk.transports.join(",") === "stdio,http" && specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:27 edit:35 text:6 image:7 assemble:11 meta:2" && specOnDisk.families.reduce((n, f) => n + f.count, 0) === 88, "SPEC families split 27/35/6/7/11/2, sum to 88, transports stdio+http", specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" "));
+checkOk(specOnDisk.transports.join(",") === "stdio,http" && specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:27 edit:36 text:6 image:7 assemble:11 meta:2" && specOnDisk.families.reduce((n, f) => n + f.count, 0) === 89, "SPEC families split 27/36/6/7/11/2, sum to 89, transports stdio+http", specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" "));
 checkOk(specOnDisk.tools.every((t) => typeof t.name === "string" && ["inspect", "edit", "text", "image", "assemble", "meta"].includes(t.family) && ["READ", "PLAN", "WRITE", "DESTRUCTIVE"].includes(t.tier) && typeof t.summary === "string" && t.summary.length > 10 && t.summary.length <= 161 && typeof t.description === "string" && t.description.length > t.summary.length && t.inputSchema?.type === "object" && typeof t.inputSchema.properties === "object" && (t.inputSchema.required === undefined || Array.isArray(t.inputSchema.required))), "every SPEC tool entry has a known family/tier, a one-sentence summary, a longer description and an object JSON Schema with properties (required present only when the tool has required params — an all-optional schema has none)", specOnDisk.tools.filter((t) => !(t.inputSchema?.type === "object")).map((t) => t.name).join(","));
 checkOk(JSON.stringify(specOnDisk.tools.map((t) => t.name)) === JSON.stringify(TOOL_DEFS.map((t) => t.name)), "SPEC tool order follows the TOOL_DEFS registry order", `first=${specOnDisk.tools[0].name} last=${specOnDisk.tools.at(-1).name}`);
 checkOk(specOnDisk.tools.find((t) => t.name === "probe")?.inputSchema.properties.input?.type === "string" && specOnDisk.tools.find((t) => t.name === "trim")?.inputSchema.properties.stream_copy?.type === "boolean" && specOnDisk.tools.find((t) => t.name === "patch_manifest")?.tier === "DESTRUCTIVE", "SPEC schemas carry real parameter types (probe.input string, trim.stream_copy boolean) and patch_manifest stays DESTRUCTIVE", "");
@@ -3147,7 +3147,7 @@ checkOk(dedupCliJson.frame_count === 1 && dedupCliJson.dedup?.dropped === 19, "C
 // list_operations / describe_operation over MCP (lượt 147).
 const listOpsRes = await client.callTool({ name: "list_operations", arguments: {} });
 const listOpsJson = JSON.parse(listOpsRes.content[0].text);
-checkOk(listOpsJson.total_tools === 88 && listOpsJson.tools?.length === 88 && listOpsJson.families?.find((f) => f.name === "edit")?.count === 35 && listOpsJson.tools?.every((t) => typeof t.summary === "string"), "MCP list_operations lists 88 tools with families (edit 35) and summaries", `total=${listOpsJson.total_tools}`);
+checkOk(listOpsJson.total_tools === 89 && listOpsJson.tools?.length === 89 && listOpsJson.families?.find((f) => f.name === "edit")?.count === 36 && listOpsJson.tools?.every((t) => typeof t.summary === "string"), "MCP list_operations lists 89 tools with families (edit 36) and summaries", `total=${listOpsJson.total_tools}`);
 const listOpsEditRes = await client.callTool({ name: "list_operations", arguments: { family: "image" } });
 const listOpsEditJson = JSON.parse(listOpsEditRes.content[0].text);
 checkOk(listOpsEditJson.tools?.length === 7 && listOpsEditJson.tools?.every((t) => t.family === "image"), "MCP list_operations family=image returns the 7 image tools", `got ${listOpsEditJson.tools?.length}`);
@@ -4542,6 +4542,46 @@ const levelsFlatRes = await client.callTool({ name: "audio_levels", arguments: {
 const levelsFlatJson = JSON.parse(levelsFlatRes.content[0].text);
 const dynFlat = levelsFlatJson.summary.dynamics;
 checkOk(dynFlat.quiet_p10_db === -27.09 && dynFlat.loud_p90_db === -27.09 && dynFlat.separation_db === 0 && dynFlat.verdict === "flat" && dynFlat.gap_buckets === 0 && dynFlat.gap_bed_db === null && dynFlat.bed_fills_speech_gaps === false, "audio_levels dynamics on levels-flat: p10 = p90 = -27.09, separation 0 flat, no gaps at all", JSON.stringify(dynFlat));
+
+// normalize (lượt 156, yubraaj11/ffmpeg-mcp normalize-then-join idea):
+// one reusable pre-assemble step to the canonical profile.
+const normRes = await client.callTool({ name: "normalize", arguments: { input: path.join(root, "test/normalize-source.mp4"), output: path.join(root, "outputs/mcp-normalize.mp4"), fps: 30 } });
+const normJson = JSON.parse(normRes.content[0].text);
+console.log("normalize:", JSON.stringify({ before: normJson.before, after: normJson.after, changes: normJson.changes, faststart: normJson.faststart }));
+checkOk(normJson.operation === "normalize" && normJson.before.dimensions === "641x361" && normJson.before.pixel_format === "yuv444p" && normJson.before.fps === 50 && normJson.before.audio_codec === "mp3" && normJson.before.audio_bitrate_kbps === 64, "normalize before: 641x361 yuv444p 50fps mp3 64k (the fixture is really non-canonical)", JSON.stringify(normJson.before));
+checkOk(normJson.after.dimensions === "640x360" && normJson.after.pixel_format === "yuv420p" && normJson.after.fps === 30 && normJson.after.audio_codec === "aac" && normJson.after.audio_bitrate_kbps > 100 && normJson.after.audio_bitrate_kbps < 220 && normJson.faststart === true && normJson.codec_verified === true && near(normJson.duration_seconds, 5, 0.1), "normalize after: 640x360 yuv420p 30fps aac ~192k, faststart true, codec verified, 5s", JSON.stringify({ after: normJson.after, faststart: normJson.faststart, duration: normJson.duration_seconds }));
+checkOk(normJson.changes.length === 5 && normJson.changes.includes("pixel format: yuv444p → yuv420p") && normJson.changes.includes("dimensions: 641x361 → 640x360") && normJson.changes.includes("frame rate: 50 → 30 fps") && normJson.changes.includes("audio codec: mp3 → aac") && normJson.changes.some((c) => c.startsWith("audio bitrate: 64 → ")), "normalize changes lists all 5 real differences in words", JSON.stringify(normJson.changes));
+checkOk(existsSync(path.join(root, "outputs/mcp-normalize.mp4")), "normalize output file exists on disk", "mcp-normalize.mp4 missing");
+const normLoudRes = await client.callTool({ name: "normalize", arguments: { input: path.join(root, "test/normalize-source.mp4"), output: path.join(root, "outputs/mcp-normalize-loud.mp4"), fps: 30, target_lufs: -14 } });
+const normLoudJson = JSON.parse(normLoudRes.content[0].text);
+checkOk(near(normLoudJson.output_lufs, -14, 0.5) && normLoudJson.output_true_peak_db < -0.3 && normLoudJson.two_pass === true && normLoudJson.changes.some((c) => c.startsWith("loudness: -22.26 → ")), "normalize --target-lufs -14: two-pass loudnorm lands on target (TP under ceiling), loudness change reported", JSON.stringify({ lufs: normLoudJson.output_lufs, tp: normLoudJson.output_true_peak_db, changes: normLoudJson.changes }));
+const normWRes = await client.callTool({ name: "normalize", arguments: { input: path.join(root, "test/normalize-source.mp4"), output: path.join(root, "outputs/mcp-normalize-w320.mp4"), width: 320 } });
+const normWJson = JSON.parse(normWRes.content[0].text);
+checkOk(normWJson.after.dimensions === "320x180" && normWJson.after.fps === 50, "normalize --width 320 fits inside the box (320x180, fps untouched)", JSON.stringify(normWJson.after));
+const normDryRes = await client.callTool({ name: "normalize", arguments: { input: path.join(root, "test/normalize-source.mp4"), output: path.join(root, "outputs/mcp-normalize-dry.mp4"), dry_run: true } });
+const normDryJson = JSON.parse(normDryRes.content[0].text);
+checkOk(normDryJson.dry_run === true && normDryJson.commands.length === 1 && /libx264/.test(normDryJson.commands[0]) && /yuv420p/.test(normDryJson.commands[0]) && !existsSync(path.join(root, "outputs/mcp-normalize-dry.mp4")), "normalize dry_run prints the exact command and writes no file", JSON.stringify(normDryJson.commands));
+const normOdd = await callExpectThrow("normalize", { input: path.join(root, "test/normalize-source.mp4"), output: path.join(root, "outputs/x.mp4"), width: 321 });
+checkOk(/must be even/.test(normOdd), "normalize refuses an odd --width", normOdd.slice(0, 120));
+const normWebm = await callExpectThrow("normalize", { input: path.join(root, "test/normalize-source.mp4"), output: path.join(root, "outputs/x.webm") });
+checkOk(/writes MP4/.test(normWebm), "normalize refuses a non-MP4 video output", normWebm.slice(0, 120));
+const normNoAudio = await callExpectThrow("normalize", { input: path.join(root, "test/broll-blue-noaudio.mp4"), output: path.join(root, "outputs/x.mp4"), target_lufs: -14 });
+checkOk(/needs an audio stream/.test(normNoAudio), "normalize --target-lufs refuses a video-only input", normNoAudio.slice(0, 120));
+// CLI parity: the same call through bin/mediakit.js.
+const normCli = JSON.parse((await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "normalize", path.join(root, "test/normalize-source.mp4"), "-o", path.join(root, "outputs/mcp-normalize-cli.mp4"), "--fps", "30"])).stdout);
+checkOk(normCli.operation === "normalize" && normCli.after.fps === 30 && normCli.after.dimensions === "640x360", "CLI normalize matches the MCP result (30fps, 640x360)", JSON.stringify(normCli.after));
+// batch normalize: the same op over a glob.
+await mkdir(path.join(root, "outputs/mcp-batch-norm-in"), { recursive: true });
+await copyFile(path.join(root, "test/normalize-source.mp4"), path.join(root, "outputs/mcp-batch-norm-in/clip.mp4"));
+await rm(path.join(root, "outputs/mcp-batch-norm-out"), { recursive: true, force: true });
+const batchNormRes = await client.callTool({ name: "batch", arguments: { operation: "normalize", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-norm-in"), output_dir: path.join(root, "outputs/mcp-batch-norm-out"), args: { fps: 30 }, jobs: 1 } });
+const batchNormJson = JSON.parse(batchNormRes.content[0].text);
+checkOk(batchNormJson.succeeded === 1 && batchNormJson.results[0].output.endsWith("-normalize.mp4") && batchNormJson.results[0].result?.after?.fps === 30, "batch normalize runs via MCP and writes <stem>-normalize.mp4 at 30fps", JSON.stringify(batchNormJson.results.map((r) => r.output)));
+checkOk(existsSync(path.join(root, "outputs/mcp-batch-norm-out/clip-normalize.mp4")), "batch normalize output file exists on disk", "clip-normalize.mp4 missing");
+// manifest normalize step: the canonical-profile step inside a pipeline.
+const normManifestRes = await client.callTool({ name: "manifest", arguments: { manifest_path: path.join(root, "test/manifest-normalize.json") } });
+const normManifestJson = JSON.parse(normManifestRes.content[0].text);
+checkOk(normManifestJson.steps_run === 1 && normManifestJson.steps[0].tool === "normalize" && normManifestJson.steps[0].status === "ok" && normManifestJson.steps[0].result?.after?.fps === 30 && near(normManifestJson.final.duration_seconds, 5, 0.1), "manifest normalize step runs and the final file is 30fps / 5s", JSON.stringify({ steps: normManifestJson.steps.map((s) => s.status), final: normManifestJson.final?.duration_seconds }));
 // CLI wiring: kebab-case command, --bucket/--top/--min-gap options,
 // min_gap 0 keeps adjacent buckets (peaks 2.5, 3).
 const levelsCli = await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "audio-levels", path.join(root, "test/levels-source.wav"), "--bucket", "0.5", "--top", "2", "--min-gap", "0"]);
@@ -7935,7 +7975,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 88 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 88 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 89 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 89 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -10655,7 +10695,7 @@ checkOk(explainSynth("REVISION_MISMATCH", "revision mismatch").kind === "fix-arg
 // the tier table, the MCP annotations, and the measured estimate.
 const safetyRes = await client.callTool({ name: "safety", arguments: {} });
 const safetyJson = JSON.parse(safetyRes.content[0].text);
-checkOk(safetyJson.total_tools === 88 && safetyJson.counts.READ === 26 && safetyJson.counts.PLAN === 4 && safetyJson.counts.WRITE === 57 && safetyJson.counts.DESTRUCTIVE === 1, "safety counts the tiers: 26 READ / 4 PLAN / 57 WRITE / 1 DESTRUCTIVE of 88 tools", JSON.stringify(safetyJson.counts));
+checkOk(safetyJson.total_tools === 89 && safetyJson.counts.READ === 26 && safetyJson.counts.PLAN === 4 && safetyJson.counts.WRITE === 58 && safetyJson.counts.DESTRUCTIVE === 1, "safety counts the tiers: 26 READ / 4 PLAN / 58 WRITE / 1 DESTRUCTIVE of 89 tools", JSON.stringify(safetyJson.counts));
 checkOk(JSON.stringify(safetyJson.tiers.DESTRUCTIVE.tools) === JSON.stringify(["patch_manifest"]), "patch_manifest is the only DESTRUCTIVE tool", JSON.stringify(safetyJson.tiers.DESTRUCTIVE.tools));
 const tierOf = {};
 for (const [tier, v] of Object.entries(safetyJson.tiers)) for (const n of v.tools) tierOf[n] = tier;
@@ -10821,7 +10861,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 88 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 89 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -10881,11 +10921,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 88, "GET /mcp reports name/version/transport and 88 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 89, "GET /mcp reports name/version/transport and 89 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 88 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 88 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 89 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 89 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 // Progressive discovery over HTTP (lượt 147): hot profile narrows
 // tools/list on the wire too — listTools() reads the env per call,
 // so flipping it here changes the same in-process server, and the
@@ -10899,7 +10939,7 @@ const httpRpcHot = await httpCall("POST", "/", { jsonrpc: "2.0", id: 7, method: 
 checkOk(httpRpcHot.status === 200 && httpRpcHot.json?.result?.tools?.length === 20, "JSON-RPC tools/list in hot profile also returns 20 tools", `count=${httpRpcHot.json?.result?.tools?.length}`);
 delete process.env.MEDIAKIT_TOOL_PROFILE;
 const httpToolsFull = await httpCall("GET", "/mcp/tools");
-checkOk(httpToolsFull.json?.tools?.length === 88, "clearing MEDIAKIT_TOOL_PROFILE restores the full 88-tool list", `count=${httpToolsFull.json?.tools?.length}`);
+checkOk(httpToolsFull.json?.tools?.length === 89, "clearing MEDIAKIT_TOOL_PROFILE restores the full 89-tool list", `count=${httpToolsFull.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -11000,7 +11040,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 88, "JSON-RPC tools/list returns the same 88 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 89, "JSON-RPC tools/list returns the same 89 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

@@ -401,7 +401,7 @@ export function createHttpServer() {
       if (req.method === "GET" && (path === "/" || path === "/mcp")) {
         // The tool count is read per request, not frozen in METADATA:
         // a server started with MEDIAKIT_TOOL_PROFILE=hot advertises
-        // 20 here, a full-profile server 88.
+        // 20 here, a full-profile server 89.
         sendJson(res, 200, { ...METADATA, tools: visibleTools().length });
         return;
       }

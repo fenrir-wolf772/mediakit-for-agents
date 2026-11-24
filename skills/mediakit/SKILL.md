@@ -1126,7 +1126,7 @@ correct, not a bug. Put `"qa": "tiktok"` (or any platform, or
 failure aborts the run and keeps the intermediates under the output
 dir — the error names the directory, so inspect the broken step's
 file instead of guessing. Only single-input steps chain
-(`trim`/`resize`/`reframe`/`compress`/`convert`/`extract_audio`/
+(`trim`/`resize`/`reframe`/`compress`/`convert`/`normalize`/`extract_audio`/
 `reverse`/`grade`/`fit`/`silence`/`denoise`/`interpolate`/
 `burn_captions`/`overlay`/`chroma_key`); multi-input work (`concat`, `mix`,
 `mux`, `pip`) stays a separate call before or after the manifest.
@@ -2014,7 +2014,7 @@ idea, with the sheet timestamps borrowed from Synkinema's
 
 ### 58h. Browse the catalog before you dump it — progressive discovery
 
-88 tools is too many schemas to pay for in every turn. Don't start
+89 tools is too many schemas to pay for in every turn. Don't start
 from `tools/list` — start from `list_operations`: one compact line
 per tool (name, family, tier, one-sentence summary), optionally
 narrowed with `family` (`inspect`, `edit`, `text`, `image`,
@@ -2053,25 +2053,29 @@ collapses slow motion. Use 0.5–1 to drop only truly frozen
 frames, 2 for a ruthless summary pass. Off by default: scrubbing
 must never silently lose frames.
 
-### 58j. Look at both sides of every seam — `verify_cuts --strips`
+### 58k. Normalize before you assemble — one call to the canonical profile
 
-`verify_cuts` proves the render cuts where the manifest promises,
-but a number cannot tell you the seam *looks* right — a
-"confirmed" cut between two near-identical frames still reads
-wrong to a viewer. With `--strips` (MCP `strips: true`) it also
-writes one 4-tile review strip per boundary into
-`<video-stem>.cut-strips/` next to the video (or `--strips-dir`
-when given): frames at cut−0.5/−0.1/+0.1/+0.5s, captured from
-the delivered video — not the 270p draft — and labelled with
-offset + timestamp. Open the strip and look: the two left tiles
-must be the outgoing shot, the two right tiles the incoming one.
-Offsets clamp into `[0, duration−0.05]` at the film edges, so a
-cut at 0.5s still gets `[0, 0.4, 0.6, 1.0]`; a strip with fewer
-than 2 distinct frames is skipped and the reason recorded
-instead of failing the verify. This generalizes kpr17ch/outtake's
-`check_frame` — one frame pulled out for a human or agent eye to
-look at — into a strip around each seam. Off by default — without it the
-verify stays probe-only.
+Raw clips arrive in every shape: yuv444p, odd dims, 50 fps VFR, mp3
+audio at 64k, rotation metadata a player applies but a filter does
+not. `assemble` and `concat` normalize internally, but only as far as
+the join needs — a clip that passes through untouched keeps its quirks
+into the render. Run `normalize` first when clips come from mixed
+sources: one call makes video libx264 + yuv420p + even dims + CFR at
+the source frame rate (or `--fps`), audio AAC 192k at 48 kHz, and
+`+faststart` on MP4 — and reports `before`/`after` (probe-measured)
+plus a `changes` list in words, so you can see what actually moved
+instead of assuming it. `--width`/`--height` fits the frame inside
+that box (aspect kept, must be even — odd values are refused, not
+rounded silently); `--target-lufs` also normalizes loudness with the
+same two-pass loudnorm `loudness` uses. Decode autorotates, so a phone
+clip stored 1280x720 with rotation 90 comes out 720x1280 and the
+rotation metadata is gone with the re-encode. It always re-encodes:
+a normalize that sometimes stream-copied would leave the odd dims /
+VFR timebase in the chain, which is exactly what the step exists to
+remove. Video inputs must write .mp4/.mov/.m4v (use `convert` for
+other containers); audio-only inputs write an audio format. Also a
+batch operation and a manifest step — put it first in a manifest, so
+every later step works on a known profile.
 
 ## Workflow: vertical captioned clip from a landscape source
 
