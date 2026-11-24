@@ -15,7 +15,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
-import { analyzeSeamSamples, applyContentBaseline, averageHash, buildZoomChains, compareDeterminismRuns, countClippedRuns, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, inspectionPointTimestamps, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, parseZoomChainEvents, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
+import { analyzeSeamSamples, applyContentBaseline, averageHash, buildZoomChains, compareDeterminismRuns, countClippedRuns, cutSheetRows, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, findDensestSpeechWindow, findHighlightSpans, findPhraseMatches, findQuietSnap, fixForMissing, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, inspectionPointTimestamps, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseStyleFile, parseZoomChainEvents, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, spectralFluxOnset, suggestSeamFix, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
@@ -9248,6 +9248,43 @@ checkOk(vcNoAudioJson.audio_checked === false && /no audio stream/.test(vcNoAudi
 // CLI --audio matches the MCP result on the same film.
 const vcAudioCli = JSON.parse((await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "verify-cuts", path.join(root, "test/verify-cuts-audio-film.json"), path.join(root, "test/verify-cuts-audio.mp4"), "--audio"])).stdout);
 checkOk(vcAudioCli.audio_checked === true && vcAudioCli.cuts?.[0]?.audio?.verdict === "clean" && vcAudioCli.cuts?.[1]?.audio?.verdict === "suspect", "CLI verify-cuts --audio matches the MCP result (cut 1 clean, cut 2 suspect)", JSON.stringify(vcAudioCli.cuts?.map((c) => c.audio?.verdict)));
+// verify_cuts suggested fix (turn 158, idea: mrpaidsocial
+// layer2-transcript.ts — a suspect seam carries a fix, not just a
+// flag: splice_click -> add_crossfade 25ms; a cut through loud
+// audio -> move_cut_to_silence, with no timestamp invented). Pure
+// helper first, on the same synthetic seams as turn 157.
+const fixClick = suggestSeamFix(seamFlipRes, 2);
+checkOk(fixClick?.action === "add_crossfade" && fixClick?.crossfade_ms === 25 && fixClick?.at_seconds === 2 && /butt-splice click/.test(fixClick?.reason ?? ""), "suggestSeamFix: suspect_word + click -> add_crossfade 25ms at the seam", JSON.stringify(fixClick));
+const fixWord = suggestSeamFix(seamToneRes, 2);
+checkOk(fixWord?.action === "move_cut_to_silence" && fixWord?.at_seconds === 2 && /-9\.0[0-9]/.test(fixWord?.reason ?? "") && !("crossfade_ms" in (fixWord ?? {})), "suggestSeamFix: suspect_word only -> move_cut_to_silence with the measured RMS, no invented timestamp", JSON.stringify(fixWord));
+const fixClean = suggestSeamFix(seamClean, 1);
+checkOk(fixClean === null, "suggestSeamFix: clean seam -> null (no fix to suggest)", JSON.stringify(fixClean));
+// MCP on the same fixtures: the fix rides on each cut's audio
+// object, and the warning names it.
+checkOk(vcAudioJson.cuts[0]?.audio?.suggested_fix === null && vcAudioJson.cuts[1]?.audio?.suggested_fix?.action === "move_cut_to_silence" && vcAudioJson.cuts[1]?.audio?.suggested_fix?.at_seconds === 2 && vcAudioJson.warnings?.some((w) => w.includes("suggested fix: move the cut into the nearest silence")), "verify_cuts --audio: clean cut has no fix, mid-tone cut suggests move_cut_to_silence and the warning names it", JSON.stringify({ c1: vcAudioJson.cuts[0]?.audio?.suggested_fix, c2: vcAudioJson.cuts[1]?.audio?.suggested_fix }));
+checkOk(vcClickJson.cuts[0]?.audio?.suggested_fix?.action === "add_crossfade" && vcClickJson.cuts[0]?.audio?.suggested_fix?.crossfade_ms === 25 && vcClickJson.cuts[0]?.audio?.suggested_fix?.at_seconds === 2 && vcClickJson.warnings?.some((w) => w.includes("suggested fix: add a 25ms crossfade at the seam")), "verify_cuts --audio: click cut suggests add_crossfade 25ms and the warning names it", JSON.stringify(vcClickJson.cuts[0]?.audio?.suggested_fix));
+// verify_cuts --cut-sheet (turn 158, idea: MakeMyClip
+// renderCutSheet): ONE overview image — one row per boundary, two
+// columns (cut-0.1s / cut+0.1s). Pure helper first: 14 boundaries
+// cap at 12 (earliest first), edge cuts clamp into [0, duration-0.05].
+const sheetFake = Array.from({ length: 14 }, (_, i) => ({ index: i + 1, type: "cut", expected_seconds: i + 1, status: "confirmed" }));
+const sheetCapped = cutSheetRows(sheetFake, 20);
+checkOk(sheetCapped.rows.length === 12 && sheetCapped.capped === true && sheetCapped.total_boundaries === 14 && sheetCapped.rows[0]?.out_seconds === 0.9 && sheetCapped.rows[11]?.expected_seconds === 12, "cutSheetRows: 14 boundaries cap at 12 rows (earliest first), capped true, total 14", JSON.stringify({ n: sheetCapped.rows.length, capped: sheetCapped.capped }));
+const sheetEdge = cutSheetRows([{ index: 1, type: "cut", expected_seconds: 0.05, status: "confirmed" }, { index: 2, type: "cut", expected_seconds: 3.98, status: "confirmed" }], 4);
+checkOk(JSON.stringify(sheetEdge.rows.map((r) => [r.out_seconds, r.in_seconds])) === JSON.stringify([[0, 0.15], [3.88, 3.95]]) && sheetEdge.capped === false, "cutSheetRows: edge cuts clamp into [0, duration-0.05] (0.05 -> [0, 0.15], 3.98 -> [3.88, 3.95])", JSON.stringify(sheetEdge.rows));
+// Default stays probe-only: no sheet without cut_sheet:true.
+checkOk(vcJson.cut_sheet === null && vcAudioOffJson.cut_sheet === null, "verify_cuts without cut_sheet writes no sheet (cut_sheet null)", JSON.stringify({ vc: vcJson.cut_sheet, off: vcAudioOffJson.cut_sheet }));
+// MCP on the vc film (3 boundaries: hard cut 1.0s, fade 2.0s, hard
+// cut 3.0s): one 640x1704 sheet, rows at cut∓0.1s, not capped.
+const vcSheetDir = path.join(vcOut, "cut-sheet-test");
+const vcSheetRes = await client.callTool({ name: "verify_cuts", arguments: { manifest_path: vcStage.manifestPath, video: vcFinalPath, cut_sheet: true, cut_sheet_path: path.join(vcSheetDir, "sheet.png") } }, undefined, { timeout: 300000 });
+const vcSheetJson = JSON.parse(vcSheetRes.content[0].text);
+const vcSheetDims = vcSheetJson.cut_sheet?.file ? await probeStreams(vcSheetJson.cut_sheet.file) : null;
+checkOk(vcSheetJson.cut_sheet?.file === path.join(vcSheetDir, "sheet.png") && existsSync(vcSheetJson.cut_sheet.file) && vcSheetJson.cut_sheet?.rows?.length === 3 && vcSheetJson.cut_sheet?.capped === false && vcSheetJson.cut_sheet?.total_boundaries === 3 && JSON.stringify(vcSheetJson.cut_sheet.rows.map((r) => [r.out_seconds, r.in_seconds])) === JSON.stringify([[0.9, 1.1], [1.9, 2.1], [2.9, 3.1]]) && vcSheetDims?.streams?.[0]?.width === 640 && vcSheetDims?.streams?.[0]?.height === 1704, "verify_cuts --cut-sheet writes one 640x1704 overview (3 rows at cut∓0.1s, not capped) to the requested path", JSON.stringify({ file: vcSheetJson.cut_sheet?.file, dims: vcSheetDims?.streams?.[0] }));
+// CLI --cut-sheet writes the default <stem>.cut-sheet.png next to
+// the video.
+const vcCliSheetJson = JSON.parse((await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "verify-cuts", vcStage.manifestPath, vcFinalPath, "--cut-sheet"])).stdout);
+checkOk(vcCliSheetJson.cut_sheet?.file === path.join(vcOut, "final.cut-sheet.png") && existsSync(vcCliSheetJson.cut_sheet.file) && vcCliSheetJson.cut_sheet?.rows?.length === 3, "CLI verify-cuts --cut-sheet writes the default <stem>.cut-sheet.png next to the video", JSON.stringify(vcCliSheetJson.cut_sheet?.file));
 
 // release_checkpoint (turn 145): one QC gate — verify + platform +
 // loudness + clipping + cuts + contact sheet, one JSON verdict.

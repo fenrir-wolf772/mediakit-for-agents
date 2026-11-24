@@ -20535,7 +20535,10 @@ export async function verifyRender({ receipt, rerender = false, outputDir = null
 // `strips: true` it also writes one 4-tile review strip per
 // boundary (frames at cut-0.5/-0.1/+0.1/+0.5s from the delivered
 // video) into `<stem>.cut-strips/` next to the video, or into
-// `stripsDir` when given.
+// `stripsDir` when given. `cutSheet: true` writes instead ONE
+// overview image (`<stem>.cut-sheet.png`, one row per boundary,
+// two columns: cut-0.1s / cut+0.1s, max 12 rows) — the overview to
+// read before opening individual strips.
 const VERIFY_CUTS_TOLERANCE_DEFAULT = 0.25;
 const VERIFY_CUTS_DURATION_TOLERANCE = 0.2;
 const VERIFY_CUTS_DRAFT_HEIGHT = 270;
@@ -20581,12 +20584,33 @@ const VERIFY_CUTS_STRIP_WIDTH = 320;
 // check is for dialogue edits, where cuts belong in silence.
 // Measurement is at the PROMISED cut time (the manifest's), not the
 // measured visual cut — the audio seam exists there whether or not
-// the picture cut was detected.
+// the picture cut was detected. A suspect seam also carries a
+// `suggested_fix` (lượt 158): a fix, not just a flag — see
+// `suggestSeamFix` below.
+// A cut-sheet overview (opt-in `cutSheet: true`, MakeMyClip's
+// `renderCutSheet` idea) writes ONE image for the whole film — one
+// row per boundary, two columns (last frame of the outgoing clip,
+// first frame of the incoming clip) — the overview to read BEFORE
+// opening individual 4-tile strips. Capped at 12 rows.
 const VERIFY_CUTS_AUDIO_WINDOW = 0.06;
 const VERIFY_CUTS_AUDIO_PEAK_DB = -30;
 const VERIFY_CUTS_AUDIO_CLICK_WINDOW = 0.04;
 const VERIFY_CUTS_AUDIO_CLICK_MAX_DIFF = 0.35;
 const VERIFY_CUTS_AUDIO_SAMPLE_RATE = 48000;
+// Suggested fix for a suspect seam (mrpaidsocial's
+// layer2-transcript.ts attaches a fix to each issue instead of only
+// flagging it: their `splice_click` maps to `add_crossfade 25ms` —
+// verified lượt 157, the 25ms is THEIR number, not calibrated on
+// MediaKit footage). A click gets the concrete fix; a cut through
+// loud audio gets the move — but no timestamp is invented for it:
+// the nearest real silence is found with `silence`/`hook` on the
+// source, then the cut is re-placed there. When both flags are set
+// the crossfade wins: it removes the click at this seam, while the
+// warning still names the mid-word risk.
+const VERIFY_CUTS_AUDIO_CROSSFADE_MS = 25;
+const VERIFY_CUTS_SHEET_MAX_ROWS = 12;
+const VERIFY_CUTS_SHEET_OFFSETS = [-0.1, 0.1];
+const VERIFY_CUTS_SHEET_WIDTH = 320;
 
 // Analyze one seam from decoded mono PCM samples (Int16Array).
 // cutIndex is the index of the first sample AFTER the cut. Pure —
@@ -20644,6 +20668,61 @@ export function analyzeSeamSamples(samples, cutIndex, { windowSeconds = VERIFY_C
   };
 }
 
+// One concrete fix for a suspect seam, or null when the seam is
+// clean. Pure — unit-tested without spawning ffmpeg. `seam` is an
+// `analyzeSeamSamples` result ({flags, click_max_diff,
+// click_threshold, left/right_rms_db, peak_threshold_db}).
+export function suggestSeamFix(seam, cutSeconds) {
+  if (!seam || !Array.isArray(seam.flags)) {
+    throw new MediaKitError("suggestSeamFix needs an analyzeSeamSamples result {flags}", "INVALID_ARG");
+  }
+  const cut = num(cutSeconds, "cutSeconds", { min: 0 });
+  if (seam.flags.length === 0) return null;
+  if (seam.flags.includes("click")) {
+    return {
+      action: "add_crossfade",
+      crossfade_ms: VERIFY_CUTS_AUDIO_CROSSFADE_MS,
+      at_seconds: cut,
+      reason: `sample jump ${seam.click_max_diff} at the seam (threshold ${seam.click_threshold}) — a ${VERIFY_CUTS_AUDIO_CROSSFADE_MS}ms crossfade across the seam removes the butt-splice click`,
+    };
+  }
+  if (seam.flags.includes("suspect_word")) {
+    return {
+      action: "move_cut_to_silence",
+      at_seconds: cut,
+      reason: `audio is loud at the seam (RMS left ${seam.left_rms_db ?? "silent"} / right ${seam.right_rms_db ?? "silent"} dBFS, threshold ${seam.peak_threshold_db} dBFS) — the cut may land mid-word; find the nearest silence with silence/hook on the source and re-place the cut there`,
+    };
+  }
+  return null;
+}
+
+// Rows for the cut-sheet overview: one row per boundary (first
+// `maxRows`, earliest first), each with the last frame of the
+// outgoing clip (cut-0.1s) and the first frame of the incoming clip
+// (cut+0.1s), both clamped into [0, duration-0.05]. Pure —
+// unit-tested without spawning ffmpeg. `boundaries` are the
+// `verifyAssembleCuts` cuts ({index, type, expected_seconds,
+// status}); `capped` says the film had more boundaries than the
+// sheet shows.
+export function cutSheetRows(boundaries, duration, { maxRows = VERIFY_CUTS_SHEET_MAX_ROWS } = {}) {
+  if (!Array.isArray(boundaries)) {
+    throw new MediaKitError("cutSheetRows needs a boundaries array", "INVALID_ARG");
+  }
+  const dur = num(duration, "duration", { min: 0 });
+  const max = num(maxRows, "maxRows", { min: 1, max: 64, integer: true });
+  const end = Math.max(0, dur - 0.05);
+  const clamp = (t) => +Math.min(Math.max(t, 0), end).toFixed(3);
+  const rows = boundaries.slice(0, max).map((b) => ({
+    boundary_index: b.index,
+    type: b.type,
+    expected_seconds: b.expected_seconds,
+    status: b.status ?? null,
+    out_seconds: clamp(b.expected_seconds + VERIFY_CUTS_SHEET_OFFSETS[0]),
+    in_seconds: clamp(b.expected_seconds + VERIFY_CUTS_SHEET_OFFSETS[1]),
+  }));
+  return { rows, capped: boundaries.length > max, total_boundaries: boundaries.length };
+}
+
 // Decode one small window around a cut to raw PCM and analyze the
 // seam. Accurate seek (-ss after -i): the window is 0.12s, so the
 // decode cost is bounded by the cut's position in the file, not by
@@ -20665,7 +20744,7 @@ export async function measureCutSeam({ video, cutSeconds, windowSeconds = VERIFY
   return { cut_seconds: cut, window_seconds: win, sample_rate: VERIFY_CUTS_AUDIO_SAMPLE_RATE, samples: samples.length, ...analyzeSeamSamples(samples, cutIndex, { windowSeconds: win }) };
 }
 
-export async function verifyAssembleCuts({ manifestPath, video, tolerance = VERIFY_CUTS_TOLERANCE_DEFAULT, threshold = null, draftHeight = VERIFY_CUTS_DRAFT_HEIGHT, keepDraft = false, strips = false, stripsDir = null, audio = false }) {
+export async function verifyAssembleCuts({ manifestPath, video, tolerance = VERIFY_CUTS_TOLERANCE_DEFAULT, threshold = null, draftHeight = VERIFY_CUTS_DRAFT_HEIGHT, keepDraft = false, strips = false, stripsDir = null, audio = false, cutSheet = false, cutSheetPath = null }) {
   const tol = num(tolerance, "tolerance", { min: 0, max: 5 });
   const dh = num(draftHeight, "draft_height", { min: 16, max: 4320, integer: true });
   const manifestAbs = await requireInput(manifestPath, "manifest");
@@ -20784,11 +20863,15 @@ export async function verifyAssembleCuts({ manifestPath, video, tolerance = VERI
           if (c.type !== "cut") { c.audio = null; continue; }
           const seam = await measureCutSeam({ video: videoAbs, cutSeconds: c.expected_seconds });
           c.audio = seam;
+          c.audio.suggested_fix = suggestSeamFix(seam, c.expected_seconds);
           if (seam.verdict === "suspect") {
             const why = [];
             if (seam.flags.includes("suspect_word")) why.push(`audio is loud on ${seam.left_rms_db !== null && seam.left_rms_db > VERIFY_CUTS_AUDIO_PEAK_DB ? "the left" : "the right"} side (RMS left ${seam.left_rms_db ?? "silent"} dBFS / right ${seam.right_rms_db ?? "silent"} dBFS, threshold ${VERIFY_CUTS_AUDIO_PEAK_DB} dBFS) — the cut may land mid-word`);
             if (seam.flags.includes("click")) why.push(`butt-splice click at the seam (max sample jump ${seam.click_max_diff}, threshold ${VERIFY_CUTS_AUDIO_CLICK_MAX_DIFF})`);
-            warnings.push(`cut ${c.index} at ${c.expected_seconds}s: ${why.join("; ")}`);
+            let warnText = `cut ${c.index} at ${c.expected_seconds}s: ${why.join("; ")}`;
+            if (c.audio.suggested_fix?.action === "add_crossfade") warnText += ` — suggested fix: add a ${c.audio.suggested_fix.crossfade_ms}ms crossfade at the seam`;
+            else if (c.audio.suggested_fix?.action === "move_cut_to_silence") warnText += " — suggested fix: move the cut into the nearest silence";
+            warnings.push(warnText);
           }
         }
       }
@@ -20842,6 +20925,47 @@ export async function verifyAssembleCuts({ manifestPath, video, tolerance = VERI
         await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
       }
     }
+    // Cut-sheet overview (opt-in): ONE image for the whole film —
+    // one row per boundary (max 12, earliest first), two columns
+    // (last frame of the outgoing clip at cut-0.1s, first frame of
+    // the incoming clip at cut+0.1s), each tile labelled with its
+    // cut + offset + timestamp. Read it BEFORE opening individual
+    // strips: it answers "do all the seams look right" in one
+    // glance. A film with no boundaries gets file: null +
+    // skipped_reason, not a failure; a film with more than 12
+    // boundaries keeps the first 12 and reports capped: true.
+    let cutSheetResult = null;
+    let cutSheetPathAbs = null;
+    if (cutSheet === true) {
+      if (duration === null || !Number.isFinite(duration) || duration <= 0) {
+        throw new MediaKitError("verify_cuts --cut-sheet needs a readable video duration", "PROBE_FAILED");
+      }
+      const sheet = cutSheetRows(cuts, duration);
+      if (sheet.rows.length === 0) {
+        cutSheetResult = { file: null, rows: [], capped: false, total_boundaries: 0, skipped_reason: "no boundaries — the film has a single shot" };
+      } else {
+        const stem = path.parse(videoAbs).name;
+        cutSheetPathAbs = await prepareOutput(cutSheetPath ?? path.join(path.dirname(videoAbs), `${stem}.cut-sheet.png`), [videoAbs]);
+        const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-verify-cut-sheet-"));
+        try {
+          let i = 0;
+          for (const row of sheet.rows) {
+            for (const [side, t] of [["out", row.out_seconds], ["in", row.in_seconds]]) {
+              i++;
+              const tilePath = path.join(tmpDir, `tile-${String(i).padStart(3, "0")}.png`);
+              const labelFile = path.join(tmpDir, `label-${i}.txt`);
+              const off = side === "out" ? VERIFY_CUTS_SHEET_OFFSETS[0] : VERIFY_CUTS_SHEET_OFFSETS[1];
+              await writeFile(labelFile, `cut ${row.boundary_index} ${off > 0 ? "+" : ""}${off}s  ${prettyTimestamp(t)}`, "utf8");
+              await captureFrameAt(videoAbs, t, tilePath, { width: VERIFY_CUTS_SHEET_WIDTH, labelFile });
+            }
+          }
+          await run(FFMPEG, ["-y", "-framerate", "1", "-i", path.join(tmpDir, "tile-%03d.png"), "-vf", `tile=2x${sheet.rows.length}`, "-frames:v", "1", "-q:v", "2", cutSheetPathAbs]);
+          cutSheetResult = { file: cutSheetPathAbs, rows: sheet.rows, capped: sheet.capped, total_boundaries: sheet.total_boundaries };
+        } finally {
+          await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+        }
+      }
+    }
     return {
       operation: "verify_cuts",
       manifest: manifestAbs,
@@ -20856,6 +20980,7 @@ export async function verifyAssembleCuts({ manifestPath, video, tolerance = VERI
       draft: draftMade && keepDraft ? draftPath : null,
       strips: stripsResult,
       strips_dir: stripsDirAbs,
+      cut_sheet: cutSheetResult,
       audio_checked: audioChecked,
       ...(audioNote ? { audio_note: audioNote } : {}),
       cuts,

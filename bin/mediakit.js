@@ -1008,8 +1008,8 @@ const COMMANDS = {
     ],
   },
   "verify-cuts": {
-    usage: "mediakit verify-cuts <film.json> <video.mp4> [--tolerance 0.25] [--threshold 0.05] [--draft-height 270] [--keep-draft] [--strips] [--strips-dir <dir>] [--audio]",
-    desc: "Verify an assemble render cuts where its film manifest promises: downscale the video to a 270p draft, measure the real hard cuts with the content scene detector, and compare them against the manifest's shot boundaries — a hard cut must land within --tolerance (default 0.25s) of its promised time, a transition must show a real visual change across its blend window (a fade fires no scene cut, so the frames just outside the window are diffed instead), and any extra cut is reported as unexpected. Duration is checked against the voice timeline (±0.2s). Probe-only: writes nothing except a temp draft, removed afterwards unless --keep-draft. With --strips it also writes one 4-tile review strip per boundary (frames at cut-0.5/-0.1/+0.1/+0.5s from the delivered video) into <video-stem>.cut-strips/ next to the video, or into --strips-dir when given. With --audio it also measures the SOUND at every hard cut (RMS energy 0.06s each side, above -30 dBFS flags suspect_word; largest sample jump ±40ms around the seam, above 0.35 flags click) — either flag warns and fails the check; opt-in because a canvas_scene film mixes one continuous voice across every visual cut by design, so this is for dialogue edits, where cuts belong in silence.",
+    usage: "mediakit verify-cuts <film.json> <video.mp4> [--tolerance 0.25] [--threshold 0.05] [--draft-height 270] [--keep-draft] [--strips] [--strips-dir <dir>] [--audio] [--cut-sheet] [--cut-sheet-path <path>]",
+    desc: "Verify an assemble render cuts where its film manifest promises: downscale the video to a 270p draft, measure the real hard cuts with the content scene detector, and compare them against the manifest's shot boundaries — a hard cut must land within --tolerance (default 0.25s) of its promised time, a transition must show a real visual change across its blend window (a fade fires no scene cut, so the frames just outside the window are diffed instead), and any extra cut is reported as unexpected. Duration is checked against the voice timeline (±0.2s). Probe-only: writes nothing except a temp draft, removed afterwards unless --keep-draft. With --strips it also writes one 4-tile review strip per boundary (frames at cut-0.5/-0.1/+0.1/+0.5s from the delivered video) into <video-stem>.cut-strips/ next to the video, or into --strips-dir when given. With --cut-sheet it writes ONE overview image (<video-stem>.cut-sheet.png, or --cut-sheet-path when given): one row per boundary (max 12), two columns — the last frame of the outgoing clip (cut-0.1s) and the first frame of the incoming clip (cut+0.1s) — read it before opening individual strips. With --audio it also measures the SOUND at every hard cut (RMS energy 0.06s each side, above -30 dBFS flags suspect_word; largest sample jump ±40ms around the seam, above 0.35 flags click) — either flag warns and fails the check, and each suspect seam carries a suggested_fix (a click gets a 25ms crossfade, a cut through loud audio gets move_cut_to_silence); opt-in because a canvas_scene film mixes one continuous voice across every visual cut by design, so this is for dialogue edits, where cuts belong in silence.",
     args: [{ name: "manifest", required: true }, { name: "video", required: true }],
     options: [
       ["--tolerance", "How far a measured cut may drift from its promised time, in seconds (default 0.25)"],
@@ -1019,6 +1019,8 @@ const COMMANDS = {
       ["--strips", "Also write one 4-tile review strip per boundary (frames at cut-0.5/-0.1/+0.1/+0.5s from the delivered video)"],
       ["--strips-dir", "Directory for the review strips (default <video-stem>.cut-strips/ next to the video; ignored unless --strips)"],
       ["--audio", "Also measure the SOUND at every hard cut: peak 0.06s each side (above -30 dBFS flags suspect_word) and the largest sample jump ±40ms around the seam (above 0.35 flags click) — for dialogue edits, where cuts belong in silence"],
+      ["--cut-sheet", "Also write ONE overview image (<video-stem>.cut-sheet.png): one row per boundary (max 12), two columns — the last frame of the outgoing clip (cut-0.1s) and the first frame of the incoming clip (cut+0.1s)"],
+      ["--cut-sheet-path", "Path for the cut-sheet overview image (default <video-stem>.cut-sheet.png next to the video; ignored unless --cut-sheet)"],
     ],
   },
   diagnose: {
@@ -2385,6 +2387,8 @@ async function main() {
           strips: opts.strips === true,
           stripsDir: opts.strips_dir ?? null,
           audio: opts.audio === true,
+          cutSheet: opts.cut_sheet === true,
+          cutSheetPath: opts.cut_sheet_path ?? null,
         });
         break;
       }

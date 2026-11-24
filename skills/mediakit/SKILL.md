@@ -2030,6 +2030,26 @@ design); a video with no audio stream skips the check with a
 note. The 0.35 click threshold comes from
 mrpaidsocial/video-editor-agent and is not yet calibrated on
 MediaKit footage — treat a `click` flag as "listen to this seam".
+A suspect seam also carries a `suggested_fix`, not just a flag:
+a click gets `add_crossfade` 25ms at the seam (their
+`splice_click` fix from the same file), a cut through loud audio
+gets `move_cut_to_silence` — no timestamp is invented for the
+move; find the nearest silence with `silence`/`hook` on the
+source and re-place the cut there. When both flags are set the
+crossfade wins (it removes the click; the warning still names
+the mid-word risk).
+
+`verify_cuts --cut-sheet` is the overview to read before
+opening individual 4-tile strips: one image for the whole film
+(`<video-stem>.cut-sheet.png`, or `--cut-sheet-path` when
+given), one row per boundary (max 12, earliest first — a film
+with more boundaries keeps the first 12 and reports
+`capped: true`), two columns — the last frame of the outgoing
+clip (cut−0.1s) and the first frame of the incoming clip
+(cut+0.1s), each tile labelled with its cut + offset +
+timestamp. A single-shot film has no boundaries, so the sheet
+reports `file: null` + `skipped_reason` instead of failing.
+Off by default; the verify stays probe-only without it.
 
 ### 58h. Browse the catalog before you dump it — progressive discovery
 
