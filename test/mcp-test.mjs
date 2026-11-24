@@ -15,7 +15,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
-import { analyzeSeamSamples, applyContentBaseline, averageHash, buildZoomChains, compareDeterminismRuns, countClippedRuns, cutSheetRows, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, endInPause, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseSpeechLevels, parseStyleFile, parseTemplateCatalogMeta, parseTemplateSlotMeta, parseZoomChainEvents, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, snapKeepSegmentsToPauses, spectralFluxOnset, startInPause, suggestSeamFix, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
+import { analyzeSeamSamples, applyContentBaseline, averageHash, buildZoomChains, compareDeterminismRuns, countClippedRuns, cutSheetRows, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, endInPause, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseSpeechLevels, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, snapKeepSegmentsToPauses, spectralFluxOnset, startInPause, suggestSeamFix, trackBeatsDP, validateOtioTimeline, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
@@ -227,10 +227,12 @@ checkOk(descBad?.code === "INVALID_ARG" && /list_operations/.test(descBad?.messa
 
 // list_templates (lượt 163, idea: mcp-video-editor's shot library):
 // the scene-template catalog as browsable cards — pure first.
-const catAll = await listSceneTemplates({});
-checkOk(catAll.total_templates === 5 && catAll.matching === 5 && catAll.categories.map((c) => `${c.name}:${c.count}`).join(" ") === "title:1 motion:1 card:2 ambient:1" && catAll.templates.every((t) => typeof t.motion_type === "string" && t.motion_type.length > 0 && t.duration_seconds.min >= 2 && t.duration_seconds.max >= t.duration_seconds.min && Array.isArray(t.tags) && t.tags.length > 0 && typeof t.face_safe === "boolean" && ["hook", "core", "payoff", "any"].includes(t.timing_hint)), "listSceneTemplates lists all 5 templates with category counts 1/1/2/1 and a motion_type + duration range + tags + face_safe + timing_hint on every card", JSON.stringify(catAll.categories));
-const catCard = await listSceneTemplates({ category: "card", timingHint: "hook" });
-checkOk(catCard.matching === 2 && catCard.templates.map((t) => t.id).join(",") === "slide-in,spring-in" && catCard.filters.category === "card" && catCard.filters.timing_hint === "hook", "listSceneTemplates category=card + timing_hint=hook narrows to slide-in + spring-in", JSON.stringify(catCard.templates.map((t) => t.id)));
+// Readiness (lượt 164): the default shelf hides preview templates,
+// so the full-catalog shape is checked with readiness all.
+const catAll = await listSceneTemplates({ readiness: "all" });
+checkOk(catAll.total_templates === 5 && catAll.matching === 5 && catAll.categories.map((c) => `${c.name}:${c.count}`).join(" ") === "title:1 motion:1 card:2 ambient:1" && catAll.templates.every((t) => typeof t.motion_type === "string" && t.motion_type.length > 0 && t.duration_seconds.min >= 2 && t.duration_seconds.max >= t.duration_seconds.min && Array.isArray(t.tags) && t.tags.length > 0 && typeof t.face_safe === "boolean" && ["hook", "core", "payoff", "any"].includes(t.timing_hint) && ["draft", "preview", "ready"].includes(t.readiness)), "listSceneTemplates readiness=all lists all 5 templates with category counts 1/1/2/1 and a motion_type + duration range + tags + face_safe + timing_hint + readiness on every card", JSON.stringify(catAll.categories));
+const catCard = await listSceneTemplates({ category: "card", timingHint: "hook", readiness: "all" });
+checkOk(catCard.matching === 2 && catCard.templates.map((t) => t.id).join(",") === "slide-in,spring-in" && catCard.filters.category === "card" && catCard.filters.timing_hint === "hook" && catCard.filters.readiness === "all", "listSceneTemplates category=card + timing_hint=hook + readiness=all narrows to slide-in + spring-in", JSON.stringify(catCard.templates.map((t) => t.id)));
 const catFace = await listSceneTemplates({ faceSafe: true });
 checkOk(catFace.matching === 1 && catFace.templates[0].id === "rings", "listSceneTemplates face_safe=true returns only rings", JSON.stringify(catFace.templates.map((t) => t.id)));
 const catTag = await listSceneTemplates({ tag: "physics" });
@@ -239,7 +241,7 @@ const catNone = await listSceneTemplates({ tag: "no-such-tag" });
 checkOk(catNone.matching === 0 && catNone.templates.length === 0, "listSceneTemplates with an unknown tag matches nothing (tags are open vocabulary, not an allowlist)", JSON.stringify(catNone));
 const catRings = await listSceneTemplates({ template: "rings" });
 checkOk(catRings.template?.id === "rings" && catRings.template?.motion_type === "expanding rings pulse" && catRings.template?.example_shot?.kind === "canvas_scene" && catRings.template?.example_shot?.template === "rings" && catRings.template?.example_shot?.duration === 5 && catRings.template?.example_shot?.params?.count === 4 && catRings.template?.example_shot?.params?.speed === 0.5 && catRings.template?.params?.speed?.default === 0.5 && typeof catRings.template?.prompt === "string" && /text-free/.test(catRings.template.prompt), "listSceneTemplates template=rings returns the detail + a ready-to-paste example_shot (duration 5 = midpoint of 2-8, params = defaults) + a directing prompt", JSON.stringify(catRings.template?.example_shot));
-for (const [badArgs, why] of [[{ category: "nope" }, "unknown category"], [{ timingHint: "intro" }, "unknown timing hint"], [{ faceSafe: "yes" }, "non-boolean face_safe"], [{ tag: "" }, "empty tag"], [{ template: "nope" }, "unknown template id"]]) {
+for (const [badArgs, why] of [[{ category: "nope" }, "unknown category"], [{ timingHint: "intro" }, "unknown timing hint"], [{ faceSafe: "yes" }, "non-boolean face_safe"], [{ tag: "" }, "empty tag"], [{ template: "nope" }, "unknown template id"], [{ readiness: "nope" }, "unknown readiness"]]) {
   let threw = null;
   try { await listSceneTemplates(badArgs); } catch (e) { threw = e; }
   checkOk(threw?.code === "INVALID_ARG" && typeof threw?.message === "string" && threw.message.length > 0, `listSceneTemplates rejects ${why} with INVALID_ARG`, threw?.message ?? "no throw");
@@ -3178,19 +3180,43 @@ const descOpBadRes = await client.callTool({ name: "describe_operation", argumen
 const descOpBadJson = JSON.parse(descOpBadRes.content[0].text);
 checkOk(descOpBadRes.isError === true && descOpBadJson.code === "INVALID_ARG" && /list_operations/.test(descOpBadJson.error ?? ""), "MCP describe_operation of an unknown name fails INVALID_ARG with a browse hint", JSON.stringify(descOpBadJson));
 
-// list_templates over MCP + CLI (lượt 163).
-const listTplRes = await client.callTool({ name: "list_templates", arguments: { category: "card" } });
+// list_templates over MCP + CLI (lượt 163). Readiness (lượt 164,
+// idea: 01sy/remotion-template-library's readiness levels): the
+// shelf shows only ready templates by default — preview ones
+// (title-card, slide-in) need readiness all/preview to appear.
+const listTplRes = await client.callTool({ name: "list_templates", arguments: { category: "card", readiness: "all" } });
 const listTplJson = JSON.parse(listTplRes.content[0].text);
-checkOk(listTplJson.total_templates === 5 && listTplJson.matching === 2 && listTplJson.templates?.map((t) => t.id).join(",") === "slide-in,spring-in" && listTplJson.categories?.find((c) => c.name === "card")?.count === 2, "MCP list_templates category=card returns the 2 card templates", JSON.stringify(listTplJson.templates?.map((t) => t.id)));
+checkOk(listTplJson.total_templates === 5 && listTplJson.matching === 2 && listTplJson.templates?.map((t) => t.id).join(",") === "slide-in,spring-in" && listTplJson.categories?.find((c) => c.name === "card")?.count === 2, "MCP list_templates category=card + readiness=all returns the 2 card templates", JSON.stringify(listTplJson.templates?.map((t) => t.id)));
+const listTplDefaultRes = await client.callTool({ name: "list_templates", arguments: {} });
+const listTplDefaultJson = JSON.parse(listTplDefaultRes.content[0].text);
+checkOk(listTplDefaultJson.total_templates === 5 && listTplDefaultJson.matching === 3 && listTplDefaultJson.templates?.map((t) => t.id).join(",") === "bounce,rings,spring-in" && listTplDefaultJson.templates?.every((t) => t.readiness === "ready") && listTplDefaultJson.readiness_counts?.find((r) => r.level === "ready")?.count === 3 && listTplDefaultJson.readiness_counts?.find((r) => r.level === "preview")?.count === 2 && listTplDefaultJson.readiness_counts?.find((r) => r.level === "draft")?.count === 0 && listTplDefaultJson.filters?.readiness === "ready", "MCP list_templates with no args hides the 2 preview templates (3 ready shown, counts 3/2/0, filter echoes ready)", JSON.stringify({ matching: listTplDefaultJson.matching, counts: listTplDefaultJson.readiness_counts }));
+const listTplPreviewRes = await client.callTool({ name: "list_templates", arguments: { readiness: "preview" } });
+const listTplPreviewJson = JSON.parse(listTplPreviewRes.content[0].text);
+checkOk(listTplPreviewJson.matching === 2 && listTplPreviewJson.templates?.map((t) => t.id).join(",") === "slide-in,title-card" && listTplPreviewJson.filters?.readiness === "preview", "MCP list_templates readiness=preview returns slide-in + title-card", JSON.stringify(listTplPreviewJson.templates?.map((t) => t.id)));
+const listTplDraftRes = await client.callTool({ name: "list_templates", arguments: { readiness: "draft" } });
+const listTplDraftJson = JSON.parse(listTplDraftRes.content[0].text);
+checkOk(listTplDraftJson.matching === 0 && listTplDraftJson.templates?.length === 0 && listTplDraftJson.total_templates === 5, "MCP list_templates readiness=draft returns 0 (no draft template yet, catalog still 5)", JSON.stringify(listTplDraftJson.matching));
+const listTplAllRes = await client.callTool({ name: "list_templates", arguments: { readiness: "all" } });
+const listTplAllJson = JSON.parse(listTplAllRes.content[0].text);
+checkOk(listTplAllJson.matching === 5 && listTplAllJson.templates?.map((t) => t.id).join(",") === "bounce,rings,slide-in,spring-in,title-card", "MCP list_templates readiness=all returns all 5 templates", JSON.stringify(listTplAllJson.templates?.map((t) => t.id)));
+const listTplBadReadyRes = await client.callTool({ name: "list_templates", arguments: { readiness: "nope" } });
+const listTplBadReadyJson = JSON.parse(listTplBadReadyRes.content[0].text);
+checkOk(listTplBadReadyRes.isError === true && listTplBadReadyJson.code === "INVALID_ARG" && /draft, preview, ready/.test(listTplBadReadyJson.error ?? ""), "MCP list_templates with an unknown readiness fails INVALID_ARG + the level list", JSON.stringify(listTplBadReadyJson));
 const listTplOneRes = await client.callTool({ name: "list_templates", arguments: { template: "bounce" } });
 const listTplOneJson = JSON.parse(listTplOneRes.content[0].text);
-checkOk(listTplOneJson.template?.id === "bounce" && listTplOneJson.template?.example_shot?.kind === "canvas_scene" && listTplOneJson.template?.example_shot?.duration === 4 && listTplOneJson.template?.example_shot?.params?.bounces === 3 && listTplOneJson.template?.params?.apex?.default === 0.12 && typeof listTplOneJson.template?.prompt === "string" && /floor line at 0.62H/.test(listTplOneJson.template.prompt), "MCP list_templates template=bounce returns the detail + example shot (duration 4 = midpoint of 2-6, bounces 3, apex 0.12) + directing prompt", JSON.stringify(listTplOneJson.template?.example_shot));
+checkOk(listTplOneJson.template?.id === "bounce" && listTplOneJson.template?.readiness === "ready" && listTplOneJson.template?.example_shot?.kind === "canvas_scene" && listTplOneJson.template?.example_shot?.duration === 4 && listTplOneJson.template?.example_shot?.params?.bounces === 3 && listTplOneJson.template?.params?.apex?.default === 0.12 && typeof listTplOneJson.template?.prompt === "string" && /floor line at 0.62H/.test(listTplOneJson.template.prompt), "MCP list_templates template=bounce returns the detail + example shot (duration 4 = midpoint of 2-6, bounces 3, apex 0.12) + directing prompt + readiness ready", JSON.stringify(listTplOneJson.template?.example_shot));
+const listTplTitleRes = await client.callTool({ name: "list_templates", arguments: { template: "title-card" } });
+const listTplTitleJson = JSON.parse(listTplTitleRes.content[0].text);
+checkOk(listTplTitleJson.template?.id === "title-card" && listTplTitleJson.template?.readiness === "preview", "MCP list_templates template=title-card detail carries readiness preview", JSON.stringify(listTplTitleJson.template?.readiness));
 const listTplBadRes = await client.callTool({ name: "list_templates", arguments: { category: "nope" } });
 const listTplBadJson = JSON.parse(listTplBadRes.content[0].text);
 checkOk(listTplBadRes.isError === true && listTplBadJson.code === "INVALID_ARG" && /title, motion, card, ambient/.test(listTplBadJson.error ?? ""), "MCP list_templates with an unknown category fails INVALID_ARG + the category list", JSON.stringify(listTplBadJson));
 const listTplCli = await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "list-templates", "--face-safe"]);
 const listTplCliJson = JSON.parse(listTplCli.stdout);
 checkOk(listTplCliJson.matching === 1 && listTplCliJson.templates?.[0]?.id === "rings", "CLI list-templates --face-safe returns only rings", JSON.stringify(listTplCliJson.templates?.map((t) => t.id)));
+const listTplCliPreview = await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "list-templates", "--readiness", "preview"]);
+const listTplCliPreviewJson = JSON.parse(listTplCliPreview.stdout);
+checkOk(listTplCliPreviewJson.matching === 2 && listTplCliPreviewJson.templates?.map((t) => t.id).join(",") === "slide-in,title-card", "CLI list-templates --readiness preview returns slide-in + title-card", JSON.stringify(listTplCliPreviewJson.templates?.map((t) => t.id)));
 
 const overlayRes = await client.callTool({
   name: "overlay",
@@ -9715,7 +9741,7 @@ diagBounceDoc.shots[0].text = [{ text: "BOUNCE TITLE", position: "top" }];
 await writeFile(diagBounceStage.manifestPath, JSON.stringify(diagBounceDoc), "utf8");
 const diagBounceRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagBounceStage.manifestPath } });
 const diagBounceJson = JSON.parse(diagBounceRes.content[0].text);
-checkOk(diagBounceJson.verdict === "warn" && diagBounceJson.warnings === 1 && diagBounceJson.checks?.some((c) => c.id === "text_layer" && c.severity === "warn" && /bounce apex 0.12 reaches 0.075H/.test(c.message) && /ends 0.127H/.test(c.message)), "diagnose warns when the default bounce apex reaches into a top text band (0.075H vs band ends 0.127H)", JSON.stringify(diagBounceJson.checks?.filter((c) => c.id === "text_layer")));
+checkOk(diagBounceJson.verdict === "warn" && diagBounceJson.warnings === 2 && diagBounceJson.checks?.some((c) => c.id === "text_layer" && c.severity === "warn" && /bounce apex 0.12 reaches 0.075H/.test(c.message) && /ends 0.127H/.test(c.message)) && diagBounceJson.checks?.some((c) => c.id === "template_readiness" && c.severity === "warn" && /title-card" is preview/.test(c.message)), "diagnose warns when the default bounce apex reaches into a top text band (0.075H vs band ends 0.127H) — and the film's preview title-card shot adds the second warning", JSON.stringify(diagBounceJson.checks?.filter((c) => c.id === "text_layer" || c.id === "template_readiness")));
 const diagBounceApexStage = await stageAssembleManifest("assemble-template.json");
 const diagBounceApexDoc = JSON.parse(await readFile(diagBounceApexStage.manifestPath, "utf8"));
 diagBounceApexDoc.shots[0].text = [{ text: "BOUNCE TITLE", position: "top" }];
@@ -9723,7 +9749,7 @@ diagBounceApexDoc.shots[0].params.apex = 0.35;
 await writeFile(diagBounceApexStage.manifestPath, JSON.stringify(diagBounceApexDoc), "utf8");
 const diagBounceApexRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagBounceApexStage.manifestPath } });
 const diagBounceApexJson = JSON.parse(diagBounceApexRes.content[0].text);
-checkOk(diagBounceApexJson.verdict === "pass" && diagBounceApexJson.warnings === 0 && !diagBounceApexJson.checks?.some((c) => c.id === "text_layer" && c.severity === "warn"), "diagnose passes the same film with bounce apex 0.35 (ball clears the top text band)", JSON.stringify({ verdict: diagBounceApexJson.verdict, warnings: diagBounceApexJson.warnings }));
+checkOk(diagBounceApexJson.verdict === "warn" && diagBounceApexJson.warnings === 1 && !diagBounceApexJson.checks?.some((c) => c.id === "text_layer" && c.severity === "warn") && diagBounceApexJson.checks?.some((c) => c.id === "template_readiness" && c.severity === "warn" && /title-card" is preview/.test(c.message)), "diagnose clears the apex warning with bounce apex 0.35 (ball clears the top text band) — the only warning left is the preview title-card template", JSON.stringify({ verdict: diagBounceApexJson.verdict, warnings: diagBounceApexJson.warnings }));
 // Template fit in diagnose (lượt 162, idea: mcp-video-editor's
 // effects catalog): a hook-timed card on a payoff role, a core-timed
 // beat as the hook, a non-face-safe template under a center text
@@ -9743,7 +9769,27 @@ checkOk(diagFitHookJson.verdict === "warn" && diagFitHookJson.warnings === 1 && 
 const diagFitPassStage = await stageAssembleManifest("assemble-template-fit-pass.json");
 const diagFitPassRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagFitPassStage.manifestPath } });
 const diagFitPassJson = JSON.parse(diagFitPassRes.content[0].text);
-checkOk(diagFitPassJson.verdict === "pass" && diagFitPassJson.warnings === 0 && diagFitPassJson.checks?.some((c) => c.id === "template_fit" && c.severity === "pass" && /s1:title-card, s2:bounce, s3:rings/.test(c.message)), "diagnose passes a film whose templates fit their slots (title-card hook, bounce core, rings + top text)", JSON.stringify({ verdict: diagFitPassJson.verdict, checks: diagFitPassJson.checks?.filter((c) => c.id === "template_fit") }));
+checkOk(diagFitPassJson.verdict === "pass" && diagFitPassJson.warnings === 0 && diagFitPassJson.checks?.some((c) => c.id === "template_fit" && c.severity === "pass" && /s1:spring-in, s2:bounce, s3:rings/.test(c.message)) && diagFitPassJson.checks?.some((c) => c.id === "template_readiness" && c.severity === "pass" && /templates are ready \(s1:spring-in, s2:bounce, s3:rings\)/.test(c.message)), "diagnose passes a film whose templates fit their slots (spring-in hook, bounce core, rings + top text) and are all ready", JSON.stringify({ verdict: diagFitPassJson.verdict, checks: diagFitPassJson.checks?.filter((c) => c.id === "template_fit" || c.id === "template_readiness") }));
+// Template readiness in diagnose (lượt 164, idea: 01sy/
+// remotion-template-library's readiness levels): a film leaning
+// on a preview template warns once — the template renders, but
+// no shipped film has verified its cuts yet. The fixture has no
+// roles and no center text, so template_fit passes and only
+// template_readiness differs.
+const diagReadyStage = await stageAssembleManifest("assemble-template-readiness.json");
+const diagReadyRes = await client.callTool({ name: "diagnose", arguments: { manifest_path: diagReadyStage.manifestPath } });
+const diagReadyJson = JSON.parse(diagReadyRes.content[0].text);
+checkOk(diagReadyJson.verdict === "warn" && diagReadyJson.warnings === 1 && diagReadyJson.checks?.some((c) => c.id === "template_readiness" && c.severity === "warn" && /s1 template "title-card" is preview/.test(c.message) && /check the cut before shipping/.test(c.message)) && diagReadyJson.checks?.some((c) => c.id === "template_fit" && c.severity === "pass"), "diagnose warns once on template_readiness for the preview title-card shot (bounce is ready, template_fit passes)", JSON.stringify(diagReadyJson.checks?.filter((c) => c.id === "template_fit" || c.id === "template_readiness")));
+// The readiness parser is pure: all three levels pass through,
+// anything else (a typo, a missing field, a non-string) fails
+// PRESET_LIBRARY_INVALID — a bad registry fails loudly at load
+// instead of shipping a template with an unknown readiness.
+checkOk(parseTemplateReadiness({ readiness: "draft" }, "test").readiness === "draft" && parseTemplateReadiness({ readiness: "preview" }, "test").readiness === "preview" && parseTemplateReadiness({ readiness: "ready" }, "test").readiness === "ready", "parseTemplateReadiness passes all three levels through");
+for (const bad of [{ readiness: "nope" }, {}, { readiness: 1 }, { readiness: null }]) {
+  let threw = null;
+  try { parseTemplateReadiness(bad, "test"); } catch (e) { threw = e; }
+  checkOk(threw !== null && threw.code === "PRESET_LIBRARY_INVALID" && /readiness must be one of draft, preview, ready/.test(threw.message ?? ""), `parseTemplateReadiness rejects ${JSON.stringify(bad)} with PRESET_LIBRARY_INVALID`, threw?.message ?? "no throw");
+}
 // Style pace in diagnose (lượt 133, idea: Takes check_edit): the
 // 20s style fixtures are 4 canvas shots (no source files, so no
 // geometry/motion checks fire) — only the style_pace checks differ.

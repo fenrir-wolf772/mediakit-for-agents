@@ -1,0 +1,1 @@
+{"version": 1, "preset": "vertical", "title": "Template readiness fixture", "voice": {"path": "canvas-voice.mp3", "lead": 0.5, "tail": 0.5}, "shots": [{"id": "s1", "kind": "canvas_scene", "template": "title-card", "duration": 2.0, "params": {"text": "PREVIEW"}}, {"id": "s2", "kind": "canvas_scene", "template": "bounce", "duration": 2.0}]}

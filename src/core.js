@@ -18069,6 +18069,26 @@ export const SCENE_TEMPLATE_IDS = ["title-card", "bounce", "slide-in", "spring-i
 // opening card), core (a mid-film energy beat), payoff, or any.
 export const SCENE_TEMPLATE_TIMING_HINTS = ["hook", "core", "payoff", "any"];
 
+// Readiness levels for a scene template (idea: 01sy/
+// remotion-template-library's 3-level assets — demo /
+// preview-ready / ready — lượt 163). MediaKit's levels are
+// grounded in render evidence, not in a preview file: `ready`
+// means a shipped report film used the template and its cuts
+// were confirmed (verify_cuts); `preview` means it renders
+// and has shipped in a film, but no cut has been verified
+// end-to-end yet; `draft` means it has never been rendered in
+// a shipped film. The catalog hides non-ready templates by
+// default, and diagnose warns when a film leans on one —
+// a director should know before the render, not after.
+export const SCENE_TEMPLATE_READINESS_LEVELS = ["draft", "preview", "ready"];
+
+export function parseTemplateReadiness(t, where) {
+  if (typeof t?.readiness !== "string" || !SCENE_TEMPLATE_READINESS_LEVELS.includes(t.readiness)) {
+    throw new MediaKitError(`${where} readiness must be one of ${SCENE_TEMPLATE_READINESS_LEVELS.join(", ")}, got: ${JSON.stringify(t?.readiness)}`, "PRESET_LIBRARY_INVALID");
+  }
+  return { readiness: t.readiness };
+}
+
 // Catalog categories for the scene-template library (idea:
 // AISEO-VirtualabDigital/mcp-video-editor's shot library, src/data/
 // shots.ts — 10 categories + shot cards with motionType /
@@ -18200,7 +18220,7 @@ export async function getSceneTemplates() {
       }
       params[name] = param;
     }
-    byId[t.id] = { id: t.id, name: t.name ?? t.id, description: t.description ?? "", file: fileAbs, params, ...parseTemplateSlotMeta(t, `assemble scene template library: template "${t.id}"`), ...parseTemplateCatalogMeta(t, `assemble scene template library: template "${t.id}"`) };
+    byId[t.id] = { id: t.id, name: t.name ?? t.id, description: t.description ?? "", file: fileAbs, params, ...parseTemplateSlotMeta(t, `assemble scene template library: template "${t.id}"`), ...parseTemplateCatalogMeta(t, `assemble scene template library: template "${t.id}"`), ...parseTemplateReadiness(t, `assemble scene template library: template "${t.id}"`) };
   }
   const ids = Object.keys(byId).sort();
   if (JSON.stringify(ids) !== JSON.stringify([...SCENE_TEMPLATE_IDS].sort())) {
@@ -18244,11 +18264,12 @@ function sceneTemplateCard(t) {
     tags: [...t.tags],
     face_safe: t.faceSafe,
     timing_hint: t.timingHint,
+    readiness: t.readiness,
     description: t.description,
   };
 }
 
-export async function listSceneTemplates({ category = null, faceSafe = null, timingHint = null, tag = null, template = null } = {}) {
+export async function listSceneTemplates({ category = null, faceSafe = null, timingHint = null, tag = null, template = null, readiness = null } = {}) {
   if (template !== null && template !== undefined) {
     const found = await resolveSceneTemplate(template);
     const mid = Math.round(((found.durationSeconds.min + found.durationSeconds.max) / 2) * 10) / 10;
@@ -18280,20 +18301,34 @@ export async function listSceneTemplates({ category = null, faceSafe = null, tim
   if (tag !== null && tag !== undefined && (typeof tag !== "string" || !tag.trim())) {
     throw new MediaKitError(`tag must be a non-empty string, got: ${JSON.stringify(tag)}`, "INVALID_ARG");
   }
+  // Readiness (lượt 164): the shelf shows only `ready` templates
+  // by default — a director browsing for a shot should not have
+  // to guess which ones are proven. `all` lifts the filter;
+  // an explicit level shows just that level. An unknown level
+  // fails loudly, like an unknown category: a typo that silently
+  // returned an empty shelf would look like "no template fits".
+  const effectiveReadiness = readiness ?? "ready";
+  if (effectiveReadiness !== "all" && !SCENE_TEMPLATE_READINESS_LEVELS.includes(effectiveReadiness)) {
+    throw new MediaKitError(`unknown template readiness "${readiness}" (levels: ${SCENE_TEMPLATE_READINESS_LEVELS.join(", ")} or "all")`, "INVALID_ARG");
+  }
   const templates = await getSceneTemplates();
   const all = Object.values(templates).sort((a, b) => a.id.localeCompare(b.id));
   const matching = all.filter((t) =>
     (category == null || t.category === category) &&
     (faceSafe == null || t.faceSafe === faceSafe) &&
     (timingHint == null || t.timingHint === timingHint) &&
-    (tag == null || t.tags.includes(tag)));
+    (tag == null || t.tags.includes(tag)) &&
+    (effectiveReadiness === "all" || t.readiness === effectiveReadiness));
   return {
     total_templates: all.length,
     matching: matching.length,
     categories: Object.entries(SCENE_TEMPLATE_CATEGORIES).map(([name, description]) => ({
       name, description, count: all.filter((t) => t.category === name).length,
     })),
-    filters: { category: category ?? null, face_safe: faceSafe ?? null, timing_hint: timingHint ?? null, tag: tag ?? null },
+    readiness_counts: SCENE_TEMPLATE_READINESS_LEVELS.map((level) => ({
+      level, count: all.filter((t) => t.readiness === level).length,
+    })),
+    filters: { category: category ?? null, face_safe: faceSafe ?? null, timing_hint: timingHint ?? null, tag: tag ?? null, readiness: effectiveReadiness },
     templates: matching.map(sceneTemplateCard),
   };
 }
@@ -22203,6 +22238,32 @@ export async function diagnoseFilm({ manifestPath, styleFile = null, stamp = fal
           for (const msg of fitIssues) add("template_fit", "warn", msg);
         } else {
           add("template_fit", "pass", `templates fit their slots (${templateShots.map((s) => `${s.id}:${s.template}`).join(", ")})`);
+        }
+      }
+      // Template readiness (lượt 164, idea: 01sy/
+      // remotion-template-library's readiness levels): a film
+      // that leans on a preview or draft template says so in
+      // preflight — the template renders, but its cuts have not
+      // been verified end-to-end in a shipped film yet. Ready
+      // templates pass in the same check, so an all-ready film
+      // still reads "pass" here. Skipped when the registry
+      // itself failed to load — template_fit already errors
+      // for that, and a second error would double-count it.
+      if (!slotError) {
+        const readinessIssues = [];
+        for (const s of templateShots) {
+          const meta = slotMeta[s.template];
+          if (!meta) continue; // validate already rejected unknown ids
+          if (meta.readiness === "preview") {
+            readinessIssues.push(`shot ${s.id} template "${s.template}" is preview — it renders, but no shipped film has verified its cuts end-to-end yet; check the cut before shipping`);
+          } else if (meta.readiness === "draft") {
+            readinessIssues.push(`shot ${s.id} template "${s.template}" is draft — it has never been rendered in a shipped film; render a preview and verify the cut before using it`);
+          }
+        }
+        if (readinessIssues.length) {
+          for (const msg of readinessIssues) add("template_readiness", "warn", msg);
+        } else {
+          add("template_readiness", "pass", `templates are ready (${templateShots.map((s) => `${s.id}:${s.template}`).join(", ")})`);
         }
       }
     }

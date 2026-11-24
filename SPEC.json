@@ -5831,7 +5831,7 @@
       "family": "assemble",
       "tier": "READ",
       "summary": "Browse the assemble scene-template catalog without rendering anything — the director's shelf for canvas_scene shots.",
-      "description": "Browse the assemble scene-template catalog without rendering anything — the director's shelf for canvas_scene shots. One compact card per template (id, name, category, motion_type, recommended duration_seconds, tags, face_safe, timing_hint, description); filters combine (category title|motion|card|ambient, face_safe, timing_hint hook|core|payoff|any, tag). Pass template for the full detail of one template: every param spec, a directing prompt (what to change, what to keep) plus a ready-to-paste example_shot (kind canvas_scene, duration = the midpoint of the recommended range, params = the defaults). Call this before writing a film.json instead of guessing template names — the registry is the only source of truth, and an unknown category/timing hint fails loudly while an unknown tag simply matches nothing.",
+      "description": "Browse the assemble scene-template catalog without rendering anything — the director's shelf for canvas_scene shots. One compact card per template (id, name, category, motion_type, recommended duration_seconds, tags, face_safe, timing_hint, readiness, description); filters combine (category title|motion|card|ambient, face_safe, timing_hint hook|core|payoff|any, tag). Only ready templates show by default — a template is ready when a shipped film has verified its cuts end-to-end; preview templates render but are unverified, draft ones have never shipped. Pass readiness all to see the whole shelf, or readiness preview|draft to see one level. Pass template for the full detail of one template: every param spec, a directing prompt (what to change, what to keep) plus a ready-to-paste example_shot (kind canvas_scene, duration = the midpoint of the recommended range, params = the defaults). Call this before writing a film.json instead of guessing template names — the registry is the only source of truth, and an unknown category/timing hint/readiness fails loudly while an unknown tag simply matches nothing.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -5858,6 +5858,11 @@
             "type": "string",
             "minLength": 1,
             "description": "Full detail for ONE template by id, e.g. rings — returns its params plus an example_shot"
+          },
+          "readiness": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Readiness level to show: ready (default), preview, draft, or all — the shelf hides non-ready templates unless asked"
           }
         },
         "additionalProperties": false,
@@ -5865,5 +5870,5 @@
       }
     }
   ],
-  "spec_hash": "66946d7e450920cfbb055f7ae23e25174542d98a00baaa5370050cb6d9bdcb81"
+  "spec_hash": "fc2beaaee84cb446ea4a9546caec61d3da997c70954bfd21de2006431e718962"
 }

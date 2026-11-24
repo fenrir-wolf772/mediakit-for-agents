@@ -232,8 +232,12 @@ only when no template fits — template params merge over
 defaults, unknown names fail validate. Each template also declares
 `faceSafe` + `timingHint` (only `rings` keeps the frame center clear;
 title-card/slide-in/spring-in are hook cards, bounce is a core beat),
-and `diagnose` warns when a template is used in the wrong slot or
-role. For one channel look
+and `readiness` (`ready` — a shipped film verified its cuts;
+`preview` — renders but unverified: title-card, slide-in; `draft` —
+never shipped). `list-templates` shows only ready templates by
+default (`--readiness all` to see the whole shelf), and `diagnose`
+warns when a template is used in the wrong slot or role, or when a
+film leans on a preview/draft template. For one channel look
 across the whole film, set `"brand"` in the manifest
 (`amber-teal`, `warm-story`, `minimal-line`, registry in
 `brands.json` — or your own ids from a `MEDIAKIT_BRANDS` file):

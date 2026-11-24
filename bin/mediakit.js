@@ -1037,8 +1037,8 @@ const COMMANDS = {
     ],
   },
   "list-templates": {
-    usage: "mediakit list-templates [--category title|motion|card|ambient] [--face-safe | --no-face-safe] [--timing-hint hook|core|payoff|any] [--tag <tag>] [--template <id>]",
-    desc: "Browse the assemble scene-template catalog without rendering anything — the director's shelf for canvas_scene shots. One compact card per template (id, name, category, motion_type, recommended duration_seconds, tags, face_safe, timing_hint, description); filters combine. --template <id> prints the full detail of one template: every param spec, a directing prompt (what to change, what to keep), plus a ready-to-paste example_shot (kind canvas_scene, duration = the midpoint of the recommended range, params = the defaults). Call this before writing a film.json instead of guessing template names.",
+    usage: "mediakit list-templates [--category title|motion|card|ambient] [--face-safe | --no-face-safe] [--timing-hint hook|core|payoff|any] [--tag <tag>] [--template <id>] [--readiness ready|preview|draft|all]",
+    desc: "Browse the assemble scene-template catalog without rendering anything — the director's shelf for canvas_scene shots. One compact card per template (id, name, category, motion_type, recommended duration_seconds, tags, face_safe, timing_hint, readiness, description); filters combine. Only ready templates show by default — pass --readiness all to see the whole shelf, or preview|draft for one level. --template <id> prints the full detail of one template: every param spec, a directing prompt (what to change, what to keep), plus a ready-to-paste example_shot (kind canvas_scene, duration = the midpoint of the recommended range, params = the defaults). Call this before writing a film.json instead of guessing template names.",
     args: [],
     options: [
       ["--category", "Narrow to one category: title, motion, card, ambient"],
@@ -1047,6 +1047,7 @@ const COMMANDS = {
       ["--timing-hint", "Narrow to one slot: hook, core, payoff, any"],
       ["--tag", "Narrow to templates carrying this tag (e.g. physics, text, calm)"],
       ["--template", "Full detail for ONE template by id, e.g. rings"],
+      ["--readiness", "Readiness level to show: ready (default), preview, draft, or all"],
     ],
   },
   "align-voice": {
@@ -2429,6 +2430,7 @@ async function main() {
           timingHint: opts.timing_hint ?? null,
           tag: opts.tag ?? null,
           template: opts.template ?? null,
+          readiness: opts.readiness ?? null,
         });
         break;
       case "align-voice": {

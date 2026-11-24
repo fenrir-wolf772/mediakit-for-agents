@@ -2478,15 +2478,16 @@ export const TOOL_DEFS = [
   {
     name: "list_templates",
     tier: "READ",
-    description: "Browse the assemble scene-template catalog without rendering anything — the director's shelf for canvas_scene shots. One compact card per template (id, name, category, motion_type, recommended duration_seconds, tags, face_safe, timing_hint, description); filters combine (category title|motion|card|ambient, face_safe, timing_hint hook|core|payoff|any, tag). Pass template for the full detail of one template: every param spec, a directing prompt (what to change, what to keep) plus a ready-to-paste example_shot (kind canvas_scene, duration = the midpoint of the recommended range, params = the defaults). Call this before writing a film.json instead of guessing template names — the registry is the only source of truth, and an unknown category/timing hint fails loudly while an unknown tag simply matches nothing.",
+    description: "Browse the assemble scene-template catalog without rendering anything — the director's shelf for canvas_scene shots. One compact card per template (id, name, category, motion_type, recommended duration_seconds, tags, face_safe, timing_hint, readiness, description); filters combine (category title|motion|card|ambient, face_safe, timing_hint hook|core|payoff|any, tag). Only ready templates show by default — a template is ready when a shipped film has verified its cuts end-to-end; preview templates render but are unverified, draft ones have never shipped. Pass readiness all to see the whole shelf, or readiness preview|draft to see one level. Pass template for the full detail of one template: every param spec, a directing prompt (what to change, what to keep) plus a ready-to-paste example_shot (kind canvas_scene, duration = the midpoint of the recommended range, params = the defaults). Call this before writing a film.json instead of guessing template names — the registry is the only source of truth, and an unknown category/timing hint/readiness fails loudly while an unknown tag simply matches nothing.",
     schema: {
     category: z.string().min(1).optional().describe("Narrow to one category: title, motion, card, ambient"),
     face_safe: z.boolean().optional().describe("Only templates that keep the frame center clear (true) or cover it (false)"),
     timing_hint: z.string().min(1).optional().describe("Narrow to one slot: hook, core, payoff, any"),
     tag: z.string().min(1).optional().describe("Narrow to templates carrying this tag (e.g. physics, text, calm)"),
     template: z.string().min(1).optional().describe("Full detail for ONE template by id, e.g. rings — returns its params plus an example_shot"),
+    readiness: z.string().min(1).optional().describe("Readiness level to show: ready (default), preview, draft, or all — the shelf hides non-ready templates unless asked"),
   },
-    handler: async (a) => safe(() => core.listSceneTemplates({ category: a.category ?? null, faceSafe: a.face_safe ?? null, timingHint: a.timing_hint ?? null, tag: a.tag ?? null, template: a.template ?? null })),
+    handler: async (a) => safe(() => core.listSceneTemplates({ category: a.category ?? null, faceSafe: a.face_safe ?? null, timingHint: a.timing_hint ?? null, tag: a.tag ?? null, template: a.template ?? null, readiness: a.readiness ?? null })),
   },
 ];
 

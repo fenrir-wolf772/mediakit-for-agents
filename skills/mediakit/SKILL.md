@@ -1,3 +1,8 @@
+---
+name: mediakit
+description: Professional media tools for video and audio — probe, cut, reframe, caption, mix, assemble and QC with ffmpeg, instead of guessing or writing one-off shell commands.
+---
+
 # MediaKit — agent skill
 
 You have professional media tools. Use them instead of guessing about a
