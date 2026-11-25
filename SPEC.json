@@ -1,7 +1,7 @@
 {
   "spec_version": 1,
   "mediakit_version": "0.1.0",
-  "tool_count": 95,
+  "tool_count": 96,
   "transports": [
     "stdio",
     "http"
@@ -30,7 +30,7 @@
     {
       "name": "assemble",
       "description": "Director workflow: film, manifest, jobs and release.",
-      "count": 15
+      "count": 16
     },
     {
       "name": "meta",
@@ -6009,7 +6009,7 @@
       "family": "meta",
       "tier": "READ",
       "summary": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the…",
-      "description": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 95 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+      "description": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 96 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -6180,6 +6180,28 @@
       }
     },
     {
+      "name": "project_summary",
+      "family": "assemble",
+      "tier": "READ",
+      "summary": "One compact page about a film, for planning (frankShan001/CutVoke's project_summary idea: a small summary for planning instead of the whole timeline).",
+      "description": "One compact page about a film, for planning (frankShan001/CutVoke's project_summary idea: a small summary for planning instead of the whole timeline). The director asks 'what is this film' before deciding the next edit — diagnose answers 'is it valid', plan answers 'can it render', this answers 'what is it, in one page': title, total length and frame, one line per shot (kind + source + length + role + first text line), voice/music/sfx/captions, chapters, hook, and a single `one_line` sentence. Probe-only, writes nothing; it reuses the assemble manifest validator, so every media file is probed and every rule checked. A film that fails validation returns valid:false with the issues listed instead of throwing — only a missing/unreadable film file throws.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "film": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Path to the assemble film.json manifest to summarize"
+          }
+        },
+        "required": [
+          "film"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "lease",
       "family": "assemble",
       "tier": "WRITE",
@@ -6228,5 +6250,5 @@
       }
     }
   ],
-  "spec_hash": "ea14942f38cf5924fa45103ed003686d5d8d120bcd57b300ba843551a6ea21f9"
+  "spec_hash": "05362bdff0031787a7cbf0bb91cae810164ff8eca70912717c2c885090b88e46"
 }

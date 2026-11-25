@@ -2021,7 +2021,7 @@ one tier — `mediakit safety` lists them, and the MCP `tools/list`
 carries the same tiers as standard annotations
 (`readOnlyHint` / `destructiveHint` / `idempotentHint` /
 `openWorldHint`), so a client can gate on them instead of trusting
-prose. READ (29 tools) only probes and writes nothing; PLAN (4)
+prose. READ (30 tools) only probes and writes nothing; PLAN (4)
 answers a question by transient work and leaves no artifact —
 `determinism` renders to a hidden work dir that is removed,
 `verify_cuts` renders a draft to temp (plus caller-requested
@@ -2142,7 +2142,7 @@ Off by default; the verify stays probe-only without it.
 
 ### 58h. Browse the catalog before you dump it — progressive discovery
 
-95 tools is too many schemas to pay for in every turn. Don't start
+96 tools is too many schemas to pay for in every turn. Don't start
 from `tools/list` — start from `list_operations`: one compact line
 per tool (name, family, tier, one-sentence summary), optionally
 narrowed with `family` (`inspect`, `edit`, `text`, `image`,
@@ -2242,6 +2242,23 @@ is the picture, not the label. `--dry-run` validates the timestamps
 and lists the pair files without writing anything. Use it after every
 `patch_manifest` + re-render: a pair with `changed: false` at the
 timestamp you edited means the edit did not land.
+
+### 58n. One page about a film, for planning — `project_summary`
+
+`diagnose` answers "is it valid", `plan` answers "can it render" —
+`project_summary` answers "what is it, in one page": title, total
+length and frame, one line per shot (kind + source + length + role +
+first text line), voice/music/sfx/captions, chapters, hook, and a
+single `one_line` sentence. Call it before deciding the next edit,
+instead of dumping the whole film.json into the turn — the director
+plans from the summary, then opens the manifest only for the shot
+being changed. Probe-only, writes nothing; a film that fails
+validation returns `valid:false` with the issues listed, so a bad
+film reads as a summary with problems, not a crash. The summary is
+for planning, not for the verdict — a film is only "done" after the
+numbers (`check`/`verify_cuts`/`release-checkpoint`) AND the eyes
+(`thumbnail` contact sheet, 12 frames, looked at frame by frame)
+both pass; never call a render good from the numbers alone.
 
 ## Workflow: vertical captioned clip from a landscape source
 

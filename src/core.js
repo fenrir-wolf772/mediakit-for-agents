@@ -12886,6 +12886,9 @@ const TOOL_REQUIREMENTS = {
   // validate_shot_spec is pure Node + ffprobe only (JSON parse,
   // vm.Script syntax check, probe for still/video) — no ffmpeg needed.
   validate_shot_spec: {},
+  // project_summary is pure Node + ffprobe only (JSON parse,
+  // validateAssembleManifest probes every media file) — no ffmpeg needed.
+  project_summary: {},
 };
 
 async function listCapabilities(kind) {
@@ -20528,6 +20531,91 @@ async function validateAssembleManifest(doc, manifestAbs) {
     music, sfx, captions, shots, chapters, hook, warnings, fingerprint,
     fingerprint_parts: { manifest: manifestHash, voice: voiceHash, music: musicHash, sfx: sfxHashes, captions: captionsHash, assets: assetHashes, brand: brandResolved ? stableStringify(brandResolved) : null },
   };
+}
+
+// ---------------------------------------------------------------- project_summary
+// One compact page about a film, for planning (frankShan001/CutVoke's
+// project_summary idea: a small summary for planning instead of the
+// whole timeline). The director asks "what is this film" before
+// deciding the next edit — diagnose answers "is it valid", plan
+// answers "can it render", this answers "what is it, in one page":
+// title, length, frame, one line per shot (kind + source + length +
+// role), voice/music/sfx/captions, chapters, hook, and a single
+// `one_line` sentence. Probe-only: it reuses validateAssembleManifest
+// (so every file is probed and every rule checked), writes nothing.
+// A film that fails validation returns valid:false + the issues
+// instead of throwing — only a missing/unreadable film file throws
+// (INPUT_NOT_FOUND), the same contract as validate_shot_spec.
+export function summarizeProject(plan) {
+  const shotSource = (s) => {
+    if (s.kind === "canvas_scene") return s.template ? `template:${s.template}` : (s.scene ? `scene:${path.basename(s.scene)}` : "canvas_scene");
+    if (s.kind === "color") return s.color ? `color:${s.color}` : "color";
+    if (s.source) return path.basename(s.source);
+    return s.kind;
+  };
+  const shots = plan.shots.map((s, i) => {
+    const row = { index: i + 1, id: s.id, kind: s.kind, source: shotSource(s), duration_seconds: s.duration, frames: s.frames };
+    if (s.role) row.role = s.role;
+    if (s.transition) row.transition = `${s.transition.type} ${s.transition.duration_seconds}s`;
+    if (s.audio_level !== undefined && s.audio_level !== 1) row.audio_level = s.audio_level;
+    if (s.variants && s.variants.length > 1) { row.variants = s.variants.map((v) => v.label); row.selected = s.selected_label ?? s.selected; }
+    const text = s.textLayers?.[0]?.text ?? null;
+    if (text) row.text = String(text).split("\n")[0];
+    if (s.dialogue) row.dialogue_chars = s.dialogue.length;
+    return row;
+  });
+  const voice = plan.voice ? { file: path.basename(plan.voice.path), duration_seconds: plan.voice.duration_seconds, lead_seconds: plan.voice.lead, tail_seconds: plan.voice.tail } : null;
+  const music = plan.music ? { file: path.basename(plan.music.path), volume: plan.music.volume, duck_db: plan.music.duck_db } : null;
+  const sfx = (plan.sfx ?? []).map((e) => ({ file: path.basename(e.file), at_seconds: e.at_seconds, volume: e.volume }));
+  const captions = plan.captions ? { file: path.basename(plan.captions.path), cue_count: plan.captions.cue_count } : null;
+  const chapters = (plan.chapters ?? []).map((c) => ({ title: c.title, at_seconds: c.at_seconds }));
+  const hook = plan.hook ? { shot: plan.hook.shot, start_seconds: plan.hook.start_seconds, end_seconds: plan.hook.end_seconds } : null;
+  const parts = [
+    `${shots.length} shot${shots.length === 1 ? "" : "s"}`,
+    `${plan.total_seconds}s`,
+    `${plan.width}x${plan.height}@${plan.fps}`,
+    voice ? `voice ${voice.duration_seconds}s` : "no voice",
+    music ? "music" : "no music",
+    sfx.length ? `${sfx.length} sfx` : "no sfx",
+    captions ? `captions ${captions.cue_count ?? "?"} cues` : "no captions",
+    "0 blockers",
+  ];
+  return {
+    valid: true,
+    title: plan.title,
+    total_seconds: plan.total_seconds,
+    total_frames: plan.total_frames,
+    fps: plan.fps,
+    dimensions: `${plan.width}x${plan.height}`,
+    preset: plan.preset ?? null,
+    brand: plan.brand ?? null,
+    style: plan.style ?? null,
+    shots,
+    voice, music, sfx, captions, chapters, hook,
+    warnings: plan.warnings ?? [],
+    blockers: [],
+    ready: true,
+    fingerprint: plan.fingerprint ? plan.fingerprint.slice(0, 16) : null,
+    one_line: parts.join(" · "),
+  };
+}
+
+export async function projectSummary({ film }) {
+  const filmPath = await requireInput(film, "film manifest");
+  let doc;
+  try {
+    doc = JSON.parse(await readFile(filmPath, "utf8"));
+  } catch (e) {
+    return { operation: "project_summary", film: filmPath, valid: false, issues: [`film is not valid JSON: ${e.message}`] };
+  }
+  let plan;
+  try {
+    plan = await validateAssembleManifest(doc, filmPath);
+  } catch (e) {
+    const msg = e instanceof MediaKitError ? e.message : `cannot validate manifest: ${e.message}`;
+    return { operation: "project_summary", film: filmPath, valid: false, issues: [msg] };
+  }
+  return { operation: "project_summary", film: filmPath, ...summarizeProject(plan) };
 }
 
 // ---------------------------------------------------------------- align_voice

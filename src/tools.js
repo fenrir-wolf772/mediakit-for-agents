@@ -2537,7 +2537,7 @@ export const TOOL_DEFS = [
   {
     name: "list_operations",
     tier: "READ",
-    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 95 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 96 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
     schema: {
     family: z.enum(["inspect", "edit", "text", "image", "assemble", "meta"]).optional().describe("Narrow to one family; omit for the whole catalog"),
   },
@@ -2601,6 +2601,18 @@ export const TOOL_DEFS = [
       spec: a.spec ?? null,
       specFile: a.spec_file ?? null,
       baseDir: a.base_dir ?? null,
+    })),
+  },
+
+  {
+    name: "project_summary",
+    tier: "READ",
+    description: "One compact page about a film, for planning (frankShan001/CutVoke's project_summary idea: a small summary for planning instead of the whole timeline). The director asks 'what is this film' before deciding the next edit — diagnose answers 'is it valid', plan answers 'can it render', this answers 'what is it, in one page': title, total length and frame, one line per shot (kind + source + length + role + first text line), voice/music/sfx/captions, chapters, hook, and a single `one_line` sentence. Probe-only, writes nothing; it reuses the assemble manifest validator, so every media file is probed and every rule checked. A film that fails validation returns valid:false with the issues listed instead of throwing — only a missing/unreadable film file throws.",
+    schema: {
+    film: pathSchema.describe("Path to the assemble film.json manifest to summarize"),
+  },
+    handler: async (a) => safe(() => core.projectSummary({
+      film: a.film,
     })),
   },
 
@@ -2675,7 +2687,7 @@ export function listSafetyTiers() {
 }
 
 // ---------------------------------------------------------------- progressive discovery
-// The catalog is 95 tools and tools/list dumps the full JSON schema
+// The catalog is 96 tools and tools/list dumps the full JSON schema
 // of every one on every turn — kinocut's answer is progressive
 // discovery: a compact list first, full schema only for the tools
 // actually used (lượt 147, idea: KyaniteLabs/kinocut
@@ -2723,13 +2735,14 @@ export const TOOL_FAMILY_OF = {
   // image (8)
   thumbnail: "image", frames: "image", extract_frames: "image", preview_compare: "image", image_to_video: "image",
   slideshow: "image", export_gif: "image", svg_animate: "image",
-  // assemble (15)
+  // assemble (16)
   assemble: "assemble", manifest: "assemble", patch_manifest: "assemble",
   init_project: "assemble", export_timeline: "assemble", job: "assemble",
   release_checkpoint: "assemble", package: "assemble", publish_kit: "assemble",
   social: "assemble", batch: "assemble", list_templates: "assemble",
   validate_template_package: "assemble",
   validate_shot_spec: "assemble",
+  project_summary: "assemble",
   lease: "assemble",
   // meta (2)
   list_operations: "meta", describe_operation: "meta",

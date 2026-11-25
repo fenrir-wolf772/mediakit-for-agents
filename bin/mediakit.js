@@ -1087,6 +1087,12 @@ const COMMANDS = {
       ["--readiness", "Readiness level to show: ready (default), preview, draft, or all"],
     ],
   },
+  "project-summary": {
+    usage: "mediakit project-summary <film.json>",
+    desc: "One compact page about a film, for planning (CutVoke's project_summary idea): title, total length and frame, one line per shot (kind + source + length + role + first text line), voice/music/sfx/captions, chapters, hook, and a single one_line sentence — instead of dumping the whole timeline. Probe-only, writes nothing; it reuses the assemble manifest validator, so every media file is probed and every rule checked. A film that fails validation returns valid:false with the issues listed instead of throwing — only a missing/unreadable film file throws.",
+    args: [{ name: "film", required: true }],
+    options: [],
+  },
   "validate-template-package": {
     usage: "mediakit validate-template-package <dir>",
     desc: "Validate an external scene-template package before assemble is ever asked to trust it — a directory holding template.json (ONE template entry, the same schema as one registry entry) + the .cjs scene module it names + any extra files. Three layers, each reported separately: magic_bytes (content, not extension — JSON must parse, a .cjs must be valid UTF-8 text that parses as JavaScript without executing it, images must carry their format's magic bytes), traversal (the manifest's file must be a bare .cjs filename; every symlink must resolve inside the package root), completeness (template.json at the root, the entry passes the same validation as a built-in template, the scene module exists, is non-empty and statically exports draw). Probe-only, writes nothing; a bad package returns valid:false with the issues listed instead of throwing — only a missing package directory throws.",
@@ -2539,6 +2545,10 @@ async function main() {
           template: opts.template ?? null,
           readiness: opts.readiness ?? null,
         });
+        break;
+      case "project-summary":
+        if (!positional[0]) fail("missing film manifest: mediakit project-summary <film.json>");
+        result = await core.projectSummary({ film: positional[0] });
         break;
       case "validate-template-package":
         if (!positional[0]) fail("missing package directory: mediakit validate-template-package <dir>");
