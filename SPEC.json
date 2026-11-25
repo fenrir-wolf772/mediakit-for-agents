@@ -1,7 +1,7 @@
 {
   "spec_version": 1,
   "mediakit_version": "0.1.0",
-  "tool_count": 94,
+  "tool_count": 95,
   "transports": [
     "stdio",
     "http"
@@ -25,7 +25,7 @@
     {
       "name": "image",
       "description": "Stills and frame sequences: sample, export or build from images.",
-      "count": 7
+      "count": 8
     },
     {
       "name": "assemble",
@@ -726,6 +726,72 @@
         },
         "required": [
           "input",
+          "output_dir"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "preview_compare",
+      "family": "image",
+      "tier": "WRITE",
+      "summary": "Before/after frame pairs for ONE uncommitted edit (frankShan001/CutVoke's preview_compare idea): the director renders the film twice — before the edit and after…",
+      "description": "Before/after frame pairs for ONE uncommitted edit (frankShan001/CutVoke's preview_compare idea): the director renders the film twice — before the edit and after it — and asks whether the edit actually changed anything, and where. At each of 1-3 timestamps (seconds or MM:SS, each inside BOTH videos) it captures the frame from each video at that exact time and writes one PNG per pair: before on the left, after on the right, each labelled BEFORE/AFTER + timestamp, so the eye judges in one glance. Each pair also reports mean_abs_diff — mean absolute difference of 16x16 gray thumbs (the same measure extract_frames --dedup uses) — and changed (diff >= changed_threshold, default 1.0). Calibrated: same file 0.00, same content re-encoded crf 28 0.03-0.04, a different clip with similar luma 2.02-2.27, a 120px logo added 3.02, black vs content 126.1 — so 1.0 sits between re-encode noise and the smallest real change measured. The diff is measured on unlabelled captures (labels are drawn only in the compose step, so label text never inflates the number). Set dry_run=true to validate the timestamps and list the pair files without writing anything.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "before": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Video BEFORE the edit"
+          },
+          "after": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Video AFTER the edit"
+          },
+          "timestamps": {
+            "type": "array",
+            "items": {
+              "type": [
+                "number",
+                "string"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 3,
+            "description": "1-3 timestamps in seconds or MM:SS (e.g. [1, 5, \\\"0:09\\\"]); each must sit inside both videos, no duplicates"
+          },
+          "output_dir": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Directory to write the pair PNGs into (created if needed)"
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 80,
+            "maximum": 3840,
+            "default": 540,
+            "description": "Width of each half in pixels (default 540, so a pair is 1080 wide)"
+          },
+          "changed_threshold": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 255,
+            "default": 1,
+            "description": "Mean abs diff (0-255 gray scale) at/above which a pair counts as changed (default 1.0)"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "default": false,
+            "description": "Validate the timestamps and list the pair files without writing anything"
+          }
+        },
+        "required": [
+          "before",
+          "after",
+          "timestamps",
           "output_dir"
         ],
         "additionalProperties": false,
@@ -5943,7 +6009,7 @@
       "family": "meta",
       "tier": "READ",
       "summary": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the…",
-      "description": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 94 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+      "description": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 95 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -6162,5 +6228,5 @@
       }
     }
   ],
-  "spec_hash": "4d8e9cb015b6b8680086b764fb78967d637c30dbf2eb4d6a57131be13ef61f56"
+  "spec_hash": "ea14942f38cf5924fa45103ed003686d5d8d120bcd57b300ba843551a6ea21f9"
 }

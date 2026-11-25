@@ -2065,6 +2065,135 @@ export async function extractFrames({ input, outputDir, count = 6, format = "png
   };
 }
 
+// ---------------------------------------------------------------- preview_compare
+// Before/after frame pairs for ONE uncommitted edit (frankShan001/
+// CutVoke's preview_compare idea): the director renders the film
+// twice — before the edit and after it — and asks "did this edit
+// actually change anything, and where?" at 1-3 timestamps. Each pair
+// is one PNG: the before frame on the left, the after frame on the
+// right, both labelled with their timestamp, so the eye judges in one
+// glance. The number decides too: mean absolute gray difference of
+// 16x16 thumbs (the same measure extract_frames --dedup uses, so the
+// scale is already calibrated — identical frames measure 0.00, a flat
+// colour swap measures ~40) with `changed_threshold` (default 1.0)
+// marking a pair `changed`. Calibrated 2026-11-26 (lượt 172): same
+// file 0.00, same content re-encoded crf 28 0.03-0.04, different clip
+// with similar luma 2.02-2.27, a 120px logo added 3.02, black vs
+// content 126.1 — so 1.0 sits between re-encode noise (<=0.04) and the
+// smallest real change measured (2.02). The diff is measured on the
+// captures — the BEFORE/AFTER label text would otherwise add a
+// constant offset in the top-left corner — and the labels are drawn
+// only in the compose step.
+export const PREVIEW_COMPARE_MAX_TIMESTAMPS = 3;
+export const PREVIEW_COMPARE_DEFAULT_WIDTH = 540;
+export const PREVIEW_COMPARE_DEFAULT_CHANGED_THRESHOLD = 1.0;
+
+export function parsePreviewCompareTimestamps(value, durationBefore, durationAfter) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > PREVIEW_COMPARE_MAX_TIMESTAMPS) {
+    throw new MediaKitError(`preview_compare needs 1-${PREVIEW_COMPARE_MAX_TIMESTAMPS} timestamps, got: ${Array.isArray(value) ? value.length : typeof value}`, "INVALID_ARG");
+  }
+  const limit = Math.min(durationBefore, durationAfter);
+  const out = [];
+  for (const raw of value) {
+    const t = parseTime(raw, "timestamp");
+    if (t >= limit) {
+      throw new MediaKitError(`timestamp ${t}s is at/past the end of the shorter video (${limit}s)`, "INVALID_ARG");
+    }
+    if (out.includes(t)) {
+      throw new MediaKitError(`duplicate timestamp ${t}s — each pair needs its own time`, "INVALID_ARG");
+    }
+    out.push(t);
+  }
+  return out;
+}
+
+async function grayThumb16(imagePath) {
+  const { stdout } = await runRaw(FFMPEG, ["-v", "error", "-i", imagePath, "-vf", "scale=16:16,format=gray", "-f", "rawvideo", "-"]);
+  if (stdout.length !== 256) throw new MediaKitError(`could not read 16x16 gray thumb of ${imagePath} (${stdout.length} bytes)`, "MEASURE_FAILED");
+  return stdout;
+}
+
+export async function previewCompare({ before, after, timestamps, outputDir, width = PREVIEW_COMPARE_DEFAULT_WIDTH, changedThreshold = PREVIEW_COMPARE_DEFAULT_CHANGED_THRESHOLD, dryRun = false }) {
+  const beforePath = await requireInput(before);
+  const afterPath = await requireInput(after);
+  if (typeof outputDir !== "string" || !outputDir.trim()) {
+    throw new MediaKitError("output directory is required", "INVALID_OUTPUT");
+  }
+  const w = num(width, "width", { min: 80, max: 3840, integer: true });
+  const threshold = num(changedThreshold, "changed_threshold", { min: 0, max: 255 });
+  const metaBefore = await probe(beforePath);
+  const metaAfter = await probe(afterPath);
+  if (!metaBefore.video) throw new MediaKitError("preview_compare needs a video for `before`", "INVALID_ARG");
+  if (!metaAfter.video) throw new MediaKitError("preview_compare needs a video for `after`", "INVALID_ARG");
+  const durBefore = metaBefore.duration_seconds;
+  const durAfter = metaAfter.duration_seconds;
+  if (durBefore === null || durBefore <= 0 || durAfter === null || durAfter <= 0) {
+    throw new MediaKitError("could not read input durations", "PROBE_FAILED");
+  }
+  const times = parsePreviewCompareTimestamps(timestamps, durBefore, durAfter);
+  // Dry-run must write nothing — not even the output directory: the
+  // sandbox check still runs (so a dry-run against an escaped path
+  // fails the same way), but the mkdir + writability probe wait for
+  // a real run.
+  const dir = dryRun === true ? path.resolve(outputDir) : await prepareOutputDir(outputDir);
+  if (dryRun === true) await assertInsideWorkdir(dir, "output directory");
+  const pairs = times.map((t, i) => ({
+    index: i + 1,
+    timestamp_seconds: t,
+    file: path.join(dir, `compare-${String(i + 1).padStart(2, "0")}-${t.toFixed(3)}s.png`),
+  }));
+  if (dryRun === true) {
+    return {
+      operation: "preview_compare", before: beforePath, after: afterPath, output_dir: dir,
+      width: w, changed_threshold: threshold, dry_run: true,
+      durations_seconds: { before: durBefore, after: durAfter },
+      pairs: pairs.map((p) => ({ ...p, mean_abs_diff: null, changed: null })),
+      pairs_changed: null, pairs_total: pairs.length,
+    };
+  }
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-preview-compare-"));
+  try {
+    for (const p of pairs) {
+      const t = p.timestamp_seconds;
+      const beforeCap = path.join(tmpDir, `before-${p.index}.png`);
+      const afterCap = path.join(tmpDir, `after-${p.index}.png`);
+      await captureFrameAt(beforePath, t, beforeCap, { width: w });
+      await captureFrameAt(afterPath, t, afterCap, { width: w });
+      const diff = meanAbsDiffGray(await grayThumb16(beforeCap), await grayThumb16(afterCap));
+      p.mean_abs_diff = +diff.toFixed(2);
+      p.changed = diff >= threshold;
+      // Labels are drawn only here, in the compose step — never on
+      // the captures the diff is measured from (see header comment).
+      const labelBefore = path.join(tmpDir, `label-before-${p.index}.txt`);
+      const labelAfter = path.join(tmpDir, `label-after-${p.index}.txt`);
+      await writeFile(labelBefore, `BEFORE ${t.toFixed(3)}s`, "utf8");
+      await writeFile(labelAfter, `AFTER ${t.toFixed(3)}s`, "utf8");
+      const fs = Math.max(12, Math.round(w / 16));
+      const escFont = TITLECARD_FONT.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
+      const labelFilter = (file) => `drawtext=fontfile=${escFont}:textfile=${file.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'")}:fontsize=${fs}:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=4:x=8:y=8`;
+      await run(FFMPEG, ["-y", "-i", beforeCap, "-i", afterCap, "-filter_complex",
+        `[0:v]${labelFilter(labelBefore)}[a];[1:v]${labelFilter(labelAfter)}[b];[a][b]hstack=inputs=2`,
+        "-frames:v", "1", "-q:v", "2", p.file]);
+      const info = await fileInfo(p.file);
+      const pairProbe = await probe(p.file);
+      p.bytes = info.bytes;
+      p.dimensions = pairProbe.video ? `${pairProbe.video.width}x${pairProbe.video.height}` : null;
+      // The captures live in a temp dir that is removed below; only
+      // the composed pair is a deliverable.
+    }
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+  return {
+    operation: "preview_compare", before: beforePath, after: afterPath, output_dir: dir,
+    width: w, changed_threshold: threshold,
+    durations_seconds: { before: durBefore, after: durAfter },
+    pairs,
+    pairs_changed: pairs.filter((p) => p.changed).length,
+    pairs_total: pairs.length,
+  };
+}
+
 // ---------------------------------------------------------------- extract_frames
 // Full frame sequence: EVERY frame of a clip (or a time range) as
 // separate images, not N evenly spaced samples like `frames`. The
@@ -12567,6 +12696,7 @@ const DOCTOR_FILTERS = [
   "chromakey", "zoompan",
   "afade",
   "tblend", "signalstats",
+  "hstack",
   "convolution",
   "ssim", "psnr", "libvmaf",
   "blend", "split",
@@ -12603,6 +12733,7 @@ const TOOL_REQUIREMENTS = {
   concat: { filters: ["concat", "xfade", "acrossfade", "fps", "scale", "pad"] },
   frames: { filters: ["scale", "convolution", "signalstats"] },
   extract_frames: { filters: ["fps", "scale", "format"] },
+  preview_compare: { filters: ["scale", "format", "drawtext", "hstack"] },
   export_gif: { filters: ["palettegen", "paletteuse", "fps", "scale"] },
   burn_captions: { filters: ["subtitles", "ass"] },
   reframe: { filters: ["crop", "scale", "pad", "gblur", "overlay"], encoders: ["libx264"] },

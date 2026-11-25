@@ -325,6 +325,31 @@ export const TOOL_DEFS = [
 
 
   {
+    name: "preview_compare",
+    tier: "WRITE",
+    description: "Before/after frame pairs for ONE uncommitted edit (frankShan001/CutVoke's preview_compare idea): the director renders the film twice — before the edit and after it — and asks whether the edit actually changed anything, and where. At each of 1-3 timestamps (seconds or MM:SS, each inside BOTH videos) it captures the frame from each video at that exact time and writes one PNG per pair: before on the left, after on the right, each labelled BEFORE/AFTER + timestamp, so the eye judges in one glance. Each pair also reports mean_abs_diff — mean absolute difference of 16x16 gray thumbs (the same measure extract_frames --dedup uses) — and changed (diff >= changed_threshold, default 1.0). Calibrated: same file 0.00, same content re-encoded crf 28 0.03-0.04, a different clip with similar luma 2.02-2.27, a 120px logo added 3.02, black vs content 126.1 — so 1.0 sits between re-encode noise and the smallest real change measured. The diff is measured on unlabelled captures (labels are drawn only in the compose step, so label text never inflates the number). Set dry_run=true to validate the timestamps and list the pair files without writing anything.",
+    schema: {
+    before: pathSchema.describe("Video BEFORE the edit"),
+    after: pathSchema.describe("Video AFTER the edit"),
+    timestamps: z.array(z.union([z.number(), z.string()])).min(1).max(3).describe("1-3 timestamps in seconds or MM:SS (e.g. [1, 5, \\\"0:09\\\"]); each must sit inside both videos, no duplicates"),
+    output_dir: pathSchema.describe("Directory to write the pair PNGs into (created if needed)"),
+    width: z.number().int().min(80).max(3840).default(540).describe("Width of each half in pixels (default 540, so a pair is 1080 wide)"),
+    changed_threshold: z.number().min(0).max(255).default(1).describe("Mean abs diff (0-255 gray scale) at/above which a pair counts as changed (default 1.0)"),
+    dry_run: z.boolean().default(false).describe("Validate the timestamps and list the pair files without writing anything"),
+  },
+    handler: async (a) => safe(() => core.previewCompare({
+    before: a.before,
+    after: a.after,
+    timestamps: a.timestamps,
+    outputDir: a.output_dir,
+    width: a.width,
+    changedThreshold: a.changed_threshold,
+    dryRun: a.dry_run,
+  })),
+  },
+
+
+  {
     name: "burn_captions",
     tier: "WRITE",
     description: "Burn subtitles into the video (hardcoded, always visible). Accepts .srt, .ass or .vtt — or words_file, a transcribe --word-timestamps JSON: the words are chunked first with the locked TikTok defaults (max 6 words/cue, chunk_captions) into a temp .srt, burned, and the temp file removed; the result reports the chunking in `chunked`. Pass captions or words_file, never both. Style: background (default — white text on a semi-transparent black box), outline (black outline, no box), shadow (thin outline + drop shadow), or glow (thick halo in the text's own colour, reads on bright footage). Defaults scale with frame height: ~60px type on 1080x1920, sitting ~500px above the bottom edge so platform UI (bottom ~480px) never covers the text. Explicit font_size / margin_v override. max_lines shrinks the type (measured with the same font libass draws, Liberation Sans) until every cue wraps to at most that many lines, never below a readability floor (1.6% of frame height, min 16px); a cue that still overflows at the floor burns at the floor and reports fit.fits=false. platform sets the default margin from that platform's own bottom UI depth (tiktok 520px at 1920 high, youtube 100px at 1080 high) and narrows the fit width to its text-safe rect; explicit margin_v wins. .ass files carry their own styles, so style, max_lines and the platform margin are ignored there (style_applied=false, fit=null with a note). Set dry_run=true to print the exact ffmpeg command and write no file (font_size/margin/style/fit are computed from the input, so they are exact; duration/size report null — measured on the real output).",
@@ -2512,7 +2537,7 @@ export const TOOL_DEFS = [
   {
     name: "list_operations",
     tier: "READ",
-    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 94 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 95 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
     schema: {
     family: z.enum(["inspect", "edit", "text", "image", "assemble", "meta"]).optional().describe("Narrow to one family; omit for the whole catalog"),
   },
@@ -2650,7 +2675,7 @@ export function listSafetyTiers() {
 }
 
 // ---------------------------------------------------------------- progressive discovery
-// The catalog is 94 tools and tools/list dumps the full JSON schema
+// The catalog is 95 tools and tools/list dumps the full JSON schema
 // of every one on every turn — kinocut's answer is progressive
 // discovery: a compact list first, full schema only for the tools
 // actually used (lượt 147, idea: KyaniteLabs/kinocut
@@ -2695,8 +2720,8 @@ export const TOOL_FAMILY_OF = {
   // text (7)
   transcribe: "text", convert_captions: "text", generate_srt: "text", chunk_captions: "text",
   titlecard: "text", intro: "text", align_voice: "text",
-  // image (7)
-  thumbnail: "image", frames: "image", extract_frames: "image", image_to_video: "image",
+  // image (8)
+  thumbnail: "image", frames: "image", extract_frames: "image", preview_compare: "image", image_to_video: "image",
   slideshow: "image", export_gif: "image", svg_animate: "image",
   // assemble (15)
   assemble: "assemble", manifest: "assemble", patch_manifest: "assemble",

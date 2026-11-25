@@ -143,6 +143,18 @@ const COMMANDS = {
       ["-o, --output", "Output file (required)"],
     ],
   },
+  "preview-compare": {
+    usage: "mediakit preview-compare <before.mp4> <after.mp4> --timestamps 1,5,9 -o <directory> [--width <px>] [--changed-threshold <n>] [--dry-run]",
+    desc: "Before/after frame pairs for ONE uncommitted edit (CutVoke's preview_compare idea): render the film twice — before the edit and after it — and compare at 1-3 timestamps (seconds or MM:SS, comma-separated; each must sit inside both videos). Each pair is one PNG: before on the left, after on the right, each labelled BEFORE/AFTER + timestamp. Each pair also reports mean_abs_diff (16x16 gray thumbs) and changed (diff >= --changed-threshold, default 1.0; calibrated: same file 0.00, re-encode noise <=0.04, smallest real change 2.02). --dry-run validates the timestamps and lists the pair files without writing anything.",
+    args: [{ name: "before", required: true }, { name: "after", required: true }],
+    options: [
+      ["--timestamps", "1-3 timestamps, comma-separated seconds or MM:SS (e.g. 1,5,0:09); each must sit inside both videos"],
+      ["--width", "Width of each half in pixels (default 540, so a pair is 1080 wide)"],
+      ["--changed-threshold", "Mean abs diff (0-255 gray scale) at/above which a pair counts as changed (default 1.0)"],
+      ["--dry-run", "Validate the timestamps and list the pair files without writing anything"],
+      ["-o, --output", "Output directory (required, created if needed)"],
+    ],
+  },
   frames: {
     usage: "mediakit frames <input> -o <directory> [--count <n>] [--format png|jpg|webp] [--width <px>] [--sharpest] [--sharpest-samples <n>]",
     desc: "Extract N evenly spaced frames as separate images (frame-001.png, ...) so you can look at a video before cutting it. --sharpest picks the sharpest frame in each interval instead of the interval start (Laplacian mean, measured on disk; each entry reports its sharpness and window).",
@@ -1591,6 +1603,19 @@ async function main() {
           sharpestSamples: numOpt(opts, "sharpest_samples") ?? 5,
         });
         break;
+      case "preview-compare": {
+        if (positional.length < 2) fail("preview-compare needs <before> <after>");
+        if (opts.timestamps === undefined) fail("preview-compare needs --timestamps <s,s,...>");
+        result = await core.previewCompare({
+          before: positional[0], after: positional[1],
+          timestamps: String(opts.timestamps).split(",").map((s) => s.trim()).filter(Boolean),
+          outputDir: needOutput(opts),
+          width: numOpt(opts, "width") ?? 540,
+          changedThreshold: numOpt(opts, "changed_threshold") ?? 1,
+          dryRun: opts.dry_run === true,
+        });
+        break;
+      }
       case "extract-frames":
         result = await core.extractFramesSequence({
           input: needInput(), outputDir: needOutput(opts),

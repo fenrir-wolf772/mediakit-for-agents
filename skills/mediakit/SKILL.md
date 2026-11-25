@@ -2142,7 +2142,7 @@ Off by default; the verify stays probe-only without it.
 
 ### 58h. Browse the catalog before you dump it — progressive discovery
 
-94 tools is too many schemas to pay for in every turn. Don't start
+95 tools is too many schemas to pay for in every turn. Don't start
 from `tools/list` — start from `list_operations`: one compact line
 per tool (name, family, tier, one-sentence summary), optionally
 narrowed with `family` (`inspect`, `edit`, `text`, `image`,
@@ -2221,6 +2221,27 @@ directory by default (`--base-dir` overrides). A bad spec returns
 `valid:false` with the issues listed instead of throwing, so validate
 each shot file before pasting it into a film — `assemble --mode
 validate` only sees the shot once the whole film is written.
+
+### 58m. Prove one edit changed the frame — `preview_compare`
+
+You changed one thing in a film and re-rendered it — did the change
+actually land, and where? Don't re-watch both renders: `preview_compare`
+takes the before video and the after video plus 1–3 timestamps (seconds
+or `MM:SS`, each inside *both* videos) and writes one PNG per pair —
+before on the left, after on the right, each labelled BEFORE/AFTER +
+timestamp. Each pair also reports `mean_abs_diff` (mean absolute
+difference of 16×16 gray thumbs, the same measure `extract_frames
+--dedup` uses) and `changed` (diff ≥ `--changed-threshold`, default
+1.0). Calibrated on this machine: the same file measures 0.00, the
+same content re-encoded at crf 28 measures 0.03–0.04, a different
+clip with similar luma 2.02–2.27, a 120px logo added 3.02, black vs
+content 126.1 — so 1.0 sits between re-encode noise and the smallest
+real change measured. The diff is measured on unlabelled captures
+(the labels are drawn only when the pair is composed), so the number
+is the picture, not the label. `--dry-run` validates the timestamps
+and lists the pair files without writing anything. Use it after every
+`patch_manifest` + re-render: a pair with `changed: false` at the
+timestamp you edited means the edit did not land.
 
 ## Workflow: vertical captioned clip from a landscape source
 
