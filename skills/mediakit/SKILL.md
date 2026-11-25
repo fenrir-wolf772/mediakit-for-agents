@@ -1483,7 +1483,10 @@ cut the same way. `--keep last` (default) keeps the later take —
 people warm up, so the later take is usually the better one;
 `--keep first` keeps the earlier one. The cut goes through
 `cut_words`, so pads (0.06/0.12), `--min-keep` and
-`cut_check.swallowed` behave identically. This is deterministic,
+`cut_check.swallowed` behave identically — and so does
+`--snap-to-pause` (rule 43): the keep edges move into the real
+pauses instead of the fixed pads, with the reason in `snap`.
+This is deterministic,
 not a judge: an intentional repetition ("I like cats. I like
 cats a lot.") looks exactly like a retake to the detector — the
 gap bounds are the only guard. So always run `--detect-only`
@@ -1874,7 +1877,15 @@ separated by less than that many seconds of kept speech, so a
 sub-2s keep fragment between two cuts is cut with them instead of
 making a choppy clip (2.0 is OpenEdit's default — but it can
 swallow real words on a dense take, so it stays off unless
-asked). `--fillers "um,uh,you know"` overrides the
+asked). `--snap-to-pause` moves each keep edge into the real pause
+the transcript points at (rule 43: measured from the take's own
+audio at 10 ms frames, 0.1s of room tone kept each side) instead
+of the fixed pads — Whisper's word edges run late at sentence
+ends, so a transcript-only cut keeps the start of the next
+sentence; an edge with no pause, an ambiguous one, or a snap that
+would cross a kept word keeps its padded value, with the reason in
+`snap`. A keep segment with no kept words in it (leading/trailing
+silence) is never snapped. `--fillers "um,uh,you know"` overrides the
 list; a phrase matches consecutive words. This is deterministic,
 not a judge: a dramatic pause looks exactly like a hesitation to
 the detector — always run `--detect-only` first and read the

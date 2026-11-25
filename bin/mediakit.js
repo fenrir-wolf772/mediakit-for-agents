@@ -662,8 +662,8 @@ const COMMANDS = {
     ],
   },
   "remove-retakes": {
-    usage: "mediakit remove-retakes <input> --words-file <words.json> -o <output> [--min-words 3] [--max-gap-words 8] [--max-gap-seconds 5] [--keep last|first] [--pad-before 0.06] [--pad-after 0.12] [--min-keep 0.2] [--detect-only]",
-    desc: "Cut repeated takes out of a talking-head clip, on word timings from transcribe --word-timestamps (save its printed JSON and pass it as --words-file): when the speaker says a sentence, restarts, and says it again, the earlier take plus the restart junk ('okay, again', a filler) is cut and the fluent take is kept whole. A repeat is --min-words identical words (default 3) with at most --max-gap-words words (default 8) and --max-gap-seconds (default 5) between the takes; a 2-word abandoned start ('the quick' — 'um' — 'the quick brown fox') is also cut. --keep last (default) keeps the later take, --keep first the earlier one. --detect-only reports the clusters and the cut plan and writes no file. No retake copies the input unchanged. Deterministic, not a judge: an intentional repetition looks like a retake to this detector — read the clusters (or run --detect-only) before cutting.",
+    usage: "mediakit remove-retakes <input> --words-file <words.json> -o <output> [--min-words 3] [--max-gap-words 8] [--max-gap-seconds 5] [--keep last|first] [--pad-before 0.06] [--pad-after 0.12] [--min-keep 0.2] [--snap-to-pause] [--detect-only]",
+    desc: "Cut repeated takes out of a talking-head clip, on word timings from transcribe --word-timestamps (save its printed JSON and pass it as --words-file): when the speaker says a sentence, restarts, and says it again, the earlier take plus the restart junk ('okay, again', a filler) is cut and the fluent take is kept whole. A repeat is --min-words identical words (default 3) with at most --max-gap-words words (default 8) and --max-gap-seconds (default 5) between the takes; a 2-word abandoned start ('the quick' — 'um' — 'the quick brown fox') is also cut. --keep last (default) keeps the later take, --keep first the earlier one. --snap-to-pause moves each keep edge into the real pause the transcript points at (measured from the take's own audio, 0.1s of room tone kept each side) instead of the fixed pads — Whisper's word edges run late at sentence ends; an edge with no pause, an ambiguous one, or a snap that would cross a kept word keeps its padded value, with the reason in snap. --detect-only reports the clusters and the cut plan and writes no file. No retake copies the input unchanged. Deterministic, not a judge: an intentional repetition looks like a retake to this detector — read the clusters (or run --detect-only) before cutting.",
     args: [{ name: "input", required: true }],
     options: [
       ["--words-file", "Transcript JSON with a words array (required) — the stdout of `transcribe --word-timestamps` saved to a file"],
@@ -674,13 +674,14 @@ const COMMANDS = {
       ["--pad-before", "Seconds kept before each kept-word run (default 0.06)"],
       ["--pad-after", "Seconds kept after each kept-word run (default 0.12)"],
       ["--min-keep", "Drop keep segments shorter than this many seconds (default 0.2)"],
+      ["--snap-to-pause", "Snap each keep edge into the real pause the transcript points at (measured levels, 0.1s room tone each side) instead of the fixed pads; an edge with no pause or an ambiguous one keeps its padded value"],
       ["--detect-only", "Report the clusters and the cut plan and write no file"],
       ["-o, --output", "Output file (required unless --detect-only)"],
     ],
   },
   "smart-cut": {
-    usage: "mediakit smart-cut <input> --words-file <words.json> -o <output> [--min-gap 0.45] [--aggressiveness 0.5] [--fillers um,uh,\"you know\"] [--min-keep 0.2] [--no-contextual-gate] [--min-segment 0] [--detect-only] [--dry-run]",
-    desc: "Tighten a talking-head clip on word timings from transcribe --word-timestamps (save its printed JSON and pass it as --words-file): cut the hesitation out of a take in one pass — long pauses between words, long filler words, and words held so long they became a stall. A filler only counts when held long (>= 0.35s - 0.15*aggressiveness), so a quick 0.1s 'um' survives and a stretched 'ummm' does not; that duration gate is what makes 'like'/'you know' safe in the default list. Since lượt 130 the contextual fillers 'like'/'you know'/'basically'/'actually' ALSO need the context gate (on by default): a long one is only cut when flanked by >= 0.15s pauses on both sides or at the very start/end of the take — a 0.6s 'like' inside 'I like this' survives and is listed in gated_fillers; --no-contextual-gate restores the old duration-only behaviour. --min-segment (default 0 = off) merges removals separated by less than that many seconds of kept speech, so a sub-2s keep fragment between two cuts is cut with them (2.0 follows OpenEdit's silence_cutter default — but it can swallow real words on a dense take, so it stays off unless asked). One --aggressiveness knob (0-1, default 0.5) scales all three cut thresholds at once. --detect-only reports the removed intervals and the cut plan and writes no file; --dry-run prints the exact ffmpeg command. Nothing to cut copies the input unchanged. Deterministic, not a judge: a dramatic pause looks like a hesitation to this detector — read the removed list (or run --detect-only) before cutting.",
+    usage: "mediakit smart-cut <input> --words-file <words.json> -o <output> [--min-gap 0.45] [--aggressiveness 0.5] [--fillers um,uh,\"you know\"] [--min-keep 0.2] [--no-contextual-gate] [--min-segment 0] [--snap-to-pause] [--detect-only] [--dry-run]",
+    desc: "Tighten a talking-head clip on word timings from transcribe --word-timestamps (save its printed JSON and pass it as --words-file): cut the hesitation out of a take in one pass — long pauses between words, long filler words, and words held so long they became a stall. A filler only counts when held long (>= 0.35s - 0.15*aggressiveness), so a quick 0.1s 'um' survives and a stretched 'ummm' does not; that duration gate is what makes 'like'/'you know' safe in the default list. Since lượt 130 the contextual fillers 'like'/'you know'/'basically'/'actually' ALSO need the context gate (on by default): a long one is only cut when flanked by >= 0.15s pauses on both sides or at the very start/end of the take — a 0.6s 'like' inside 'I like this' survives and is listed in gated_fillers; --no-contextual-gate restores the old duration-only behaviour. --min-segment (default 0 = off) merges removals separated by less than that many seconds of kept speech, so a sub-2s keep fragment between two cuts is cut with them (2.0 follows OpenEdit's silence_cutter default — but it can swallow real words on a dense take, so it stays off unless asked). --snap-to-pause moves each keep edge into the real pause the transcript points at (measured from the take's own audio, 0.1s of room tone kept each side) instead of the fixed pads — Whisper's word edges run late at sentence ends, so a transcript-only cut keeps the start of the next sentence; an edge with no pause, an ambiguous one, or a snap that would cross a kept word keeps its padded value, with the reason in snap. One --aggressiveness knob (0-1, default 0.5) scales all three cut thresholds at once. --detect-only reports the removed intervals and the cut plan and writes no file; --dry-run prints the exact ffmpeg command. Nothing to cut copies the input unchanged. Deterministic, not a judge: a dramatic pause looks like a hesitation to this detector — read the removed list (or run --detect-only) before cutting.",
     args: [{ name: "input", required: true }],
     options: [
       ["--words-file", "Transcript JSON with a words array (required) — the stdout of `transcribe --word-timestamps` saved to a file"],
@@ -690,6 +691,7 @@ const COMMANDS = {
       ["--min-keep", "Drop keep segments shorter than this many seconds (default 0.2)"],
       ["--no-contextual-gate", "Disable the context gate: cut 'like'/'you know'/'basically'/'actually' on duration alone, as before lượt 130"],
       ["--min-segment", "Merge removals separated by less than this many seconds of kept speech (default 0 = off; 2.0 is OpenEdit's default)"],
+      ["--snap-to-pause", "Snap each keep edge into the real pause the transcript points at (measured levels, 0.1s room tone each side) instead of the fixed pads; an edge with no pause or an ambiguous one keeps its padded value"],
       ["--detect-only", "Report the removed intervals and the cut plan and write no file"],
       ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required unless --detect-only)"],
@@ -1987,6 +1989,7 @@ async function main() {
           padBefore: numOpt(opts, "pad_before") ?? 0.06,
           padAfter: numOpt(opts, "pad_after") ?? 0.12,
           minKeep: numOpt(opts, "min_keep") ?? 0.2,
+          snapToPause: opts.snap_to_pause === true,
           detectOnly: opts.detect_only === true,
         });
         break;
@@ -2002,6 +2005,7 @@ async function main() {
           minKeep: numOpt(opts, "min_keep") ?? 0.2,
           contextualGate: opts.contextual_gate !== false,
           minSegment: numOpt(opts, "min_segment") ?? 0,
+          snapToPause: opts.snap_to_pause === true,
           detectOnly: opts.detect_only === true,
           dryRun: opts.dry_run === true,
         });

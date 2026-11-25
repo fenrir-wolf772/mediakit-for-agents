@@ -11248,6 +11248,20 @@ export async function measureSpeechLevels(input) {
   return parseSpeechLevels(stderr, 0);
 }
 
+// Word indices inside each keep segment, for snapping a planner's
+// segments (smart_cut builds keep from removed intervals, not word
+// runs, so it has no segment_indices of its own). A word counts
+// when it overlaps the segment at all — a stretched word's kept
+// 0.05s fragment counts, so the snap guard sees it and never eats
+// it; a filler word ending exactly on a segment edge does not
+// count (end == start is no overlap).
+export function segmentWordIndices(words, keep) {
+  return keep.map((seg) => words.reduce((out, w, i) => {
+    if (w.start < seg.end && w.end > seg.start) out.push(i);
+    return out;
+  }, []));
+}
+
 // Snap keep segments' edges into the real pauses the transcript
 // points at (pure: levels are passed in, unit-tested directly).
 // The start edge snaps into the pause BEFORE the first kept word
@@ -11262,6 +11276,13 @@ export function snapKeepSegmentsToPauses(words, keep, segmentIndices, levels, { 
   const snap = keep.map(() => ({ start: { mode: "kept", reason: "no pause found" }, end: { mode: "kept", reason: "no pause found" } }));
   keep.forEach((seg, i) => {
     const indices = segmentIndices[i];
+    // A keep segment with no kept words in it (leading/trailing
+    // silence the planner kept, e.g. smart_cut's [0, first word))
+    // has no word edge to snap from — both edges stay padded.
+    if (!indices || indices.length === 0) {
+      snap[i] = { start: { mode: "kept", reason: "no kept words in segment" }, end: { mode: "kept", reason: "no kept words in segment" } };
+      return;
+    }
     const firstIdx = indices[0];
     const lastIdx = indices[indices.length - 1];
     // End edge: the pause after the last kept word.
@@ -11700,7 +11721,7 @@ function formatWordRanges(indices) {
   return parts.join(",");
 }
 
-export async function removeRetakes({ input, output = null, wordsFile, minWords = 3, maxGapWords = 8, maxGapSeconds = 5, keep = "last", padBefore = 0.06, padAfter = 0.12, minKeep = 0.2, detectOnly = false }) {
+export async function removeRetakes({ input, output = null, wordsFile, minWords = 3, maxGapWords = 8, maxGapSeconds = 5, keep = "last", padBefore = 0.06, padAfter = 0.12, minKeep = 0.2, snapToPause = false, detectOnly = false }) {
   const inPath = await requireInput(input);
   const wordsPath = await requireInput(wordsFile, "words file");
   let rawWords;
@@ -11732,13 +11753,30 @@ export async function removeRetakes({ input, output = null, wordsFile, minWords 
     pad_before: num(padBefore, "pad_before", { min: 0, max: 1 }),
     pad_after: num(padAfter, "pad_after", { min: 0, max: 1 }),
     min_keep: num(minKeep, "min_keep", { min: 0.05, max: 5 }),
+    snap_to_pause: snapToPause === true,
+    snap: null,
   };
   if (detectOnly === true) {
     const cut = new Set(removed);
-    const { keep: kept, swallowed } = buildKeepSegmentsFromWords(words, cut, duration, { padBefore: base.pad_before, padAfter: base.pad_after, minKeep: base.min_keep });
+    const { keep: kept0, swallowed, segment_indices } = buildKeepSegmentsFromWords(words, cut, duration, { padBefore: base.pad_before, padAfter: base.pad_after, minKeep: base.min_keep });
+    // Snap edges into real pauses (opt-in, same machinery as
+    // cut_words --snap-to-pause) — the snapped plan is what
+    // detect-only previews, so a retake cut never starts mid-word
+    // because Whisper's edge ran late.
+    let kept = kept0;
+    let snap = null;
+    if (snapToPause === true && removed.length > 0) {
+      if (duration > PAUSE_MAX_DURATION_SEC) {
+        throw new MediaKitError(`remove_retakes --snap-to-pause refuses files over ${PAUSE_MAX_DURATION_SEC}s (the 10 ms level log would exceed the capture buffer) — trim a section first`, "INVALID_ARG");
+      }
+      const levels = await measureSpeechLevels(inPath);
+      const res = snapKeepSegmentsToPauses(words, kept0, segment_indices, levels, { minKeep: base.min_keep });
+      kept = res.keep;
+      snap = res.snap;
+    }
     const keptTotal = kept.reduce((s, k) => s + k.duration, 0);
     return {
-      ...base, detect_only: true,
+      ...base, detect_only: true, snap,
       keep_segments: kept,
       removed_seconds: +(duration - keptTotal).toFixed(3),
       cut_check: { swallowed, warnings: swallowed.map((s) => `kept word #${s.index} '${s.word}' @${s.start}s is mostly cut out — play it, then re-run with a larger --max-gap-words or smaller --min-words`) },
@@ -11758,6 +11796,7 @@ export async function removeRetakes({ input, output = null, wordsFile, minWords 
     input: inPath, output, wordsFile: wordsPath,
     indices: formatWordRanges(removed),
     padBefore: base.pad_before, padAfter: base.pad_after, minKeep: base.min_keep,
+    snapToPause: snapToPause === true,
   });
   return {
     ...base,
@@ -11766,6 +11805,8 @@ export async function removeRetakes({ input, output = null, wordsFile, minWords 
     keep_segments: cut.keep_segments,
     removed_seconds: cut.removed_seconds,
     cut_check: cut.cut_check,
+    snap: cut.snap,
+    snap_to_pause: cut.snap_to_pause,
     ...(cut.dimensions ? { dimensions: cut.dimensions } : {}),
     ...(cut.size_bytes !== undefined ? { size_bytes: cut.size_bytes } : {}),
   };
@@ -12035,7 +12076,7 @@ export function planSmartCuts(words, duration, { minGap = 0.45, aggressiveness =
   };
 }
 
-export async function smartCut({ input, output = null, wordsFile, minGap = 0.45, aggressiveness = 0.5, fillers = null, minKeep = 0.2, contextualGate = true, minSegment = 0, detectOnly = false, dryRun = false }) {
+export async function smartCut({ input, output = null, wordsFile, minGap = 0.45, aggressiveness = 0.5, fillers = null, minKeep = 0.2, contextualGate = true, minSegment = 0, snapToPause = false, detectOnly = false, dryRun = false }) {
   const inPath = await requireInput(input);
   const wordsPath = await requireInput(wordsFile, "words file");
   let rawWords;
@@ -12050,7 +12091,27 @@ export async function smartCut({ input, output = null, wordsFile, minGap = 0.45,
   const duration = meta.duration_seconds;
   if (duration === null) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
   const plan = planSmartCuts(words, duration, { minGap, aggressiveness, fillers, minKeep, contextualGate, minSegment });
-  const keptTotal = plan.keep.reduce((s, k) => s + k.duration, 0);
+  // Snap edges into real pauses (opt-in, the same machinery as
+  // cut_words --snap-to-pause): one level measurement over the
+  // whole take, then each keep edge moves into the pause the
+  // transcript points at. plan.keep has no word indices of its own
+  // (it is built from removed intervals), so they are derived from
+  // word overlap; a silence-only segment snaps to nothing and keeps
+  // its padded edges. Skipped when nothing is cut, and files over
+  // 1200 s are refused (the 10 ms level log would exceed the
+  // capture buffer).
+  let kept = plan.keep;
+  let snap = null;
+  if (snapToPause === true && plan.removed_count > 0) {
+    if (duration > PAUSE_MAX_DURATION_SEC) {
+      throw new MediaKitError(`smart_cut --snap-to-pause refuses files over ${PAUSE_MAX_DURATION_SEC}s (the 10 ms level log would exceed the capture buffer) — trim a section first`, "INVALID_ARG");
+    }
+    const levels = await measureSpeechLevels(inPath);
+    const res = snapKeepSegmentsToPauses(words, plan.keep, segmentWordIndices(words, plan.keep), levels, { minKeep: num(minKeep, "min_keep", { min: 0.05, max: 5 }) });
+    kept = res.keep;
+    snap = res.snap;
+  }
+  const keptTotal = kept.reduce((s, k) => s + k.duration, 0);
   const base = {
     operation: "smart_cut",
     input: inPath,
@@ -12064,12 +12125,14 @@ export async function smartCut({ input, output = null, wordsFile, minGap = 0.45,
     removed_count: plan.removed_count,
     gated_fillers: plan.gated_fillers,
     min_segment_merges: plan.min_segment_merges,
-    keep_segments: plan.keep,
+    keep_segments: kept,
     removed_seconds: +(duration - keptTotal).toFixed(3),
     duration_before: duration,
     min_keep: num(minKeep, "min_keep", { min: 0.05, max: 5 }),
     contextual_gate: contextualGate !== false,
     min_segment: num(minSegment, "min_segment", { min: 0, max: 5 }),
+    snap_to_pause: snapToPause === true,
+    snap,
     cut_check: { swallowed: plan.swallowed, warnings: plan.swallowed.map((s) => `kept word #${s.index} '${s.word}' @${s.start}s is mostly cut out — play it, then re-run with a larger --min-gap or smaller --aggressiveness`) },
   };
   if (detectOnly === true) return { ...base, detect_only: true, ...(dryRun ? { dry_run: true } : {}) };
@@ -12080,7 +12143,7 @@ export async function smartCut({ input, output = null, wordsFile, minGap = 0.45,
     const info = await fileInfo(outPath);
     return { ...base, output: outPath, duration_after: duration, stream_copy: true, warning: "nothing to cut — copied unchanged", ...info };
   }
-  if (plan.keep.length === 0) {
+  if (kept.length === 0) {
     throw new MediaKitError("smart_cut would remove everything — nothing to keep (pass a larger --min-gap or smaller --aggressiveness)", "INVALID_ARG");
   }
   const outPath = await prepareOutput(output, [inPath, wordsPath]);
@@ -12091,7 +12154,7 @@ export async function smartCut({ input, output = null, wordsFile, minGap = 0.45,
   const aParts = [];
   const vLabels = [];
   const aLabels = [];
-  plan.keep.forEach((seg, i) => {
+  kept.forEach((seg, i) => {
     if (meta.video) {
       vParts.push(`[0:v]trim=start=${seg.start}:end=${seg.end},setpts=PTS-STARTPTS[v${i}]`);
       vLabels.push(`[v${i}]`);
@@ -12100,8 +12163,8 @@ export async function smartCut({ input, output = null, wordsFile, minGap = 0.45,
     aLabels.push(`[a${i}]`);
   });
   const graph = [...vParts, ...aParts];
-  if (meta.video) graph.push(`${vLabels.join("")}concat=n=${plan.keep.length}:v=1:a=0[vout]`);
-  graph.push(`${aLabels.join("")}concat=n=${plan.keep.length}:v=0:a=1[aout]`);
+  if (meta.video) graph.push(`${vLabels.join("")}concat=n=${kept.length}:v=1:a=0[vout]`);
+  graph.push(`${aLabels.join("")}concat=n=${kept.length}:v=0:a=1[aout]`);
   const args = ["-y", "-i", inPath, "-filter_complex", graph.join(";")];
   if (meta.video) {
     args.push("-map", "[vout]", "-map", "[aout]",
@@ -16390,25 +16453,27 @@ export const BATCH_OPERATIONS = {
   // remove_retakes in batch: same words-file-by-convention as
   // cut_words — <words_dir>/<stem>.words.json per clip.
   remove_retakes: {
-    args: ["words_dir", "min_words", "max_gap_words", "max_gap_seconds", "keep", "pad_before", "pad_after", "min_keep"],
+    args: ["words_dir", "min_words", "max_gap_words", "max_gap_seconds", "keep", "pad_before", "pad_after", "min_keep", "snap_to_pause"],
     run: (input, output, a) => removeRetakes({
       input, output,
       wordsFile: cutWordsFileFor(input, a.words_dir),
       minWords: a.min_words ?? 3, maxGapWords: a.max_gap_words ?? 8, maxGapSeconds: a.max_gap_seconds ?? 5,
       keep: a.keep ?? "last",
       padBefore: a.pad_before ?? 0.06, padAfter: a.pad_after ?? 0.12, minKeep: a.min_keep ?? 0.2,
+      snapToPause: a.snap_to_pause ?? false,
     }),
     extraHash: async (input, a) => hashSidecar(cutWordsFileFor(input, a.words_dir)),
   },
   // smart_cut in batch: same words-file-by-convention as cut_words.
   smart_cut: {
-    args: ["words_dir", "min_gap", "aggressiveness", "fillers", "min_keep", "contextual_gate", "min_segment"],
+    args: ["words_dir", "min_gap", "aggressiveness", "fillers", "min_keep", "contextual_gate", "min_segment", "snap_to_pause"],
     run: (input, output, a) => smartCut({
       input, output,
       wordsFile: cutWordsFileFor(input, a.words_dir),
       minGap: a.min_gap ?? 0.45, aggressiveness: a.aggressiveness ?? 0.5,
       fillers: a.fillers ?? null, minKeep: a.min_keep ?? 0.2,
       contextualGate: a.contextual_gate ?? true, minSegment: a.min_segment ?? 0,
+      snapToPause: a.snap_to_pause ?? false,
     }),
     extraHash: async (input, a) => hashSidecar(cutWordsFileFor(input, a.words_dir)),
   },
@@ -17130,22 +17195,24 @@ export const MANIFEST_STEPS = {
   },
   // Same override for remove_retakes: one words file for the one input.
   remove_retakes: {
-    args: ["words_file", "min_words", "max_gap_words", "max_gap_seconds", "keep", "pad_before", "pad_after", "min_keep"],
+    args: ["words_file", "min_words", "max_gap_words", "max_gap_seconds", "keep", "pad_before", "pad_after", "min_keep", "snap_to_pause"],
     run: (input, output, a) => removeRetakes({
       input, output, wordsFile: a.words_file,
       minWords: a.min_words ?? 3, maxGapWords: a.max_gap_words ?? 8, maxGapSeconds: a.max_gap_seconds ?? 5,
       keep: a.keep ?? "last",
       padBefore: a.pad_before ?? 0.06, padAfter: a.pad_after ?? 0.12, minKeep: a.min_keep ?? 0.2,
+      snapToPause: a.snap_to_pause ?? false,
     }),
   },
   // Same override for smart_cut: one words file for the one input.
   smart_cut: {
-    args: ["words_file", "min_gap", "aggressiveness", "fillers", "min_keep", "contextual_gate", "min_segment"],
+    args: ["words_file", "min_gap", "aggressiveness", "fillers", "min_keep", "contextual_gate", "min_segment", "snap_to_pause"],
     run: (input, output, a) => smartCut({
       input, output, wordsFile: a.words_file,
       minGap: a.min_gap ?? 0.45, aggressiveness: a.aggressiveness ?? 0.5,
       fillers: a.fillers ?? null, minKeep: a.min_keep ?? 0.2,
       contextualGate: a.contextual_gate ?? true, minSegment: a.min_segment ?? 0,
+      snapToPause: a.snap_to_pause ?? false,
     }),
   },
   // Same override for search_words: one words file for the one
