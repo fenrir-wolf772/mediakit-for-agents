@@ -15,7 +15,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
-import { analyzeSeamSamples, applyContentBaseline, averageHash, buildZoomChains, chunkCaptions, compareDeterminismRuns, countClippedRuns, cutSheetRows, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, endInPause, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseSpeechLevels, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, snapKeepSegmentsToPauses, spectralFluxOnset, startInPause, suggestSeamFix, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
+import { acquireEditLease, analyzeSeamSamples, applyContentBaseline, averageHash, buildZoomChains, chunkCaptions, compareDeterminismRuns, countClippedRuns, cutSheetRows, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, editLeaseStatus, endInPause, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parseSmartCutFillers, parseSpeechLevels, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, releaseEditLease, renewEditLease, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, snapKeepSegmentsToPauses, spectralFluxOnset, startInPause, stepFallbackConfirmed, suggestSeamFix, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
@@ -201,19 +201,19 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "normalize", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut", "clean_voice", "measure_pace", "highlights", "align_voice", "safety", "estimate_conversion", "release_checkpoint", "list_operations", "describe_operation", "list_templates", "validate_template_package", "chunk_captions", "validate_shot_spec"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "normalize", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut", "clean_voice", "measure_pace", "highlights", "align_voice", "safety", "estimate_conversion", "release_checkpoint", "list_operations", "describe_operation", "list_templates", "validate_template_package", "chunk_captions", "validate_shot_spec", "lease"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 93 tools present");
-checkOk(missing.length === 0, "tools/list has all 93 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 94 tools present");
+checkOk(missing.length === 0, "tools/list has all 94 tools", `missing: ${missing.join(", ")}`);
 
 // Progressive discovery (lượt 147, idea: KyaniteLabs/kinocut):
 // the compact catalog first, full schema only on demand.
 const discAll = listOperations({});
 console.log("list_operations:", discAll.tools.length, "tools | families", discAll.families.map((f) => `${f.name}:${f.count}`).join(" "));
-checkOk(discAll.total_tools === 93 && discAll.tools.length === 93 && discAll.profile === "full" && discAll.visible_tools === 93, "list_operations (pure) lists all 93 tools in full profile", JSON.stringify({ total: discAll.total_tools, visible: discAll.visible_tools, profile: discAll.profile }));
-checkOk(discAll.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:27 edit:36 text:7 image:7 assemble:14 meta:2", "list_operations families split 27/36/7/7/14/2", discAll.families.map((f) => `${f.name}:${f.count}`).join(" "));
+checkOk(discAll.total_tools === 94 && discAll.tools.length === 94 && discAll.profile === "full" && discAll.visible_tools === 94, "list_operations (pure) lists all 94 tools in full profile", JSON.stringify({ total: discAll.total_tools, visible: discAll.visible_tools, profile: discAll.profile }));
+checkOk(discAll.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:27 edit:36 text:7 image:7 assemble:15 meta:2", "list_operations families split 27/36/7/7/15/2", discAll.families.map((f) => `${f.name}:${f.count}`).join(" "));
 checkOk(discAll.tools.every((t) => typeof t.name === "string" && ["inspect", "edit", "text", "image", "assemble", "meta"].includes(t.family) && ["READ", "PLAN", "WRITE", "DESTRUCTIVE"].includes(t.tier) && typeof t.summary === "string" && t.summary.length > 10 && t.summary.length <= 161 && (t.summary.endsWith(".") || t.summary.endsWith("…"))), "every list_operations entry has a known family, a tier and a one-sentence summary (<=160 chars, ends . or …)", discAll.tools.filter((t) => !(t.summary.endsWith(".") || t.summary.endsWith("…"))).map((t) => t.name).join(","));
-checkOk(Object.keys(TOOL_FAMILY_OF).length === 93 && TOOL_DEFS.every((t) => TOOL_FAMILY_OF[t.name] !== undefined) && new Set(Object.values(TOOL_FAMILY_OF)).size === 6, "TOOL_FAMILY_OF covers every TOOL_DEFS entry exactly once, in 6 families", `map=${Object.keys(TOOL_FAMILY_OF).length} defs=${TOOL_DEFS.length}`);
+checkOk(Object.keys(TOOL_FAMILY_OF).length === 94 && TOOL_DEFS.every((t) => TOOL_FAMILY_OF[t.name] !== undefined) && new Set(Object.values(TOOL_FAMILY_OF)).size === 6, "TOOL_FAMILY_OF covers every TOOL_DEFS entry exactly once, in 6 families", `map=${Object.keys(TOOL_FAMILY_OF).length} defs=${TOOL_DEFS.length}`);
 const discEdit = listOperations({ family: "edit" });
 checkOk(discEdit.tools.length === 36 && discEdit.tools.every((t) => t.family === "edit"), "list_operations family=edit narrows to the 36 edit tools", `got ${discEdit.tools.length}`);
 let discBadFamily = null;
@@ -246,12 +246,12 @@ for (const [badArgs, why] of [[{ category: "nope" }, "unknown category"], [{ tim
   try { await listSceneTemplates(badArgs); } catch (e) { threw = e; }
   checkOk(threw?.code === "INVALID_ARG" && typeof threw?.message === "string" && threw.message.length > 0, `listSceneTemplates rejects ${why} with INVALID_ARG`, threw?.message ?? "no throw");
 }
-checkOk(toolProfile() === "full" && visibleTools().length === 93 && HOT_TOOLS.length === 18 && HOT_TOOLS.every((n) => TOOL_DEFS.some((t) => t.name === n)), "default profile is full (93 visible) and the 18 hot tools all exist", `profile=${toolProfile()} hot=${HOT_TOOLS.length}`);
+checkOk(toolProfile() === "full" && visibleTools().length === 94 && HOT_TOOLS.length === 18 && HOT_TOOLS.every((n) => TOOL_DEFS.some((t) => t.name === n)), "default profile is full (94 visible) and the 18 hot tools all exist", `profile=${toolProfile()} hot=${HOT_TOOLS.length}`);
 process.env.MEDIAKIT_TOOL_PROFILE = "hot";
 checkOk(toolProfile() === "hot" && visibleTools().length === 20 && visibleTools().some((t) => t.name === "list_operations") && visibleTools().some((t) => t.name === "describe_operation") && !visibleTools().some((t) => t.name === "chroma_key"), "hot profile narrows tools/list to 20 (18 hot + 2 discovery), chroma_key hidden", `visible=${visibleTools().length}`);
-checkOk(listOperations({}).tools.length === 93 && listOperations({}).visible_tools === 20, "list_operations still reports the FULL 93-tool catalog in hot profile (visible_tools 20)", JSON.stringify({ tools: listOperations({}).tools.length, visible: listOperations({}).visible_tools }));
+checkOk(listOperations({}).tools.length === 94 && listOperations({}).visible_tools === 20, "list_operations still reports the FULL 94-tool catalog in hot profile (visible_tools 20)", JSON.stringify({ tools: listOperations({}).tools.length, visible: listOperations({}).visible_tools }));
 process.env.MEDIAKIT_TOOL_PROFILE = "bogus";
-checkOk(toolProfile() === "full" && visibleTools().length === 93, "an unknown MEDIAKIT_TOOL_PROFILE value falls back to full (93 visible)", `profile=${toolProfile()}`);
+checkOk(toolProfile() === "full" && visibleTools().length === 94, "an unknown MEDIAKIT_TOOL_PROFILE value falls back to full (94 visible)", `profile=${toolProfile()}`);
 delete process.env.MEDIAKIT_TOOL_PROFILE;
 // Machine-readable contract (lượt 149): SPEC.json is generated from
 // the same TOOL_DEFS registry — the committed file must equal a
@@ -264,10 +264,10 @@ const specFresh = await buildSpec();
 checkOk(specOnDisk.spec_version === SPEC_VERSION && specFresh.spec_version === SPEC_VERSION, "SPEC.json carries spec_version 1", `on-disk=${specOnDisk.spec_version} fresh=${specFresh.spec_version}`);
 const pkgJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 checkOk(specOnDisk.mediakit_version === pkgJson.version && specFresh.mediakit_version === pkgJson.version, "SPEC.json mediakit_version matches package.json", `spec=${specOnDisk.mediakit_version} pkg=${pkgJson.version}`);
-checkOk(specOnDisk.tool_count === 93 && specFresh.tool_count === 93 && specOnDisk.tools.length === 93, "SPEC.json lists all 93 tools", `on-disk=${specOnDisk.tool_count} fresh=${specFresh.tool_count}`);
+checkOk(specOnDisk.tool_count === 94 && specFresh.tool_count === 94 && specOnDisk.tools.length === 94, "SPEC.json lists all 94 tools", `on-disk=${specOnDisk.tool_count} fresh=${specFresh.tool_count}`);
 checkOk(specText(specOnDisk) === specText(specFresh), "committed SPEC.json equals a fresh build byte for byte (regenerate with `npm run spec` when it drifts)", `hash on-disk=${specOnDisk.spec_hash?.slice(0, 12)} fresh=${specFresh.spec_hash.slice(0, 12)}`);
 checkOk(specOnDisk.spec_hash === specHash(specOnDisk.tools) && specFresh.spec_hash === specHash(specFresh.tools), "SPEC spec_hash is the sha256 of its own tools array", `hash=${specOnDisk.spec_hash.slice(0, 12)}…`);
-checkOk(specOnDisk.transports.join(",") === "stdio,http" && specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:27 edit:36 text:7 image:7 assemble:14 meta:2" && specOnDisk.families.reduce((n, f) => n + f.count, 0) === 93, "SPEC families split 27/36/7/7/14/2, sum to 93, transports stdio+http", specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" "));
+checkOk(specOnDisk.transports.join(",") === "stdio,http" && specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:27 edit:36 text:7 image:7 assemble:15 meta:2" && specOnDisk.families.reduce((n, f) => n + f.count, 0) === 94, "SPEC families split 27/36/7/7/15/2, sum to 94, transports stdio+http", specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" "));
 checkOk(specOnDisk.tools.every((t) => typeof t.name === "string" && ["inspect", "edit", "text", "image", "assemble", "meta"].includes(t.family) && ["READ", "PLAN", "WRITE", "DESTRUCTIVE"].includes(t.tier) && typeof t.summary === "string" && t.summary.length > 10 && t.summary.length <= 161 && typeof t.description === "string" && t.description.length > t.summary.length && t.inputSchema?.type === "object" && typeof t.inputSchema.properties === "object" && (t.inputSchema.required === undefined || Array.isArray(t.inputSchema.required))), "every SPEC tool entry has a known family/tier, a one-sentence summary, a longer description and an object JSON Schema with properties (required present only when the tool has required params — an all-optional schema has none)", specOnDisk.tools.filter((t) => !(t.inputSchema?.type === "object")).map((t) => t.name).join(","));
 checkOk(JSON.stringify(specOnDisk.tools.map((t) => t.name)) === JSON.stringify(TOOL_DEFS.map((t) => t.name)), "SPEC tool order follows the TOOL_DEFS registry order", `first=${specOnDisk.tools[0].name} last=${specOnDisk.tools.at(-1).name}`);
 checkOk(specOnDisk.tools.find((t) => t.name === "probe")?.inputSchema.properties.input?.type === "string" && specOnDisk.tools.find((t) => t.name === "trim")?.inputSchema.properties.stream_copy?.type === "boolean" && specOnDisk.tools.find((t) => t.name === "patch_manifest")?.tier === "DESTRUCTIVE", "SPEC schemas carry real parameter types (probe.input string, trim.stream_copy boolean) and patch_manifest stays DESTRUCTIVE", "");
@@ -3332,7 +3332,7 @@ checkOk(dedupCliJson.frame_count === 1 && dedupCliJson.dedup?.dropped === 19, "C
 // list_operations / describe_operation over MCP (lượt 147).
 const listOpsRes = await client.callTool({ name: "list_operations", arguments: {} });
 const listOpsJson = JSON.parse(listOpsRes.content[0].text);
-checkOk(listOpsJson.total_tools === 93 && listOpsJson.tools?.length === 93 && listOpsJson.families?.find((f) => f.name === "edit")?.count === 36 && listOpsJson.tools?.every((t) => typeof t.summary === "string"), "MCP list_operations lists 93 tools with families (edit 36) and summaries", `total=${listOpsJson.total_tools}`);
+checkOk(listOpsJson.total_tools === 94 && listOpsJson.tools?.length === 94 && listOpsJson.families?.find((f) => f.name === "edit")?.count === 36 && listOpsJson.tools?.every((t) => typeof t.summary === "string"), "MCP list_operations lists 94 tools with families (edit 36) and summaries", `total=${listOpsJson.total_tools}`);
 const listOpsEditRes = await client.callTool({ name: "list_operations", arguments: { family: "image" } });
 const listOpsEditJson = JSON.parse(listOpsEditRes.content[0].text);
 checkOk(listOpsEditJson.tools?.length === 7 && listOpsEditJson.tools?.every((t) => t.family === "image"), "MCP list_operations family=image returns the 7 image tools", `got ${listOpsEditJson.tools?.length}`);
@@ -3524,6 +3524,109 @@ checkOk(shotMissingRes.isError === true && shotMissingJson.code === "INPUT_NOT_F
 const shotCli = await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "validate-shot-spec", shotImgFile]);
 const shotCliJson = JSON.parse(shotCli.stdout);
 checkOk(shotCliJson.valid === true && shotCliJson.kind === "image" && shotCliJson.inputs.source?.size_bytes === 4401, "CLI validate-shot-spec on the image spec reports valid:true + kind image", JSON.stringify({ valid: shotCliJson.valid, kind: shotCliJson.kind }));
+
+// edit lease (lượt 171, idea: frankShan001/CutVoke's edit_lock): a TTL
+// write lock for a manifest, so a director editing across several
+// calls is not silently clobbered by another writer. The scratch
+// manifest is written into outputs/ with an absolute input path (the
+// dry-run validation inside patch_manifest must find the input file).
+const leasePath = path.join(root, "outputs/mcp-manifest-lease.json");
+const leaseOriginal = JSON.stringify({ version: 1, input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-manifest-lease-out.mp4"), steps: [{ tool: "trim", args: { start: 2, end: 8 } }, { tool: "reframe", args: { mode: "blur", width: 1080, height: 1920 } }, { tool: "loudness", args: { target_lufs: -14 } }], qa: "tiktok" }, null, 2);
+await writeFile(leasePath, leaseOriginal, "utf8");
+const leaseSidecar = `${leasePath}.lease.json`;
+await rm(leaseSidecar, { force: true });
+// Pure: no lease at first.
+const leaseNone = await editLeaseStatus({ manifestPath: leasePath });
+checkOk(leaseNone.state === "none" && leaseNone.lease_corrupt === false, "lease status on an unleased manifest reports state none", JSON.stringify(leaseNone.state));
+// Pure: an expired lease does not block, cannot be renewed, and
+// releases as expired.
+await writeFile(leaseSidecar, JSON.stringify({ version: 1, lease_id: "lease-expired", holder: "ghost", manifest: leasePath, acquired_at: new Date(Date.now() - 700000).toISOString(), expires_at: new Date(Date.now() - 600000).toISOString(), ttl_seconds: 180, revision: 0 }), "utf8");
+const leaseExpired = await editLeaseStatus({ manifestPath: leasePath });
+checkOk(leaseExpired.state === "expired" && leaseExpired.expired_seconds_ago >= 590, "lease status on an expired lease reports expired with seconds since expiry", JSON.stringify({ state: leaseExpired.state, ago: leaseExpired.expired_seconds_ago }));
+const leaseExpiredPatch = await patchManifest({ manifestPath: leasePath, patch: [{ op: "set", path: "steps.0.args.end", value: 7 }], expectedRevision: 0 });
+checkOk(leaseExpiredPatch.revision_after === 1, "patch_manifest writes through an expired lease (revision 0 -> 1)", JSON.stringify(leaseExpiredPatch.revision_after));
+let leaseExpiredRenewErr = null;
+try { await renewEditLease({ manifestPath: leasePath, leaseId: "lease-expired" }); } catch (e) { leaseExpiredRenewErr = e; }
+checkOk(leaseExpiredRenewErr?.code === "LEASE_EXPIRED", "renew on an expired lease refuses with LEASE_EXPIRED", leaseExpiredRenewErr?.code ?? "");
+const leaseExpiredRelease = await releaseEditLease({ manifestPath: leasePath, leaseId: "lease-expired" });
+checkOk(leaseExpiredRelease.released === true && leaseExpiredRelease.state === "expired", "release on an expired lease succeeds and reports state expired", JSON.stringify(leaseExpiredRelease.state));
+const leaseNone2 = await editLeaseStatus({ manifestPath: leasePath });
+checkOk(leaseNone2.state === "none", "lease status is none again after releasing the expired lease", JSON.stringify(leaseNone2.state));
+// Pure: acquire defaults to 180s and records the manifest revision.
+const leaseA = await acquireEditLease({ manifestPath: leasePath, holder: "director-a" });
+checkOk(/^lease-[0-9a-f]{16}$/.test(leaseA.lease_id) && leaseA.ttl_seconds === 180 && leaseA.ttl_requested === null && leaseA.expires_in_seconds === 180 && leaseA.renewed === false && leaseA.revision === 1, "lease acquire defaults to TTL 180s, returns a lease id and records revision 1", JSON.stringify({ id: leaseA.lease_id, ttl: leaseA.ttl_seconds, rev: leaseA.revision }));
+const leaseActive = await editLeaseStatus({ manifestPath: leasePath });
+checkOk(leaseActive.state === "active" && leaseActive.holder === "director-a" && leaseActive.expires_in_seconds > 150 && leaseActive.expires_in_seconds <= 180, "lease status on a held lease reports active with the holder and seconds left", JSON.stringify({ state: leaseActive.state, left: leaseActive.expires_in_seconds }));
+// Pure: the same holder re-acquiring renews the same lease id.
+const leaseA2 = await acquireEditLease({ manifestPath: leasePath, holder: "director-a", ttlSeconds: 300 });
+checkOk(leaseA2.lease_id === leaseA.lease_id && leaseA2.renewed === true && leaseA2.expires_in_seconds === 300, "lease re-acquire by the same holder renews the same lease id to TTL 300s", JSON.stringify({ renewed: leaseA2.renewed, exp: leaseA2.expires_in_seconds }));
+// Pure: another holder is refused, and the refusal never names the id.
+let leaseHeldErr = null;
+try { await acquireEditLease({ manifestPath: leasePath, holder: "director-b" }); } catch (e) { leaseHeldErr = e; }
+checkOk(leaseHeldErr?.code === "LEASE_HELD" && /director-a/.test(leaseHeldErr.message) && !leaseHeldErr.message.includes(leaseA.lease_id), "lease acquire by another holder refuses with LEASE_HELD naming the holder but never the lease id", leaseHeldErr?.message?.slice(0, 120) ?? "");
+// Pure: patch_manifest without the lease id is refused and the file
+// is untouched; with it, the patch commits.
+let leasePatchHeldErr = null;
+try { await patchManifest({ manifestPath: leasePath, patch: [{ op: "set", path: "steps.2.args.target_lufs", value: -16 }], expectedRevision: 1 }); } catch (e) { leasePatchHeldErr = e; }
+checkOk(leasePatchHeldErr?.code === "LEASE_HELD", "patch_manifest without a lease id is refused with LEASE_HELD while the lease is held", leasePatchHeldErr?.code ?? "");
+checkOk(JSON.parse(await readFile(leasePath, "utf8")).revision === 1, "the refused patch leaves the manifest file at revision 1", "");
+const leasePatchOk = await patchManifest({ manifestPath: leasePath, patch: [{ op: "set", path: "steps.2.args.target_lufs", value: -16 }], expectedRevision: 1, leaseId: leaseA.lease_id });
+checkOk(leasePatchOk.revision_after === 2, "patch_manifest with the matching lease id commits (revision 1 -> 2)", JSON.stringify(leasePatchOk.revision_after));
+// Pure: renew/release with the wrong id change nothing.
+let leaseRenewWrongErr = null;
+try { await renewEditLease({ manifestPath: leasePath, leaseId: "lease-wrong" }); } catch (e) { leaseRenewWrongErr = e; }
+checkOk(leaseRenewWrongErr?.code === "LEASE_MISMATCH", "lease renew with a wrong id refuses with LEASE_MISMATCH", leaseRenewWrongErr?.code ?? "");
+const leaseRenewed = await renewEditLease({ manifestPath: leasePath, leaseId: leaseA.lease_id, ttlSeconds: 120 });
+checkOk(leaseRenewed.expires_in_seconds === 120 && leaseRenewed.ttl_seconds === 120, "lease renew with the right id extends the expiry to TTL 120s", JSON.stringify(leaseRenewed.expires_in_seconds));
+let leaseReleaseWrongErr = null;
+try { await releaseEditLease({ manifestPath: leasePath, leaseId: "lease-wrong" }); } catch (e) { leaseReleaseWrongErr = e; }
+checkOk(leaseReleaseWrongErr?.code === "LEASE_MISMATCH" && (await editLeaseStatus({ manifestPath: leasePath })).state === "active", "lease release with a wrong id refuses with LEASE_MISMATCH and the lease stays active", leaseReleaseWrongErr?.code ?? "");
+const leaseReleased = await releaseEditLease({ manifestPath: leasePath, leaseId: leaseA.lease_id });
+checkOk(leaseReleased.released === true && leaseReleased.state === "active", "lease release with the right id releases the active lease", JSON.stringify(leaseReleased.state));
+const leaseNone3 = await editLeaseStatus({ manifestPath: leasePath });
+checkOk(leaseNone3.state === "none", "lease status is none after release", JSON.stringify(leaseNone3.state));
+// Pure: TTL clamps to 120-300 and reports both values; an empty
+// holder is refused.
+const leaseShort = await acquireEditLease({ manifestPath: leasePath, holder: "director-c", ttlSeconds: 30 });
+checkOk(leaseShort.ttl_seconds === 120 && leaseShort.ttl_requested === 30, "lease acquire with TTL 30 clamps to 120s and reports the requested 30s", JSON.stringify({ applied: leaseShort.ttl_seconds, requested: leaseShort.ttl_requested }));
+await releaseEditLease({ manifestPath: leasePath, leaseId: leaseShort.lease_id });
+const leaseLong = await acquireEditLease({ manifestPath: leasePath, holder: "director-c", ttlSeconds: 999 });
+checkOk(leaseLong.ttl_seconds === 300 && leaseLong.ttl_requested === 999, "lease acquire with TTL 999 clamps to 300s and reports the requested 999s", JSON.stringify({ applied: leaseLong.ttl_seconds, requested: leaseLong.ttl_requested }));
+await releaseEditLease({ manifestPath: leasePath, leaseId: leaseLong.lease_id });
+let leaseEmptyHolderErr = null;
+try { await acquireEditLease({ manifestPath: leasePath, holder: "  " }); } catch (e) { leaseEmptyHolderErr = e; }
+checkOk(leaseEmptyHolderErr?.code === "INVALID_ARG", "lease acquire with an empty holder refuses with INVALID_ARG", leaseEmptyHolderErr?.code ?? "");
+// Pure: a corrupt lease file is treated as no lease (fail-open) and
+// never blocks a patch.
+await writeFile(leaseSidecar, "not json{", "utf8");
+const leaseCorrupt = await editLeaseStatus({ manifestPath: leasePath });
+checkOk(leaseCorrupt.state === "none" && leaseCorrupt.lease_corrupt === true, "lease status on a corrupt lease file reports state none + lease_corrupt", JSON.stringify(leaseCorrupt));
+const leaseCorruptPatch = await patchManifest({ manifestPath: leasePath, patch: [{ op: "set", path: "output", value: path.join(root, "outputs/mcp-manifest-lease-out2.mp4") }], expectedRevision: 2 });
+checkOk(leaseCorruptPatch.revision_after === 3, "patch_manifest writes through a corrupt lease file (revision 2 -> 3)", JSON.stringify(leaseCorruptPatch.revision_after));
+// MCP + CLI: acquire/status/patch-through/release round-trip.
+const leaseMcp = await client.callTool({ name: "lease", arguments: { action: "acquire", manifest_path: leasePath, holder: "mcp-director" } });
+const leaseMcpJson = JSON.parse(leaseMcp.content[0].text);
+checkOk(leaseMcp.isError !== true && /^lease-[0-9a-f]{16}$/.test(leaseMcpJson.lease_id) && leaseMcpJson.ttl_seconds === 180, "MCP lease acquire returns a lease id with TTL 180s", JSON.stringify({ id: leaseMcpJson.lease_id, ttl: leaseMcpJson.ttl_seconds }));
+const leaseMcpStatus = await client.callTool({ name: "lease", arguments: { action: "status", manifest_path: leasePath } });
+const leaseMcpStatusJson = JSON.parse(leaseMcpStatus.content[0].text);
+checkOk(leaseMcpStatusJson.state === "active" && leaseMcpStatusJson.holder === "mcp-director", "MCP lease status reports the active lease and its holder", JSON.stringify(leaseMcpStatusJson.state));
+const leaseMcpPatchHeldText = await callExpectThrow("patch_manifest", { manifest_path: leasePath, expected_revision: 3, patch: [{ op: "set", path: "steps.0.args.start", value: 1 }] });
+checkOk(/LEASE_HELD/.test(leaseMcpPatchHeldText) && /mcp-director/.test(leaseMcpPatchHeldText), "MCP patch_manifest without the lease id is refused with LEASE_HELD naming the holder", leaseMcpPatchHeldText.slice(0, 160));
+const leaseMcpPatch = await client.callTool({ name: "patch_manifest", arguments: { manifest_path: leasePath, expected_revision: 3, lease_id: leaseMcpJson.lease_id, patch: [{ op: "set", path: "steps.0.args.start", value: 1 }] } });
+const leaseMcpPatchJson = JSON.parse(leaseMcpPatch.content[0].text);
+checkOk(leaseMcpPatchJson.revision_after === 4, "MCP patch_manifest with the lease id commits (revision 3 -> 4)", JSON.stringify(leaseMcpPatchJson.revision_after));
+const leaseMcpRelease = await client.callTool({ name: "lease", arguments: { action: "release", manifest_path: leasePath, lease_id: leaseMcpJson.lease_id } });
+const leaseMcpReleaseJson = JSON.parse(leaseMcpRelease.content[0].text);
+checkOk(leaseMcpReleaseJson.released === true, "MCP lease release frees the lease", JSON.stringify(leaseMcpReleaseJson.released));
+const leaseCliAcquire = await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "lease", "acquire", leasePath, "--holder", "cli-director"]);
+const leaseCliAcquireJson = JSON.parse(leaseCliAcquire.stdout);
+checkOk(/^lease-[0-9a-f]{16}$/.test(leaseCliAcquireJson.lease_id) && leaseCliAcquireJson.holder === "cli-director", "CLI lease acquire returns a lease id for the holder", JSON.stringify(leaseCliAcquireJson.lease_id));
+const leaseCliStatus = await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "lease", "status", leasePath]);
+const leaseCliStatusJson = JSON.parse(leaseCliStatus.stdout);
+checkOk(leaseCliStatusJson.state === "active" && leaseCliStatusJson.holder === "cli-director", "CLI lease status reports the active lease", JSON.stringify(leaseCliStatusJson.state));
+const leaseCliRelease = await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "lease", "release", leasePath, "--lease-id", leaseCliAcquireJson.lease_id]);
+const leaseCliReleaseJson = JSON.parse(leaseCliRelease.stdout);
+checkOk(leaseCliReleaseJson.released === true, "CLI lease release frees the lease", JSON.stringify(leaseCliReleaseJson.released));
 
 const overlayRes = await client.callTool({
   name: "overlay",
@@ -8611,7 +8714,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 93 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 93 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 94 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 94 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -9934,7 +10037,7 @@ const vcDarkScenesJson = JSON.parse(vcDarkScenesRes.content[0].text);
 checkOk(vcDarkScenesJson.count === 0 && vcDarkScenesJson.scene_changes?.length === 0, "scenes content detector is blind on the dark film (0 cuts) — the fixture really exercises the fallback", JSON.stringify(vcDarkScenesJson.scene_changes));
 const vcDarkRes = await client.callTool({ name: "verify_cuts", arguments: { manifest_path: vcDarkStage.manifestPath, video: vcDarkPath } }, undefined, { timeout: 300000 });
 const vcDarkJson = JSON.parse(vcDarkRes.content[0].text);
-checkOk(vcDarkJson.ok === true && vcDarkJson.cuts?.length === 1 && vcDarkJson.cuts?.[0]?.status === "confirmed_by_diff" && vcDarkJson.cuts?.[0]?.measured_seconds === null && vcDarkJson.cuts?.[0]?.frame_diff?.confirmed === true && vcDarkJson.cuts?.[0]?.frame_diff?.at >= 1 && vcDarkJson.cuts?.[0]?.frame_diff?.at >= 2 * Math.min(vcDarkJson.cuts[0].frame_diff.before, vcDarkJson.cuts[0].frame_diff.after) && vcDarkJson.unexpected_cuts?.length === 0, "verify_cuts confirms the dark hard cut by frame-diff step (confirmed_by_diff, no detector timestamp, step evidence attached)", JSON.stringify(vcDarkJson.cuts));
+checkOk(vcDarkJson.ok === true && vcDarkJson.cuts?.length === 1 && vcDarkJson.cuts?.[0]?.status === "confirmed_by_diff" && vcDarkJson.cuts?.[0]?.measured_seconds === null && vcDarkJson.cuts?.[0]?.frame_diff?.confirmed === true && vcDarkJson.cuts?.[0]?.frame_diff?.at >= 1 && vcDarkJson.cuts?.[0]?.frame_diff?.at >= 1.5 * Math.min(vcDarkJson.cuts[0].frame_diff.before, vcDarkJson.cuts[0].frame_diff.after) && vcDarkJson.unexpected_cuts?.length === 0, "verify_cuts confirms the dark hard cut by frame-diff step (confirmed_by_diff, no detector timestamp, step evidence attached)", JSON.stringify(vcDarkJson.cuts));
 // release_checkpoint must count confirmed_by_diff as confirmed too
 // (lượt 161 dogfood caught it reporting "0/1 boundaries confirmed"
 // on a film whose only cut is confirmed_by_diff): the cuts check on
@@ -9943,6 +10046,17 @@ const vcDarkRcRes = await client.callTool({ name: "release_checkpoint", argument
 const vcDarkRcJson = JSON.parse(vcDarkRcRes.content[0].text);
 const vcDarkRcCuts = (vcDarkRcJson.checks ?? []).find((c) => c.name === "cuts");
 checkOk(vcDarkRcCuts?.status === "pass" && vcDarkRcCuts?.confirmed === 1 && /1\/1 boundaries confirmed/.test(vcDarkRcCuts?.detail ?? ""), "release_checkpoint counts a confirmed_by_diff cut as confirmed (1/1, cuts pass)", JSON.stringify(vcDarkRcCuts));
+// Step-fallback calibration (lượt 171): the rule is pinned to the 9
+// measured triples in the core.js comment — 6 real cuts confirm, 3
+// no-cuts and 1 below-floor case do not. The 6th positive is the
+// lượt 169 report film's rings->bounce cut (3.89/5.58/2.84 = 1.96x),
+// which the old ratio 2 called missing; at 1.5 it confirms.
+const stepCalibPositives = [[3.77, 6.69, 1.30], [1.40, 5.22, 11.38], [3.88, 40.74, 0.88], [1.27, 17.44, 7.12], [4.51, 19.75, 18.51], [3.89, 5.58, 2.84]];
+const stepCalibNegatives = [[3.71, 3.58, 3.45], [0.86, 0.87, 0.89], [0, 0, 0]];
+checkOk(stepCalibPositives.every(([before, at, after]) => stepFallbackConfirmed({ before, at, after }) === true), "step fallback confirms all 6 calibrated real cuts (weakest 1.96x at ratio 1.5)", JSON.stringify(stepCalibPositives.map(([b, a, c]) => +(a / Math.min(b, c)).toFixed(2))));
+checkOk(stepCalibNegatives.every(([before, at, after]) => stepFallbackConfirmed({ before, at, after }) === false), "step fallback rejects all 3 calibrated no-cuts (strongest 1.04x)", "");
+checkOk(stepFallbackConfirmed({ before: 0.1, at: 0.9, after: 0.1 }) === false, "step fallback rejects a 9x step below the 1.0 floor (at 0.9)", "");
+checkOk(stepFallbackConfirmed({ before: null, at: 5.0, after: null }) === true, "step fallback confirms on the floor alone when no neighbor is measurable (cut at a film edge)", "");
 // The wrong-timeline negative still holds with the fallback on: the
 // promised cut at 1.5s lands mid-bounce-shot, where the step
 // evidence fails (diff across ~= diffs beside it), so it stays
@@ -11637,7 +11751,7 @@ checkOk(explainSynth("REVISION_MISMATCH", "revision mismatch").kind === "fix-arg
 // the tier table, the MCP annotations, and the measured estimate.
 const safetyRes = await client.callTool({ name: "safety", arguments: {} });
 const safetyJson = JSON.parse(safetyRes.content[0].text);
-checkOk(safetyJson.total_tools === 93 && safetyJson.counts.READ === 29 && safetyJson.counts.PLAN === 4 && safetyJson.counts.WRITE === 59 && safetyJson.counts.DESTRUCTIVE === 1, "safety counts the tiers: 29 READ / 4 PLAN / 59 WRITE / 1 DESTRUCTIVE of 93 tools", JSON.stringify(safetyJson.counts));
+checkOk(safetyJson.total_tools === 94 && safetyJson.counts.READ === 29 && safetyJson.counts.PLAN === 4 && safetyJson.counts.WRITE === 60 && safetyJson.counts.DESTRUCTIVE === 1, "safety counts the tiers: 29 READ / 4 PLAN / 60 WRITE / 1 DESTRUCTIVE of 94 tools", JSON.stringify(safetyJson.counts));
 checkOk(JSON.stringify(safetyJson.tiers.DESTRUCTIVE.tools) === JSON.stringify(["patch_manifest"]), "patch_manifest is the only DESTRUCTIVE tool", JSON.stringify(safetyJson.tiers.DESTRUCTIVE.tools));
 const tierOf = {};
 for (const [tier, v] of Object.entries(safetyJson.tiers)) for (const n of v.tools) tierOf[n] = tier;
@@ -11803,7 +11917,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 93 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 94 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -11863,11 +11977,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 93, "GET /mcp reports name/version/transport and 93 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 94, "GET /mcp reports name/version/transport and 94 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 93 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 93 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 94 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 94 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 // Progressive discovery over HTTP (lượt 147): hot profile narrows
 // tools/list on the wire too — listTools() reads the env per call,
 // so flipping it here changes the same in-process server, and the
@@ -11881,7 +11995,7 @@ const httpRpcHot = await httpCall("POST", "/", { jsonrpc: "2.0", id: 7, method: 
 checkOk(httpRpcHot.status === 200 && httpRpcHot.json?.result?.tools?.length === 20, "JSON-RPC tools/list in hot profile also returns 20 tools", `count=${httpRpcHot.json?.result?.tools?.length}`);
 delete process.env.MEDIAKIT_TOOL_PROFILE;
 const httpToolsFull = await httpCall("GET", "/mcp/tools");
-checkOk(httpToolsFull.json?.tools?.length === 93, "clearing MEDIAKIT_TOOL_PROFILE restores the full 93-tool list", `count=${httpToolsFull.json?.tools?.length}`);
+checkOk(httpToolsFull.json?.tools?.length === 94, "clearing MEDIAKIT_TOOL_PROFILE restores the full 94-tool list", `count=${httpToolsFull.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -11982,7 +12096,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 93, "JSON-RPC tools/list returns the same 93 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 94, "JSON-RPC tools/list returns the same 94 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

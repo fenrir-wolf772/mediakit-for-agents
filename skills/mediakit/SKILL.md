@@ -1266,6 +1266,24 @@ Inspect the candidate, then re-issue the same call without
 against a stale revision is still refused, because a candidate
 computed from a stale base is meaningless.
 
+The revision guard only checks at the single moment of a write — two
+writers can both read revision 5, both patch, and the second one's
+patch silently wins. For a multi-step edit (plan → preview →
+approve → render, minutes apart), hold an edit lease first
+(`lease`, CutVoke's `edit_lock` idea): `acquire` with a `holder`
+name returns a `lease_id` — keep it, only the holder can renew or
+release — and while the lease is active, `patch_manifest` refuses
+every write that does not present the matching `lease_id`
+(`LEASE_HELD`, naming the holder and the seconds left). The TTL
+clamps to 120–300s (default 180; CutVoke's 30s is shorter than one
+agent thinking step between calls) and both the requested and applied
+TTL are reported; re-acquiring with the same holder renews the same
+lease id. The lease is one JSON sidecar `<manifest>.lease.json`
+written atomically; an expired lease stops blocking, a corrupt lease
+file is treated as no lease, and the `LEASE_HELD` error never names
+the lease id. A lease is cooperative, not security — it stops honest
+concurrent writers, it does not stop a writer that ignores it.
+
 ### 41. One style id for the whole video — don't retype hex values
 Pick the style once (`clean-bold`, `minimal-line` or `warm-story`,
 locked in `skills/shorts-video/styles.json`) and pass
@@ -2003,13 +2021,13 @@ one tier — `mediakit safety` lists them, and the MCP `tools/list`
 carries the same tiers as standard annotations
 (`readOnlyHint` / `destructiveHint` / `idempotentHint` /
 `openWorldHint`), so a client can gate on them instead of trusting
-prose. READ (24 tools) only probes and writes nothing; PLAN (4)
+prose. READ (29 tools) only probes and writes nothing; PLAN (4)
 answers a question by transient work and leaves no artifact —
 `determinism` renders to a hidden work dir that is removed,
 `verify_cuts` renders a draft to temp (plus caller-requested
 review strips when `strips: true`), `estimate_conversion`
 sample-encodes to temp, `job` only reads/cancels job state; WRITE
-(57) produces a file the caller asked for and never overwrites its
+(60) produces a file the caller asked for and never overwrites its
 own input; DESTRUCTIVE (1 — `patch_manifest`, guarded by
 `expected_revision` plus a `.bak` backup) replaces a user artifact
 in place. The tier is a property of the tool, not its arguments: a
@@ -2124,7 +2142,7 @@ Off by default; the verify stays probe-only without it.
 
 ### 58h. Browse the catalog before you dump it — progressive discovery
 
-93 tools is too many schemas to pay for in every turn. Don't start
+94 tools is too many schemas to pay for in every turn. Don't start
 from `tools/list` — start from `list_operations`: one compact line
 per tool (name, family, tier, one-sentence summary), optionally
 narrowed with `family` (`inspect`, `edit`, `text`, `image`,

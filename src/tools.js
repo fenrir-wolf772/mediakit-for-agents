@@ -1847,10 +1847,11 @@ export const TOOL_DEFS = [
   {
     name: "patch_manifest",
     tier: "DESTRUCTIVE",
-    description: "Edit a manifest JSON file under a revision guard (AH64-dll/OpenEdit's revision-guard idea: a write against a stale revision is refused instead of silently overwriting newer work). A manifest carries an optional top-level `revision` (absent = 0); the call requires `expected_revision` to match the file's current revision, applies 1-100 ops, proves the patched manifest still lints and plans (a real manifest --dry-run on a temp copy), then writes atomically (.partial + rename) with revision + 1 — and first copies the pre-patch bytes to `<manifest>.bak` (bariswha/losslesscut-mcp's set_segments idea), so .bak is always the revision just before the current one. A revision mismatch, a bad op, or a patched manifest that no longer validates all refuse with an error code (REVISION_MISMATCH / INVALID_ARG) and leave the file byte-identical — nothing is written. With dry_run (dziksu/synkinema's apply_operations dry_run + ChatCut's validateOnly: the approve-before-apply gate) the same guard + validation run, but nothing is written at all — no .bak, no revision bump — and the exact candidate document (with revision + 1, the bytes a real run would write) comes back in `candidate`, so the caller inspects it and re-issues the same call without dry_run to commit; a dry-run against a stale revision is still refused. Ops: set {path: input|output|qa|steps.N.tool|steps.N.args.KEY, value: scalar} (version/revision are managed, not settable); add_step {step: {tool, args?}, index?} (append, or insert at index); remove_step {index} (never the last step); replace_step {index, step: {tool, args?}}. Ops apply in order — each op addresses the step list as the previous ops left it (JSON Patch semantics). Returns revision_before/after, the backup path, a human-readable changes list, and the dry-run validation (steps + planned output).",
+    description: "Edit a manifest JSON file under a revision guard (AH64-dll/OpenEdit's revision-guard idea: a write against a stale revision is refused instead of silently overwriting newer work). A manifest carries an optional top-level `revision` (absent = 0); the call requires `expected_revision` to match the file's current revision, applies 1-100 ops, proves the patched manifest still lints and plans (a real manifest --dry-run on a temp copy), then writes atomically (.partial + rename) with revision + 1 — and first copies the pre-patch bytes to `<manifest>.bak` (bariswha/losslesscut-mcp's set_segments idea), so .bak is always the revision just before the current one. A revision mismatch, a bad op, or a patched manifest that no longer validates all refuse with an error code (REVISION_MISMATCH / INVALID_ARG) and leave the file byte-identical — nothing is written. While another holder's edit lease is active on the manifest (see the `lease` tool), a patch without that lease's `lease_id` is refused with LEASE_HELD — the revision guard stops a stale write, the lease stops a concurrent writer. With dry_run (dziksu/synkinema's apply_operations dry_run + ChatCut's validateOnly: the approve-before-apply gate) the same guard + validation run, but nothing is written at all — no .bak, no revision bump — and the exact candidate document (with revision + 1, the bytes a real run would write) comes back in `candidate`, so the caller inspects it and re-issues the same call without dry_run to commit; a dry-run against a stale revision is still refused. Ops: set {path: input|output|qa|steps.N.tool|steps.N.args.KEY, value: scalar} (version/revision are managed, not settable); add_step {step: {tool, args?}, index?} (append, or insert at index); remove_step {index} (never the last step); replace_step {index, step: {tool, args?}}. Ops apply in order — each op addresses the step list as the previous ops left it (JSON Patch semantics). Returns revision_before/after, the backup path, a human-readable changes list, and the dry-run validation (steps + planned output).",
     schema: {
     manifest_path: pathSchema.describe("Path to the manifest JSON file to patch"),
     expected_revision: z.number().int().min(0).describe("The revision the caller last read from the file (absent = 0). Must match the file's current revision or the call is refused with REVISION_MISMATCH and nothing is written"),
+    lease_id: z.string().min(1).optional().describe("Edit-lease id from `lease acquire` (optional). While another holder's lease is active on this manifest, a patch without the matching lease_id is refused with LEASE_HELD — pass the id to write through your own lease"),
     dry_run: z.boolean().default(false).describe("Preview only: run the revision guard + op checks + manifest validation and return the exact candidate document (with revision + 1) in `candidate`, writing nothing — no .bak, no revision bump. Re-issue without dry_run to commit"),
     patch: z.array(z.union([
       z.object({ op: z.literal("set"), path: z.string().min(1), value: z.union([z.string(), z.number(), z.boolean(), z.null()]) }).strict(),
@@ -1868,6 +1869,7 @@ export const TOOL_DEFS = [
     patch: a.patch,
     expectedRevision: a.expected_revision,
     dryRun: a.dry_run === true,
+    leaseId: a.lease_id ?? null,
   })),
   },
 
@@ -2253,7 +2255,7 @@ export const TOOL_DEFS = [
   {
     name: "verify_cuts",
     tier: "PLAN",
-    description: "Verify an assemble render cuts where its film manifest promises: downscale the delivered video to a 270p draft, measure the real hard cuts with the content scene detector, and compare them against the manifest's shot boundaries — a hard cut must land within tolerance (default 0.25s) of its promised time, a transition must show a real visual change across its blend window (measured as a frame diff, since a fade fires no scene cut), and any extra cut is reported as unexpected. A hard cut the detector cannot see (it is blind on dark, low-contrast shots — it compares frame means) gets one more measurement before it is called missing: the per-pixel frame-diff step across the boundary versus the diffs just before/after it, reported as confirmed_by_diff with its frame_diff evidence (at >= 1.0 and >= 2x the quieter neighbor). Duration is checked against the voice timeline (±0.2s). Returns ok plus one entry per boundary (confirmed/confirmed_by_diff/missing/invisible_transition/unmeasured) and the list of unexpected cuts. Probe-only: writes nothing except a temp draft, removed afterwards unless keep_draft. With strips:true it also writes one 4-tile review strip per boundary (frames at cut-0.5/-0.1/+0.1/+0.5s, captured from the delivered video and labelled with offset + timestamp) into <video-stem>.cut-strips/ next to the video, or into strips_dir when given — the eye-check the numbers cannot give: open the strip and look at both sides of each seam. With cut_sheet:true it writes ONE overview image instead (<video-stem>.cut-sheet.png, or cut_sheet_path when given): one row per boundary (max 12, earliest first), two columns — the last frame of the outgoing clip (cut-0.1s) and the first frame of the incoming clip (cut+0.1s), each labelled — read it before opening individual strips. With audio:true it also measures the SOUND at every hard cut (transitions are not measured — their blend is continuous by design): the RMS energy 0.06s each side of the seam and the largest sample-to-sample jump ±40ms around it; RMS above -30 dBFS on either side flags suspect_word (the cut may land mid-word), a jump above 0.35 flags click (butt-splice click) — either flag warns and fails ok, and each suspect seam carries a suggested_fix: a click gets add_crossfade 25ms at the seam, a cut through loud audio gets move_cut_to_silence (no timestamp is invented — find the nearest silence with silence/hook on the source). Peak per side is reported too, but the verdict uses RMS: a single lossy-codec pre-echo sample can trip a peak test inside true silence (measured: -24.4 dBFS peak in one 10ms sliver of a silent window, RMS -51.8 dBFS). Opt-in because a canvas_scene film mixes one continuous voice across every visual cut by design, so with audio on every hard cut there flags suspect_word; the check is for dialogue edits, where cuts belong in silence. A video with no audio stream skips the audio check with a note, never a fake pass.",
+    description: "Verify an assemble render cuts where its film manifest promises: downscale the delivered video to a 270p draft, measure the real hard cuts with the content scene detector, and compare them against the manifest's shot boundaries — a hard cut must land within tolerance (default 0.25s) of its promised time, a transition must show a real visual change across its blend window (measured as a frame diff, since a fade fires no scene cut), and any extra cut is reported as unexpected. A hard cut the detector cannot see (it is blind on dark, low-contrast shots — it compares frame means) gets one more measurement before it is called missing: the per-pixel frame-diff step across the boundary versus the diffs just before/after it, reported as confirmed_by_diff with its frame_diff evidence (at >= 1.0 and >= 1.5x the quieter neighbor). Duration is checked against the voice timeline (±0.2s). Returns ok plus one entry per boundary (confirmed/confirmed_by_diff/missing/invisible_transition/unmeasured) and the list of unexpected cuts. Probe-only: writes nothing except a temp draft, removed afterwards unless keep_draft. With strips:true it also writes one 4-tile review strip per boundary (frames at cut-0.5/-0.1/+0.1/+0.5s, captured from the delivered video and labelled with offset + timestamp) into <video-stem>.cut-strips/ next to the video, or into strips_dir when given — the eye-check the numbers cannot give: open the strip and look at both sides of each seam. With cut_sheet:true it writes ONE overview image instead (<video-stem>.cut-sheet.png, or cut_sheet_path when given): one row per boundary (max 12, earliest first), two columns — the last frame of the outgoing clip (cut-0.1s) and the first frame of the incoming clip (cut+0.1s), each labelled — read it before opening individual strips. With audio:true it also measures the SOUND at every hard cut (transitions are not measured — their blend is continuous by design): the RMS energy 0.06s each side of the seam and the largest sample-to-sample jump ±40ms around it; RMS above -30 dBFS on either side flags suspect_word (the cut may land mid-word), a jump above 0.35 flags click (butt-splice click) — either flag warns and fails ok, and each suspect seam carries a suggested_fix: a click gets add_crossfade 25ms at the seam, a cut through loud audio gets move_cut_to_silence (no timestamp is invented — find the nearest silence with silence/hook on the source). Peak per side is reported too, but the verdict uses RMS: a single lossy-codec pre-echo sample can trip a peak test inside true silence (measured: -24.4 dBFS peak in one 10ms sliver of a silent window, RMS -51.8 dBFS). Opt-in because a canvas_scene film mixes one continuous voice across every visual cut by design, so with audio on every hard cut there flags suspect_word; the check is for dialogue edits, where cuts belong in silence. A video with no audio stream skips the audio check with a note, never a fake pass.",
     schema: {
     manifest_path: pathSchema.describe("Path to the film manifest JSON file (same schema as assemble)"),
     video: pathSchema.describe("Path to the rendered video to check (final.mp4 from a full assemble render)"),
@@ -2510,7 +2512,7 @@ export const TOOL_DEFS = [
   {
     name: "list_operations",
     tier: "READ",
-    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 93 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 94 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
     schema: {
     family: z.enum(["inspect", "edit", "text", "image", "assemble", "meta"]).optional().describe("Narrow to one family; omit for the whole catalog"),
   },
@@ -2576,6 +2578,25 @@ export const TOOL_DEFS = [
       baseDir: a.base_dir ?? null,
     })),
   },
+
+  {
+    name: "lease",
+    tier: "WRITE",
+    description: "Hold a cooperative edit lease on a manifest (frankShan001/CutVoke's edit_lock idea: a TTL write lock for multi-step edits). The `patch_manifest` revision guard only checks at the single moment of a write — two writers can both read revision 5 and the second one's patch silently wins — so a director editing across several calls (plan -> preview -> approve -> render, minutes apart) acquires a lease first: while it is active, `patch_manifest` refuses every write that does not present the matching `lease_id` (LEASE_HELD, naming the holder and the seconds left). Actions: acquire (needs `holder`, a name for who holds it; returns a `lease_id` — keep it, only the holder can renew or release; `ttl_seconds` clamps to 120-300, default 180, and both the requested and applied TTL are reported; re-acquiring with the same holder renews the same lease_id); renew (needs `lease_id`, extends the expiry by `ttl_seconds`); release (needs `lease_id`, deletes the lease file); status (never throws for a missing lease — reports state none/active/expired with holder, expiry and seconds left). The lease is one JSON sidecar `<manifest>.lease.json` written atomically (.partial + rename); an expired lease stops blocking, a corrupt lease file is treated as no lease, and the LEASE_HELD error never names the lease_id. A lease is cooperative, not security — it stops honest concurrent writers, it does not stop a writer that ignores it.",
+    schema: {
+    action: z.enum(["acquire", "release", "renew", "status"]).describe("acquire: take (or renew, same holder) the lease; release: give it up; renew: extend the expiry; status: report the current state (never throws for a missing lease)"),
+    manifest_path: pathSchema.describe("Path to the manifest JSON file the lease guards"),
+    holder: z.string().min(1).optional().describe("Who holds the lease (acquire only, required) — a name such as an agent id, shown in LEASE_HELD errors"),
+    lease_id: z.string().min(1).optional().describe("Lease id from acquire (release/renew only, required)"),
+    ttl_seconds: z.number().int().min(1).optional().describe("Lease lifetime in seconds (acquire/renew only) — clamped to 120-300, default 180; the applied value is reported"),
+  },
+    handler: async (a) => safe(async () => {
+      if (a.action === "acquire") return core.acquireEditLease({ manifestPath: a.manifest_path, holder: a.holder, ttlSeconds: a.ttl_seconds ?? null });
+      if (a.action === "release") return core.releaseEditLease({ manifestPath: a.manifest_path, leaseId: a.lease_id });
+      if (a.action === "renew") return core.renewEditLease({ manifestPath: a.manifest_path, leaseId: a.lease_id, ttlSeconds: a.ttl_seconds ?? null });
+      return core.editLeaseStatus({ manifestPath: a.manifest_path });
+    }),
+  },
 ];
 
 // ---------------------------------------------------------------- safety tiers
@@ -2629,7 +2650,7 @@ export function listSafetyTiers() {
 }
 
 // ---------------------------------------------------------------- progressive discovery
-// The catalog is 93 tools and tools/list dumps the full JSON schema
+// The catalog is 94 tools and tools/list dumps the full JSON schema
 // of every one on every turn — kinocut's answer is progressive
 // discovery: a compact list first, full schema only for the tools
 // actually used (lượt 147, idea: KyaniteLabs/kinocut
@@ -2677,13 +2698,14 @@ export const TOOL_FAMILY_OF = {
   // image (7)
   thumbnail: "image", frames: "image", extract_frames: "image", image_to_video: "image",
   slideshow: "image", export_gif: "image", svg_animate: "image",
-  // assemble (13)
+  // assemble (15)
   assemble: "assemble", manifest: "assemble", patch_manifest: "assemble",
   init_project: "assemble", export_timeline: "assemble", job: "assemble",
   release_checkpoint: "assemble", package: "assemble", publish_kit: "assemble",
   social: "assemble", batch: "assemble", list_templates: "assemble",
   validate_template_package: "assemble",
   validate_shot_spec: "assemble",
+  lease: "assemble",
   // meta (2)
   list_operations: "meta", describe_operation: "meta",
 };

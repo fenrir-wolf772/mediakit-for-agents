@@ -12683,6 +12683,7 @@ const TOOL_REQUIREMENTS = {
   // patch_manifest is pure JSON + a manifest --dry-run validation —
   // no ffmpeg capability needed either.
   patch_manifest: {},
+  lease: {},
   // verify_cuts renders a 270p draft (scale + libx264) and measures
   // cuts with the content scene detector (signalstats per frame) +
   // frame diffs (blend on rgb24 + signalstats).
@@ -17984,7 +17985,7 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
 //   {op: "remove_step", index}                         — never the
 //     last remaining step
 //   {op: "replace_step", index, step: {tool, args?}}
-export async function patchManifest({ manifestPath, patch, expectedRevision, dryRun = false }) {
+export async function patchManifest({ manifestPath, patch, expectedRevision, dryRun = false, leaseId = null }) {
   const manifestAbs = await requireInput(manifestPath, "manifest");
   const expected = num(expectedRevision, "expected_revision", { min: 0, integer: true });
   if (!Array.isArray(patch) || patch.length < 1 || patch.length > 100) {
@@ -18009,6 +18010,11 @@ export async function patchManifest({ manifestPath, patch, expectedRevision, dry
   if (!Number.isInteger(currentRevision) || currentRevision < 0) {
     throw new MediaKitError(`manifest revision must be a non-negative integer, got: ${doc.revision}`, "INVALID_ARG");
   }
+  // A held edit lease blocks every write that does not present its
+  // lease_id — including this one. Checked before the revision
+  // comparison, so the caller learns about the lock before doing
+  // re-read work that still could not commit.
+  await assertNoConflictingLease(manifestAbs, leaseId);
   if (expected !== currentRevision) {
     throw new MediaKitError(`manifest revision is ${currentRevision}, expected ${expected} — re-read the manifest and retry with the current revision (nothing was written)`, "REVISION_MISMATCH");
   }
@@ -18191,6 +18197,225 @@ export async function patchManifest({ manifestPath, patch, expectedRevision, dry
     ops_applied: patch.length,
     changes,
     validated: { dry_run: true, steps: planned.steps.length, output: planned.output },
+  };
+}
+
+// ---------------------------------------------------------------- edit lease
+// Cooperative write lock for a manifest (frankShan001/CutVoke's
+// `edit_lock` idea: acquire/renew/release with a TTL, so one agent
+// editing across several calls is not silently clobbered by another
+// writer — and the editor can show who holds the lock and for how
+// long). MediaKit already has the optimistic `patch_manifest`
+// revision guard, but that guard only checks at the single moment of
+// a write: two writers can both read revision 5, both patch, and the
+// second one wins while the first one's work vanishes. A lease is the
+// missing layer for multi-step edits (plan -> preview -> approve ->
+// render, minutes apart): while a lease is active, `patch_manifest`
+// refuses every write that does not present the matching lease_id
+// (LEASE_HELD, naming the holder and the seconds left) — and a write
+// with no lease at all is refused too while one is held. The lease is
+// cooperative, not security: the holder can release it, an expired
+// lease stops blocking, and a corrupt lease file is treated as no
+// lease (fail-open, so a torn write can never brick the manifest
+// forever).
+//
+// TTL: CutVoke defaults to 30s, which is shorter than one agent
+// thinking step between calls — MediaKit clamps to 120-300s
+// (default 180) and reports both the requested and the applied TTL,
+// so a caller asking for 30s learns it got 120s instead of silently
+// holding a shorter lock than it planned for. A lease is one JSON
+// sidecar `<manifest>.lease.json` next to the manifest, written
+// atomically (.partial + rename) like patch_manifest itself; the
+// manifest's revision at acquire time is recorded in the lease so
+// `lease status` can show what the holder started from. Re-acquiring
+// with the same holder renews the same lease_id (idempotent);
+// `renew` extends it explicitly; `release` deletes the file. The
+// LEASE_HELD error never names the lease_id — only the holder can
+// release or renew, and the id is returned to the acquirer alone.
+export const LEASE_TTL_MIN_SECONDS = 120;
+export const LEASE_TTL_MAX_SECONDS = 300;
+export const LEASE_TTL_DEFAULT_SECONDS = 180;
+
+const leaseFilePath = (manifestAbs) => `${manifestAbs}.lease.json`;
+
+function clampLeaseTtl(ttlSeconds) {
+  if (ttlSeconds === undefined || ttlSeconds === null) return { requested: null, applied: LEASE_TTL_DEFAULT_SECONDS };
+  const n = num(ttlSeconds, "ttl_seconds", { min: 1, integer: true });
+  return { requested: n, applied: Math.min(LEASE_TTL_MAX_SECONDS, Math.max(LEASE_TTL_MIN_SECONDS, n)) };
+}
+
+function leaseStateOf(lease, nowMs = Date.now()) {
+  if (!lease) return "none";
+  const expiresMs = Date.parse(lease.expires_at);
+  if (Number.isNaN(expiresMs)) return "expired";
+  return expiresMs > nowMs ? "active" : "expired";
+}
+
+async function readEditLeaseFile(manifestAbs) {
+  const leasePath = leaseFilePath(manifestAbs);
+  let raw;
+  try {
+    raw = await readFile(leasePath, "utf8");
+  } catch {
+    return { lease: null, corrupt: false, leasePath };
+  }
+  try {
+    const lease = JSON.parse(raw);
+    if (!lease || typeof lease !== "object" || Array.isArray(lease) || typeof lease.lease_id !== "string" || typeof lease.holder !== "string" || typeof lease.expires_at !== "string") {
+      return { lease: null, corrupt: true, leasePath };
+    }
+    return { lease, corrupt: false, leasePath };
+  } catch {
+    return { lease: null, corrupt: true, leasePath };
+  }
+}
+
+async function writeLeaseFile(leasePath, lease) {
+  const partial = `${leasePath}.partial-${process.pid}-${randomBytes(4).toString("hex")}`;
+  try {
+    await writeFile(partial, `${JSON.stringify(lease, null, 2)}\n`, "utf8");
+    await rename(partial, leasePath);
+  } catch (e) {
+    await rm(partial, { force: true }).catch(() => {});
+    throw e;
+  }
+}
+
+async function manifestRevisionOf(manifestAbs) {
+  try {
+    const doc = JSON.parse(await readFile(manifestAbs, "utf8"));
+    return Number.isInteger(doc?.revision) && doc.revision >= 0 ? doc.revision : 0;
+  } catch {
+    return null;
+  }
+}
+
+// Enforcement for patch_manifest: while a lease is active, only the
+// holder (presenting its lease_id) may write. A corrupt lease file is
+// treated as no lease (fail-open, see above); an expired one does not
+// block either.
+async function assertNoConflictingLease(manifestAbs, leaseId) {
+  const { lease } = await readEditLeaseFile(manifestAbs);
+  if (!lease || leaseStateOf(lease) !== "active") return;
+  if (leaseId && leaseId === lease.lease_id) return;
+  const remaining = Math.max(0, Math.ceil((Date.parse(lease.expires_at) - Date.now()) / 1000));
+  throw new MediaKitError(`manifest is leased by "${lease.holder}" for ${remaining}s more (expires ${lease.expires_at}) — pass that lease's lease_id to patch_manifest, or wait for it to expire`, "LEASE_HELD");
+}
+
+export async function acquireEditLease({ manifestPath, holder, ttlSeconds }) {
+  const manifestAbs = await requireInput(manifestPath, "manifest");
+  if (typeof holder !== "string" || !holder.trim()) {
+    throw new MediaKitError(`holder must be a non-empty string, got: ${JSON.stringify(holder)}`, "INVALID_ARG");
+  }
+  const { requested, applied } = clampLeaseTtl(ttlSeconds);
+  const nowMs = Date.now();
+  const { lease, leasePath } = await readEditLeaseFile(manifestAbs);
+  if (lease && leaseStateOf(lease, nowMs) === "active" && lease.holder !== holder.trim()) {
+    const remaining = Math.max(0, Math.ceil((Date.parse(lease.expires_at) - nowMs) / 1000));
+    throw new MediaKitError(`manifest is leased by "${lease.holder}" for ${remaining}s more (expires ${lease.expires_at}) — wait for it to expire or ask the holder to release it; patch_manifest refuses writes without that lease's lease_id`, "LEASE_HELD");
+  }
+  const renewed = lease !== null && leaseStateOf(lease, nowMs) === "active" && lease.holder === holder.trim();
+  const doc = renewed ? lease : {
+    version: 1,
+    lease_id: `lease-${randomBytes(8).toString("hex")}`,
+    holder: holder.trim(),
+    manifest: manifestAbs,
+    acquired_at: new Date(nowMs).toISOString(),
+    revision: await manifestRevisionOf(manifestAbs),
+  };
+  doc.expires_at = new Date(nowMs + applied * 1000).toISOString();
+  doc.ttl_seconds = applied;
+  await writeLeaseFile(leasePath, doc);
+  return {
+    operation: "lease",
+    action: "acquire",
+    renewed,
+    lease_id: doc.lease_id,
+    holder: doc.holder,
+    manifest: manifestAbs,
+    lease_file: leasePath,
+    ttl_seconds: applied,
+    ttl_requested: requested,
+    acquired_at: doc.acquired_at,
+    expires_at: doc.expires_at,
+    expires_in_seconds: applied,
+    revision: doc.revision,
+  };
+}
+
+export async function releaseEditLease({ manifestPath, leaseId }) {
+  const manifestAbs = await requireInput(manifestPath, "manifest");
+  const { lease, leasePath } = await readEditLeaseFile(manifestAbs);
+  if (!lease) {
+    throw new MediaKitError(`no lease on ${manifestPath} to release`, "LEASE_NOT_FOUND");
+  }
+  if (leaseStateOf(lease) === "expired") {
+    await rm(leasePath, { force: true }).catch(() => {});
+    return { operation: "lease", action: "release", released: true, state: "expired", lease_id: lease.lease_id, holder: lease.holder, manifest: manifestAbs, lease_file: leasePath };
+  }
+  if (leaseId !== lease.lease_id) {
+    throw new MediaKitError(`lease_id does not match the active lease on ${manifestPath} (held by "${lease.holder}") — nothing was released`, "LEASE_MISMATCH");
+  }
+  await rm(leasePath, { force: true }).catch(() => {});
+  return { operation: "lease", action: "release", released: true, state: "active", lease_id: lease.lease_id, holder: lease.holder, manifest: manifestAbs, lease_file: leasePath };
+}
+
+export async function renewEditLease({ manifestPath, leaseId, ttlSeconds }) {
+  const manifestAbs = await requireInput(manifestPath, "manifest");
+  const { requested, applied } = clampLeaseTtl(ttlSeconds);
+  const nowMs = Date.now();
+  const { lease, leasePath } = await readEditLeaseFile(manifestAbs);
+  if (!lease) {
+    throw new MediaKitError(`no lease on ${manifestPath} to renew — acquire one first`, "LEASE_NOT_FOUND");
+  }
+  if (leaseStateOf(lease, nowMs) === "expired") {
+    throw new MediaKitError(`lease ${lease.lease_id} on ${manifestPath} expired at ${lease.expires_at} — acquire a new one instead of renewing`, "LEASE_EXPIRED");
+  }
+  if (leaseId !== lease.lease_id) {
+    throw new MediaKitError(`lease_id does not match the active lease on ${manifestPath} (held by "${lease.holder}") — nothing was renewed`, "LEASE_MISMATCH");
+  }
+  lease.expires_at = new Date(nowMs + applied * 1000).toISOString();
+  lease.ttl_seconds = applied;
+  await writeLeaseFile(leasePath, lease);
+  return {
+    operation: "lease",
+    action: "renew",
+    lease_id: lease.lease_id,
+    holder: lease.holder,
+    manifest: manifestAbs,
+    lease_file: leasePath,
+    ttl_seconds: applied,
+    ttl_requested: requested,
+    expires_at: lease.expires_at,
+    expires_in_seconds: applied,
+    revision: lease.revision ?? null,
+  };
+}
+
+export async function editLeaseStatus({ manifestPath }) {
+  const manifestAbs = await requireInput(manifestPath, "manifest");
+  const nowMs = Date.now();
+  const { lease, corrupt, leasePath } = await readEditLeaseFile(manifestAbs);
+  if (!lease) {
+    return { operation: "lease", action: "status", state: "none", lease_corrupt: corrupt, manifest: manifestAbs, lease_file: leasePath };
+  }
+  const state = leaseStateOf(lease, nowMs);
+  const expiresMs = Date.parse(lease.expires_at);
+  return {
+    operation: "lease",
+    action: "status",
+    state,
+    lease_id: lease.lease_id,
+    holder: lease.holder,
+    manifest: manifestAbs,
+    lease_file: leasePath,
+    ttl_seconds: lease.ttl_seconds ?? null,
+    acquired_at: lease.acquired_at ?? null,
+    expires_at: lease.expires_at,
+    expires_in_seconds: state === "active" ? Math.max(0, Math.ceil((expiresMs - nowMs) / 1000)) : 0,
+    expired_seconds_ago: state === "expired" ? Math.max(0, Math.floor((nowMs - expiresMs) / 1000)) : 0,
+    revision: lease.revision ?? null,
+    lease_corrupt: false,
   };
 }
 
@@ -22237,24 +22462,42 @@ const VERIFY_CUTS_TRANSITION_DIFF_FLOOR = 1.0;
 // across-boundary diff stands out from the local motion on the
 // quieter side — while a dropped cut inside a moving shot shows the
 // same diff everywhere (rings mid-shot: 3.71/3.58/3.45, ratio 1.04).
-// Calibrated on 8 cases (270p drafts, 0-255 scale): real cuts
+// Calibrated on 9 cases (270p drafts, 0-255 scale): real cuts
 // before/at/after 3.77/6.69/1.30, 1.40/5.22/11.38, 3.88/40.74/0.88,
-// 1.27/17.44/7.12, 4.51/19.75/18.51 (ratio vs min neighbor >= 3.73);
-// no-cuts 3.71/3.58/3.45, 0.86/0.87/0.89, 0/0/0 (ratio <= 1.04, or
-// at = 0). Rule: at >= floor AND at >= RATIO x the quieter
-// neighbor. MIN (not max) neighbor is deliberate: the incoming shot
-// may itself move hard right after the cut (spring-in: after 11.38
-// and 18.51), so the max neighbor would veto real cuts; the min
-// neighbor is the side that proves the step. A cut between two
-// fast-moving shots can still miss (ratio < 2) — that keeps today's
-// behavior, it just does not improve it. PySceneDetect's
+// 1.27/17.44/7.12, 4.51/19.75/18.51 (ratio vs min neighbor >= 3.73),
+// plus 3.89/5.58/2.84 = 1.96x — the lượt 169 report film's
+// rings->bounce cut at 11.267s, eye-verified clean on its strip, which
+// the old ratio 2 called missing; no-cuts 3.71/3.58/3.45,
+// 0.86/0.87/0.89, 0/0/0 (ratio <= 1.04, or at = 0). RATIO is the
+// midpoint of the observed gap: the strongest no-cut is 1.04x, the
+// weakest real cut is 1.96x, and 1.5 sits 44% above the former and
+// 24% below the latter, so a re-encode wobble on either side still
+// lands on the right side of the line. Rule: at >= floor AND at >=
+// RATIO x the quieter neighbor. MIN (not max) neighbor is deliberate:
+// the incoming shot may itself move hard right after the cut
+// (spring-in: after 11.38 and 18.51), so the max neighbor would veto
+// real cuts; the min neighbor is the side that proves the step. A cut
+// between two fast-moving shots can still miss (ratio < 1.5) — that
+// keeps today's behavior, it just does not improve it. PySceneDetect's
 // ContentDetector scores the same per-pixel mean abs diff of
 // hue/sat/lum (its AdaptiveDetector is the same idea one level up:
 // trigger on deviation from the LOCAL average, not an absolute
 // threshold) — this fallback is that idea, applied only where the
 // manifest says a cut must be, so it needs no global threshold.
 const VERIFY_CUTS_STEP_DIFF_FLOOR = 1.0;
-const VERIFY_CUTS_STEP_RATIO = 2;
+const VERIFY_CUTS_STEP_RATIO = 1.5;
+
+// The step rule, pure so the test can pin it to the calibration
+// triples in the comment above: a real hard cut is a step — its
+// across-boundary diff stands out from the local motion on the
+// quieter side — while a dropped cut inside a moving shot shows the
+// same diff everywhere. A null neighbor (cut within 0.1s of a film
+// edge) is dropped; with no measurable neighbor the floor alone
+// decides.
+export function stepFallbackConfirmed({ before, at, after }) {
+  const neighbors = [before, after].filter((v) => v !== null && v !== undefined);
+  return at !== null && at !== undefined && at >= VERIFY_CUTS_STEP_DIFF_FLOOR && (neighbors.length === 0 || at >= VERIFY_CUTS_STEP_RATIO * Math.min(...neighbors));
+}
 // Review strips (the eye-check pattern from kpr17ch/outtake's
 // `check_frame` — a single frame pulled out for a human/agent to
 // look at — applied here as one 4-tile strip per boundary, so the
@@ -22474,8 +22717,7 @@ export async function cutStepEvidence(file, cutSeconds, fps, duration) {
   const before = await pair(t - 0.2, t - 0.1);
   const at = await pair(t - 0.1, t + 0.1);
   const after = await pair(t + 0.1, t + 0.2);
-  const neighbors = [before, after].filter((v) => v !== null);
-  const confirmed = at !== null && at >= VERIFY_CUTS_STEP_DIFF_FLOOR && (neighbors.length === 0 || at >= VERIFY_CUTS_STEP_RATIO * Math.min(...neighbors));
+  const confirmed = stepFallbackConfirmed({ before, at, after });
   return { before, at, after, floor: VERIFY_CUTS_STEP_DIFF_FLOOR, ratio: VERIFY_CUTS_STEP_RATIO, confirmed };
 }
 

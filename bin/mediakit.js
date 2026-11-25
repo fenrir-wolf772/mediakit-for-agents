@@ -1173,13 +1173,24 @@ const COMMANDS = {
     ],
   },
   "patch-manifest": {
-    usage: "mediakit patch-manifest <manifest.json> --expected-revision <n> --patch-file <patch.json> [--dry-run]",
-    desc: "Edit a manifest JSON file under a revision guard (OpenEdit's revision-guard idea): the call is refused when --expected-revision does not match the file's current revision (absent = 0), so a stale edit never overwrites newer work. --patch-file holds a JSON array of 1-100 ops: {op: 'set', path: 'output'|'input'|'qa'|'steps.N.tool'|'steps.N.args.KEY', value} / {op: 'add_step', step: {tool, args?}, index?} / {op: 'remove_step', index} / {op: 'replace_step', index, step: {tool, args?}}. Ops apply in order — each op addresses the step list as the previous ops left it. The patched manifest is validated with a real manifest --dry-run before anything is written, then written atomically (.partial + rename) with revision + 1. A mismatch, a bad op, or a patched manifest that no longer validates all refuse and leave the file byte-identical. --dry-run previews the exact candidate document (with revision + 1) and writes nothing — no .bak, no revision bump — the approve-before-apply gate: inspect the candidate, then re-run without --dry-run with the same --expected-revision to commit.",
+    usage: "mediakit patch-manifest <manifest.json> --expected-revision <n> --patch-file <patch.json> [--dry-run] [--lease-id <id>]",
+    desc: "Edit a manifest JSON file under a revision guard (OpenEdit's revision-guard idea): the call is refused when --expected-revision does not match the file's current revision (absent = 0), so a stale edit never overwrites newer work. --patch-file holds a JSON array of 1-100 ops: {op: 'set', path: 'output'|'input'|'qa'|'steps.N.tool'|'steps.N.args.KEY', value} / {op: 'add_step', step: {tool, args?}, index?} / {op: 'remove_step', index} / {op: 'replace_step', index, step: {tool, args?}}. Ops apply in order — each op addresses the step list as the previous ops left it. The patched manifest is validated with a real manifest --dry-run before anything is written, then written atomically (.partial + rename) with revision + 1. A mismatch, a bad op, or a patched manifest that no longer validates all refuse and leave the file byte-identical. While another holder's edit lease is active on the manifest (see `mediakit lease`), a patch without that lease's --lease-id is refused with LEASE_HELD. --dry-run previews the exact candidate document (with revision + 1) and writes nothing — no .bak, no revision bump — the approve-before-apply gate: inspect the candidate, then re-run without --dry-run with the same --expected-revision to commit.",
     args: [{ name: "manifest", required: true }],
     options: [
       ["--expected-revision", "The revision last read from the file (required; absent = 0) — must match the file's current revision"],
       ["--patch-file", "JSON file holding the patch operations array (required)"],
       ["--dry-run", "Preview only: print the candidate manifest and write nothing"],
+      ["--lease-id", "Edit-lease id from `lease acquire` — required to write while your own lease is active; a patch without it is refused with LEASE_HELD while any lease is held"],
+    ],
+  },
+  lease: {
+    usage: "mediakit lease <acquire|release|renew|status> <manifest.json> [--holder <id>] [--lease-id <id>] [--ttl <seconds>]",
+    desc: "Hold a cooperative edit lease on a manifest (CutVoke's edit_lock idea: a TTL write lock for multi-step edits). The patch-manifest revision guard only checks at the single moment of a write — two writers can both read revision 5 and the second one's patch silently wins — so a director editing across several calls acquires a lease first: while it is active, patch-manifest refuses every write that does not present the matching --lease-id (LEASE_HELD, naming the holder and the seconds left). acquire needs --holder (a name for who holds it) and returns a lease_id — keep it, only the holder can renew or release; --ttl clamps to 120-300s (default 180) and both the requested and applied TTL are reported; re-acquiring with the same holder renews the same lease_id. renew extends the expiry by --ttl; release deletes the lease file; status reports state none/active/expired with holder, expiry and seconds left. The lease is one JSON sidecar <manifest>.lease.json written atomically; an expired lease stops blocking, a corrupt lease file is treated as no lease, and the LEASE_HELD error never names the lease_id. A lease is cooperative, not security.",
+    args: [{ name: "action", required: true }, { name: "manifest", required: true }],
+    options: [
+      ["--holder", "Who holds the lease (acquire only, required) — a name such as an agent id, shown in LEASE_HELD errors"],
+      ["--lease-id", "Lease id from acquire (release/renew only, required)"],
+      ["--ttl", "Lease lifetime in seconds (acquire/renew only) — clamped to 120-300, default 180"],
     ],
   },
   determinism: {
@@ -2568,7 +2579,26 @@ async function main() {
           patch,
           expectedRevision: numOpt(opts, "expected_revision"),
           dryRun: opts.dry_run === true,
+          leaseId: opts.lease_id ?? null,
         });
+        break;
+      }
+      case "lease": {
+        const action = positional[0];
+        if (!["acquire", "release", "renew", "status"].includes(action)) fail("lease action must be acquire, release, renew or status: mediakit lease <action> <manifest.json> [--holder <id>] [--lease-id <id>] [--ttl <seconds>]");
+        if (!positional[1]) fail(`missing manifest file: mediakit lease ${action} <manifest.json>`);
+        if (action === "acquire") {
+          if (!opts.holder) fail("missing required option: --holder <id> (who holds the lease)");
+          result = await core.acquireEditLease({ manifestPath: positional[1], holder: opts.holder, ttlSeconds: numOpt(opts, "ttl") ?? null });
+        } else if (action === "release") {
+          if (!opts.lease_id) fail("missing required option: --lease-id <id> (the lease id from acquire)");
+          result = await core.releaseEditLease({ manifestPath: positional[1], leaseId: opts.lease_id });
+        } else if (action === "renew") {
+          if (!opts.lease_id) fail("missing required option: --lease-id <id> (the lease id from acquire)");
+          result = await core.renewEditLease({ manifestPath: positional[1], leaseId: opts.lease_id, ttlSeconds: numOpt(opts, "ttl") ?? null });
+        } else {
+          result = await core.editLeaseStatus({ manifestPath: positional[1] });
+        }
         break;
       }
       case "determinism": {
