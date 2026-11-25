@@ -254,7 +254,7 @@ jobs:
           node bin/mediakit.js diagnose test/assemble-diagnose-pass.json | grep '"verdict": "pass"'
           node bin/mediakit.js diagnose test/assemble-diagnose-frozen.json | grep '"verdict": "fail"'
           node bin/mediakit.js diagnose test/assemble-film.json | grep '"verdict": "warn"'
-          node bin/mediakit.js safety | grep '"total_tools": 90'
+          node bin/mediakit.js safety | grep '"total_tools": 91'
           node bin/mediakit.js estimate-conversion test/hook-source.mp4 | grep '"method": "sample-encode"'
           node bin/mediakit.js chapters --words-file test/chapters-words.json | grep '"count": 3'
           node bin/mediakit.js chapters --words-file test/chapters-words.json --max-chapters 2 | grep '"merged_segments": 1'

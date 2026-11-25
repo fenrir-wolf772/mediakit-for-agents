@@ -6,7 +6,7 @@
  */
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { access, appendFile, copyFile, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { access, appendFile, copyFile, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -47,10 +47,25 @@ export function ffmpegTimeoutMs() {
 // a user-supplied path and is exempt.
 const WORKDIR_ENV = "MEDIAKIT_WORKDIR";
 
+// Expand a workdir value the way some MCP hosts pass it through
+// literally (mrdainami/ffmpeg-mcp's expandPath idea, lượt 166): a
+// leading ~ and ${VAR} patterns resolve against the home dir /
+// environment instead of being treated as a literal folder name —
+// otherwise MEDIAKIT_WORKDIR="~/clips" fails with
+// SANDBOX_WORKDIR_MISSING on a folder that exists. Unknown vars
+// stay literal (like their implementation), so a typo is visible
+// in the error instead of silently resolving to an empty string.
+function expandWorkdirPath(raw) {
+  let s = raw.trim();
+  if (s === "~" || s.startsWith("~/")) s = os.homedir() + s.slice(1);
+  s = s.replace(/\$\{([A-Z_][A-Z0-9_]*)\}/g, (m, key) => process.env[key] ?? m);
+  return s;
+}
+
 async function workdirRoot() {
   const raw = process.env[WORKDIR_ENV];
   if (!raw || !raw.trim()) return null;
-  const abs = path.resolve(raw.trim());
+  const abs = path.resolve(expandWorkdirPath(raw));
   let real;
   try {
     real = await realpath(abs);
@@ -7741,22 +7756,24 @@ export async function freezeFrame({ input, output, at = null, hold = 2, crf = 23
 }
 
 // ---------------------------------------------------------------- fastforward
-// Speed up marked spans of a clip, with a badge on the sped-up
-// footage (khang-nyb/demo-recorder's render() idea: their fastForward
+// Speed up or slow down marked spans of a clip, with a badge on the
+// changed footage (khang-nyb/demo-recorder's render() idea: their fastForward
 // fast-forwards backend waits in a screen recording and burns a
 // ">> tua nhanh x8" badge on the sped spans; MediaKit's version is
 // a general tool, not a screen recorder). The timeline is split
 // into pieces — normal spans at 1x, marked spans at N x — and the
-// pieces are re-joined with concat, so the output is shorter by
-// exactly the saved time and everything after a span keeps its
-// place. Video speeds up with setpts; audio keeps its pitch with
-// chained atempo (the same atempoChain fit uses). The badge is a
+// pieces are re-joined with concat, so the output is shorter (or
+// longer, for slow spans) by exactly the saved time and everything
+// after a span keeps its place. Video changes speed with setpts;
+// audio keeps its pitch with chained atempo (the same atempoChain
+// fit uses — it splits any factor into steps inside [0.5, 2.0], so
+// 0.25x is atempo=0.5,atempo=0.5 and needs no special case). The badge is a
 // dark box + drawtext bottom-right, sized from the display frame
 // height, so it lands the same relative size on a vertical phone
 // clip and a landscape one. Spans are clamped to the clip, sorted,
 // and overlaps collapse onto the previous span's end (the
 // demo-recorder merge rule) instead of erroring on input order.
-// The result measures the speed-up on disk: timing_check_mapped
+// The result measures the speed change on disk: timing_check_mapped
 // (input frame mid-span vs the output frame it should land on,
 // ~0 when the mapping is right) against timing_check_unmapped
 // (the same input frame vs the output frame at the unshifted time
@@ -7785,7 +7802,14 @@ export async function fastForwardClip({ input, segments, output, badge = true, l
     }
     const start = parseTime(s.start, `segments[${j}].start`);
     const end = parseTime(s.end, `segments[${j}].end`);
-    const speed = num(s.speed, `segments[${j}].speed`, { min: 1.1, max: 16 });
+    // Slow-motion (demilp/ffmpeg-mcp idea, lượt 166): 0.25-16, not
+    // just 1.1-16. atempoChain already splits any factor into
+    // [0.5, 2.0] steps, and setpts divides by the factor either
+    // way, so the same chain serves both directions. Exactly 1 is
+    // a no-op span — it was already refused (old floor was 1.1),
+    // and it still is: omit the span instead.
+    const speed = num(s.speed, `segments[${j}].speed`, { min: 0.25, max: 16 });
+    if (speed === 1) throw new MediaKitError(`fastforward segments[${j}].speed 1 is a no-op — omit the span or use a different speed`, "INVALID_ARG");
     if (!(end > start)) throw new MediaKitError(`fastforward segments[${j}] needs end > start (got ${start}s-${end}s)`, "INVALID_ARG");
     return { start, end, speed };
   });
@@ -7871,10 +7895,15 @@ export async function fastForwardClip({ input, segments, output, badge = true, l
       } else {
         tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-fastforward-"));
       }
-      const speeds = [...new Set(pieces.filter((p) => p.speed > 1).map((p) => p.speed))];
+      const speeds = [...new Set(pieces.filter((p) => p.speed !== 1).map((p) => p.speed))];
       for (let i = 0; i < speeds.length; i++) {
         const file = path.join(tmpDir, `badge-${i}.txt`);
-        await writeFile(file, `>> ${badgeLabel} x${String(+speeds[i].toFixed(2))}`, "utf8");
+        // Direction arrow follows the speed: >> speeds up, << slows
+        // down. The label is the caller's word (default
+        // "fast-forward"); pass --label slow-motion for a slow span
+        // so the badge reads "<< slow-motion x0.5".
+        const arrow = speeds[i] > 1 ? ">>" : "<<";
+        await writeFile(file, `${arrow} ${badgeLabel} x${String(+speeds[i].toFixed(2))}`, "utf8");
         badgeFiles[speeds[i]] = file;
       }
     }
@@ -7886,9 +7915,10 @@ export async function fastForwardClip({ input, segments, output, badge = true, l
         const p = pieces[i];
         // Parentheses matter: setpts=PTS-STARTPTS/4 parses as
         // PTS-(STARTPTS/4) and shifts every piece — the bug the
-        // broll setpts fix taught (lượt 95).
-        let chain = `[v${i}]trim=start=${f(p.start)}:end=${f(p.end)},setpts=(PTS-STARTPTS)${p.speed > 1 ? `/${f(p.speed)}` : ""}`;
-        if (p.speed > 1 && badgeGeom) {
+        // broll setpts fix taught (lượt 95). The division applies
+        // for any marked speed: /4 speeds up, /0.5 slows down.
+        let chain = `[v${i}]trim=start=${f(p.start)}:end=${f(p.end)},setpts=(PTS-STARTPTS)${p.speed !== 1 ? `/${f(p.speed)}` : ""}`;
+        if (p.speed !== 1 && badgeGeom) {
           const esc = badgeFiles[p.speed].replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
           const off = badgeGeom.margin + badgeGeom.border;
           chain += `,drawtext=fontfile=${TITLECARD_FONT}:textfile=${esc}:fontsize=${badgeGeom.fontsize}:fontcolor=white:box=1:boxcolor=black@0.7:boxborderw=${badgeGeom.border}:x=w-tw-${off}:y=h-th-${off}`;
@@ -7902,7 +7932,7 @@ export async function fastForwardClip({ input, segments, output, badge = true, l
       fc.push(`[0:a]asplit=${n}${pieces.map((_, i) => `[a${i}]`).join("")}`);
       for (let i = 0; i < n; i++) {
         const p = pieces[i];
-        fc.push(`[a${i}]atrim=start=${f(p.start)}:end=${f(p.end)},asetpts=PTS-STARTPTS${p.speed > 1 ? `,${atempoChain(p.speed)}` : ""}[pa${i}]`);
+        fc.push(`[a${i}]atrim=start=${f(p.start)}:end=${f(p.end)},asetpts=PTS-STARTPTS${p.speed !== 1 ? `,${atempoChain(p.speed)}` : ""}[pa${i}]`);
       }
       fc.push(`${pieces.map((_, i) => `[pa${i}]`).join("")}concat=n=${n}:v=0:a=1[aout]`);
     }
@@ -7945,11 +7975,11 @@ export async function fastForwardClip({ input, segments, output, badge = true, l
     let unmapped = null;
     let frames = null;
     if (meta.video) {
-      const fast = pieces.find((p) => p.speed > 1);
-      const srcMid = fast.start + (fast.end - fast.start) / 2;
-      const outMid = fast.outStart + (fast.end - fast.start) / 2 / fast.speed;
+      const marked = pieces.find((p) => p.speed !== 1);
+      const srcMid = marked.start + (marked.end - marked.start) / 2;
+      const outMid = marked.outStart + (marked.end - marked.start) / 2 / marked.speed;
       mapped = await frameDiffMean(inPath, srcMid, outMid, fps, outPath);
-      unmapped = await frameDiffMean(inPath, srcMid, fast.outStart + (fast.end - fast.start) / 2, fps, outPath);
+      unmapped = await frameDiffMean(inPath, srcMid, marked.outStart + (marked.end - marked.start) / 2, fps, outPath);
       frames = await countFrames(outPath);
     }
     return {
@@ -12588,6 +12618,88 @@ export function hwEncoderArgs(encoder, crf, preset) {
 // went. Skipped (ran:false) when trim or loudness is statically
 // unavailable — a skip is not a pass, and doctor's ok is already
 // false then because those tools are missing.
+// Path-guard matrix for `doctor --smoke` (lượt 166, backlog):
+// the 4-step chain above proves rendering works on plain names;
+// the matrix proves the path guards hold on real paths — spaces,
+// unicode, `..` that stays inside, nested output dirs — and that
+// the refusals fire (output overwrites input; traversal / symlink
+// escape out of MEDIAKIT_WORKDIR). Each render case is a real trim
+// through the tool (not a string check); each refusal case expects
+// the exact error code. Refusal cases that need a sandbox only run
+// when one is set: with no workdir there is no guard to test, so
+// they are reported skipped, never faked as passes. The outside
+// file is a 1s generated clip in os.tmpdir() (never a system file)
+// and is removed afterwards, like the smoke dir itself.
+async function runDoctorSmokePathMatrix({ tmpDir, src, sandboxEnabled, workdir }) {
+  const cases = [];
+  const push = (c) => { cases.push(c); return c.ok; };
+  // Render case: trim a 1s slice through the tool, probe the result.
+  const renderCase = async (name, input, output) => {
+    try {
+      await trim({ input, output, start: 0.25, duration: 1 });
+      const m = await probe(output);
+      if (Math.abs(m.duration_seconds - 1) > 0.15) {
+        throw new MediaKitError(`output is ${m.duration_seconds}s, expected 1s`, "SMOKE_FAILED");
+      }
+      return push({ name, kind: "render", ok: true });
+    } catch (err) {
+      return push({ name, kind: "render", ok: false, error: err?.message ?? String(err) });
+    }
+  };
+  const refusalCase = async (name, expectedCode, fn) => {
+    try {
+      await fn();
+      return push({ name, kind: "refusal", expected_code: expectedCode, ok: false, error: "call succeeded, expected a refusal" });
+    } catch (err) {
+      const code = err?.code ?? null;
+      return push({
+        name, kind: "refusal", expected_code: expectedCode, ok: code === expectedCode,
+        ...(code === expectedCode ? {} : { error: `got ${code ?? "no code"}: ${err?.message ?? err}` }),
+      });
+    }
+  };
+  let allOk = true;
+  // Spaces in both input and output names.
+  const spaceIn = path.join(tmpDir, "space name.mp4");
+  await copyFile(src, spaceIn);
+  allOk = await renderCase("space-in-name", spaceIn, path.join(tmpDir, "space out.mp4")) && allOk;
+  // Unicode (incl. emoji) in both names.
+  const uniIn = path.join(tmpDir, "ünïcode-🎬.mp4");
+  await copyFile(src, uniIn);
+  allOk = await renderCase("unicode-name", uniIn, path.join(tmpDir, "ünïcode out.mp4")) && allOk;
+  // `..` that stays inside the smoke dir.
+  allOk = await renderCase("dotdot-stays-inside", path.join(tmpDir, "sub", "..", "space name.mp4"), path.join(tmpDir, "dotdot out.mp4")) && allOk;
+  // Nested output dir (prepareOutput mkdirs).
+  allOk = await renderCase("nested-subdir", src, path.join(tmpDir, "sub", "deep", "nested.mp4")) && allOk;
+  // Output must not overwrite its own input (unconditional guard).
+  allOk = await refusalCase("output-overwrites-input", "OUTPUT_OVERWRITES_INPUT", async () => {
+    await trim({ input: src, output: src, start: 0.25, duration: 1 });
+  }) && allOk;
+  if (sandboxEnabled) {
+    // A real file outside the workdir, so the guard — not a missing
+    // file — is what refuses it.
+    const outsideBase = `mediakit-doctor-outside-${process.pid}-${randomBytes(4).toString("hex")}`;
+    const outsideFile = path.join(os.tmpdir(), `${outsideBase}.mp4`);
+    const outsideOut = path.join(os.tmpdir(), `${outsideBase}-out.mp4`);
+    await run(FFMPEG, ["-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30:duration=1", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", outsideFile]);
+    try {
+      allOk = await refusalCase("input-outside-workdir", "SANDBOX_ESCAPE", async () => { await requireInput(outsideFile); }) && allOk;
+      allOk = await refusalCase("output-outside-workdir", "SANDBOX_ESCAPE", async () => { await prepareOutput(outsideOut, [src]); }) && allOk;
+      const link = path.join(tmpDir, "escape-link.mp4");
+      await symlink(outsideFile, link);
+      allOk = await refusalCase("symlink-escapes-workdir", "SANDBOX_ESCAPE", async () => { await requireInput(link); }) && allOk;
+    } finally {
+      await rm(outsideFile, { force: true }).catch(() => {});
+    }
+  } else {
+    for (const name of ["input-outside-workdir", "output-outside-workdir", "symlink-escapes-workdir"]) {
+      cases.push({ name, kind: "refusal", expected_code: "SANDBOX_ESCAPE", ok: true, skipped: "sandbox disabled (MEDIAKIT_WORKDIR unset) — no guard to test" });
+    }
+  }
+  const skipped = cases.filter((c) => c.skipped).length;
+  return { sandbox_enabled: sandboxEnabled, workdir: workdir ?? null, cases, ok: allOk, skipped };
+}
+
 async function runDoctorSmoke(tools) {
   const started = Date.now();
   const steps = [];
@@ -12610,6 +12722,7 @@ async function runDoctorSmoke(tools) {
   try { workRoot = await workdirRoot(); } catch { workRoot = null; }
   const tmpDir = await mkdtemp(path.join(workRoot ?? os.tmpdir(), "mediakit-doctor-smoke-"));
   let ok = true;
+  let pathGuards = null;
   try {
     const src = path.join(tmpDir, "smoke-source.mp4");
     const trimmed = path.join(tmpDir, "smoke-trimmed.mp4");
@@ -12644,10 +12757,24 @@ async function runDoctorSmoke(tools) {
       }
       return "1.5s 640x360 + audio, on disk";
     });
+    // Path-guard matrix, only when the chain above passed (the
+    // render cases need the generated source on disk). A failed
+    // matrix fails smoke.ok, like a failed render step.
+    if (ok) {
+      try {
+        pathGuards = await runDoctorSmokePathMatrix({ tmpDir, src, sandboxEnabled: workRoot !== null, workdir: workRoot });
+        if (!pathGuards.ok) ok = false;
+      } catch (err) {
+        pathGuards = { sandbox_enabled: workRoot !== null, workdir: workRoot, cases: [], ok: false, skipped: 0, error: err?.message ?? String(err) };
+        ok = false;
+      }
+    } else {
+      pathGuards = { sandbox_enabled: workRoot !== null, workdir: workRoot, ran: false, reason: "smoke chain failed before the path-guard matrix", cases: [], ok: false, skipped: 0 };
+    }
   } finally {
     await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
-  return { ran: true, ok, seconds: +((Date.now() - started) / 1000).toFixed(2), steps };
+  return { ran: true, ok, seconds: +((Date.now() - started) / 1000).toFixed(2), steps, ...(pathGuards ? { path_guards: pathGuards } : {}) };
 }
 
 export async function doctor({ smoke = false } = {}) {

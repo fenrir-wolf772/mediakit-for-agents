@@ -1275,6 +1275,55 @@ const ffMp3Res = await client.callTool({
 });
 const ffMp3Json = JSON.parse(ffMp3Res.content[0].text);
 checkOk(near(ffMp3Json.duration_seconds, 7.5, 0.05) && ffMp3Json.badge === null && ffMp3Json.dimensions === null && ffMp3Json.has_audio === true, "fastforward on audio-only input: 9s - 1.5s saved = 7.5s, no badge, no dimensions", JSON.stringify(ffMp3Json.duration_seconds));
+// Slow-motion (lượt 166, demilp idea): span [2,6)@0.5 stretches
+// 4s into 8s, so the output is 14.039s — 2 + 8 + 4.039. The
+// timing check still maps: source mid-span 4s lands at out 6s.
+// Unmapped is ~0 here too, but for the boring reason: the whole
+// span sits inside the red half, so the unshifted frame is red
+// either way (same fixture limitation the header comment notes
+// for flat colours) — the pixel checks below are the real proof
+// the stretch happened.
+const ffSlowRes = await client.callTool({
+  name: "fastforward",
+  arguments: { input: path.join(root, "test/scenes-source.mp4"), segments: [{ start: 2, end: 6, speed: 0.5 }], output: path.join(root, "outputs/mcp-fastforward-slow.mp4") },
+});
+const ffSlowJson = JSON.parse(ffSlowRes.content[0].text);
+console.log("fastforward slow call:", JSON.stringify(ffSlowJson.segments), "|", ffSlowJson.duration_seconds + "s", "| mapped", ffSlowJson.timing_check_mapped, "unmapped", ffSlowJson.timing_check_unmapped, "| frames", ffSlowJson.frames);
+checkOk(near(ffSlowJson.duration_seconds, 14.039, 0.05) && near(ffSlowJson.duration_error_seconds, 0, 0.05) && ffSlowJson.duration_expected_seconds === 14.039, "fastforward slow-motion: 10.039 + 4s stretched = 14.039s", JSON.stringify(ffSlowJson.duration_seconds));
+checkOk(ffSlowJson.segments?.length === 1 && ffSlowJson.segments[0].speed === 0.5 && ffSlowJson.segments[0].out_start_seconds === 2 && ffSlowJson.segments[0].out_end_seconds === 10, "fastforward slow echoes the span: 2-6s @0.5x lands at out 2-10s", JSON.stringify(ffSlowJson.segments));
+checkOk(ffSlowJson.timing_check_mapped !== null && ffSlowJson.timing_check_mapped <= 2, "fastforward slow timing check: mapped frame ~0 (source 4s lands at out 6s)", `mapped=${ffSlowJson.timing_check_mapped} unmapped=${ffSlowJson.timing_check_unmapped}`);
+checkOk(Math.abs(ffSlowJson.frames - ffSlowJson.frames_expected) <= 2, "fastforward slow frame count is ~421 (14.039s at 30fps), within 2 of the estimate", `frames=${ffSlowJson.frames} expected~${ffSlowJson.frames_expected}`);
+const ffSlowT6R = await planeMean(path.join(root, "outputs/mcp-fastforward-slow.mp4"), "320:180:160:90", "r", 6);
+const ffSlowT6B = await planeMean(path.join(root, "outputs/mcp-fastforward-slow.mp4"), "320:180:160:90", "b", 6);
+const ffSlowT11R = await planeMean(path.join(root, "outputs/mcp-fastforward-slow.mp4"), "320:180:160:90", "r", 11);
+const ffSlowT11B = await planeMean(path.join(root, "outputs/mcp-fastforward-slow.mp4"), "320:180:160:90", "b", 11);
+console.log("fastforward slow pixels: t=6 R/B =", ffSlowT6R, ffSlowT6B, "| t=11 R/B =", ffSlowT11R, ffSlowT11B);
+checkOk(ffSlowT6R > 200 && ffSlowT6B < 20, "fastforward slow is still red at t=6 (source 4s, inside the stretched span)", `t6 R=${ffSlowT6R} B=${ffSlowT6B}`);
+checkOk(ffSlowT11R < 20 && ffSlowT11B > 200, "fastforward slow is blue at t=11 (source 7s — past the end of the un-stretched clip, so the stretch is real)", `t11 R=${ffSlowT11R} B=${ffSlowT11B}`);
+// Slow audio: silence-source 9s, span [3,7)@0.5 -> 3 + 8 + 2 = 13s;
+// the tone gaps move to [2,5) and [9,11).
+const ffSlowAudioRes = await client.callTool({
+  name: "fastforward",
+  arguments: { input: path.join(root, "test/silence-source.mp4"), segments: [{ start: 3, end: 7, speed: 0.5 }], output: path.join(root, "outputs/mcp-fastforward-slow-audio.mp4") },
+});
+const ffSlowAudioJson = JSON.parse(ffSlowAudioRes.content[0].text);
+checkOk(near(ffSlowAudioJson.duration_seconds, 13, 0.05) && near(ffSlowAudioJson.duration_error_seconds, 0, 0.05), "fastforward slow audio timing: 9s + 4s stretched = 13s", JSON.stringify(ffSlowAudioJson.duration_seconds));
+const { stderr: ffSlowSdErr } = await execFileAsync("ffmpeg", ["-v", "info", "-i", path.join(root, "outputs/mcp-fastforward-slow-audio.mp4"), "-map", "0:a", "-af", "silencedetect=noise=-40dB:d=0.3", "-f", "null", "-"]);
+const ffSlowSdStarts = [...ffSlowSdErr.matchAll(/silence_start: ([0-9.]+)/g)].map((m) => parseFloat(m[1]));
+checkOk(ffSlowSdStarts.some((t) => near(t, 2, 0.15)) && ffSlowSdStarts.some((t) => near(t, 9, 0.15)), "silencedetect finds the tone gaps stretched to [2,5) and [9,11)", `gaps at ${ffSlowSdStarts.join(", ")}`);
+// Slow badge: a dry-run writes the label file to the deterministic
+// temp dir and keeps it, so the "<< slow-motion" text is checkable
+// on disk (the real run deletes its mkdtemp dir). 0.25x also proves
+// the atempo chain: a single atempo only takes [0.5, 2.0], so 0.25
+// must chain two 0.5 steps.
+const ffSlowDryRes = await client.callTool({
+  name: "fastforward",
+  arguments: { input: path.join(root, "test/scenes-source.mp4"), segments: [{ start: 2, end: 6, speed: 0.25 }], output: path.join(root, "outputs/mcp-fastforward-slow-dry.mp4"), label: "slow-motion", dry_run: true },
+});
+const ffSlowDryJson = JSON.parse(ffSlowDryRes.content[0].text);
+const ffSlowBadgeText = await readFile(path.join(process.env.TMPDIR || "/tmp", "mediakit-fastforward-dryrun", "badge-0.txt"), "utf8");
+checkOk(ffSlowDryJson.dry_run === true && ffSlowDryJson.duration_expected_seconds === 22.039 && ffSlowBadgeText === "<< slow-motion x0.25" && ffSlowDryJson.commands?.[0]?.includes("setpts=(PTS-STARTPTS)/0.25") && ffSlowDryJson.commands[0].includes("atempo=0.5,atempo=0.5"), "fastforward slow dry-run: badge file reads \"<< slow-motion x0.25\", expected 22.039s, command stretches with setpts /0.25 + chained atempo 0.5,0.5", `${ffSlowBadgeText} | ${String(ffSlowDryJson.commands?.[0]).slice(0, 160)}`);
+checkOk(!existsSync(path.join(root, "outputs/mcp-fastforward-slow-dry.mp4")), "fastforward slow dry-run writes no file", "outputs/mcp-fastforward-slow-dry.mp4");
 // Overlap + clamp: a span starting inside the previous one starts
 // where the previous ended; a span past the end clamps to the clip.
 const ffOverlapRes = await client.callTool({
@@ -1289,9 +1338,14 @@ const ffClampRes = await client.callTool({
 });
 const ffClampJson = JSON.parse(ffClampRes.content[0].text);
 checkOk(ffClampJson.segments[0].clamped === true && ffClampJson.segments[0].end_seconds === 10.039 && near(ffClampJson.duration_seconds, 9.02, 0.05), "span past the end clamps to the clip end (8-20 -> 8-10.039) and reports it", JSON.stringify(ffClampJson.segments));
-// Refusals: speed 1 (zod floor 1.1), end before start, empty list.
+// Refusals: speed 1 (a no-op span), below the 0.25 floor, above
+// the 16 ceiling, end before start, empty list.
 const ffSpeed1Text = await callExpectThrow("fastforward", { input: path.join(root, "test/scenes-source.mp4"), segments: [{ start: 2, end: 6, speed: 1 }], output: path.join(root, "outputs/mcp-fastforward-bad.mp4") });
-checkOk(/1\.1/.test(ffSpeed1Text), "fastforward refuses speed 1 (must be over 1.1)", ffSpeed1Text.slice(0, 200));
+checkOk(/no-op/.test(ffSpeed1Text), "fastforward refuses speed 1 as a no-op span", ffSpeed1Text.slice(0, 200));
+const ffSpeedLowText = await callExpectThrow("fastforward", { input: path.join(root, "test/scenes-source.mp4"), segments: [{ start: 2, end: 6, speed: 0.1 }], output: path.join(root, "outputs/mcp-fastforward-bad-low.mp4") });
+checkOk(/0\.25/.test(ffSpeedLowText), "fastforward refuses speed 0.1 (below the 0.25 floor)", ffSpeedLowText.slice(0, 200));
+const ffSpeedHighText = await callExpectThrow("fastforward", { input: path.join(root, "test/scenes-source.mp4"), segments: [{ start: 2, end: 6, speed: 20 }], output: path.join(root, "outputs/mcp-fastforward-bad-high.mp4") });
+checkOk(/16/.test(ffSpeedHighText), "fastforward refuses speed 20 (above the 16 ceiling)", ffSpeedHighText.slice(0, 200));
 const ffBackwardsText = await callExpectThrow("fastforward", { input: path.join(root, "test/scenes-source.mp4"), segments: [{ start: 6, end: 2, speed: 2 }], output: path.join(root, "outputs/mcp-fastforward-bad2.mp4") });
 checkOk(/end > start/.test(ffBackwardsText), "fastforward refuses end before start", ffBackwardsText.slice(0, 200));
 const ffEmptyText = await callExpectThrow("fastforward", { input: path.join(root, "test/scenes-source.mp4"), segments: [], output: path.join(root, "outputs/mcp-fastforward-bad3.mp4") });
@@ -1301,6 +1355,10 @@ const ffCli = await runCli(["fastforward", path.join(root, "test/scenes-source.m
 let ffCliJson = null;
 try { ffCliJson = JSON.parse(ffCli.out); } catch { /* not JSON */ }
 checkOk(ffCli.code === 0 && near(ffCliJson?.duration_seconds, 8.039, 0.05) && ffCliJson?.segments?.[0]?.speed === 2, "CLI fastforward --span 2-6@2 renders 8.039s", ffCli.out.slice(0, 200));
+const ffCliSlow = await runCli(["fastforward", path.join(root, "test/scenes-source.mp4"), "--span", "2-6@0.5", "-o", path.join(root, "outputs/mcp-fastforward-cli-slow.mp4")]);
+let ffCliSlowJson = null;
+try { ffCliSlowJson = JSON.parse(ffCliSlow.out); } catch { /* not JSON */ }
+checkOk(ffCliSlow.code === 0 && near(ffCliSlowJson?.duration_seconds, 14.039, 0.05) && ffCliSlowJson?.segments?.[0]?.speed === 0.5, "CLI fastforward --span 2-6@0.5 renders 14.039s (slow-motion through the CLI)", ffCliSlow.out.slice(0, 200));
 const ffCliNoSpanErr = await runCliExpectError(["fastforward", path.join(root, "test/scenes-source.mp4"), "-o", path.join(root, "outputs/mcp-fastforward-nospan.mp4")]);
 checkOk(ffCliNoSpanErr !== null && /--span/.test(ffCliNoSpanErr), "CLI fastforward without --span exits 2 naming --span", (ffCliNoSpanErr ?? "").slice(0, 160));
 // Manifest: fastforward as a pipeline step (segments array, like
@@ -2471,6 +2529,15 @@ checkOk(doctorSmokeJson.ok === true && doctorSmokeJson.smoke?.ran === true && do
 checkOk(smokeSteps.map((s) => s.name).join(",") === "generate,trim,loudness,verify" && smokeSteps.every((s) => s.ok === true && typeof s.seconds === "number" && s.seconds >= 0), "doctor smoke reports all 4 steps ok with timings", JSON.stringify(smokeSteps));
 checkOk(/-14/.test(smokeSteps.find((s) => s.name === "loudness")?.detail ?? ""), "doctor smoke loudness step measured -14 LUFS", JSON.stringify(smokeSteps));
 checkOk(typeof doctorSmokeJson.smoke?.seconds === "number" && doctorSmokeJson.smoke.seconds > 0, "doctor smoke reports total seconds", JSON.stringify(doctorSmokeJson.smoke));
+// Lượt 166: the smoke also runs a path-guard matrix — real trims
+// through space/unicode/`..`-inside/nested paths, plus refusal
+// cases. Without a workdir the sandbox cases are skipped, never
+// faked as passes.
+const smokeGuards = doctorSmokeJson.smoke?.path_guards;
+checkOk(smokeGuards?.ok === true && smokeGuards?.sandbox_enabled === false && smokeGuards?.skipped === 3 && smokeGuards?.cases?.length === 8, "doctor smoke path-guards: 8 cases, 3 sandbox cases skipped without a workdir", JSON.stringify(smokeGuards));
+checkOk(["space-in-name", "unicode-name", "dotdot-stays-inside", "nested-subdir"].every((n) => smokeGuards.cases.find((c) => c.name === n)?.ok === true), "doctor smoke path-guards: space/unicode/dotdot/nested paths render", JSON.stringify(smokeGuards?.cases));
+checkOk(smokeGuards.cases.find((c) => c.name === "output-overwrites-input")?.ok === true && smokeGuards.cases.find((c) => c.name === "output-overwrites-input")?.expected_code === "OUTPUT_OVERWRITES_INPUT", "doctor smoke path-guards: output overwriting its input is refused", JSON.stringify(smokeGuards?.cases));
+checkOk(["input-outside-workdir", "output-outside-workdir", "symlink-escapes-workdir"].every((n) => { const c = smokeGuards.cases.find((x) => x.name === n); return c?.ok === true && typeof c?.skipped === "string" && c?.expected_code === "SANDBOX_ESCAPE"; }), "doctor smoke path-guards: sandbox cases skipped honestly without a workdir", JSON.stringify(smokeGuards?.cases));
 
 // Audit log / operation envelope (lượt 55): every tool call above
 // was recorded into the hermetic audit file — the log must prove it
@@ -2486,6 +2553,35 @@ async function runCliJson(args, env = {}) {
 // Turn 93: the same smoke through the CLI flag.
 const doctorSmokeCli = await runCliJson(["doctor", "--smoke"]);
 checkOk(doctorSmokeCli.ok === true && doctorSmokeCli.smoke?.ran === true && doctorSmokeCli.smoke?.ok === true && doctorSmokeCli.smoke.steps?.length === 4 && doctorSmokeCli.smoke.steps.every((s) => s.ok === true), "CLI doctor --smoke runs the real chain and passes", JSON.stringify(doctorSmokeCli.smoke));
+// Lượt 166: the same smoke inside a sandbox — the 3 refusal cases
+// now RUN (no skips) and must refuse with SANDBOX_ESCAPE.
+const doctorWorkdir = path.join(root, "outputs/mcp-doctor-workdir");
+await rm(doctorWorkdir, { recursive: true, force: true });
+await mkdir(doctorWorkdir, { recursive: true });
+const doctorSmokeSandboxed = await runCliJson(["doctor", "--smoke"], { MEDIAKIT_WORKDIR: doctorWorkdir });
+await rm(doctorWorkdir, { recursive: true, force: true });
+const sbGuards = doctorSmokeSandboxed.smoke?.path_guards;
+checkOk(doctorSmokeSandboxed.ok === true && doctorSmokeSandboxed.smoke?.ok === true && sbGuards?.sandbox_enabled === true && sbGuards?.skipped === 0 && sbGuards?.cases?.length === 8 && sbGuards?.cases.every((c) => c.ok === true), "CLI doctor --smoke inside MEDIAKIT_WORKDIR: all 8 path-guard cases pass, none skipped", JSON.stringify(sbGuards));
+checkOk(["input-outside-workdir", "output-outside-workdir", "symlink-escapes-workdir"].every((n) => { const c = sbGuards.cases.find((x) => x.name === n); return c?.kind === "refusal" && c?.expected_code === "SANDBOX_ESCAPE" && !("skipped" in c); }), "CLI doctor --smoke sandboxed: traversal/output/symlink escapes refused with SANDBOX_ESCAPE", JSON.stringify(sbGuards?.cases));
+// Lượt 166: MEDIAKIT_WORKDIR expands a leading ~ and ${VAR}
+// (mrdainami/ffmpeg-mcp's expandPath idea) — some MCP hosts pass
+// the value through literally, so "~/clips" must resolve instead
+// of failing as a missing folder. The repo root sits under $HOME
+// both locally and on the CI runner, so it doubles as the probe
+// dir without creating anything under the real home.
+const homeDir = process.env.HOME ?? "";
+const rootUnderHome = homeDir && root.startsWith(homeDir) ? root.slice(homeDir.length) : null;
+if (rootUnderHome !== null) {
+  const doctorTilde = await runCliJson(["doctor"], { MEDIAKIT_WORKDIR: `~${rootUnderHome}` });
+  const realRoot = await realpath(root);
+  checkOk(doctorTilde.ok === true && doctorTilde.sandbox?.enabled === true && doctorTilde.sandbox?.workdir === realRoot, "doctor: MEDIAKIT_WORKDIR \"~/...\" expands to the home dir", JSON.stringify(doctorTilde.sandbox));
+  const doctorVar = await runCliJson(["doctor"], { MEDIAKIT_WORKDIR: `\${HOME}${rootUnderHome}` });
+  checkOk(doctorVar.ok === true && doctorVar.sandbox?.enabled === true && doctorVar.sandbox?.workdir === realRoot, "doctor: MEDIAKIT_WORKDIR \"${HOME}/...\" expands the variable", JSON.stringify(doctorVar.sandbox));
+} else {
+  checkOk(false, "doctor workdir expansion: test setup needs root under $HOME", `HOME=${homeDir} root=${root}`);
+}
+const doctorBadVar = await runCliJson(["doctor"], { MEDIAKIT_WORKDIR: "${MEDIAKIT_NO_SUCH_VAR_XYZ}/x" });
+checkOk(doctorBadVar.ok === false && typeof doctorBadVar.sandbox?.error === "string" && /does not exist/.test(doctorBadVar.sandbox.error), "doctor: an unknown ${VAR} in MEDIAKIT_WORKDIR stays literal and reports the workdir missing (never silently empty)", JSON.stringify(doctorBadVar.sandbox));
 
 // Turn 94: init_project scaffolds a runnable video project — a
 // film.json that already validates, a measured 3s placeholder voice,

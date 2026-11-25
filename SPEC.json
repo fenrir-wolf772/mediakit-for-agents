@@ -1244,8 +1244,8 @@
       "name": "fastforward",
       "family": "edit",
       "tier": "WRITE",
-      "summary": "Speed up marked spans of a clip and burn a badge on them (khang-nyb/demo-recorder's render() idea: their demo tool fast-forwards dead backend waits and stamps…",
-      "description": "Speed up marked spans of a clip and burn a badge on them (khang-nyb/demo-recorder's render() idea: their demo tool fast-forwards dead backend waits and stamps \">> tua nhanh x8\" on the sped footage; this is the general version). The timeline is split into pieces — normal spans at 1x, marked spans at N x — and re-joined, so the output is shorter by exactly the saved time and everything after a span keeps its place. Video speeds up with setpts, audio keeps its pitch with chained atempo. Spans are clamped to the clip, sorted, and overlaps collapse onto the previous span's end instead of failing on input order. The badge is a dark box + text bottom-right, sized from the display frame height (same relative size on vertical and landscape clips); set badge false to skip it. Re-encodes video (libx264, crf 23 default), AAC pinned 192k. The result measures the speed-up on disk: duration_expected vs duration_seconds, timing_check_mapped (input frame mid-span vs the output frame it should land on, ~0 when the mapping is right) vs timing_check_unmapped, and the frame count. Set dry_run=true to print the exact ffmpeg command and write no file (duration/timing/frames report null — measured on the real output; the badge label files are written to a deterministic temp dir and kept, so the printed command runs as-is).",
+      "summary": "Speed up or slow down marked spans of a clip and burn a badge on them (khang-nyb/demo-recorder's render() idea: their demo tool fast-forwards dead backend waits…",
+      "description": "Speed up or slow down marked spans of a clip and burn a badge on them (khang-nyb/demo-recorder's render() idea: their demo tool fast-forwards dead backend waits and stamps \">> tua nhanh x8\" on the sped footage; this is the general version). The timeline is split into pieces — normal spans at 1x, marked spans at N x — and re-joined, so the output is shorter (or longer, for slow spans) by exactly the saved time and everything after a span keeps its place. Video changes speed with setpts, audio keeps its pitch with chained atempo (each atempo step inside [0.5, 2.0], so 0.25x chains two 0.5 steps). Spans are clamped to the clip, sorted, and overlaps collapse onto the previous span's end instead of failing on input order. The badge is a dark box + text bottom-right, sized from the display frame height (same relative size on vertical and landscape clips); set badge false to skip it. The badge reads \">> <label> x<speed>\" on sped spans and \"<< <label> x<speed>\" on slowed ones — pass label \"slow-motion\" for a slow span so it reads \"<< slow-motion x0.5\" instead of \"<< fast-forward x0.5\". Speed 1 is refused (a no-op span). Re-encodes video (libx264, crf 23 default), AAC pinned 192k. The result measures the speed change on disk: duration_expected vs duration_seconds, timing_check_mapped (input frame mid-span vs the output frame it should land on, ~0 when the mapping is right) vs timing_check_unmapped, and the frame count. Set dry_run=true to print the exact ffmpeg command and write no file (duration/timing/frames report null — measured on the real output; the badge label files are written to a deterministic temp dir and kept, so the printed command runs as-is).",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1285,9 +1285,9 @@
                 },
                 "speed": {
                   "type": "number",
-                  "minimum": 1.1,
+                  "minimum": 0.25,
                   "maximum": 16,
-                  "description": "Speed factor for this span, 1.1-16 (1.1 = barely faster, 16 = sixteen times faster)"
+                  "description": "Speed factor for this span, 0.25-16 (0.25 = four times slower, 1.1 = barely faster, 16 = sixteen times faster; 1 is refused as a no-op)"
                 }
               },
               "required": [
@@ -1299,7 +1299,7 @@
             },
             "minItems": 1,
             "maxItems": 16,
-            "description": "1-16 spans to speed up, in any order (sorted; overlaps collapse onto the previous span's end)"
+            "description": "1-16 spans to speed up or slow down, in any order (sorted; overlaps collapse onto the previous span's end)"
           },
           "output": {
             "$ref": "#/properties/input"
@@ -1307,11 +1307,11 @@
           "badge": {
             "type": "boolean",
             "default": true,
-            "description": "Burn the \">> fast-forward xN\" badge on sped spans (default true)"
+            "description": "Burn the speed badge on changed spans (default true): \">> fast-forward xN\" on sped spans, \"<< <label> xN\" on slowed ones"
           },
           "label": {
             "type": "string",
-            "description": "Badge word (default \"fast-forward\"); the badge reads \">> <label> x<speed>\""
+            "description": "Badge word (default \"fast-forward\"); the badge reads \">> <label> x<speed>\" on sped spans and \"<< <label> x<speed>\" on slowed ones — pass \"slow-motion\" for a slow span"
           },
           "crf": {
             "type": "integer",
@@ -4117,7 +4117,7 @@
       "family": "inspect",
       "tier": "READ",
       "summary": "Read-only environment preflight: ffmpeg/ffprobe versions, which filters and encoders this build has, and which mediakit tools that enables.",
-      "description": "Read-only environment preflight: ffmpeg/ffprobe versions, which filters and encoders this build has, and which mediakit tools that enables. An unavailable tool also reports a one-sentence fix telling you how to repair the ffmpeg install. Also reports the async job store dir (jobs_dir: path + exists + writable — it is auto-created on the first job) and the Kokoro voice venv (voice_venv, env MEDIAKIT_VOICE_VENV — optional, like the ASR engine). Run first on a new machine — a tool that reports available=false will fail at runtime. With smoke:true, also runs a real end-to-end render (generate → trim → loudness → verify) and reports whether this machine can actually render — a failed smoke fails ok.",
+      "description": "Read-only environment preflight: ffmpeg/ffprobe versions, which filters and encoders this build has, and which mediakit tools that enables. An unavailable tool also reports a one-sentence fix telling you how to repair the ffmpeg install. Also reports the async job store dir (jobs_dir: path + exists + writable — it is auto-created on the first job) and the Kokoro voice venv (voice_venv, env MEDIAKIT_VOICE_VENV — optional, like the ASR engine). Run first on a new machine — a tool that reports available=false will fail at runtime. With smoke:true, also runs a real end-to-end render (generate → trim → loudness → verify) and reports whether this machine can actually render — a failed smoke fails ok. The smoke also runs a path-guard matrix (smoke.path_guards): real trims through space/unicode/`..`-inside/nested paths, plus refusal cases (output overwrites input; input/output/symlink escaping MEDIAKIT_WORKDIR) — the sandbox cases only run when a workdir is set, otherwise they are reported skipped, never faked as passes.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -5892,5 +5892,5 @@
       }
     }
   ],
-  "spec_hash": "abe65f5a0cdec5fa0264dda21f2703780306d487448b68b3d7e4b1e39da8d420"
+  "spec_hash": "cc43dd54236821fee0ded11c65490969f8e89274b12660ce35b0b92750aac11c"
 }

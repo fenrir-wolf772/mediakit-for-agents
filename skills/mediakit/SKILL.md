@@ -571,9 +571,17 @@ When `MEDIAKIT_WORKDIR` is set, every user-supplied input/output path
 must stay inside that directory — `..` traversal and symlink escapes
 are refused with `SANDBOX_ESCAPE`, and `doctor` reports the sandbox
 state (`enabled`, `workdir`, or an `error` when the directory is
-missing). Unset, there is no restriction (the default). Internal
-scratch (ffmpeg passlogs, svg temp frames) is exempt; only paths the
-caller supplies are checked.
+missing). A leading `~` and `${VAR}` patterns in the value are
+expanded (home dir / environment) before resolving, so
+`MEDIAKIT_WORKDIR="~/clips"` and `"${HOME}/clips"` both work even
+when a host passes the value through literally. Unset, there is no
+restriction (the default). Internal scratch (ffmpeg passlogs, svg
+temp frames) is exempt; only paths the caller supplies are checked.
+`doctor --smoke` also proves the guards hold: it runs a path-guard
+matrix of real trims through space/unicode/`..`-inside/nested paths
+plus refusal cases (output overwrites input; input/output/symlink
+escaping the workdir) — the sandbox cases run only when a workdir
+is set, otherwise they are reported skipped, never faked as passes.
 
 ### 26. GIFs for READMEs: `export_gif`, and read the retry line on errors
 `export_gif` turns a clip (or a `--start`/`--end` segment) into an

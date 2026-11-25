@@ -336,11 +336,11 @@ const COMMANDS = {
   },
   fastforward: {
     usage: "mediakit fastforward <input> -o <output> --span 5-9@4 [--span ...] [--no-badge] [--label ...] [--crf 23] [--dry-run]",
-    desc: "Speed up marked spans of a clip and burn a badge on them: --span <start>-<end>@<speed> is repeatable (max 16), times in seconds or MM:SS, speed 1.1-16. The output is shorter by exactly the saved time and everything after a span keeps its place; audio keeps its pitch (atempo). Spans are clamped to the clip and overlaps collapse onto the previous span's end. The badge reads \">> fast-forward xN\" bottom-right (use --no-badge to skip it, --label to change the word). Reports duration_expected vs duration_seconds plus timing_check_mapped vs timing_check_unmapped. --dry-run prints the exact ffmpeg command and writes no file.",
+    desc: "Speed up or slow down marked spans of a clip and burn a badge on them: --span <start>-<end>@<speed> is repeatable (max 16), times in seconds or MM:SS, speed 0.25-16 (below 1 slows down, 1 is refused as a no-op). The output is shorter (or longer, for slow spans) by exactly the saved time and everything after a span keeps its place; audio keeps its pitch (chained atempo). Spans are clamped to the clip and overlaps collapse onto the previous span's end. The badge reads \">> fast-forward xN\" on sped spans and \"<< <label> xN\" on slowed ones — pass --label slow-motion for a slow span (use --no-badge to skip it, --label to change the word). Reports duration_expected vs duration_seconds plus timing_check_mapped vs timing_check_unmapped. --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
-      ["--span", "Span to speed up: <start>-<end>@<speed>, repeatable, max 16 (times in seconds or MM:SS, speed 1.1-16)"],
-      ["--no-badge", "Skip the \">> fast-forward xN\" badge on sped spans"],
+      ["--span", "Span to speed up or slow down: <start>-<end>@<speed>, repeatable, max 16 (times in seconds or MM:SS, speed 0.25-16; below 1 slows down, 1 is refused)"],
+      ["--no-badge", "Skip the speed badge on changed spans (\">> fast-forward xN\" / \"<< <label> xN\")"],
       ["--label", "Badge word (default \"fast-forward\")"],
       ["--crf", "Quality 0-51, lower is better (default 23)"],
       ["--dry-run", "Print the exact ffmpeg command and write no file"],
@@ -1160,10 +1160,10 @@ const COMMANDS = {
   },
   doctor: {
     usage: "mediakit doctor [--smoke]",
-    desc: "Read-only preflight: ffmpeg/ffprobe versions, available filters/encoders, and which tools that enables. --smoke also runs a real end-to-end render (generate → trim → loudness → verify) and reports whether this machine can actually render, not just which filters exist.",
+    desc: "Read-only preflight: ffmpeg/ffprobe versions, available filters/encoders, and which tools that enables. --smoke also runs a real end-to-end render (generate → trim → loudness → verify) and reports whether this machine can actually render, not just which filters exist — plus a path-guard matrix (space/unicode/`..`-inside/nested paths render; output-overwrites-input and workdir escapes are refused, sandbox cases skipped when no workdir is set).",
     args: [],
     options: [
-      ["--smoke", "Run a real end-to-end render chain (generate → trim → loudness → verify) after the static checks; a failed smoke fails doctor"],
+      ["--smoke", "Run a real end-to-end render chain (generate → trim → loudness → verify) after the static checks, plus a path-guard matrix; a failed smoke fails doctor"],
     ],
   },
   audit: {
