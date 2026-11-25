@@ -2510,7 +2510,7 @@ export const TOOL_DEFS = [
   {
     name: "list_operations",
     tier: "READ",
-    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 92 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 93 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
     schema: {
     family: z.enum(["inspect", "edit", "text", "image", "assemble", "meta"]).optional().describe("Narrow to one family; omit for the whole catalog"),
   },
@@ -2552,6 +2552,29 @@ export const TOOL_DEFS = [
     package: z.string().min(1).describe("Path to the template package directory (holds template.json + the .cjs scene module it names)"),
   },
     handler: async (a) => safe(() => core.validateTemplatePackage({ packagePath: a.package })),
+  },
+
+  {
+    name: "validate_shot_spec",
+    tier: "READ",
+    description: "Validate one shot-spec before it is pasted into a film (the director's ingest gate, idea from RayVentura/ShortGPT): a standalone JSON file {kind, inputs, params, z} for ONE shot. Each kind declares the inputs it requires — image/video need inputs.source (probed: a still image / a video with measurable duration), color needs params.color (hex, no files), canvas_scene needs exactly one of inputs.scene (a .js/.cjs/.mjs module that parses without executing) or params.template (a built-in template id, with its params checked against the registry) plus optional inputs.assets {name: path} still images. Unknown input roles fail (a typo'd role is a missing input, not an ignored one); z must be a finite layer number, duration a positive number of seconds. Relative input paths resolve against base_dir (default: the spec file's directory, or the working directory for an inline spec). Probe-only, writes nothing; a bad spec returns valid:false with the issues listed instead of throwing — only a missing/unreadable spec file (or both/neither of spec/spec_file) throws.",
+    schema: {
+    spec: z.object({
+      kind: z.string().min(1).describe("Shot kind: image, video, color, or canvas_scene"),
+      id: z.string().min(1).optional().describe("Shot id (optional, echoed back)"),
+      duration: z.number().positive().optional().describe("Shot length in seconds (optional)"),
+      z: z.number().optional().describe("Layer order (optional, must be finite)"),
+      inputs: z.record(z.string(), z.any()).optional().describe("File inputs by role: {source} for image/video, {scene} and/or {assets: {name: path}} for canvas_scene, {} for color"),
+      params: z.record(z.string(), z.any()).optional().describe("Shot params: {color} hex for color, {template} + template params for canvas_scene, {zoom}/{start} for image/video"),
+    }).passthrough().optional().describe("Shot-spec object, inline. Omit when passing spec_file."),
+    spec_file: pathSchema.optional().describe("Shot-spec JSON file. Pass this OR spec inline, never both."),
+    base_dir: pathSchema.optional().describe("Base directory for relative input paths (default: the spec file's directory, or the working directory for an inline spec)"),
+  },
+    handler: async (a) => safe(() => core.validateShotSpecFile({
+      spec: a.spec ?? null,
+      specFile: a.spec_file ?? null,
+      baseDir: a.base_dir ?? null,
+    })),
   },
 ];
 
@@ -2606,7 +2629,7 @@ export function listSafetyTiers() {
 }
 
 // ---------------------------------------------------------------- progressive discovery
-// The catalog is 92 tools and tools/list dumps the full JSON schema
+// The catalog is 93 tools and tools/list dumps the full JSON schema
 // of every one on every turn — kinocut's answer is progressive
 // discovery: a compact list first, full schema only for the tools
 // actually used (lượt 147, idea: KyaniteLabs/kinocut
@@ -2660,6 +2683,7 @@ export const TOOL_FAMILY_OF = {
   release_checkpoint: "assemble", package: "assemble", publish_kit: "assemble",
   social: "assemble", batch: "assemble", list_templates: "assemble",
   validate_template_package: "assemble",
+  validate_shot_spec: "assemble",
   // meta (2)
   list_operations: "meta", describe_operation: "meta",
 };

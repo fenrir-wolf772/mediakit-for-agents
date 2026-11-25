@@ -4283,12 +4283,23 @@ export function chunkCaptions(words, opts = {}) {
     }
     return { startMs: Math.round(start * 1000), endMs: Math.round(end * 1000), word: w.word.trim() };
   });
+  // Real ASR word timings jitter: a word can start a few ms before the
+  // previous ends (whisper.cpp does this). Clamp micro-overlaps (<=100ms)
+  // to the previous end and warn; anything bigger — or a word fully
+  // inside the previous one — is genuinely bad input and still refuses,
+  // so a broken transcript cannot silently re-time.
+  const clampWarnings = [];
   for (let i = 1; i < normalized.length; i++) {
     if (normalized[i].startMs < normalized[i - 1].endMs) {
-      throw new MediaKitError(
-        `word ${i + 1} starts at ${(normalized[i].startMs / 1000).toFixed(3)}s, before word ${i} ends at ${(normalized[i - 1].endMs / 1000).toFixed(3)}s — words must be in order and must not overlap`,
-        "INVALID_ARG",
-      );
+      const overlapMs = normalized[i - 1].endMs - normalized[i].startMs;
+      if (overlapMs > 100 || normalized[i].endMs <= normalized[i - 1].endMs) {
+        throw new MediaKitError(
+          `word ${i + 1} starts at ${(normalized[i].startMs / 1000).toFixed(3)}s, before word ${i} ends at ${(normalized[i - 1].endMs / 1000).toFixed(3)}s — words must be in order and must not overlap`,
+          "INVALID_ARG",
+        );
+      }
+      clampWarnings.push(`word ${i + 1} starts ${(overlapMs / 1000).toFixed(3)}s before word ${i} ends — start clamped to ${(normalized[i - 1].endMs / 1000).toFixed(3)}s (ASR jitter)`);
+      normalized[i].startMs = normalized[i - 1].endMs;
     }
   }
   // Cues as word lists first, so the stranded-word repair below can
@@ -4337,7 +4348,7 @@ export function chunkCaptions(words, opts = {}) {
       split_reason: c.reason,
     };
   });
-  const warnings = [];
+  const warnings = [...clampWarnings];
   for (const c of cues) {
     for (const line of c.text.split("\n")) {
       if (line.length > lineChars) {
@@ -12740,6 +12751,9 @@ const TOOL_REQUIREMENTS = {
   // validate_template_package is pure Node (JSON parse, magic bytes,
   // vm.Script syntax check, symlink walk) — no ffmpeg needed.
   validate_template_package: {},
+  // validate_shot_spec is pure Node + ffprobe only (JSON parse,
+  // vm.Script syntax check, probe for still/video) — no ffmpeg needed.
+  validate_shot_spec: {},
 };
 
 async function listCapabilities(kind) {
@@ -19006,6 +19020,247 @@ export async function validateTemplatePackage({ packagePath }) {
     layers,
     issues,
   };
+}
+
+// Shot-spec validation (idea from RayVentura/ShortGPT): a shot is
+// authored as one standalone JSON file — {kind, inputs, params, z} —
+// and validated at ingest, before it is ever pasted into a film.
+// The point is a named failure early: assemble --mode validate only
+// sees the shot once the whole film is written, so a missing source
+// or a wrong kind surfaces after the director already did the work.
+// This validator is the ingest gate for single shots: every input
+// the kind requires must be named AND present on disk, probed to be
+// the media the kind needs. A bad spec returns valid:false with the
+// issues listed instead of throwing — only a missing/unreadable spec
+// file throws (same contract as validate_template_package).
+export const SHOT_SPEC_KINDS = ["image", "video", "color", "canvas_scene"];
+
+// File-input roles each kind requires. canvas_scene takes its scene
+// module as inputs.scene OR a built-in template id as params.template
+// (exactly one — same rule as the film schema); its still-image
+// assets ride in inputs.assets as {name: path}.
+const SHOT_SPEC_REQUIRED_INPUTS = {
+  image: ["source"],
+  video: ["source"],
+  color: [],
+  canvas_scene: [],
+};
+const SHOT_SPEC_ALLOWED_INPUTS = {
+  image: ["source"],
+  video: ["source"],
+  color: [],
+  canvas_scene: ["scene", "assets"],
+};
+
+async function checkShotSpecInputFile(resolved, { stillImage = false, video = false } = {}) {
+  // Returns {ok, detail, size_bytes?, duration_seconds?} — never throws.
+  let st;
+  try {
+    st = await stat(resolved);
+  } catch {
+    return { ok: false, detail: "file does not exist" };
+  }
+  if (!st.isFile()) return { ok: false, detail: "not a file" };
+  let meta;
+  try {
+    meta = await probe(resolved);
+  } catch (err) {
+    return { ok: false, detail: `cannot be probed (${err instanceof MediaKitError ? err.message : String(err.message ?? err)})` };
+  }
+  if (!meta.video) return { ok: false, detail: "has no video stream", size_bytes: st.size };
+  if (stillImage && (meta.audio || meta.duration_seconds !== null)) {
+    return { ok: false, detail: "must be a still image, not a video (extract a frame first)", size_bytes: st.size };
+  }
+  if (video && !Number.isFinite(meta.duration_seconds)) {
+    return { ok: false, detail: "could not measure the video duration", size_bytes: st.size };
+  }
+  return {
+    ok: true,
+    detail: stillImage ? "still image" : video ? `video, ${meta.duration_seconds}s` : "readable media",
+    size_bytes: st.size,
+    ...(video ? { duration_seconds: meta.duration_seconds } : {}),
+  };
+}
+
+export async function validateShotSpec(spec, { baseDir = process.cwd() } = {}) {
+  const checks = [];
+  const issues = [];
+  const check = (field, ok, detail) => {
+    checks.push({ field, ok, detail });
+    if (!ok) issues.push(`${field}: ${detail}`);
+  };
+  const done = (kind, id, inputs) => ({
+    operation: "validate_shot_spec",
+    valid: issues.length === 0,
+    kind,
+    id,
+    inputs,
+    params: spec && typeof spec === "object" && !Array.isArray(spec) ? (spec.params ?? null) : null,
+    issues,
+    checks,
+  });
+  if (!spec || typeof spec !== "object" || Array.isArray(spec)) {
+    check("spec", false, "must be a plain JSON object");
+    return done(null, null, {});
+  }
+  const kind = spec.kind;
+  if (typeof kind !== "string" || !SHOT_SPEC_KINDS.includes(kind)) {
+    check("kind", false, `must be one of ${SHOT_SPEC_KINDS.join(", ")}, got ${JSON.stringify(kind ?? null)}`);
+    return done(typeof kind === "string" ? kind : null, typeof spec.id === "string" ? spec.id : null, {});
+  }
+  const id = typeof spec.id === "string" && spec.id.trim() ? spec.id : null;
+  if (spec.id !== undefined && id === null) check("id", false, "must be a non-empty string");
+  if (spec.duration !== undefined) {
+    check("duration", typeof spec.duration === "number" && Number.isFinite(spec.duration) && spec.duration > 0, "must be a positive number of seconds");
+  }
+  if (spec.z !== undefined) {
+    check("z", typeof spec.z === "number" && Number.isFinite(spec.z), "must be a finite number (layer order)");
+  }
+  if (spec.params !== undefined && (typeof spec.params !== "object" || spec.params === null || Array.isArray(spec.params))) {
+    check("params", false, "must be a plain JSON object");
+  }
+  const inputs = spec.inputs ?? {};
+  if (typeof inputs !== "object" || inputs === null || Array.isArray(inputs)) {
+    check("inputs", false, "must be a plain JSON object {role: path}");
+    return done(kind, id, {});
+  }
+  const allowed = SHOT_SPEC_ALLOWED_INPUTS[kind];
+  for (const role of Object.keys(inputs)) {
+    if (!allowed.includes(role)) {
+      check(`inputs.${role}`, false, `unknown input role for kind "${kind}" (allowed: ${allowed.join(", ") || "none"})`);
+    }
+  }
+  const resolvedInputs = {};
+  const resolveRel = (p) => (path.isAbsolute(p) ? p : path.resolve(baseDir, p));
+  for (const role of SHOT_SPEC_REQUIRED_INPUTS[kind]) {
+    const raw = inputs[role];
+    if (typeof raw !== "string" || !raw.trim()) {
+      check(`inputs.${role}`, false, `required for kind "${kind}" — name the file`);
+      continue;
+    }
+    const r = await checkShotSpecInputFile(resolveRel(raw), { stillImage: kind === "image", video: kind === "video" });
+    check(`inputs.${role}`, r.ok, r.ok ? `${raw} — ${r.detail}` : `${raw} — ${r.detail}`);
+    if (r.ok) {
+      resolvedInputs[role] = { path: resolveRel(raw), size_bytes: r.size_bytes, ...(r.duration_seconds !== undefined ? { duration_seconds: r.duration_seconds } : {}) };
+    }
+  }
+  // Light type checks on the optional per-kind params assemble would
+  // range-check later — the gate catches wrong shapes, not bad values.
+  if (kind === "image" && spec.params?.zoom !== undefined) {
+    const zoom = spec.params.zoom;
+    const zoomOk =
+      typeof zoom === "object" && zoom !== null && !Array.isArray(zoom) &&
+      (zoom.from === undefined || (typeof zoom.from === "number" && Number.isFinite(zoom.from))) &&
+      (zoom.to === undefined || (typeof zoom.to === "number" && Number.isFinite(zoom.to)));
+    check("params.zoom", zoomOk, "must be an object {from, to, focus?, focus_end?} with numeric from/to");
+  }
+  if (kind === "video" && spec.params?.start !== undefined) {
+    check("params.start", typeof spec.params.start === "number" && Number.isFinite(spec.params.start) && spec.params.start >= 0, "must be a number >= 0 (seconds into the source)");
+  }
+  if (kind === "color") {
+    const color = spec.params?.color;
+    if (typeof color !== "string" || !isHexColorArg(color)) {
+      check("params.color", false, `required for kind "color" — a hex color (e.g. 111111), got ${JSON.stringify(color ?? null)}`);
+    } else {
+      check("params.color", true, color);
+    }
+  }
+  if (kind === "canvas_scene") {
+    const hasScene = typeof inputs.scene === "string" && inputs.scene.trim();
+    const hasTemplate = spec.params && typeof spec.params.template === "string" && spec.params.template.trim();
+    if (hasScene && hasTemplate) {
+      check("scene/template", false, "canvas_scene takes either inputs.scene or params.template, not both");
+    } else if (!hasScene && !hasTemplate) {
+      check("scene/template", false, `canvas_scene needs inputs.scene (a .js/.cjs/.mjs module) or params.template (one of ${SCENE_TEMPLATE_IDS.join(", ")})`);
+    } else if (hasScene) {
+      const scenePath = resolveRel(inputs.scene);
+      if (!/\.(cjs|js|mjs)$/i.test(path.extname(scenePath))) {
+        check("inputs.scene", false, `must be a .js/.cjs/.mjs module, got ${path.extname(scenePath) || "(no extension)"}`);
+      } else {
+        let src = null;
+        try {
+          src = await readFile(scenePath, "utf8");
+        } catch {
+          src = null;
+        }
+        if (src === null) {
+          check("inputs.scene", false, "file does not exist or cannot be read");
+        } else if (!src.trim()) {
+          check("inputs.scene", false, "scene module is empty");
+        } else {
+          try {
+            new vm.Script(src, { filename: inputs.scene });
+            check("inputs.scene", true, "parses as JavaScript (not executed)");
+            resolvedInputs.scene = { path: scenePath, size_bytes: Buffer.byteLength(src) };
+          } catch (err) {
+            check("inputs.scene", false, `JavaScript syntax error: ${String(err.message ?? err).split("\n")[0]}`);
+          }
+        }
+      }
+    } else {
+      // Template id — resolve against the registry so a typo fails
+      // here, not mid-render. params.template is stripped before the
+      // template-param check: it names the template, it is not a param.
+      let tpl = null;
+      try {
+        tpl = await resolveSceneTemplate(spec.params.template.trim());
+        check("params.template", true, `"${tpl.id}"`);
+      } catch (err) {
+        check("params.template", false, err instanceof MediaKitError ? err.message : String(err.message ?? err));
+      }
+      if (tpl) {
+        const { template: _template, ...templateParams } = spec.params;
+        try {
+          resolveSceneTemplateParams(tpl, templateParams, "shot-spec");
+          check("params", true, "template params pass the registry check");
+        } catch (err) {
+          check("params", false, err instanceof MediaKitError ? err.message : String(err.message ?? err));
+        }
+      }
+    }
+    // Still-image assets, if any: {name: path} under inputs.assets.
+    if (inputs.assets !== undefined) {
+      if (typeof inputs.assets !== "object" || inputs.assets === null || Array.isArray(inputs.assets)) {
+        check("inputs.assets", false, "must be an object {name: path}");
+      } else {
+        const assetOut = {};
+        for (const [name, assetRaw] of Object.entries(inputs.assets)) {
+          if (typeof assetRaw !== "string" || !assetRaw.trim()) {
+            check(`inputs.assets.${name}`, false, "needs a path");
+            continue;
+          }
+          const r = await checkShotSpecInputFile(resolveRel(assetRaw), { stillImage: true });
+          check(`inputs.assets.${name}`, r.ok, r.ok ? `${assetRaw} — ${r.detail}` : `${assetRaw} — ${r.detail}`);
+          if (r.ok) assetOut[name] = { path: resolveRel(assetRaw), size_bytes: r.size_bytes };
+        }
+        if (Object.keys(assetOut).length) resolvedInputs.assets = assetOut;
+      }
+    }
+  }
+  return done(kind, id, resolvedInputs);
+}
+
+export async function validateShotSpecFile({ specFile = null, spec = null, baseDir = null } = {}) {
+  if (specFile && spec) throw new MediaKitError("validate_shot_spec takes exactly one source: spec inline OR spec_file, not both", "INVALID_ARG");
+  if (!specFile && !spec) throw new MediaKitError("validate_shot_spec needs a source: spec inline OR spec_file", "INVALID_ARG");
+  let doc = spec;
+  let resolvedBase = baseDir;
+  if (specFile) {
+    const specPath = await requireInput(specFile, "shot-spec file");
+    let raw;
+    try {
+      raw = await readFile(specPath, "utf8");
+    } catch {
+      throw new MediaKitError(`shot-spec file cannot be read: ${specFile}`, "INVALID_ARG");
+    }
+    try {
+      doc = JSON.parse(raw);
+    } catch {
+      throw new MediaKitError(`shot-spec file is not valid JSON: ${specFile}`, "INVALID_ARG");
+    }
+    if (!resolvedBase) resolvedBase = path.dirname(specPath);
+  }
+  return validateShotSpec(doc, { baseDir: resolvedBase ?? process.cwd() });
 }
 
 // Merge a template's defaults with the shot's params: shot values

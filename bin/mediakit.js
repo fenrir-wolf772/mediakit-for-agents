@@ -1081,6 +1081,14 @@ const COMMANDS = {
     args: [{ name: "package", required: true }],
     options: [],
   },
+  "validate-shot-spec": {
+    usage: "mediakit validate-shot-spec <spec.json> [--base-dir <dir>]",
+    desc: "Validate one shot-spec before it is pasted into a film (the director's ingest gate): a standalone JSON file {kind, inputs, params, z} for ONE shot. Each kind declares the inputs it requires — image/video need inputs.source (probed: a still image / a video with measurable duration), color needs params.color (hex, no files), canvas_scene needs exactly one of inputs.scene (a .js/.cjs/.mjs module that parses without executing) or params.template (a built-in template id, with its params checked against the registry) plus optional inputs.assets {name: path} still images. Unknown input roles fail; z must be a finite layer number, duration a positive number of seconds. Relative input paths resolve against --base-dir (default: the spec file's directory). Probe-only, writes nothing; a bad spec returns valid:false with the issues listed instead of throwing — only a missing/unreadable spec file throws.",
+    args: [{ name: "spec", required: true }],
+    options: [
+      ["--base-dir", "Base directory for relative input paths (default: the spec file's directory)"],
+    ],
+  },
   "align-voice": {
     usage: "mediakit align-voice <film.json> [--lines <lines.json>] [--threshold-db -40] [--min-silence 0.25] [--snap-window-ms 600] [--apply -o <aligned-film.json>] [--expected-key <hex>]",
     desc: "Align an assemble film's shot durations to its voice: split the voice across the shots that speak, in proportion to each shot's dialogue characters, then snap each interior boundary to the middle of the nearest pause within --snap-window-ms (default 600) so a cut never clips a word. Dialogue comes from each shot's `dialogue` field, overridden per shot by --lines [{shot, dialogue}]; shots with no dialogue keep their durations. Plan mode (default) writes nothing and reports the dialogue_key, per-shot durations/deltas/snap info, and violations. --apply writes the aligned film (never over the input) and embeds the dialogue it aligned from; it refuses when there are violations or when --expected-key differs from the computed key.",
@@ -2499,6 +2507,10 @@ async function main() {
       case "validate-template-package":
         if (!positional[0]) fail("missing package directory: mediakit validate-template-package <dir>");
         result = await core.validateTemplatePackage({ packagePath: positional[0] });
+        break;
+      case "validate-shot-spec":
+        if (!positional[0]) fail("missing shot-spec file: mediakit validate-shot-spec <spec.json>");
+        result = await core.validateShotSpecFile({ specFile: positional[0], baseDir: opts.base_dir ?? null });
         break;
       case "align-voice": {
         if (!positional[0]) fail("missing manifest file: mediakit align-voice <film.json>");

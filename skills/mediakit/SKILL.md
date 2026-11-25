@@ -590,6 +590,10 @@ splits a cue once it already holds 3 words. It writes a cues JSON
 `generate_srt` directly, so the chain is `transcribe --word-timestamps`
 → `chunk_captions` → `generate_srt` → `burn_captions` (or straight into
 `burn_captions --words-file`, which runs the same chunker internally).
+Real ASR timings jitter: a word starting up to 100ms before the
+previous ends is clamped to the previous end and reported in `warnings`
+(a bigger overlap still refuses — that is a broken transcript, not
+jitter); check the warnings when a chain runs on fresh ASR output.
 
 When `MEDIAKIT_WORKDIR` is set, every user-supplied input/output path
 must stay inside that directory — `..` traversal and symlink escapes
@@ -2120,7 +2124,7 @@ Off by default; the verify stays probe-only without it.
 
 ### 58h. Browse the catalog before you dump it — progressive discovery
 
-91 tools is too many schemas to pay for in every turn. Don't start
+93 tools is too many schemas to pay for in every turn. Don't start
 from `tools/list` — start from `list_operations`: one compact line
 per tool (name, family, tier, one-sentence summary), optionally
 narrowed with `family` (`inspect`, `edit`, `text`, `image`,
@@ -2182,6 +2186,23 @@ remove. Video inputs must write .mp4/.mov/.m4v (use `convert` for
 other containers); audio-only inputs write an audio format. Also a
 batch operation and a manifest step — put it first in a manifest, so
 every later step works on a known profile.
+
+### 58l. Validate one shot-spec before it enters the film
+
+A shot is authored as one standalone JSON file — `{kind, inputs,
+params, z}` — and `validate_shot_spec` is the ingest gate for it:
+`image`/`video` need `inputs.source` (probed: a still image / a
+video with measurable duration), `color` needs `params.color` (hex,
+no files), `canvas_scene` needs exactly one of `inputs.scene` (a
+`.js`/`.cjs`/`.mjs` module that parses without executing) or
+`params.template` (a built-in template id, its params checked against
+the registry) plus optional `inputs.assets` `{name: path}` still
+images. Unknown input roles fail — a typo'd role is a missing input,
+not an ignored one. Relative paths resolve against the spec file's
+directory by default (`--base-dir` overrides). A bad spec returns
+`valid:false` with the issues listed instead of throwing, so validate
+each shot file before pasting it into a film — `assemble --mode
+validate` only sees the shot once the whole film is written.
 
 ## Workflow: vertical captioned clip from a landscape source
 
