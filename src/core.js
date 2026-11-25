@@ -4011,7 +4011,18 @@ export async function burnCaptions({ input, output, captions, fontSize = null, f
     const color = fontColor.toLowerCase() === "white" ? "" : `,PrimaryColour=&H${fontColor}&`;
     vf = `subtitles='${esc}':force_style='${forceStyle}${color}'`;
   }
-  const args = ["-y", "-i", inPath, "-vf", vf, "-c:a", "copy", outPath];
+  const args = ["-y", "-i", inPath, "-vf", vf, "-c:a", "copy"];
+  // MP4-family outputs get +faststart (editly puts `-movflags
+  // faststart` on every MP4 output; without it a captioned assemble
+  // film ships moov-after-mdat and `check --faststart` fails on the
+  // final file — found lượt 167, when the mux had faststart but the
+  // caption burn re-encoded without it). WebM has no moov box, so
+  // only mp4/mov/m4v get the flag. The dry-run command below prints
+  // these exact args, so the flag is visible there too.
+  if (["mp4", "mov", "m4v"].includes(path.extname(outPath).toLowerCase().slice(1))) {
+    args.push("-movflags", "+faststart");
+  }
+  args.push(outPath);
   if (dryRun) {
     // font_size/margin/style/fit are computed from the input probe
     // and the captions file, so they are exact; duration/size are
@@ -20341,10 +20352,13 @@ async function joinAssembleSegments(segmentPaths, joins, opts, outPath, onJoinPr
 // <manifestDir>/.mediakit-assemble-cache/<sha256>.mp4 + index.json
 // {key: {output_size_bytes, output_sha256}}. A hit is verified by
 // size + SHA-256, never trusted on filename alone.
-async function assembleCachedShot(plan, shot, opts, tmpDir, onShotProgress = null) {
-  const cacheDir = path.join(plan.manifestDir, ASSEMBLE_CACHE_DIRNAME);
-  const indexPath = path.join(cacheDir, "index.json");
-  const key = createHash("sha256").update(stableStringify({
+// The content-hash key for one rendered shot segment. Factored out of
+// assembleCachedShot (lượt 168) so the assemble checkpoint can
+// recompute the SAME key without rendering: the checkpoint's per-shot
+// status (done/stale/missing/pending) is a key comparison plus a
+// cache-file verification, never a re-render.
+function assembleShotCacheKey(plan, shot, opts) {
+  return createHash("sha256").update(stableStringify({
     renderer: ASSEMBLE_VERSION,
     kind: shot.kind,
     template: shot.template ?? null,
@@ -20358,6 +20372,12 @@ async function assembleCachedShot(plan, shot, opts, tmpDir, onShotProgress = nul
     params: shot.params ?? null,
     width: opts.width, height: opts.height, fps: opts.fps, crf: opts.crf, preset: opts.preset,
   })).digest("hex");
+}
+
+async function assembleCachedShot(plan, shot, opts, tmpDir, onShotProgress = null) {
+  const cacheDir = path.join(plan.manifestDir, ASSEMBLE_CACHE_DIRNAME);
+  const indexPath = path.join(cacheDir, "index.json");
+  const key = assembleShotCacheKey(plan, shot, opts);
   const cacheFile = path.join(cacheDir, `${key}.mp4`);
   const segPath = path.join(tmpDir, `shot-${shot.id}.mp4`);
   let cacheIndex = {};
@@ -20370,19 +20390,23 @@ async function assembleCachedShot(plan, shot, opts, tmpDir, onShotProgress = nul
       const st = await stat(cacheFile);
       if (st.size === cacheIndex[key].output_size_bytes && (await hashFile(cacheFile)) === cacheIndex[key].output_sha256) {
         await copyFile(cacheFile, segPath);
-        return { path: segPath, cached: true };
+        return { path: segPath, cached: true, key, sha256: cacheIndex[key].output_sha256, size: st.size };
       }
     } catch { /* cached segment gone or changed: rebuild */ }
   }
   await mkdir(cacheDir, { recursive: true });
   await buildAssembleShot(plan, shot, { ...opts, tmpDir }, segPath, onShotProgress);
+  let segSha = null;
+  let segSize = null;
   try {
     await copyFile(segPath, cacheFile);
     const st = await stat(cacheFile);
-    cacheIndex[key] = { output_size_bytes: st.size, output_sha256: await hashFile(cacheFile) };
+    segSha = await hashFile(cacheFile);
+    segSize = st.size;
+    cacheIndex[key] = { output_size_bytes: segSize, output_sha256: segSha };
     await writeFile(indexPath, JSON.stringify(cacheIndex, null, 2), "utf8");
   } catch { /* cache write is best-effort; the segment itself is built */ }
-  return { path: segPath, cached: false };
+  return { path: segPath, cached: false, key, sha256: segSha, size: segSize };
 }
 
 // Voice padded to the film timeline: adelay by lead, apad to the
@@ -20558,7 +20582,196 @@ async function requireAssembleApproval(plan, force) {
   return "approved";
 }
 
-export async function assemble({ manifestPath, mode = "validate", outputDir = null, previewSeconds = 20, force = false, onProgress = null, jobId = null, jobDir = null, planFile = null, fromPlan = null }) {
+// Clip a film's shots to the preview window (lượt 168 — factored out
+// of assemble so --mode status can recompute the exact same clipped
+// shot list a preview checkpoint recorded). Returns the clipped shots
+// (spread copies — the plan's own shots are never mutated), the
+// preview totals, and any transition-drop warnings.
+function clipAssembleShotsForPreview(plan, previewSeconds) {
+  const previewTotal = Math.min(num(previewSeconds, "preview_seconds", { min: 1, max: 60 }), plan.total_seconds);
+  const previewFrames = Math.round(previewTotal * plan.fps);
+  const renderShots = [];
+  let used = 0;
+  for (const s of plan.shots) {
+    if (used >= previewFrames) break;
+    const take = Math.min(s.frames, previewFrames - used);
+    renderShots.push({ ...s, frames: take, duration: take / plan.fps });
+    used += take;
+  }
+  const previewWarnings = [];
+  for (let i = 1; i < renderShots.length; i++) {
+    const t = renderShots[i].transition;
+    if (!t) continue;
+    const hAfter = t.frames - Math.floor(t.frames / 2);
+    if (renderShots[i].frames < hAfter) {
+      previewWarnings.push(`preview: transition into shot ${renderShots[i].id} dropped — the shot is clipped to ${renderShots[i].frames} frames, below its ${hAfter}-frame handle (hard cut instead)`);
+      delete renderShots[i].transition;
+    }
+  }
+  return { renderShots, renderTotalSeconds: previewTotal, renderTotalFrames: previewFrames, previewWarnings };
+}
+
+// ---------------------------------------------------------------- assemble checkpoint
+// Assemble checkpoint + resume (ShortGPT's checkpoint/resume idea,
+// lượt 168; editly has no equivalent — a killed editly render restarts
+// from zero). The segment cache already skips re-rendering unchanged
+// shots; the checkpoint is the durable per-shot LEDGER on top of it:
+// after every shot segment is ready during preview/render, the
+// checkpoint file records that shot's cache key + segment digest
+// (written atomically, so a kill mid-render leaves a truthful record).
+// `assemble --mode status --checkpoint-file <path>` re-verifies each
+// recorded shot against the durable cache and reports done / stale
+// (the film changed that shot) / missing (cache entry gone) / pending
+// (never recorded) + resumable (every current shot done AND the film
+// fingerprint unchanged). One checkpoint file holds ONE mode (preview
+// or render — the opts differ, so the keys differ); handing a render
+// a preview checkpoint starts a fresh ledger and says so.
+const ASSEMBLE_CHECKPOINT_VERSION = 1;
+
+function assembleCheckpointOpts(opts) {
+  return { width: opts.width, height: opts.height, fps: opts.fps, crf: opts.crf, preset: opts.preset };
+}
+
+function assembleCheckpointBase({ plan, mode, previewSeconds, opts, outputDir }) {
+  return {
+    version: ASSEMBLE_CHECKPOINT_VERSION,
+    tool: "assemble-checkpoint",
+    manifest: plan.manifest,
+    fingerprint: plan.fingerprint,
+    fingerprint_parts: plan.fingerprint_parts,
+    mode,
+    preview_seconds: mode === "preview" ? previewSeconds : null,
+    opts: assembleCheckpointOpts(opts),
+    output_dir: outputDir ?? null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    shots: [],
+  };
+}
+
+// Read a checkpoint without throwing: missing/corrupt/wrong-shape is a
+// status answer (no_checkpoint / checkpoint_invalid), never a crash —
+// a fresh film simply has no checkpoint yet.
+async function readAssembleCheckpoint(checkpointFile) {
+  let raw;
+  try {
+    raw = await readFile(checkpointFile, "utf8");
+  } catch {
+    return { ok: false, reason: "no_checkpoint" };
+  }
+  let doc;
+  try {
+    doc = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: "checkpoint_invalid" };
+  }
+  if (!doc || typeof doc !== "object" || doc.tool !== "assemble-checkpoint" || !Array.isArray(doc.shots)
+    || !["preview", "render"].includes(doc.mode) || !doc.opts || typeof doc.opts !== "object") {
+    return { ok: false, reason: "checkpoint_invalid" };
+  }
+  return { ok: true, doc };
+}
+
+async function writeAssembleCheckpoint(checkpointAbs, doc) {
+  doc.updated_at = new Date().toISOString();
+  return writeStampFile(checkpointAbs, doc);
+}
+
+// Upsert one finished shot into the ledger (by id): a re-render of the
+// same film keeps the other shots' records, so the ledger always
+// describes the last completed run. The doc's fingerprint follows the
+// CURRENT film on every write — a stale fingerprint would make status
+// report film_changed forever after an edit.
+function upsertAssembleCheckpointShot(doc, record) {
+  const idx = doc.shots.findIndex((s) => s.id === record.id);
+  if (idx === -1) doc.shots.push(record);
+  else doc.shots[idx] = record;
+  return doc;
+}
+
+// --mode status: verify the checkpoint ledger against the durable
+// segment cache. No writes, no approval, no output dir — a read-only
+// resume check. Keys are recomputed with the RECORDED opts (the
+// geometry the segments were built at); a film whose width/height/fps
+// changed still verifies its unchanged shots as done, but resumable
+// also requires the film fingerprint to match — a resume is only safe
+// on an unchanged film.
+async function assembleCheckpointStatus({ plan, checkpointFile, base }) {
+  const checkpointAbs = path.resolve(checkpointFile);
+  const read = await readAssembleCheckpoint(checkpointAbs);
+  const pendingShots = plan.shots.map((s) => ({ id: s.id, kind: s.kind, status: "pending" }));
+  if (!read.ok) {
+    return {
+      ...base, mode: "status", checkpoint_file: checkpointAbs,
+      checkpoint: read.reason, film_changed: null, resumable: false,
+      shots: pendingShots,
+      counts: { done: 0, stale: 0, missing: 0, pending: plan.shots.length },
+      note: read.reason === "no_checkpoint"
+        ? "no checkpoint file yet — render or preview with --checkpoint-file first, then status reports per-shot resume state."
+        : "checkpoint file is not a readable assemble checkpoint — render or preview with --checkpoint-file to write a fresh one.",
+    };
+  }
+  const cdoc = read.doc;
+  const cMode = cdoc.mode;
+  const isPreview = cMode === "preview";
+  const clipped = isPreview
+    ? clipAssembleShotsForPreview(plan, cdoc.preview_seconds ?? 20)
+    : { renderShots: plan.shots, renderTotalSeconds: plan.total_seconds, renderTotalFrames: plan.total_frames };
+  const built = planAssembleVideo(clipped.renderShots, plan.fps).shots;
+  const opts = cdoc.opts;
+  // The durable cache index: key -> {output_size_bytes, output_sha256}.
+  let cacheIndex = {};
+  try {
+    const parsed = JSON.parse(await readFile(path.join(plan.manifestDir, ASSEMBLE_CACHE_DIRNAME, "index.json"), "utf8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) cacheIndex = parsed;
+  } catch { /* no cache yet: every recorded shot is missing */ }
+  const recordedById = new Map(cdoc.shots.map((s) => [s.id, s]));
+  const counts = { done: 0, stale: 0, missing: 0, pending: 0 };
+  const shots = [];
+  for (const shot of built) {
+    const currentKey = assembleShotCacheKey(plan, shot, opts);
+    const recorded = recordedById.get(shot.id);
+    let status;
+    let detail = null;
+    if (!recorded) {
+      status = "pending";
+    } else if (recorded.key !== currentKey) {
+      status = "stale";
+      detail = "shot changed since the checkpoint was written";
+    } else {
+      const entry = cacheIndex[currentKey];
+      let verified = false;
+      if (entry) {
+        try {
+          const cacheFile = path.join(plan.manifestDir, ASSEMBLE_CACHE_DIRNAME, `${currentKey}.mp4`);
+          const st = await stat(cacheFile);
+          verified = st.size === entry.output_size_bytes && (await hashFile(cacheFile)) === entry.output_sha256;
+        } catch { /* gone or changed */ }
+      }
+      status = verified ? "done" : "missing";
+      if (!verified) detail = "recorded segment is gone from the shot cache or its digest changed";
+    }
+    counts[status]++;
+    shots.push({ id: shot.id, kind: shot.kind, status, key: currentKey, recorded_key: recorded?.key ?? null, frames: shot.buildFrames, duration_seconds: shot.buildSeconds, ...(detail ? { detail } : {}) });
+  }
+  const extraRecorded = cdoc.shots.filter((s) => !built.some((b) => b.id === s.id)).map((s) => s.id);
+  const filmChanged = cdoc.fingerprint !== plan.fingerprint;
+  const resumable = counts.done === built.length && !filmChanged;
+  return {
+    ...base, mode: "status", checkpoint_file: checkpointAbs,
+    checkpoint: "ok", checkpoint_mode: cMode,
+    film_fingerprint: plan.fingerprint, checkpoint_fingerprint: cdoc.fingerprint ?? null,
+    film_changed: filmChanged, resumable,
+    shots, counts, extra_recorded: extraRecorded,
+    note: resumable
+      ? "every shot is verified in the shot cache and the film is unchanged — a re-render resumes from the cache."
+      : filmChanged
+        ? "the film changed since the checkpoint was written — stale shots rebuild, done shots resume from the cache."
+        : "some shots are not verified yet — render or preview with the same --checkpoint-file to finish the ledger.",
+  };
+}
+
+export async function assemble({ manifestPath, mode = "validate", outputDir = null, previewSeconds = 20, force = false, onProgress = null, jobId = null, jobDir = null, planFile = null, fromPlan = null, checkpointFile = null }) {
   const manifestAbs = await requireInput(manifestPath, "manifest");
   let raw;
   try {
@@ -20617,6 +20830,15 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
     fingerprint: plan.fingerprint,
     warnings: plan.warnings,
   };
+  if (mode === "status") {
+    // Resume check (lượt 168): read-only, no output dir, no approval.
+    // The checkpoint ledger must be named — without it there is
+    // nothing to verify against.
+    if (typeof checkpointFile !== "string" || !checkpointFile.trim()) {
+      throw new MediaKitError("assemble --mode status needs --checkpoint-file <path> — the ledger a preview/render wrote", "INVALID_ARG");
+    }
+    return assembleCheckpointStatus({ plan, checkpointFile, base });
+  }
   if (mode === "validate") {
     return {
       ...base,
@@ -20751,8 +20973,6 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
   }
 
   const isPreview = mode === "preview";
-  const previewTotal = isPreview ? Math.min(num(previewSeconds, "preview_seconds", { min: 1, max: 60 }), plan.total_seconds) : plan.total_seconds;
-  const previewFrames = Math.round(previewTotal * plan.fps);
   const outW = isPreview ? assembleEvenDown(Math.floor(plan.width / 2)) : plan.width;
   const outH = isPreview ? assembleEvenDown(Math.floor(plan.height / 2)) : plan.height;
   const crf = isPreview ? 28 : 23;
@@ -20799,27 +21019,9 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
   let renderShots = plan.shots;
   let renderTotalSeconds = plan.total_seconds;
   let renderTotalFrames = plan.total_frames;
-  const previewWarnings = [];
+  let previewWarnings = [];
   if (isPreview) {
-    renderShots = [];
-    let used = 0;
-    for (const s of plan.shots) {
-      if (used >= previewFrames) break;
-      const take = Math.min(s.frames, previewFrames - used);
-      renderShots.push({ ...s, frames: take, duration: take / plan.fps });
-      used += take;
-    }
-    renderTotalSeconds = previewTotal;
-    renderTotalFrames = previewFrames;
-    for (let i = 1; i < renderShots.length; i++) {
-      const t = renderShots[i].transition;
-      if (!t) continue;
-      const hAfter = t.frames - Math.floor(t.frames / 2);
-      if (renderShots[i].frames < hAfter) {
-        previewWarnings.push(`preview: transition into shot ${renderShots[i].id} dropped — the shot is clipped to ${renderShots[i].frames} frames, below its ${hAfter}-frame handle (hard cut instead)`);
-        delete renderShots[i].transition;
-      }
-    }
+    ({ renderShots, renderTotalSeconds, renderTotalFrames, previewWarnings } = clipAssembleShotsForPreview(plan, previewSeconds));
   }
   const videoPlan = planAssembleVideo(renderShots, plan.fps);
   const renderShotsBuilt = videoPlan.shots;
@@ -20830,6 +21032,26 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
   let cacheHits = 0;
   let completed = false;
   const segmentPaths = [];
+  // Checkpoint ledger (lượt 168): resolved once, seeded from the
+  // existing file when it describes this same mode + geometry —
+  // otherwise a fresh ledger (a preview checkpoint handed to a render
+  // describes different segments, so keeping its records would lie).
+  // The ledger is written after EVERY shot, so a kill mid-render
+  // leaves the finished shots recorded.
+  let checkpointAbs = null;
+  let checkpointDoc = null;
+  let checkpointResetFrom = null;
+  let checkpointShotsDone = 0;
+  if (checkpointFile != null) {
+    checkpointAbs = await prepareOutput(checkpointFile, [manifestAbs]);
+    const read = await readAssembleCheckpoint(checkpointAbs);
+    if (read.ok && read.doc.mode === mode && JSON.stringify(read.doc.opts) === JSON.stringify(assembleCheckpointOpts(opts))) {
+      checkpointDoc = read.doc;
+    } else {
+      if (read.ok) checkpointResetFrom = read.doc.mode;
+      checkpointDoc = assembleCheckpointBase({ plan, mode, previewSeconds: isPreview ? renderTotalSeconds : null, opts, outputDir: outDirAbs });
+    }
+  }
   try {
     for (const [i, shot] of renderShotsBuilt.entries()) {
       emitProgress("shots", i / renderShotsBuilt.length, shot.id);
@@ -20838,6 +21060,18 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       });
       if (r.cached) cacheHits++;
       segmentPaths.push(r.path);
+      if (checkpointAbs) {
+        upsertAssembleCheckpointShot(checkpointDoc, {
+          id: shot.id, kind: shot.kind, key: r.key,
+          segment_sha256: r.sha256, segment_size_bytes: r.size,
+          frames: shot.buildFrames, duration_seconds: shot.buildSeconds,
+          status: "done", cached: r.cached, updated_at: new Date().toISOString(),
+        });
+        checkpointDoc.fingerprint = plan.fingerprint;
+        checkpointDoc.fingerprint_parts = plan.fingerprint_parts;
+        await writeAssembleCheckpoint(checkpointAbs, checkpointDoc);
+        checkpointShotsDone++;
+      }
     }
     emitProgress("shots", 1);
     const videoOnlyPath = path.join(tmpDir, "video-only.mp4");
@@ -20956,6 +21190,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
         output: finalPath,
         dimensions: `${outW}x${outH}`,
         cache_hits: cacheHits,
+        ...(checkpointAbs ? { checkpoint_file: checkpointAbs, checkpoint: { mode, shots_done: checkpointShotsDone, shots_total: renderShotsBuilt.length, ...(checkpointResetFrom ? { reset_from_mode: checkpointResetFrom } : {}) } } : {}),
         ...(audioLevelsApplied.length ? { audio_levels: audioLevelsApplied } : {}),
         transition_warnings: previewWarnings,
         elapsed_seconds: elapsed,
@@ -21002,6 +21237,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       mediakit_version: MEDIAKIT_VERSION,
       ffmpeg_version: await ffmpegVersionString(),
       cache_hits: cacheHits,
+      ...(checkpointAbs ? { checkpoint_file: checkpointAbs, checkpoint: { mode, shots_done: checkpointShotsDone, shots_total: renderShotsBuilt.length, ...(checkpointResetFrom ? { reset_from_mode: checkpointResetFrom } : {}) } } : {}),
       chapters: plan.chapters,
       hook: plan.hook,
       shots_run: renderShots.length,
@@ -23483,7 +23719,7 @@ export async function checkJobAdmission() {
   throw new MediaKitError(`job admission limit: ${a.reason} — retry in ~${a.retry_after_seconds}s`, "JOB_ADMISSION_LIMIT", { retryable: true, retryAfterSeconds: a.retry_after_seconds });
 }
 
-export async function startAssembleJob({ manifestPath, outputDir, force = false, fromPlan = null }) {
+export async function startAssembleJob({ manifestPath, outputDir, force = false, fromPlan = null, checkpointFile = null }) {
   // Fail fast, before spawning anything: the manifest must validate
   // and the approval gate must pass — a job that is born dead hides
   // the real error behind a poll.
@@ -23523,6 +23759,10 @@ export async function startAssembleJob({ manifestPath, outputDir, force = false,
     throw new MediaKitError("assemble --mode render needs an output directory", "INVALID_ARG");
   }
   const outDirAbs = await prepareOutputDir(outputDir);
+  // The checkpoint ledger rides along to the worker: a long async
+  // render is the one most likely to be interrupted, so it is the one
+  // that most needs per-shot records.
+  const checkpointAbs = checkpointFile != null ? await prepareOutput(checkpointFile, [manifestAbs]) : null;
   const root = jobsRoot();
   const jobId = newJobId();
   const jobDir = path.join(root, jobId);
@@ -23532,6 +23772,7 @@ export async function startAssembleJob({ manifestPath, outputDir, force = false,
     job_id: jobId, operation: "assemble", status: "queued",
     manifest: manifestAbs, output_dir: outDirAbs, mode: "render", force: !!force,
     ...(planAbs ? { from_plan: planAbs } : {}),
+    ...(checkpointAbs ? { checkpoint_file: checkpointAbs } : {}),
     approval: approvalStatus, title: plan.title,
     total_seconds: plan.total_seconds, total_frames: plan.total_frames,
     pid: null, progress: { stage: null, percent: 0, detail: null }, progress_history: [],
@@ -23552,6 +23793,7 @@ export async function startAssembleJob({ manifestPath, outputDir, force = false,
       cliPath, "assemble", manifestAbs, "--mode", "render", "-o", outDirAbs,
       "--job-id", jobId, "--job-dir", jobDir, ...(force ? ["--force"] : []),
       ...(planAbs ? ["--from-plan", planAbs] : []),
+      ...(checkpointAbs ? ["--checkpoint-file", checkpointAbs] : []),
     ], { detached: true, stdio: ["ignore", logFd, logFd], env: process.env });
   } catch (e) {
     try { closeSync(logFd); } catch { /* already closed */ }

@@ -6070,6 +6070,13 @@ checkOk(capsDryJson.commands?.length === 1 && capsDryJson.commands[0].includes("
 checkOk(!existsSync(path.join(root, "outputs/mcp-captions-dry.mp4")), "burn_captions dry-run writes no file", "outputs/mcp-captions-dry.mp4");
 const capsDryCli = await runCliJson(["burn-captions", path.join(root, "test/source.mp4"), "--captions", path.join(root, "test/captions.srt"), "-o", path.join(root, "outputs/mcp-captions-cli-dry.mp4"), "--style", "glow", "--dry-run"]);
 checkOk(capsDryCli.dry_run === true && capsDryCli.commands?.[0]?.includes("subtitles=") && capsDryCli.commands?.[0]?.includes("Outline=4") && !existsSync(path.join(root, "outputs/mcp-captions-cli-dry.mp4")), "CLI burn-captions --dry-run prints the glow command and writes no file", JSON.stringify(capsDryCli.commands));
+// burn_captions +faststart (lượt 168, editly's every-MP4 rule): the
+// re-encode used to drop the flag, so a captioned assemble film
+// shipped moov-after-mdat and `check --faststart` failed on it.
+checkOk(capsDryJson.commands[0].includes("-movflags +faststart"), "burn_captions dry-run command carries -movflags +faststart for .mp4 output", capsDryJson.commands?.[0] ?? "");
+const capsFastRes = await client.callTool({ name: "check", arguments: { input: path.join(root, "outputs/mcp-captions.mp4"), platform: "tiktok", faststart: true } });
+const capsFastJson = JSON.parse(capsFastRes.content[0].text);
+checkOk(capsFastJson.checks?.find((c) => c.name === "faststart")?.pass === true, "burn_captions output passes check --faststart (moov before mdat)", JSON.stringify(capsFastJson.checks?.find((c) => c.name === "faststart")));
 
 // burn_captions on a rotated clip: defaults scale with the DISPLAY
 // frame (1080x1920), not the coded 1920x1080 — font 60px, margin
@@ -9397,6 +9404,63 @@ const presetRenderRes = await client.callTool({ name: "assemble", arguments: { m
 const presetRenderJson = JSON.parse(presetRenderRes.content[0].text);
 const presetFinalProbe = await probeStreams(path.join(presetOut, "final.mp4"));
 checkOk(presetRenderJson.final?.dimensions === "1080x1920" && presetRenderJson.preset === "vertical" && presetRenderJson.final?.frames === 300 && near(parseFloat(presetFinalProbe?.format?.duration), 10, 0.15), "assemble preset film renders 1080x1920 / 300 frames / 10s with preset echoed in the receipt", JSON.stringify(presetRenderJson.final));
+// Assemble checkpoint + resume (lượt 168, ShortGPT's idea): a
+// per-shot ledger written after every shot, and --mode status that
+// verifies it against the durable shot cache without rendering.
+// Fixture: the same 10s / 4-shot film, staged fresh.
+const ckptStage = await stageAssembleManifest("assemble-film.json");
+const ckptPath = path.join(ckptStage.dir, "assemble-checkpoint.json");
+const ckptOut = path.join(ckptStage.dir, "out");
+// status needs a checkpoint file named
+const ckptStatusNoFileText = await callExpectThrow("assemble", { manifest_path: ckptStage.manifestPath, mode: "status" });
+checkOk(/needs --checkpoint-file/.test(ckptStatusNoFileText ?? ""), "assemble status refuses without --checkpoint-file", ckptStatusNoFileText ?? "");
+// no ledger on disk yet: every shot pending, not resumable
+const ckptNoneRes = await client.callTool({ name: "assemble", arguments: { manifest_path: ckptStage.manifestPath, mode: "status", checkpoint_file: ckptPath } });
+const ckptNoneJson = JSON.parse(ckptNoneRes.content[0].text);
+checkOk(ckptNoneJson.checkpoint === "no_checkpoint" && ckptNoneJson.resumable === false && JSON.stringify(ckptNoneJson.counts) === JSON.stringify({ done: 0, stale: 0, missing: 0, pending: 4 }), "assemble status on a fresh film reports no_checkpoint with 4 pending shots", JSON.stringify(ckptNoneJson.counts));
+// first render writes the ledger: 4 shots done, 0 cache hits
+const ckptRenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: ckptStage.manifestPath, mode: "render", output_dir: ckptOut, force: true, checkpoint_file: ckptPath } }, undefined, { timeout: 300000 });
+const ckptRenderJson = JSON.parse(ckptRenderRes.content[0].text);
+checkOk(ckptRenderJson.checkpoint?.shots_done === 4 && ckptRenderJson.checkpoint?.shots_total === 4 && ckptRenderJson.checkpoint_file === ckptPath && ckptRenderJson.cache_hits === 0, "assemble render with --checkpoint-file records 4/4 shots in the receipt, 0 cache hits on the first render", JSON.stringify(ckptRenderJson.checkpoint));
+const ckptDoc = JSON.parse(await readFile(ckptPath, "utf8"));
+checkOk(ckptDoc.tool === "assemble-checkpoint" && ckptDoc.mode === "render" && ckptDoc.shots?.length === 4 && ckptDoc.shots.every((s) => s.status === "done" && /^[0-9a-f]{64}$/.test(s.key ?? "") && /^[0-9a-f]{64}$/.test(s.segment_sha256 ?? "")) && ckptDoc.fingerprint === ckptRenderJson.fingerprint, "checkpoint file on disk holds 4 done shots with keys + segment digests and the film fingerprint", JSON.stringify(ckptDoc.shots?.map((s) => s.id)));
+// status after the render: all done, resumable
+const ckptStatusRes = await client.callTool({ name: "assemble", arguments: { manifest_path: ckptStage.manifestPath, mode: "status", checkpoint_file: ckptPath } });
+const ckptStatusJson = JSON.parse(ckptStatusRes.content[0].text);
+checkOk(ckptStatusJson.checkpoint === "ok" && ckptStatusJson.resumable === true && ckptStatusJson.film_changed === false && JSON.stringify(ckptStatusJson.counts) === JSON.stringify({ done: 4, stale: 0, missing: 0, pending: 0 }), "assemble status after the render reports 4 done and resumable", JSON.stringify(ckptStatusJson.counts));
+// edit one shot (s4 color card): that shot goes stale, the rest stay done
+const ckptEditDoc = JSON.parse(await readFile(ckptStage.manifestPath, "utf8"));
+ckptEditDoc.shots.find((s) => s.id === "s4").color = "222222";
+await writeFile(ckptStage.manifestPath, JSON.stringify(ckptEditDoc), "utf8");
+const ckptStaleRes = await client.callTool({ name: "assemble", arguments: { manifest_path: ckptStage.manifestPath, mode: "status", checkpoint_file: ckptPath } });
+const ckptStaleJson = JSON.parse(ckptStaleRes.content[0].text);
+checkOk(ckptStaleJson.film_changed === true && ckptStaleJson.resumable === false && JSON.stringify(ckptStaleJson.counts) === JSON.stringify({ done: 3, stale: 1, missing: 0, pending: 0 }) && ckptStaleJson.shots?.find((s) => s.id === "s4")?.status === "stale", "assemble status after editing s4 reports 3 done + s4 stale, not resumable", JSON.stringify(ckptStaleJson.shots?.map((s) => `${s.id}:${s.status}`)));
+// re-render: only the stale shot rebuilds (3 cache hits), ledger whole again
+const ckptRerenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: ckptStage.manifestPath, mode: "render", output_dir: ckptOut, force: true, checkpoint_file: ckptPath } }, undefined, { timeout: 300000 });
+const ckptRerenderJson = JSON.parse(ckptRerenderRes.content[0].text);
+checkOk(ckptRerenderJson.cache_hits === 3 && ckptRerenderJson.checkpoint?.shots_done === 4, "assemble re-render after one edit rebuilds only the stale shot (3 cache hits, ledger 4/4)", JSON.stringify({ cache_hits: ckptRerenderJson.cache_hits, checkpoint: ckptRerenderJson.checkpoint }));
+const ckptStatus2Res = await client.callTool({ name: "assemble", arguments: { manifest_path: ckptStage.manifestPath, mode: "status", checkpoint_file: ckptPath } });
+const ckptStatus2Json = JSON.parse(ckptStatus2Res.content[0].text);
+checkOk(ckptStatus2Json.resumable === true && ckptStatus2Json.film_changed === false && ckptStatus2Json.counts?.done === 4, "assemble status after the resume render is resumable again", JSON.stringify(ckptStatus2Json.counts));
+// delete one cached segment: that shot goes missing, resume is off
+const ckptDoc2 = JSON.parse(await readFile(ckptPath, "utf8"));
+const s2Key = ckptDoc2.shots.find((s) => s.id === "s2").key;
+await rm(path.join(ckptStage.dir, ".mediakit-assemble-cache", `${s2Key}.mp4`), { force: true });
+const ckptMissingRes = await client.callTool({ name: "assemble", arguments: { manifest_path: ckptStage.manifestPath, mode: "status", checkpoint_file: ckptPath } });
+const ckptMissingJson = JSON.parse(ckptMissingRes.content[0].text);
+checkOk(ckptMissingJson.resumable === false && JSON.stringify(ckptMissingJson.counts) === JSON.stringify({ done: 3, stale: 0, missing: 1, pending: 0 }) && ckptMissingJson.shots?.find((s) => s.id === "s2")?.status === "missing", "assemble status after deleting the s2 cache segment reports s2 missing, not resumable", JSON.stringify(ckptMissingJson.shots?.map((s) => `${s.id}:${s.status}`)));
+// a preview ledger of its own, then a preview handed the render
+// ledger: the ledger resets and says so
+const ckptPreviewPath = path.join(ckptStage.dir, "assemble-checkpoint-preview.json");
+const ckptPreviewRes = await client.callTool({ name: "assemble", arguments: { manifest_path: ckptStage.manifestPath, mode: "preview", output_dir: path.join(ckptStage.dir, "out-preview"), preview_seconds: 10, checkpoint_file: ckptPreviewPath } }, undefined, { timeout: 300000 });
+const ckptPreviewJson = JSON.parse(ckptPreviewRes.content[0].text);
+checkOk(ckptPreviewJson.checkpoint?.mode === "preview" && ckptPreviewJson.checkpoint?.shots_done === 4, "assemble preview with --checkpoint-file records a preview ledger (4 shots)", JSON.stringify(ckptPreviewJson.checkpoint));
+const ckptPreviewStatusRes = await client.callTool({ name: "assemble", arguments: { manifest_path: ckptStage.manifestPath, mode: "status", checkpoint_file: ckptPreviewPath } });
+const ckptPreviewStatusJson = JSON.parse(ckptPreviewStatusRes.content[0].text);
+checkOk(ckptPreviewStatusJson.checkpoint_mode === "preview" && ckptPreviewStatusJson.resumable === true && ckptPreviewStatusJson.counts?.done === 4, "assemble status on the preview ledger reports preview mode, 4 done, resumable", JSON.stringify({ mode: ckptPreviewStatusJson.checkpoint_mode, counts: ckptPreviewStatusJson.counts }));
+const ckptResetRes = await client.callTool({ name: "assemble", arguments: { manifest_path: ckptStage.manifestPath, mode: "preview", output_dir: path.join(ckptStage.dir, "out-preview2"), preview_seconds: 10, checkpoint_file: ckptPath } }, undefined, { timeout: 300000 });
+const ckptResetJson = JSON.parse(ckptResetRes.content[0].text);
+checkOk(ckptResetJson.checkpoint?.reset_from_mode === "render" && ckptResetJson.checkpoint?.mode === "preview" && ckptResetJson.checkpoint?.shots_done === 4, "assemble preview handed a render checkpoint resets the ledger and reports reset_from_mode render", JSON.stringify(ckptResetJson.checkpoint));
 const assembleApproveEarlyText = await callExpectThrow("assemble", { manifest_path: assembleStage.manifestPath, mode: "approve", output_dir: assembleOut });
 checkOk(/needs a preview/.test(assembleApproveEarlyText ?? ""), "assemble approve refuses without a preview", assembleApproveEarlyText ?? "");
 const assembleRenderEarlyText = await callExpectThrow("assemble", { manifest_path: assembleStage.manifestPath, mode: "render", output_dir: assembleOut });

@@ -10,7 +10,7 @@ This is NOT the `manifest` tool. `manifest` runs a linear edit pipeline
 (input → steps → output). `assemble` builds a film from many shots on
 one timeline, with the voice as the master clock.
 
-## The five modes
+## The six modes
 
 1. **`validate`** — reads the manifest, probes the voice and every
    asset, checks the timeline math. Writes nothing. Run this before
@@ -36,21 +36,27 @@ one timeline, with the voice as the master clock.
    approve/render also refuse a non-exportable plan, naming its
    blockers. A blocked plan still previews, and the preview echoes
    `plan_blockers`, so the director can see the problem first.
-2. **`preview`** — renders the first N seconds (default 20) at half
+3. **`preview`** — renders the first N seconds (default 20) at half
    resolution, with voice, music, SFX and captions, and writes
    `preview.mp4` + `preview.json` (with the fingerprint). Show the
    preview to the user.
-3. **`approve`** — records the fingerprint of the exact manifest +
+4. **`approve`** — records the fingerprint of the exact manifest +
    voice + assets + captions that the preview shows, in
    `.mediakit-assemble-approval.json` next to the manifest. Requires
    a preview whose fingerprint matches the current files. Never
    approve your own technical checks — approval means a human saw the
    preview and said yes.
-4. **`render`** — full-resolution render. Requires a matching
+5. **`render`** — full-resolution render. Requires a matching
    approval, unless `force` is set (recorded as `approval: "forced"`
    in the receipt — use it only when the user explicitly says so).
    Writes the final video + `assemble-receipt.json` into the output
    directory.
+6. **`status`** — the resume check: reads a checkpoint ledger (see
+   below) and reports every shot as `done` / `stale` / `missing` /
+   `pending`, plus `resumable` (every current shot verified AND the
+   film fingerprint unchanged). Writes nothing, needs no approval and
+   no output directory — run it after a killed or interrupted render
+   to see exactly which shots still need work before re-rendering.
 
 ## Voice-led timing (the one rule that matters)
 
@@ -461,6 +467,17 @@ while the middle of a pause is silence on both sides.
   unchanged shots (verified by size + SHA-256); editing one shot
   rebuilds only that shot. Preview segments use different keys
   (half size), so a preview never pollutes a full render.
+- A checkpoint ledger (`--checkpoint-file <path>` on preview/render)
+  records each shot the moment its segment is ready — cache key +
+  segment digest, written atomically after every shot, so a kill
+  mid-render leaves a truthful record. `assemble --mode status
+  --checkpoint-file <path>` verifies each recorded shot against the
+  cache and reports `done` / `stale` (the film changed that shot) /
+  `missing` (cache entry gone) / `pending` (never recorded). One file
+  holds one mode: handing a render a preview checkpoint starts a
+  fresh ledger and reports `reset_from_mode`. The receipt and the
+  preview doc echo the ledger as `checkpoint_file` + `checkpoint`
+  (`shots_done` / `shots_total`).
 - The fingerprint is SHA-256 over the manifest bytes + voice bytes +
   asset bytes + caption bytes + style values. Any change to any of
   them invalidates the approval, and `render` says exactly what
