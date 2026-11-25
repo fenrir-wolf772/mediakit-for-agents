@@ -1,7 +1,7 @@
 {
   "spec_version": 1,
   "mediakit_version": "0.1.0",
-  "tool_count": 91,
+  "tool_count": 92,
   "transports": [
     "stdio",
     "http"
@@ -20,7 +20,7 @@
     {
       "name": "text",
       "description": "Words on screen and in audio: captions, titles, transcription.",
-      "count": 6
+      "count": 7
     },
     {
       "name": "image",
@@ -737,7 +737,7 @@
       "family": "edit",
       "tier": "WRITE",
       "summary": "Burn subtitles into the video (hardcoded, always visible).",
-      "description": "Burn subtitles into the video (hardcoded, always visible). Accepts .srt, .ass or .vtt. Style: background (default — white text on a semi-transparent black box), outline (black outline, no box), shadow (thin outline + drop shadow), or glow (thick halo in the text's own colour, reads on bright footage). Defaults scale with frame height: ~60px type on 1080x1920, sitting ~500px above the bottom edge so platform UI (bottom ~480px) never covers the text. Explicit font_size / margin_v override. max_lines shrinks the type (measured with the same font libass draws, Liberation Sans) until every cue wraps to at most that many lines, never below a readability floor (1.6% of frame height, min 16px); a cue that still overflows at the floor burns at the floor and reports fit.fits=false. platform sets the default margin from that platform's own bottom UI depth (tiktok 520px at 1920 high, youtube 100px at 1080 high) and narrows the fit width to its text-safe rect; explicit margin_v wins. .ass files carry their own styles, so style, max_lines and the platform margin are ignored there (style_applied=false, fit=null with a note). Set dry_run=true to print the exact ffmpeg command and write no file (font_size/margin/style/fit are computed from the input, so they are exact; duration/size report null — measured on the real output).",
+      "description": "Burn subtitles into the video (hardcoded, always visible). Accepts .srt, .ass or .vtt — or words_file, a transcribe --word-timestamps JSON: the words are chunked first with the locked TikTok defaults (max 6 words/cue, chunk_captions) into a temp .srt, burned, and the temp file removed; the result reports the chunking in `chunked`. Pass captions or words_file, never both. Style: background (default — white text on a semi-transparent black box), outline (black outline, no box), shadow (thin outline + drop shadow), or glow (thick halo in the text's own colour, reads on bright footage). Defaults scale with frame height: ~60px type on 1080x1920, sitting ~500px above the bottom edge so platform UI (bottom ~480px) never covers the text. Explicit font_size / margin_v override. max_lines shrinks the type (measured with the same font libass draws, Liberation Sans) until every cue wraps to at most that many lines, never below a readability floor (1.6% of frame height, min 16px); a cue that still overflows at the floor burns at the floor and reports fit.fits=false. platform sets the default margin from that platform's own bottom UI depth (tiktok 520px at 1920 high, youtube 100px at 1080 high) and narrows the fit width to its text-safe rect; explicit margin_v wins. .ass files carry their own styles, so style, max_lines and the platform margin are ignored there (style_applied=false, fit=null with a note). Set dry_run=true to print the exact ffmpeg command and write no file (font_size/margin/style/fit are computed from the input, so they are exact; duration/size report null — measured on the real output).",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -750,9 +750,12 @@
             "$ref": "#/properties/input"
           },
           "captions": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Path to the .srt/.ass/.vtt file"
+            "$ref": "#/properties/input",
+            "description": "Path to the .srt/.ass/.vtt file (omit when passing words_file)"
+          },
+          "words_file": {
+            "$ref": "#/properties/input",
+            "description": "Transcript JSON with a words array — the stdout of `transcribe --word-timestamps` saved to a file, or a hand-written {words:[{start,end,word}]}; chunked with the TikTok defaults into a temp .srt first"
           },
           "font_size": {
             "type": "integer",
@@ -806,8 +809,7 @@
         },
         "required": [
           "input",
-          "output",
-          "captions"
+          "output"
         ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
@@ -2074,7 +2076,7 @@
       "family": "edit",
       "tier": "WRITE",
       "summary": "Change container or codec.",
-      "description": "Change container or codec. Omit video_codec/audio_codec to stream-copy that stream. crf 23 is a good default for H.264. gop (frames) or gop_seconds sets an exact keyframe interval on re-encode (scene-cut keyframes disabled for libx264/libx265/mpeg4); the result measures the keyframes on the output file. A GOP is required for keyframe-snapped stream-copy cuts. encoder picks the video encoder: \"auto\" probes for the first working hardware encoder of the codec family and falls back to software when none works (the fallback is reported in encoder_fallback, never silent); a named hardware encoder (h264_nvenc, hevc_qsv, h264_vaapi, ...) must probe-usable or the call fails. The result reports encoder_used and verifies the output codec on disk (codec_verified). Set dry_run=true to print the exact ffmpeg command and write no file.",
+      "description": "Change container or codec. Omit video_codec/audio_codec to stream-copy that stream. crf 23 is a good default for H.264. gop (frames) or gop_seconds sets an exact keyframe interval on re-encode (scene-cut keyframes disabled for libx264/libx265/mpeg4); the result measures the keyframes on the output file. A GOP is required for keyframe-snapped stream-copy cuts. encoder picks the video encoder: \"auto\" probes for the first working hardware encoder of the codec family and falls back to software when none works (the fallback is reported in encoder_fallback, never silent); a named hardware encoder (h264_nvenc, hevc_qsv, h264_vaapi, ...) must probe-usable or the call fails. The result reports encoder_used and verifies the output codec on disk (codec_verified). Multi-attribute (misbahsy/video-audio-mcp's convert_video_properties idea): width/height/fps/video_bitrate_kbps/audio_bitrate_kbps/audio_sample_rate/audio_channels set several properties in one call — each applies only when given; video properties need a video re-encode, audio properties an audio re-encode (the audio codec defaults to the container's when audio_codec is omitted); video_bitrate_kbps runs ABR and replaces CRF. The result reports before/after (probe-measured) plus a changes list. Set dry_run=true to print the exact ffmpeg command and write no file.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2144,6 +2146,48 @@
               "av1_amf"
             ],
             "description": "Hardware encoder: \"auto\" probes for the first working encoder of the codec family and falls back to software (reported, never silent); a named encoder must probe-usable or the call fails. Needs a video re-encode (pass video_codec); mpeg4 has no hardware encoder"
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 16,
+            "maximum": 8192,
+            "description": "Resize to this width in px (exact; a missing side keeps aspect and stays even; needs a video re-encode)"
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 16,
+            "maximum": 8192,
+            "description": "Resize to this height in px (exact; a missing side keeps aspect and stays even; needs a video re-encode)"
+          },
+          "fps": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 120,
+            "description": "Cap the frame rate (constant frame rate; needs a video re-encode)"
+          },
+          "video_bitrate_kbps": {
+            "type": "integer",
+            "minimum": 8,
+            "maximum": 200000,
+            "description": "Video bitrate in kbps (ABR mode — replaces CRF when set; needs a video re-encode; does not combine with encoder)"
+          },
+          "audio_bitrate_kbps": {
+            "type": "integer",
+            "minimum": 8,
+            "maximum": 3200,
+            "description": "Audio bitrate in kbps (needs an audio re-encode; the codec defaults to the container's — aac for mp4, libopus for webm — unless audio_codec is given)"
+          },
+          "audio_sample_rate": {
+            "type": "integer",
+            "minimum": 8000,
+            "maximum": 192000,
+            "description": "Audio sample rate in Hz (needs an audio re-encode)"
+          },
+          "audio_channels": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8,
+            "description": "Audio channel count (needs an audio re-encode)"
           },
           "dry_run": {
             "type": "boolean",
@@ -2591,6 +2635,102 @@
             "type": "string",
             "minLength": 1,
             "description": "Output .srt file path"
+          }
+        },
+        "required": [
+          "output"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "chunk_captions",
+      "family": "text",
+      "tier": "WRITE",
+      "summary": "Chunk word timings into subtitle cues (the director's caption step): words from transcribe --word-timestamps become cues [{start, end, text}] in a .json file,…",
+      "description": "Chunk word timings into subtitle cues (the director's caption step): words from transcribe --word-timestamps become cues [{start, end, text}] in a .json file, ready for generate_srt (or for burn_captions via --words-file). Defaults are the locked TikTok standard: at most 6 words per cue, 84 chars (2 lines), split on pauses over 0.4s, on sentence ends, and — with split_on_punctuation — after a comma/semicolon/colon once the cue already holds 3 words; a cue never ends on a stranded word like 'the'/'of'. Pure text, no ffmpeg: the grouping is deterministic, same words in, same cues out. The result returns the cues plus stats (words_in, cues_out, max_words_in_cue, split_reasons) — a cue cut by a sentence end or a pause may hold fewer than 3 words, that is the rule, not a bug. Pass words inline or a words_file, never both.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "words_file": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Transcript JSON with a words array — the stdout of `transcribe --word-timestamps` saved to a file, or a hand-written {words:[{start,end,word}]}"
+          },
+          "words": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "start": {
+                  "type": [
+                    "number",
+                    "string"
+                  ],
+                  "description": "Word start: seconds or \"MM:SS\""
+                },
+                "end": {
+                  "type": [
+                    "number",
+                    "string"
+                  ],
+                  "description": "Word end: seconds or \"MM:SS\" (must be after start)"
+                },
+                "word": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "One word (a single token, no spaces)"
+                }
+              },
+              "required": [
+                "start",
+                "end",
+                "word"
+              ],
+              "additionalProperties": false
+            },
+            "minItems": 1,
+            "maxItems": 80000,
+            "description": "Word timings to chunk, inline. Omit when passing words_file."
+          },
+          "output": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Output .json file path (cues + stats)"
+          },
+          "max_words": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 6,
+            "description": "Max words per cue (default 6, the TikTok standard)"
+          },
+          "max_chars": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 1000,
+            "default": 84,
+            "description": "Max characters per cue (default 84 = 2 lines of 42)"
+          },
+          "max_seconds": {
+            "type": "number",
+            "minimum": 0.1,
+            "maximum": 60,
+            "default": 3.5,
+            "description": "Max cue duration in seconds (default 3.5)"
+          },
+          "pause_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 5,
+            "default": 0.4,
+            "description": "Split on a pause longer than this, in seconds (default 0.4)"
+          },
+          "split_on_punctuation": {
+            "type": "boolean",
+            "default": true,
+            "description": "Also split after a comma/semicolon/colon once the cue holds 3 words (default true); sentence ends always split"
           }
         },
         "required": [
@@ -5798,7 +5938,7 @@
       "family": "meta",
       "tier": "READ",
       "summary": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the…",
-      "description": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 91 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+      "description": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 92 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -5907,5 +6047,5 @@
       }
     }
   ],
-  "spec_hash": "1cb3372c2af6222f3a23916db352b73358c8514f85923b9a8eacc32b4ba063f1"
+  "spec_hash": "e081d8986d8ae52a263ea53afdb0a8f3df7b249b9f4cc0b96406dc2a309cd956"
 }

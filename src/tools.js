@@ -327,11 +327,12 @@ export const TOOL_DEFS = [
   {
     name: "burn_captions",
     tier: "WRITE",
-    description: "Burn subtitles into the video (hardcoded, always visible). Accepts .srt, .ass or .vtt. Style: background (default — white text on a semi-transparent black box), outline (black outline, no box), shadow (thin outline + drop shadow), or glow (thick halo in the text's own colour, reads on bright footage). Defaults scale with frame height: ~60px type on 1080x1920, sitting ~500px above the bottom edge so platform UI (bottom ~480px) never covers the text. Explicit font_size / margin_v override. max_lines shrinks the type (measured with the same font libass draws, Liberation Sans) until every cue wraps to at most that many lines, never below a readability floor (1.6% of frame height, min 16px); a cue that still overflows at the floor burns at the floor and reports fit.fits=false. platform sets the default margin from that platform's own bottom UI depth (tiktok 520px at 1920 high, youtube 100px at 1080 high) and narrows the fit width to its text-safe rect; explicit margin_v wins. .ass files carry their own styles, so style, max_lines and the platform margin are ignored there (style_applied=false, fit=null with a note). Set dry_run=true to print the exact ffmpeg command and write no file (font_size/margin/style/fit are computed from the input, so they are exact; duration/size report null — measured on the real output).",
+    description: "Burn subtitles into the video (hardcoded, always visible). Accepts .srt, .ass or .vtt — or words_file, a transcribe --word-timestamps JSON: the words are chunked first with the locked TikTok defaults (max 6 words/cue, chunk_captions) into a temp .srt, burned, and the temp file removed; the result reports the chunking in `chunked`. Pass captions or words_file, never both. Style: background (default — white text on a semi-transparent black box), outline (black outline, no box), shadow (thin outline + drop shadow), or glow (thick halo in the text's own colour, reads on bright footage). Defaults scale with frame height: ~60px type on 1080x1920, sitting ~500px above the bottom edge so platform UI (bottom ~480px) never covers the text. Explicit font_size / margin_v override. max_lines shrinks the type (measured with the same font libass draws, Liberation Sans) until every cue wraps to at most that many lines, never below a readability floor (1.6% of frame height, min 16px); a cue that still overflows at the floor burns at the floor and reports fit.fits=false. platform sets the default margin from that platform's own bottom UI depth (tiktok 520px at 1920 high, youtube 100px at 1080 high) and narrows the fit width to its text-safe rect; explicit margin_v wins. .ass files carry their own styles, so style, max_lines and the platform margin are ignored there (style_applied=false, fit=null with a note). Set dry_run=true to print the exact ffmpeg command and write no file (font_size/margin/style/fit are computed from the input, so they are exact; duration/size report null — measured on the real output).",
     schema: {
     input: pathSchema,
     output: pathSchema,
-    captions: pathSchema.describe("Path to the .srt/.ass/.vtt file"),
+    captions: pathSchema.optional().describe("Path to the .srt/.ass/.vtt file (omit when passing words_file)"),
+    words_file: pathSchema.optional().describe("Transcript JSON with a words array — the stdout of `transcribe --word-timestamps` saved to a file, or a hand-written {words:[{start,end,word}]}; chunked with the TikTok defaults into a temp .srt first"),
     font_size: z.number().int().min(8).max(200).optional().describe("Font size in px; default scales with frame height (~60px at 1920 high)"),
     margin_v: z.number().int().min(0).optional().describe("Distance from bottom edge in px; default is 26% of frame height (above platform UI), or the platform's bottom UI depth when platform is set"),
     style: z.enum(["background", "outline", "shadow", "glow"]).optional().describe("Caption style; default background (boxed). Ignored for .ass inputs"),
@@ -343,7 +344,8 @@ export const TOOL_DEFS = [
     handler: async (a) => safe(() => core.burnCaptions({
     input: a.input,
     output: a.output,
-    captions: a.captions,
+    captions: a.captions ?? null,
+    wordsFile: a.words_file ?? null,
     fontSize: a.font_size ?? null,
     marginV: a.margin_v ?? null,
     style: a.style ?? null,
@@ -846,7 +848,7 @@ export const TOOL_DEFS = [
   {
     name: "convert",
     tier: "WRITE",
-    description: "Change container or codec. Omit video_codec/audio_codec to stream-copy that stream. crf 23 is a good default for H.264. gop (frames) or gop_seconds sets an exact keyframe interval on re-encode (scene-cut keyframes disabled for libx264/libx265/mpeg4); the result measures the keyframes on the output file. A GOP is required for keyframe-snapped stream-copy cuts. encoder picks the video encoder: \"auto\" probes for the first working hardware encoder of the codec family and falls back to software when none works (the fallback is reported in encoder_fallback, never silent); a named hardware encoder (h264_nvenc, hevc_qsv, h264_vaapi, ...) must probe-usable or the call fails. The result reports encoder_used and verifies the output codec on disk (codec_verified). Set dry_run=true to print the exact ffmpeg command and write no file.",
+    description: "Change container or codec. Omit video_codec/audio_codec to stream-copy that stream. crf 23 is a good default for H.264. gop (frames) or gop_seconds sets an exact keyframe interval on re-encode (scene-cut keyframes disabled for libx264/libx265/mpeg4); the result measures the keyframes on the output file. A GOP is required for keyframe-snapped stream-copy cuts. encoder picks the video encoder: \"auto\" probes for the first working hardware encoder of the codec family and falls back to software when none works (the fallback is reported in encoder_fallback, never silent); a named hardware encoder (h264_nvenc, hevc_qsv, h264_vaapi, ...) must probe-usable or the call fails. The result reports encoder_used and verifies the output codec on disk (codec_verified). Multi-attribute (misbahsy/video-audio-mcp's convert_video_properties idea): width/height/fps/video_bitrate_kbps/audio_bitrate_kbps/audio_sample_rate/audio_channels set several properties in one call — each applies only when given; video properties need a video re-encode, audio properties an audio re-encode (the audio codec defaults to the container's when audio_codec is omitted); video_bitrate_kbps runs ABR and replaces CRF. The result reports before/after (probe-measured) plus a changes list. Set dry_run=true to print the exact ffmpeg command and write no file.",
     schema: {
     input: pathSchema,
     output: pathSchema,
@@ -857,6 +859,13 @@ export const TOOL_DEFS = [
     gop: z.number().int().min(1).max(10000).optional().describe("Keyframe interval in frames (needs a video re-encode; mutually exclusive with gop_seconds)"),
     gop_seconds: z.number().min(0.1).max(3600).optional().describe("Keyframe interval in seconds, converted to frames from the source fps (mutually exclusive with gop)"),
     encoder: z.enum(["auto", ...core.GPU_ENCODERS]).optional().describe("Hardware encoder: \"auto\" probes for the first working encoder of the codec family and falls back to software (reported, never silent); a named encoder must probe-usable or the call fails. Needs a video re-encode (pass video_codec); mpeg4 has no hardware encoder"),
+    width: z.number().int().min(16).max(8192).optional().describe("Resize to this width in px (exact; a missing side keeps aspect and stays even; needs a video re-encode)"),
+    height: z.number().int().min(16).max(8192).optional().describe("Resize to this height in px (exact; a missing side keeps aspect and stays even; needs a video re-encode)"),
+    fps: z.number().min(1).max(120).optional().describe("Cap the frame rate (constant frame rate; needs a video re-encode)"),
+    video_bitrate_kbps: z.number().int().min(8).max(200000).optional().describe("Video bitrate in kbps (ABR mode — replaces CRF when set; needs a video re-encode; does not combine with encoder)"),
+    audio_bitrate_kbps: z.number().int().min(8).max(3200).optional().describe("Audio bitrate in kbps (needs an audio re-encode; the codec defaults to the container's — aac for mp4, libopus for webm — unless audio_codec is given)"),
+    audio_sample_rate: z.number().int().min(8000).max(192000).optional().describe("Audio sample rate in Hz (needs an audio re-encode)"),
+    audio_channels: z.number().int().min(1).max(8).optional().describe("Audio channel count (needs an audio re-encode)"),
     dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file (keyframes report null — they are measured on the real output)"),
   },
     handler: async (a) => safe(() => core.convert({
@@ -870,6 +879,13 @@ export const TOOL_DEFS = [
     gopSeconds: a.gop_seconds ?? null,
     dryRun: a.dry_run,
     encoder: a.encoder ?? null,
+    width: a.width ?? null,
+    height: a.height ?? null,
+    fps: a.fps ?? null,
+    videoBitrateKbps: a.video_bitrate_kbps ?? null,
+    audioBitrateKbps: a.audio_bitrate_kbps ?? null,
+    audioSampleRate: a.audio_sample_rate ?? null,
+    audioChannels: a.audio_channels ?? null,
   })),
   },
 
@@ -1029,6 +1045,37 @@ export const TOOL_DEFS = [
     output: pathSchema.describe("Output .srt file path"),
   },
     handler: async (a) => safe(() => core.generateSrt({ cues: a.cues ?? null, words: a.words ?? null, output: a.output })),
+  },
+
+
+  {
+    name: "chunk_captions",
+    tier: "WRITE",
+    description: "Chunk word timings into subtitle cues (the director's caption step): words from transcribe --word-timestamps become cues [{start, end, text}] in a .json file, ready for generate_srt (or for burn_captions via --words-file). Defaults are the locked TikTok standard: at most 6 words per cue, 84 chars (2 lines), split on pauses over 0.4s, on sentence ends, and — with split_on_punctuation — after a comma/semicolon/colon once the cue already holds 3 words; a cue never ends on a stranded word like 'the'/'of'. Pure text, no ffmpeg: the grouping is deterministic, same words in, same cues out. The result returns the cues plus stats (words_in, cues_out, max_words_in_cue, split_reasons) — a cue cut by a sentence end or a pause may hold fewer than 3 words, that is the rule, not a bug. Pass words inline or a words_file, never both.",
+    schema: {
+    words_file: pathSchema.optional().describe("Transcript JSON with a words array — the stdout of `transcribe --word-timestamps` saved to a file, or a hand-written {words:[{start,end,word}]}"),
+    words: z.array(z.object({
+      start: z.union([z.number(), z.string()]).describe("Word start: seconds or \"MM:SS\""),
+      end: z.union([z.number(), z.string()]).describe("Word end: seconds or \"MM:SS\" (must be after start)"),
+      word: z.string().min(1).describe("One word (a single token, no spaces)"),
+    })).min(1).max(80000).optional().describe("Word timings to chunk, inline. Omit when passing words_file."),
+    output: pathSchema.describe("Output .json file path (cues + stats)"),
+    max_words: z.number().int().min(1).max(100).default(6).describe("Max words per cue (default 6, the TikTok standard)"),
+    max_chars: z.number().int().min(10).max(1000).default(84).describe("Max characters per cue (default 84 = 2 lines of 42)"),
+    max_seconds: z.number().min(0.1).max(60).default(3.5).describe("Max cue duration in seconds (default 3.5)"),
+    pause_seconds: z.number().min(0).max(5).default(0.4).describe("Split on a pause longer than this, in seconds (default 0.4)"),
+    split_on_punctuation: z.boolean().default(true).describe("Also split after a comma/semicolon/colon once the cue holds 3 words (default true); sentence ends always split"),
+  },
+    handler: async (a) => safe(() => core.chunkCaptionsFile({
+    wordsFile: a.words_file ?? null,
+    words: a.words ?? null,
+    output: a.output,
+    maxWords: a.max_words ?? 6,
+    maxChars: a.max_chars ?? 84,
+    maxSeconds: a.max_seconds ?? 3.5,
+    pauseSeconds: a.pause_seconds ?? 0.4,
+    splitOnPunctuation: a.split_on_punctuation ?? true,
+  })),
   },
 
 
@@ -2463,7 +2510,7 @@ export const TOOL_DEFS = [
   {
     name: "list_operations",
     tier: "READ",
-    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 91 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 92 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
     schema: {
     family: z.enum(["inspect", "edit", "text", "image", "assemble", "meta"]).optional().describe("Narrow to one family; omit for the whole catalog"),
   },
@@ -2559,7 +2606,7 @@ export function listSafetyTiers() {
 }
 
 // ---------------------------------------------------------------- progressive discovery
-// The catalog is 91 tools and tools/list dumps the full JSON schema
+// The catalog is 92 tools and tools/list dumps the full JSON schema
 // of every one on every turn — kinocut's answer is progressive
 // discovery: a compact list first, full schema only for the tools
 // actually used (lượt 147, idea: KyaniteLabs/kinocut
@@ -2601,8 +2648,8 @@ export const TOOL_FAMILY_OF = {
   cut_words: "edit", remove_retakes: "edit", smart_cut: "edit", clean_voice: "edit",
   mix: "edit", overlay: "edit", pip: "edit", broll: "edit", fit: "edit",
   reframe: "edit", mux: "edit", burn_captions: "edit", download: "edit",
-  // text (6)
-  transcribe: "text", convert_captions: "text", generate_srt: "text",
+  // text (7)
+  transcribe: "text", convert_captions: "text", generate_srt: "text", chunk_captions: "text",
   titlecard: "text", intro: "text", align_voice: "text",
   // image (7)
   thumbnail: "image", frames: "image", extract_frames: "image", image_to_video: "image",

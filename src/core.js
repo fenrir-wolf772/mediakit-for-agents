@@ -3902,10 +3902,38 @@ function assColor(value, label) {
   return `&H00${hex.slice(4, 6)}${hex.slice(2, 4)}${hex.slice(0, 2)}&`;
 }
 
-export async function burnCaptions({ input, output, captions, fontSize = null, fontColor = "white", box = true, marginV = null, style = null, outlineColor = "black", maxLines = null, platform = null, onProgress = null, dryRun = false }) {
+export async function burnCaptions({ input, output, captions = null, wordsFile = null, fontSize = null, fontColor = "white", box = true, marginV = null, style = null, outlineColor = "black", maxLines = null, platform = null, onProgress = null, dryRun = false }) {
   const inPath = await requireInput(input);
-  const capPath = await requireInput(captions, "captions file");
-  const outPath = await prepareOutput(output, [inPath]);
+  if (captions && wordsFile) {
+    throw new MediaKitError("burn_captions takes captions or words_file, not both — captions is a finished .srt/.ass/.vtt, words_file is word timings to chunk first", "INVALID_ARG");
+  }
+  if (!captions && !wordsFile) {
+    throw new MediaKitError("burn_captions needs captions <.srt/.ass/.vtt> or words_file <words.json>", "INVALID_ARG");
+  }
+  // words_file: chunk the transcript with the locked TikTok defaults
+  // (max 6 words/cue) into a temp .srt, burn it, remove the temp
+  // file afterwards. The temp path never reaches the result —
+  // `captions` reports the words file, `chunked` how many cues it
+  // became. Chunking is pure (no I/O), so it runs before the output
+  // guard; the temp file is written only after prepareOutput passes.
+  let wordsPath = null;
+  let grouped = null;
+  if (wordsFile) {
+    wordsPath = await requireInput(wordsFile, "words file");
+    const raw = JSON.parse(await readFile(wordsPath, "utf8"));
+    const list = normalizeTranscriptWords(raw, "words file", "burn_captions");
+    grouped = chunkCaptions(list, CHUNK_DEFAULTS);
+  }
+  const outPath = await prepareOutput(output, wordsPath ? [inPath, wordsPath] : [inPath]);
+  let tmpDir = null;
+  let capPath;
+  if (wordsPath) {
+    tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-burnwords-"));
+    capPath = path.join(tmpDir, "chunked.srt");
+    await writeFile(capPath, formatSrtBody(grouped.cues.map((c) => ({ startMs: c.startMs, endMs: c.endMs, text: c.text }))), "utf8");
+  } else {
+    capPath = await requireInput(captions, "captions file");
+  }
   const ext = path.extname(capPath).toLowerCase();
   if (![".srt", ".ass", ".vtt"].includes(ext)) {
     throw new MediaKitError(`captions must be .srt/.ass/.vtt, got ${ext}`, "INVALID_ARG");
@@ -4023,25 +4051,39 @@ export async function burnCaptions({ input, output, captions, fontSize = null, f
     args.push("-movflags", "+faststart");
   }
   args.push(outPath);
+  const chunked = grouped ? {
+    cues: grouped.cues_out, words_in: grouped.words_in,
+    max_words_in_cue: grouped.max_words_in_cue, split_reasons: grouped.split_reasons,
+  } : null;
+  const cleanupTmp = async () => { if (tmpDir) await rm(tmpDir, { recursive: true, force: true }); };
   if (dryRun) {
     // font_size/margin/style/fit are computed from the input probe
     // and the captions file, so they are exact; duration/size are
     // measured on the real output, so they report null here.
-    return {
-      operation: "burn_captions", dry_run: true, input: inPath, output: outPath, captions: capPath,
+    const result = {
+      operation: "burn_captions", dry_run: true, input: inPath, output: outPath, captions: wordsPath ?? capPath,
+      ...(chunked ? { words_file: wordsPath, chunked } : {}),
       font_size: size, margin_v: margin, style: styleName, style_applied: ext !== ".ass",
       platform: platform ?? null, fit, fit_note: fitNote,
       duration_seconds: null, size_bytes: null,
       commands: [formatCommand(args)],
-      note: "Dry run: no file written. duration/size are measured on the real output, so they report null here.",
+      note: `Dry run: no file written. duration/size are measured on the real output, so they report null here.${chunked ? " The chunked .srt is a temp file, removed after the run — the command above references it." : ""}`,
     };
+    await cleanupTmp();
+    return result;
   }
-  await runFfmpegWithProgress(args, {
-    totalSeconds: meta.duration_seconds, onProgress,
-  });
-  const info = await fileInfo(outPath);
-  const out = await probe(outPath);
-  return { operation: "burn_captions", input: inPath, output: outPath, captions: capPath, font_size: size, margin_v: margin, style: styleName, style_applied: ext !== ".ass", platform: platform ?? null, fit, fit_note: fitNote, ...info, duration_seconds: out.duration_seconds };
+  let result;
+  try {
+    await runFfmpegWithProgress(args, {
+      totalSeconds: meta.duration_seconds, onProgress,
+    });
+    const info = await fileInfo(outPath);
+    const out = await probe(outPath);
+    result = { operation: "burn_captions", input: inPath, output: outPath, captions: wordsPath ?? capPath, ...(chunked ? { words_file: wordsPath, chunked } : {}), font_size: size, margin_v: margin, style: styleName, style_applied: ext !== ".ass", platform: platform ?? null, fit, fit_note: fitNote, ...info, duration_seconds: out.duration_seconds };
+  } finally {
+    await cleanupTmp();
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------- convert_captions
@@ -4166,48 +4208,65 @@ export async function convertCaptions({ input, output }) {
 const MAX_SRT_CUES = 10_000;
 
 // ---------------------------------------------------------------- semantic captions
-// groupWords: stickman-video-director's semantic caption grouping,
-// adapted to MediaKit's Shorts rules (2 lines x 42 chars per line).
-// Words are [{start, end, word}] in timeline order (seconds or
-// "MM:SS"); cues are grouped by meaning, not by a fixed word count:
-//   - flush on a pause > 0.4s between words, or on sentence end [.?!]
-//   - flush BEFORE a word that would push the cue past 8 words, 3.5s,
-//     or 84 characters (2 lines of 42)
+// chunkCaptions: group word timings into subtitle cues, TikTok-style:
+// 3–6 words per cue by default (maxWords 6), at most maxChars
+// characters (2 lines), split on pauses and on punctuation. Words are
+// [{start, end, word}] in timeline order (seconds or "MM:SS"); cues
+// are grouped by meaning, not by a fixed word count:
+//   - flush on a pause > pauseSeconds between words, or on sentence
+//     end [.?!…] (always — a sentence never runs across cues)
+//   - flush AFTER a word ending in [,;:] when splitOnPunctuation and
+//     the cue already holds >= 3 words (a mid-sentence break that
+//     still reads as a phrase; with splitOnPunctuation=false only
+//     the hard limits and sentence ends break)
+//   - flush BEFORE a word that would push the cue past maxWords,
+//     maxSeconds, or maxChars
 //   - a cue never ends on a stranded function word (the/a/of/to/...):
 //     that word moves to the next cue instead
 // Pure function (no I/O) so tests can call it directly. Deterministic:
-// same words in -> same cues out, byte-identical SRT via formatSrtBody.
+// same words in -> same cues out. The 3–6-word target is a range, not
+// a hard minimum: a cue cut by a sentence end or a pause may hold
+// fewer words — the stats report the real distribution.
 // Limits: abbreviations ending in "." (e.g. "U.S.") also flush —
 // join them into one word ("U.S.") before calling if that matters.
-const SEMANTIC_MAX_WORDS = 8;
-const SEMANTIC_MAX_CUE_SECONDS = 3.5;
-const SEMANTIC_MAX_CUE_CHARS = 84;
-const SEMANTIC_MAX_LINE_CHARS = 42;
-const SEMANTIC_PAUSE_SECONDS = 0.4;
+const CHUNK_DEFAULTS = { maxWords: 6, maxChars: 84, maxSeconds: 3.5, pauseSeconds: 0.4, splitOnPunctuation: true };
+// groupWords keeps the legacy semantic grouping generate_srt shipped
+// with (max 8 words, no comma breaks) — byte-identical SRTs.
+const GROUP_WORDS_DEFAULTS = { maxWords: 8, maxChars: 84, maxSeconds: 3.5, pauseSeconds: 0.4, splitOnPunctuation: false };
+const CHUNK_MIN_COMMA_WORDS = 3;
 const STRANDED_WORDS = new Set([
   "a", "an", "the", "of", "to", "in", "on", "at", "and", "but", "or",
   "with", "for", "from", "by", "as", "into", "over", "under",
 ]);
 
-function wrapCaptionLines(text) {
+function wrapCaptionLines(text, lineChars = 42) {
   const words = text.split(" ");
   const lines = [];
   let line = "";
   for (const w of words) {
     if (!line) line = w;
-    else if (line.length + 1 + w.length <= SEMANTIC_MAX_LINE_CHARS) line += ` ${w}`;
+    else if (line.length + 1 + w.length <= lineChars) line += ` ${w}`;
     else { lines.push(line); line = w; }
   }
   if (line) lines.push(line);
   return lines.join("\n");
 }
 
-export function groupWords(words) {
+export function chunkCaptions(words, opts = {}) {
+  const maxWords = num(opts.maxWords ?? CHUNK_DEFAULTS.maxWords, "max_words", { min: 1, max: 100, integer: true });
+  const maxChars = num(opts.maxChars ?? CHUNK_DEFAULTS.maxChars, "max_chars", { min: 10, max: 1000, integer: true });
+  const maxSeconds = num(opts.maxSeconds ?? CHUNK_DEFAULTS.maxSeconds, "max_seconds", { min: 0.1, max: 60 });
+  const pauseSeconds = num(opts.pauseSeconds ?? CHUNK_DEFAULTS.pauseSeconds, "pause_seconds", { min: 0, max: 5 });
+  const splitOnPunctuation = opts.splitOnPunctuation ?? CHUNK_DEFAULTS.splitOnPunctuation;
+  if (typeof splitOnPunctuation !== "boolean") {
+    throw new MediaKitError("split_on_punctuation must be true or false", "INVALID_ARG");
+  }
+  const lineChars = Math.max(10, Math.floor(maxChars / 2));
   if (!Array.isArray(words) || words.length === 0) {
-    throw new MediaKitError("groupWords needs a non-empty words array", "INVALID_ARG");
+    throw new MediaKitError("chunkCaptions needs a non-empty words array", "INVALID_ARG");
   }
   if (words.length > MAX_SRT_CUES * 8) {
-    throw new MediaKitError(`groupWords accepts at most ${MAX_SRT_CUES * 8} words, got ${words.length}`, "INVALID_ARG");
+    throw new MediaKitError(`chunkCaptions accepts at most ${MAX_SRT_CUES * 8} words, got ${words.length}`, "INVALID_ARG");
   }
   const normalized = words.map((w, i) => {
     const n = i + 1;
@@ -4246,11 +4305,12 @@ export function groupWords(words) {
       const gapS = (w.startMs - prev.endMs) / 1000;
       const joined = [...cur.map((x) => x.word), w.word].join(" ");
       const durS = (w.endMs - cur[0].startMs) / 1000;
-      if (gapS > SEMANTIC_PAUSE_SECONDS) flush("pause");
-      else if (cur.length >= SEMANTIC_MAX_WORDS) flush("word-limit");
-      else if (joined.length > SEMANTIC_MAX_CUE_CHARS) flush("char-limit");
-      else if (durS > SEMANTIC_MAX_CUE_SECONDS) flush("duration-limit");
+      if (gapS > pauseSeconds) flush("pause");
+      else if (cur.length >= maxWords) flush("word-limit");
+      else if (joined.length > maxChars) flush("char-limit");
+      else if (durS > maxSeconds) flush("duration-limit");
       else if (/[.!?]$/.test(prev.word)) flush("sentence-end");
+      else if (splitOnPunctuation && /[,;:]$/.test(prev.word) && cur.length >= CHUNK_MIN_COMMA_WORDS) flush("punctuation");
     }
     cur.push(w);
   }
@@ -4271,27 +4331,36 @@ export function groupWords(words) {
     return {
       startMs: c.words[0].startMs,
       endMs: c.words[c.words.length - 1].endMs,
-      text: wrapCaptionLines(text),
+      start: +(c.words[0].startMs / 1000).toFixed(3),
+      end: +(c.words[c.words.length - 1].endMs / 1000).toFixed(3),
+      text: wrapCaptionLines(text, lineChars),
       split_reason: c.reason,
     };
   });
   const warnings = [];
   for (const c of cues) {
     for (const line of c.text.split("\n")) {
-      if (line.length > SEMANTIC_MAX_LINE_CHARS) {
-        warnings.push(`cue "${c.text.split("\n")[0]}…" has a ${line.length}-char line (one word longer than ${SEMANTIC_MAX_LINE_CHARS} chars cannot wrap)`);
+      if (line.length > lineChars) {
+        warnings.push(`cue "${c.text.split("\n")[0]}…" has a ${line.length}-char line (one word longer than ${lineChars} chars cannot wrap)`);
         break;
       }
     }
   }
+  const splitReasons = {};
+  for (const c of cues) splitReasons[c.split_reason] = (splitReasons[c.split_reason] ?? 0) + 1;
   return {
     cues,
     words_in: normalized.length,
     cues_out: cues.length,
     max_words_in_cue: Math.max(...cues.map((c) => c.text.replace(/\n/g, " ").split(" ").length)),
     longest_cue_chars: Math.max(...cues.map((c) => c.text.replace(/\n/g, " ").length)),
+    split_reasons: splitReasons,
     warnings,
   };
+}
+
+export function groupWords(words) {
+  return chunkCaptions(words, GROUP_WORDS_DEFAULTS);
 }
 
 // One SRT body builder for generate_srt and transcribe, so both tools
@@ -4372,6 +4441,60 @@ export async function generateSrt({ cues = null, words = null, output }) {
     first_start_seconds: +(normalized[0].startMs / 1000).toFixed(3),
     last_end_seconds: +(normalized[normalized.length - 1].endMs / 1000).toFixed(3),
     ...(grouping ? { grouping } : {}),
+    ...info,
+  };
+}
+
+// ---------------------------------------------------------------- chunk_captions
+// Chunk word timings into subtitle cues (the chunkCaptions pure
+// function, exposed as a tool so the director workflow can inspect
+// and tune the grouping before burning). Output is a cues JSON file
+// whose cues feed generate_srt directly (same {start, end, text}
+// shape, seconds). Defaults are the locked TikTok standard: at most
+// 6 words per cue, 84 chars (2 lines), split on pauses > 0.4s and on
+// punctuation. Pass words inline (MCP) or a words file (CLI / the
+// JSON transcribe --word-timestamps prints), never both.
+export async function chunkCaptionsFile({ wordsFile = null, words = null, output, maxWords = 6, maxChars = 84, maxSeconds = 3.5, pauseSeconds = 0.4, splitOnPunctuation = true }) {
+  if (wordsFile && words) {
+    throw new MediaKitError("chunk_captions takes words_file or words, not both — words_file is a transcribe --word-timestamps JSON, words is the same array inline", "INVALID_ARG");
+  }
+  if (!wordsFile && !words) {
+    throw new MediaKitError("chunk_captions needs words_file <words.json> or words [{start, end, word}]", "INVALID_ARG");
+  }
+  let list;
+  let wordsPath = null;
+  if (wordsFile) {
+    wordsPath = await requireInput(wordsFile, "words file");
+    const raw = JSON.parse(await readFile(wordsPath, "utf8"));
+    list = normalizeTranscriptWords(raw, "words file", "chunk_captions");
+  } else {
+    list = normalizeTranscriptWords(words, "words", "chunk_captions");
+  }
+  const grouped = chunkCaptions(list, { maxWords, maxChars, maxSeconds, pauseSeconds, splitOnPunctuation });
+  const outPath = await prepareOutput(output, wordsPath ? [wordsPath] : []);
+  if (path.extname(outPath).toLowerCase() !== ".json") {
+    throw new MediaKitError(`chunk_captions output must end in .json, got ${path.extname(outPath) || "(no extension)"}`, "INVALID_ARG");
+  }
+  const cues = grouped.cues.map((c) => ({ start: c.start, end: c.end, text: c.text, split_reason: c.split_reason }));
+  const doc = {
+    cues,
+    stats: {
+      words_in: grouped.words_in,
+      cues_out: grouped.cues_out,
+      max_words_in_cue: grouped.max_words_in_cue,
+      longest_cue_chars: grouped.longest_cue_chars,
+      split_reasons: grouped.split_reasons,
+      warnings: grouped.warnings,
+    },
+  };
+  await writeFile(outPath, `${JSON.stringify(doc, null, 2)}\n`, "utf8");
+  const info = await fileInfo(outPath);
+  return {
+    operation: "chunk_captions",
+    input: wordsPath,
+    output: outPath,
+    cues,
+    ...doc.stats,
     ...info,
   };
 }
@@ -10026,7 +10149,7 @@ const VIDEO_CODECS = { libx264: "mp4", libx265: "mp4", vp9: "webm", av1: "mp4", 
 // so the GOP there is a maximum, not an exact spacing. The result
 // measures the keyframes on the output file (count + gap stats), so
 // the spacing is verified, not assumed.
-export async function convert({ input, output, videoCodec = null, audioCodec = null, crf = 23, preset = "medium", gop = null, gopSeconds = null, dryRun = false, encoder = null }) {
+export async function convert({ input, output, videoCodec = null, audioCodec = null, crf = 23, preset = "medium", gop = null, gopSeconds = null, dryRun = false, encoder = null, width = null, height = null, fps = null, videoBitrateKbps = null, audioBitrateKbps = null, audioSampleRate = null, audioChannels = null }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const c = num(crf, "crf", { min: 0, max: 51, integer: true });
@@ -10034,12 +10157,44 @@ export async function convert({ input, output, videoCodec = null, audioCodec = n
     throw new MediaKitError("convert --gop and --gop-seconds are mutually exclusive (one way to set the interval)", "INVALID_ARG");
   }
   const encReq = encoder ?? null;
+  // Multi-attribute convert (misbahsy/video-audio-mcp's
+  // convert_video_properties idea): one call may also resize, cap
+  // the frame rate, and set video/audio bitrates — each property is
+  // applied only when given, the rest stream-copy as before.
+  const wReq = (width === null || width === undefined) ? null : num(width, "width", { min: 16, max: 8192, integer: true });
+  const hReq = (height === null || height === undefined) ? null : num(height, "height", { min: 16, max: 8192, integer: true });
+  if (wReq !== null && wReq % 2 !== 0) throw new MediaKitError("convert --width must be even (H.264 yuv420p needs even dimensions)", "INVALID_ARG");
+  if (hReq !== null && hReq % 2 !== 0) throw new MediaKitError("convert --height must be even (H.264 yuv420p needs even dimensions)", "INVALID_ARG");
+  const fpsReq = (fps === null || fps === undefined) ? null : num(fps, "fps", { min: 1, max: 120 });
+  const vbrReq = (videoBitrateKbps === null || videoBitrateKbps === undefined) ? null : num(videoBitrateKbps, "video_bitrate_kbps", { min: 8, max: 200000, integer: true });
+  const abrReq = (audioBitrateKbps === null || audioBitrateKbps === undefined) ? null : num(audioBitrateKbps, "audio_bitrate_kbps", { min: 8, max: 3200, integer: true });
+  const arReq = (audioSampleRate === null || audioSampleRate === undefined) ? null : num(audioSampleRate, "audio_sample_rate", { min: 8000, max: 192000, integer: true });
+  const acReq = (audioChannels === null || audioChannels === undefined) ? null : num(audioChannels, "audio_channels", { min: 1, max: 8, integer: true });
+  const needsVideoReencode = wReq !== null || hReq !== null || fpsReq !== null || vbrReq !== null;
+  const needsAudioReencode = abrReq !== null || arReq !== null || acReq !== null;
+  if (needsVideoReencode && (!videoCodec || videoCodec === "copy")) {
+    throw new MediaKitError("convert --width/--height/--fps/--video-bitrate-kbps need a video re-encode (pass --video-codec libx264, libx265, av1 or vp9); stream-copy cannot resize or re-time frames", "INVALID_ARG");
+  }
+  if (needsAudioReencode && audioCodec === "copy") {
+    throw new MediaKitError("convert --audio-bitrate-kbps/--audio-sample-rate/--audio-channels need an audio re-encode, but --audio-codec copy was given", "INVALID_ARG");
+  }
+  if (vbrReq !== null && encReq !== null) {
+    throw new MediaKitError("convert --video-bitrate-kbps does not combine with --encoder yet — the hardware path sets its own rate control; drop one of them", "INVALID_ARG");
+  }
+  // Audio properties without an explicit codec default to the
+  // container's codec (mp4-family: aac, webm: libopus, mp3:
+  // libmp3lame) — the caller names a bitrate, not a codec.
+  let audioCodecUsed = audioCodec ?? null;
+  if (needsAudioReencode && !audioCodecUsed) {
+    const outExt = path.extname(output).slice(1).toLowerCase();
+    audioCodecUsed = outExt === "webm" ? "libopus" : (AUDIO_FORMATS[outExt] ?? "aac");
+  }
   if (encReq !== null && (!videoCodec || videoCodec === "copy")) {
     throw new MediaKitError("convert --encoder needs a video re-encode (pass --video-codec libx264, libx265, av1 or vp9); stream-copy has no encoder to choose", "INVALID_ARG");
   }
   const gopFramesReq = (gop === null || gop === undefined) ? null : num(gop, "gop", { min: 1, max: 10000, integer: true });
   const gopSecsReq = (gopSeconds === null || gopSeconds === undefined) ? null : num(gopSeconds, "gop_seconds", { min: 0.1, max: 3600 });
-  const meta = gopFramesReq !== null || gopSecsReq !== null || encReq !== null ? await probe(inPath) : null;
+  const meta = gopFramesReq !== null || gopSecsReq !== null || encReq !== null || needsVideoReencode || needsAudioReencode ? await probe(inPath) : null;
   let gopFrames = null;
   let gopSecondsOut = null;
   // Resolved encoder: { requested, used, fallback, fallbackReason }.
@@ -10050,7 +10205,12 @@ export async function convert({ input, output, videoCodec = null, audioCodec = n
   let resolved = { requested: null, used: videoCodec, fallback: false, fallbackReason: null };
   let hwArgs = null;
   if (meta) {
-    if (!meta.video) throw new MediaKitError(`convert ${encReq !== null ? "--encoder" : "--gop"} needs a video input`, "INVALID_ARG");
+    if ((encReq !== null || gopFramesReq !== null || gopSecsReq !== null || needsVideoReencode) && !meta.video) {
+      throw new MediaKitError(`convert ${encReq !== null ? "--encoder" : gopFramesReq !== null || gopSecsReq !== null ? "--gop" : "--width/--height/--fps/--video-bitrate-kbps"} needs a video input`, "INVALID_ARG");
+    }
+    if (needsAudioReencode && !meta.audio) {
+      throw new MediaKitError("convert --audio-bitrate-kbps/--audio-sample-rate/--audio-channels need an audio stream in the input", "INVALID_ARG");
+    }
     if (encReq !== null) {
       resolved = await resolveVideoEncoder({ videoCodec, encoder: encReq });
       if (!resolved.fallback && resolved.requested !== null) hwArgs = hwEncoderArgs(resolved.used, c, preset);
@@ -10073,6 +10233,14 @@ export async function convert({ input, output, videoCodec = null, audioCodec = n
     }
   }
   const hwEncoder = hwArgs ? resolved.used : null;
+  // Scale + fps ride on one -vf chain with the hardware filter (if
+  // any). The scale is exact (the caller asked for these dims; a
+  // missing side is -2: keep aspect, stay even); the fps filter caps
+  // the rate at a constant frame rate.
+  const vfParts = [];
+  if (hwArgs?.videoFilter) vfParts.push(hwArgs.videoFilter);
+  if (wReq !== null || hReq !== null) vfParts.push(`scale=${wReq ?? -2}:${hReq ?? -2}:flags=lanczos`);
+  if (fpsReq !== null) vfParts.push(`fps=${fpsReq}`);
   const args = ["-y", "-i", inPath];
   if (videoCodec) {
     if (!(videoCodec in VIDEO_CODECS)) throw new MediaKitError(`unsupported video codec: ${videoCodec}`, "INVALID_ARG");
@@ -10081,13 +10249,19 @@ export async function convert({ input, output, videoCodec = null, audioCodec = n
       // hwEncoderArgs) instead of software -crf/-preset, plus -g for
       // the GOP. -keyint_min/-sc_threshold/-x265-params are
       // libx264/libx265-only and are skipped here.
-      if (hwArgs.videoFilter) args.push("-vf", hwArgs.videoFilter);
+      if (vfParts.length) args.push("-vf", vfParts.join(","));
       args.push("-c:v", hwEncoder, ...hwArgs.args);
+      if (fpsReq !== null) args.push("-fps_mode", "cfr");
       if (gopFrames !== null) args.push("-g", String(gopFrames));
     } else {
+      if (vfParts.length) args.push("-vf", vfParts.join(","));
       args.push("-c:v", videoCodec);
       if (videoCodec !== "copy") {
-        args.push("-crf", String(c), "-preset", preset);
+        // Bitrate mode replaces CRF (the encoder runs ABR, not
+        // constant-quality) — the preset still applies either way.
+        if (vbrReq !== null) args.push("-b:v", `${vbrReq}k`, "-preset", preset);
+        else args.push("-crf", String(c), "-preset", preset);
+        if (fpsReq !== null) args.push("-fps_mode", "cfr");
         if (gopFrames !== null) {
           // -keyint_min is a libx264/libx265/mpeg4 option; libvpx/aom
           // take -g only. Scene-cut suppression is codec-specific too.
@@ -10101,8 +10275,11 @@ export async function convert({ input, output, videoCodec = null, audioCodec = n
   } else {
     args.push("-c:v", "copy");
   }
-  if (audioCodec) args.push("-c:a", audioCodec, ...audioBitrateArgs(audioCodec));
-  else args.push("-c:a", "copy");
+  if (audioCodecUsed) {
+    args.push("-c:a", audioCodecUsed, ...(abrReq !== null ? ["-b:a", `${abrReq}k`] : audioBitrateArgs(audioCodecUsed)));
+    if (arReq !== null) args.push("-ar", String(arReq));
+    if (acReq !== null) args.push("-ac", String(acReq));
+  } else args.push("-c:a", "copy");
   args.push(outPath);
   // `video_codec` reports the encoder actually used (a hardware name
   // when one ran, the software codec otherwise) — not the request.
@@ -10115,12 +10292,33 @@ export async function convert({ input, output, videoCodec = null, audioCodec = n
     preset_used: hwArgs?.presetUsed ?? null,
     preset_ignored: hwArgs?.presetIgnored ?? null,
   };
+  // Before/after are probe-measured (display dims, so a rotated
+  // phone clip reports the frame the viewer sees), so the caller can
+  // check the convert did what was asked without a second probe.
+  // `before` is null for a plain convert (no probe was needed).
+  const summarizeConvert = (m) => ({
+    dimensions: m.video ? `${m.video.display_width ?? m.video.width}x${m.video.display_height ?? m.video.height}` : null,
+    fps: m.video?.fps ?? null,
+    video_bitrate_kbps: m.video?.bit_rate ? Math.round(m.video.bit_rate / 1000) : null,
+    audio_codec: m.audio?.codec ?? null,
+    audio_bitrate_kbps: m.audio?.bit_rate ? Math.round(m.audio.bit_rate / 1000) : null,
+    audio_sample_rate: m.audio?.sample_rate ?? null,
+    audio_channels: m.audio?.channels ?? null,
+  });
+  const before = meta ? summarizeConvert(meta) : null;
+  const requested = {
+    width: wReq, height: hReq, fps: fpsReq,
+    video_bitrate_kbps: vbrReq, audio_bitrate_kbps: abrReq,
+    audio_sample_rate: arReq, audio_channels: acReq,
+  };
   if (dryRun) {
     return {
       operation: "convert", dry_run: true, input: inPath, output: outPath,
-      video_codec: videoCodecUsed, audio_codec: audioCodec ?? "copy",
+      video_codec: videoCodecUsed, audio_codec: audioCodecUsed ?? "copy",
       gop_frames: gopFrames, gop_seconds: gopSecondsOut, keyframes: null,
       codec_verified: null, codec_name: null,
+      crf_applied: vbrReq !== null ? null : c,
+      before, after: null, changes: null, requested,
       ...encoderFields,
       commands: [formatCommand(args)],
       note: "Dry run: no file written. The keyframe spacing is measured on the real output, so it reports null here.",
@@ -10157,11 +10355,24 @@ export async function convert({ input, output, videoCodec = null, audioCodec = n
       avg_gap_seconds: gaps?.avg_seconds ?? null,
     };
   }
+  const after = summarizeConvert(out);
+  const changes = [];
+  if (before) {
+    if (before.dimensions !== after.dimensions) changes.push(`dimensions: ${before.dimensions} → ${after.dimensions}`);
+    if (before.fps !== after.fps) changes.push(`frame rate: ${before.fps} → ${after.fps} fps`);
+    if (before.video_bitrate_kbps !== after.video_bitrate_kbps) changes.push(`video bitrate: ${before.video_bitrate_kbps} → ${after.video_bitrate_kbps} kbps`);
+    if (before.audio_codec !== after.audio_codec) changes.push(`audio codec: ${before.audio_codec} → ${after.audio_codec}`);
+    if (before.audio_bitrate_kbps !== after.audio_bitrate_kbps) changes.push(`audio bitrate: ${before.audio_bitrate_kbps} → ${after.audio_bitrate_kbps} kbps`);
+    if (before.audio_sample_rate !== after.audio_sample_rate) changes.push(`audio sample rate: ${before.audio_sample_rate} → ${after.audio_sample_rate} Hz`);
+    if (before.audio_channels !== after.audio_channels) changes.push(`audio channels: ${before.audio_channels} → ${after.audio_channels}`);
+  }
   return {
     operation: "convert", input: inPath, output: outPath,
-    video_codec: videoCodecUsed, audio_codec: audioCodec ?? "copy",
+    video_codec: videoCodecUsed, audio_codec: audioCodecUsed ?? "copy",
     gop_frames: gopFrames, gop_seconds: gopSecondsOut, keyframes,
     codec_verified: codecVerified, codec_name: codecName,
+    crf_applied: vbrReq !== null ? null : c,
+    before, after, changes, requested,
     ...encoderFields,
     ...info, duration_seconds: out.duration_seconds,
     dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
@@ -12494,6 +12705,7 @@ const TOOL_REQUIREMENTS = {
   social: { filters: ["crop", "scale", "pad", "gblur", "overlay", "loudnorm"], encoders: ["libx264"] },
   convert_captions: {},
   generate_srt: {},
+  chunk_captions: {},
   find: {},
   download: {},
   batch: {},
@@ -16381,8 +16593,8 @@ export const BATCH_OPERATIONS = {
     run: (input, output, a) => compress({ input, output, quality: a.quality ?? "medium", maxWidth: a.max_width ?? null, crf: a.crf ?? null, preset: a.preset ?? null, targetSizeMb: a.target_size_mb ?? null, resolutionLadder: a.resolution_ladder ?? true, qualityProof: a.quality_proof ?? true }),
   },
   convert: {
-    args: ["video_codec", "audio_codec", "crf", "preset", "gop", "gop_seconds", "encoder"],
-    run: (input, output, a) => convert({ input, output, videoCodec: a.video_codec ?? null, audioCodec: a.audio_codec ?? null, crf: a.crf ?? 23, preset: a.preset ?? "medium", gop: a.gop ?? null, gopSeconds: a.gop_seconds ?? null, encoder: a.encoder ?? null }),
+    args: ["video_codec", "audio_codec", "crf", "preset", "gop", "gop_seconds", "encoder", "width", "height", "fps", "video_bitrate_kbps", "audio_bitrate_kbps", "audio_sample_rate", "audio_channels"],
+    run: (input, output, a) => convert({ input, output, videoCodec: a.video_codec ?? null, audioCodec: a.audio_codec ?? null, crf: a.crf ?? 23, preset: a.preset ?? "medium", gop: a.gop ?? null, gopSeconds: a.gop_seconds ?? null, encoder: a.encoder ?? null, width: a.width ?? null, height: a.height ?? null, fps: a.fps ?? null, videoBitrateKbps: a.video_bitrate_kbps ?? null, audioBitrateKbps: a.audio_bitrate_kbps ?? null, audioSampleRate: a.audio_sample_rate ?? null, audioChannels: a.audio_channels ?? null }),
   },
   normalize: {
     args: ["width", "height", "fps", "crf", "preset", "target_lufs"],
@@ -17166,8 +17378,8 @@ export const MANIFEST_STEPS = {
     run: (input, output, a) => interpolate({ input, output, fps: a.fps, mode: a.mode ?? "blend", crf: a.crf ?? 23 }),
   },
   burn_captions: {
-    args: ["captions", "font_size", "margin_v", "style", "outline_color", "max_lines", "platform"],
-    run: (input, output, a) => burnCaptions({ input, output, captions: a.captions, fontSize: a.font_size ?? null, marginV: a.margin_v ?? null, style: a.style ?? null, outlineColor: a.outline_color ?? "black", maxLines: a.max_lines ?? null, platform: a.platform ?? null }),
+    args: ["captions", "words_file", "font_size", "margin_v", "style", "outline_color", "max_lines", "platform"],
+    run: (input, output, a) => burnCaptions({ input, output, captions: a.captions ?? null, wordsFile: a.words_file ?? null, fontSize: a.font_size ?? null, marginV: a.margin_v ?? null, style: a.style ?? null, outlineColor: a.outline_color ?? "black", maxLines: a.max_lines ?? null, platform: a.platform ?? null }),
   },
   overlay: {
     args: ["overlay", "position", "margin", "width", "opacity", "start", "end"],

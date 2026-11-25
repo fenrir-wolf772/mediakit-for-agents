@@ -198,6 +198,10 @@ reports `compressor` (settings) and `compressed_lufs`.
 `burn_captions` needs a real `.srt`, `.ass`, or `.vtt` file. If the user
 only has raw text, write the SRT yourself first (format below), then burn.
 Hardcoded captions cannot be turned off later — keep an uncaptioned master.
+If you have word timings instead of a caption file, pass `--words-file`
+and `burn_captions` chunks them first with the TikTok defaults (see §25) —
+the result reports the chunking (`chunked.cues`, `words_in`) so you can
+see what was burned.
 
 ### 8. Mutation smoke + ratchet (for contributors, not for callers)
 `npm run mutation-smoke` proves the test suite can fail: 4 hand-written
@@ -266,6 +270,18 @@ the codec. CRF 23 is a good default for H.264; 18–20 for near-lossless,
 back to software otherwise — the result says which one ran
 (`encoder_used`, `encoder_fallback`); a named encoder that cannot
 probe-encode fails instead of silently falling back.
+One call can change several properties at once: `--width/--height/--fps`
+plus `--video-bitrate-kbps/--audio-bitrate-kbps/--audio-sample-rate/
+--audio-channels`. Video properties need a video re-encode (pass
+`--video-codec`); audio properties need an audio re-encode, and the
+audio codec defaults from the output extension when you don't name one
+(`libopus` for webm, otherwise `aac`). A video bitrate switches the
+encode to ABR — it replaces `--crf` (`crf_applied` comes back null) and
+does not combine with `--encoder`. Dimensions must be even. The result
+reports probe-measured `before`/`after` (dimensions, fps, bitrates,
+sample rate, channels) and a `changes` list — measure against those,
+never against the request alone; ABR on easy content undershoots the
+target, so allow a wide tolerance (50–150%) when you assert a bitrate.
 
 ### 10. Measure bars before you crop; package last
 `cropdetect` samples frames across the whole file (not just the start,
@@ -566,6 +582,14 @@ like "the" or "of". The result returns the grouping report
 each cue split instead of trusting a silent regroup. Pass cues or
 words, never both. This is the stickman-video-director grouping rule,
 adapted to Shorts line lengths.
+
+For TikTok-style captions use `chunk_captions` instead: same engine,
+tighter defaults — max 6 words per cue, and a comma/semicolon/colon
+splits a cue once it already holds 3 words. It writes a cues JSON
+(`{cues: [{start, end, text, split_reason}], stats: {...}}`) that feeds
+`generate_srt` directly, so the chain is `transcribe --word-timestamps`
+→ `chunk_captions` → `generate_srt` → `burn_captions` (or straight into
+`burn_captions --words-file`, which runs the same chunker internally).
 
 When `MEDIAKIT_WORKDIR` is set, every user-supplied input/output path
 must stay inside that directory — `..` traversal and symlink escapes

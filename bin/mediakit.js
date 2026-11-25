@@ -187,11 +187,12 @@ const COMMANDS = {
     ],
   },
   "burn-captions": {
-    usage: "mediakit burn-captions <input> --captions <file.srt|ass|vtt> -o <output> [--font-size <n>] [--margin-v <n>] [--style background|outline|shadow|glow] [--outline-color <name|hex>] [--max-lines <n>] [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin] [--dry-run]",
-    desc: "Burn subtitles into the video (hardcoded, always visible). --dry-run prints the exact ffmpeg command and writes no file.",
+    usage: "mediakit burn-captions <input> --captions <file.srt|ass|vtt> -o <output> [--font-size <n>] [--margin-v <n>] [--style background|outline|shadow|glow] [--outline-color <name|hex>] [--max-lines <n>] [--platform tiktok|reels|shorts|youtube|instagram-feed|instagram-story|linkedin] [--dry-run]  |  mediakit burn-captions <input> --words-file <words.json> -o <output> [...]",
+    desc: "Burn subtitles into the video (hardcoded, always visible). --words-file chunks word timings first with the locked TikTok defaults (max 6 words/cue) into a temp .srt, burns it, and removes the temp file. --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
-      ["--captions", "Subtitle file .srt/.ass/.vtt (required)"],
+      ["--captions", "Subtitle file .srt/.ass/.vtt (required unless --words-file)"],
+      ["--words-file", "Transcript JSON with a words array (alternative to --captions): chunked with the TikTok defaults into a temp .srt first"],
       ["--font-size", "Font size in px (default: scales with frame height, ~60px at 1920 high)"],
       ["--margin-v", "Distance from bottom edge in px (default: 26% of frame height, above platform UI; or the platform's bottom UI depth with --platform)"],
       ["--style", "Caption style: background (default, white text on a semi-transparent black box) | outline | shadow | glow (halo in the text colour). Ignored for .ass files, which carry their own styles"],
@@ -513,8 +514,8 @@ const COMMANDS = {
     ],
   },
   convert: {
-    usage: "mediakit convert <input> -o <output> [--video-codec <c>] [--audio-codec <c>] [--crf <n>] [--preset <p>] [--gop <frames>] [--gop-seconds <s>] [--encoder <auto|name>] [--dry-run]",
-    desc: "Change container or codec. Omit a codec to stream-copy that stream. --gop / --gop-seconds sets an exact keyframe interval on re-encode (measured on the output file). --encoder auto probes for the first working hardware encoder of the codec family and falls back to software when none works (the fallback is reported, never silent); a named hardware encoder (h264_nvenc, hevc_qsv, h264_vaapi, ...) must probe-usable or the call fails. --dry-run prints the exact ffmpeg command and writes no file.",
+    usage: "mediakit convert <input> -o <output> [--video-codec <c>] [--audio-codec <c>] [--crf <n>] [--preset <p>] [--gop <frames>] [--gop-seconds <s>] [--encoder <auto|name>] [--width <n>] [--height <n>] [--fps <n>] [--video-bitrate-kbps <n>] [--audio-bitrate-kbps <n>] [--audio-sample-rate <n>] [--audio-channels <n>] [--dry-run]",
+    desc: "Change container or codec. Omit a codec to stream-copy that stream. --gop / --gop-seconds sets an exact keyframe interval on re-encode (measured on the output file). --encoder auto probes for the first working hardware encoder of the codec family and falls back to software when none works (the fallback is reported, never silent); a named hardware encoder (h264_nvenc, hevc_qsv, h264_vaapi, ...) must probe-usable or the call fails. Multi-attribute: --width/--height/--fps/--video-bitrate-kbps/--audio-bitrate-kbps/--audio-sample-rate/--audio-channels set several properties in one call (each applies only when given; video properties need a video re-encode, audio properties an audio re-encode; --video-bitrate-kbps runs ABR and replaces --crf). --dry-run prints the exact ffmpeg command and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--video-codec", "libx264 | libx265 | vp9 | av1 | mpeg4 | copy"],
@@ -524,6 +525,13 @@ const COMMANDS = {
       ["--gop", "Keyframe interval in frames (needs --video-codec re-encode)"],
       ["--gop-seconds", "Keyframe interval in seconds (from source fps; needs --video-codec re-encode)"],
       ["--encoder", "Hardware encoder: auto (probe + reported software fallback) or h264_nvenc | hevc_nvenc | av1_nvenc | h264_qsv | hevc_qsv | av1_qsv | h264_vaapi | hevc_vaapi | vp9_vaapi | av1_vaapi | h264_videotoolbox | hevc_videotoolbox | h264_amf | hevc_amf | av1_amf"],
+      ["--width", "Resize to this width in px (exact; missing side keeps aspect, must be even; needs --video-codec re-encode)"],
+      ["--height", "Resize to this height in px (exact; missing side keeps aspect, must be even; needs --video-codec re-encode)"],
+      ["--fps", "Cap the frame rate, constant frame rate (1-120; needs --video-codec re-encode)"],
+      ["--video-bitrate-kbps", "Video bitrate in kbps (ABR mode, replaces --crf; needs --video-codec re-encode; does not combine with --encoder)"],
+      ["--audio-bitrate-kbps", "Audio bitrate in kbps (needs an audio re-encode; codec defaults to the container's unless --audio-codec is given)"],
+      ["--audio-sample-rate", "Audio sample rate in Hz (needs an audio re-encode)"],
+      ["--audio-channels", "Audio channel count (needs an audio re-encode)"],
       ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required)"],
     ],
@@ -616,6 +624,20 @@ const COMMANDS = {
       ["--cues-file", "JSON file with the cue array (may also be {\"cues\": [...]})"],
       ["--words-file", "JSON file with the word array (may also be {\"words\": [...]}); alternative to --cues-file"],
       ["-o, --output", "Output .srt file (required)"],
+    ],
+  },
+  "chunk-captions": {
+    usage: "mediakit chunk-captions --words-file <words.json> -o <output.json> [--max-words 6] [--max-chars 84] [--max-seconds 3.5] [--pause-seconds 0.4] [--no-split-on-punctuation]",
+    desc: "Chunk word timings into subtitle cues: words from transcribe --word-timestamps become cues [{start, end, text}] in a .json file, ready for generate-srt (or for burn-captions via --words-file). Defaults are the locked TikTok standard: at most 6 words per cue, 84 chars (2 lines), split on pauses over 0.4s, on sentence ends, and after a comma/semicolon/colon once the cue holds 3 words. Pure text, no ffmpeg.",
+    args: [],
+    options: [
+      ["--words-file", "JSON file with the word array (may also be {\"words\": [...]}) (required)"],
+      ["--max-words", "Max words per cue (default 6)"],
+      ["--max-chars", "Max characters per cue (default 84 = 2 lines of 42)"],
+      ["--max-seconds", "Max cue duration in seconds (default 3.5)"],
+      ["--pause-seconds", "Split on a pause longer than this, in seconds (default 0.4)"],
+      ["--no-split-on-punctuation", "Do not split after a comma/semicolon/colon (sentence ends still split)"],
+      ["-o, --output", "Output .json file with cues + stats (required)"],
     ],
   },
   "publish-kit": {
@@ -1575,10 +1597,11 @@ async function main() {
         });
         break;
       case "burn-captions": {
-        if (!opts.captions) fail("missing required option: --captions <file.srt|ass|vtt>");
+        if (opts.captions && opts.words_file) fail("burn-captions takes --captions or --words-file, not both");
+        if (!opts.captions && !opts.words_file) fail("missing required option: --captions <file.srt|ass|vtt> or --words-file <words.json>");
         result = await core.burnCaptions({
           input: needInput(), output: needOutput(opts),
-          captions: opts.captions, fontSize: numOpt(opts, "font_size") ?? null,
+          captions: opts.captions ?? null, wordsFile: opts.words_file ?? null, fontSize: numOpt(opts, "font_size") ?? null,
           marginV: numOpt(opts, "margin_v") ?? null,
           style: opts.style ?? null, outlineColor: opts.outline_color ?? "black",
           maxLines: numOpt(opts, "max_lines") ?? null,
@@ -1641,6 +1664,13 @@ async function main() {
           gopSeconds: numOpt(opts, "gop_seconds") ?? null,
           dryRun: opts.dry_run === true,
           encoder: opts.encoder ?? null,
+          width: numOpt(opts, "width") ?? null,
+          height: numOpt(opts, "height") ?? null,
+          fps: numOpt(opts, "fps") ?? null,
+          videoBitrateKbps: numOpt(opts, "video_bitrate_kbps") ?? null,
+          audioBitrateKbps: numOpt(opts, "audio_bitrate_kbps") ?? null,
+          audioSampleRate: numOpt(opts, "audio_sample_rate") ?? null,
+          audioChannels: numOpt(opts, "audio_channels") ?? null,
         });
         break;
       case "normalize":
@@ -1924,6 +1954,26 @@ async function main() {
           const words = Array.isArray(parsed) ? parsed : parsed.words;
           result = await core.generateSrt({ words, output: needOutput(opts) });
         }
+        break;
+      }
+      case "chunk-captions": {
+        if (!opts.words_file) fail("missing required option: --words-file <words.json>");
+        const { readFile } = await import("node:fs/promises");
+        let parsed;
+        try {
+          parsed = JSON.parse(await readFile(opts.words_file, "utf8"));
+        } catch (e) {
+          fail(`could not read JSON ${opts.words_file}: ${e.message}`);
+        }
+        const words = Array.isArray(parsed) ? parsed : parsed.words;
+        result = await core.chunkCaptionsFile({
+          words, output: needOutput(opts),
+          maxWords: numOpt(opts, "max_words") ?? 6,
+          maxChars: numOpt(opts, "max_chars") ?? 84,
+          maxSeconds: numOpt(opts, "max_seconds") ?? 3.5,
+          pauseSeconds: numOpt(opts, "pause_seconds") ?? 0.4,
+          splitOnPunctuation: opts.split_on_punctuation !== false,
+        });
         break;
       }
       case "publish-kit": {
