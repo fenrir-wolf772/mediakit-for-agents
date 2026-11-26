@@ -12884,6 +12884,10 @@ const TOOL_REQUIREMENTS = {
   // patch_manifest is pure JSON + a manifest --dry-run validation —
   // no ffmpeg capability needed either.
   patch_manifest: {},
+  // propose_edit proves each option with the same helpers
+  // patchManifest uses and diffs JSON in pure Node — same (lack of)
+  // ffmpeg capability.
+  propose_edit: {},
   lease: {},
   // verify_cuts renders a 270p draft (scale + libx264) and measures
   // cuts with the content scene detector (signalstats per frame) +
@@ -18305,6 +18309,364 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
 //   {op: "remove_step", index}                         — never the
 //     last remaining step
 //   {op: "replace_step", index, step: {tool, args?}}
+// ---------------------------------------------------------------- propose_edit
+// OpenChatCut's proposal idea (src/agent/proposal.ts): a director
+// never edits a timeline directly — it proposes OPTIONS (each an
+// option label + a list of operations), the caller picks one, and
+// the commit replays it atomically. MediaKit already had the pieces
+// (patch_manifest's revision guard + dry-run candidate, the edit
+// lease); propose_edit is the missing proposal object:
+//   * baseDoc snapshot — base_revision + base_sha256 of the exact
+//     bytes read, so an apply against a moved base is refused with
+//     REVISION_MISMATCH instead of silently landing on new work;
+//   * compactOperations — the option's ops are compacted before
+//     validation (a `set` that writes the value already there is a
+//     no-op and is dropped; adjacent `set`s on the same path fold
+//     to the last one), and the compaction is reported, not hidden;
+//   * impact — each option is proven with the same helpers
+//     patchManifest uses (op validation + apply + manifest
+//     --dry-run), so a valid option is guaranteed committable, and
+//     diffed against the base doc: steps added/removed/changed, tools added/removed,
+//     input/output/qa flips. An option that fails validation is
+//     reported valid:false with the error instead of failing the
+//     whole proposal, so a director can offer a risky option next
+//     to a safe one.
+// A proposal writes nothing (PLAN tier): no file, no .bak, no
+// revision bump. The lease state is reported, never enforced — a
+// held lease does not block proposing, it only tells the caller
+// whether patch_manifest will accept the apply afterwards (the
+// lease holder's id is never printed). Apply with patch_manifest
+// using the option's apply.arguments.
+function readManifestOpValue(doc, parts) {
+  if (parts[0] === "steps") {
+    const idx = Number(parts[1]);
+    if (!Number.isInteger(idx) || idx < 0 || !Array.isArray(doc.steps) || idx >= doc.steps.length) return undefined;
+    if (parts[2] === "tool" && parts.length === 3) return doc.steps[idx].tool;
+    if (parts[2] === "args" && parts.length === 4) return doc.steps[idx]?.args?.[parts[3]];
+    return undefined;
+  }
+  if (parts.length === 1 && ["input", "output", "qa"].includes(parts[0])) return doc[parts[0]];
+  return undefined;
+}
+
+function writeManifestOpValue(doc, parts, value) {
+  if (parts[0] === "steps") {
+    const idx = Number(parts[1]);
+    if (!Number.isInteger(idx) || idx < 0 || !Array.isArray(doc.steps) || idx >= doc.steps.length) return;
+    if (parts[2] === "tool" && parts.length === 3) { doc.steps[idx].tool = value; return; }
+    if (parts[2] === "args" && parts.length === 4) { doc.steps[idx].args = doc.steps[idx].args ?? {}; doc.steps[idx].args[parts[3]] = value; return; }
+    return;
+  }
+  if (parts.length === 1 && ["input", "output", "qa"].includes(parts[0])) doc[parts[0]] = value;
+}
+
+export function compactManifestOps(doc, patch) {
+  if (!Array.isArray(patch)) {
+    throw new MediaKitError(`patch must be an array of operations, got: ${typeof patch}`, "INVALID_ARG");
+  }
+  // Simulate on a clone so each `set` is judged against the value
+  // the earlier ops left there. Malformed ops (no op name, no path)
+  // are kept verbatim — validateManifestOps inside patchManifest
+  // rejects them with the specific message; compaction must never
+  // swallow a bad op into a confusing different error.
+  const working = JSON.parse(JSON.stringify(doc));
+  const kept = [];
+  const removed = [];
+  for (const op of patch) {
+    if (op && typeof op === "object" && !Array.isArray(op) && op.op === "set" && typeof op.path === "string") {
+      const parts = op.path.split(".");
+      const current = readManifestOpValue(working, parts);
+      if (current !== undefined && current === op.value) {
+        removed.push(`drop no-op set ${op.path} (already ${JSON.stringify(op.value)})`);
+        continue;
+      }
+      writeManifestOpValue(working, parts, op.value);
+    }
+    kept.push(op);
+  }
+  // Fold adjacent `set`s on the same path to the last one. Only
+  // ADJACENT folds are safe: a structural op between two sets can
+  // shift step indices, so the second set may address a different
+  // step than the first.
+  const folded = [];
+  for (const op of kept) {
+    const prev = folded[folded.length - 1];
+    if (op?.op === "set" && prev?.op === "set" && prev.path === op.path) {
+      removed.push(`fold set ${op.path} = ${JSON.stringify(prev.value)} into ${JSON.stringify(op.value)}`);
+      folded[folded.length - 1] = op;
+    } else {
+      folded.push(op);
+    }
+  }
+  return { ops: folded, removed, removed_count: removed.length };
+}
+
+export function diffManifestDocs(before, after) {
+  const toolsOf = (d) => (Array.isArray(d?.steps) ? d.steps.map((s) => s.tool) : []);
+  const beforeTools = toolsOf(before);
+  const afterTools = toolsOf(after);
+  const count = (arr) => arr.reduce((m, t) => { m[t] = (m[t] ?? 0) + 1; return m; }, {});
+  const b = count(beforeTools);
+  const a = count(afterTools);
+  const toolsAdded = [];
+  const toolsRemoved = [];
+  for (const [t, n] of Object.entries(a)) if ((b[t] ?? 0) < n) toolsAdded.push(...Array(n - (b[t] ?? 0)).fill(t));
+  for (const [t, n] of Object.entries(b)) if ((a[t] ?? 0) < n) toolsRemoved.push(...Array(n - (a[t] ?? 0)).fill(t));
+  const stepsChanged = [];
+  for (let i = 0; i < Math.min(beforeTools.length, afterTools.length); i++) {
+    if (JSON.stringify(before.steps[i]) !== JSON.stringify(after.steps[i])) stepsChanged.push(i);
+  }
+  const stepsAdded = afterTools.length > beforeTools.length
+    ? Array.from({ length: afterTools.length - beforeTools.length }, (_, k) => beforeTools.length + k) : [];
+  const stepsRemoved = beforeTools.length > afterTools.length
+    ? Array.from({ length: beforeTools.length - afterTools.length }, (_, k) => afterTools.length + k) : [];
+  return {
+    steps_before: beforeTools.length,
+    steps_after: afterTools.length,
+    tools_added: toolsAdded.sort(),
+    tools_removed: toolsRemoved.sort(),
+    steps_changed: stepsChanged,
+    steps_added: stepsAdded,
+    steps_removed: stepsRemoved,
+    input_changed: JSON.stringify(before.input ?? null) !== JSON.stringify(after.input ?? null),
+    output_changed: JSON.stringify(before.output ?? null) !== JSON.stringify(after.output ?? null),
+    qa_changed: JSON.stringify(before.qa ?? null) !== JSON.stringify(after.qa ?? null),
+  };
+}
+
+export async function proposeEdit({ manifestPath, options }) {
+  const manifestAbs = await requireInput(manifestPath, "manifest");
+  if (!Array.isArray(options) || options.length < 1 || options.length > 5) {
+    throw new MediaKitError(`options must be an array of 1-5 edit options, got: ${Array.isArray(options) ? `${options.length} options` : typeof options}`, "INVALID_ARG");
+  }
+  let raw;
+  try {
+    raw = await readFile(manifestAbs, "utf8");
+  } catch (e) {
+    throw new MediaKitError(`cannot read manifest ${manifestPath}: ${e.message}`, "INVALID_INPUT");
+  }
+  let doc;
+  try {
+    doc = JSON.parse(raw);
+  } catch (e) {
+    throw new MediaKitError(`manifest is not valid JSON: ${e.message}`, "INVALID_ARG");
+  }
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
+    throw new MediaKitError("manifest must be a JSON object {version, input, steps}", "INVALID_ARG");
+  }
+  const currentRevision = doc.revision ?? 0;
+  if (!Number.isInteger(currentRevision) || currentRevision < 0) {
+    throw new MediaKitError(`manifest revision must be a non-negative integer, got: ${doc.revision}`, "INVALID_ARG");
+  }
+  const baseSha256 = createHash("sha256").update(raw, "utf8").digest("hex");
+  // Lease state is informational only: a proposal writes nothing,
+  // so a held lease never blocks it — but the caller needs to know
+  // whether patch_manifest will accept the apply afterwards. The
+  // lease id is never reported (only its holder can use it).
+  const { lease } = await readEditLeaseFile(manifestAbs);
+  const leaseState = leaseStateOf(lease);
+  const leaseInfo = !lease ? { state: "none" } : leaseState === "active"
+    ? { state: "active", holder: lease.holder, expires_at: lease.expires_at, expires_in_seconds: Math.max(0, Math.ceil((Date.parse(lease.expires_at) - Date.now()) / 1000)) }
+    : { state: leaseState, holder: lease.holder, expires_at: lease.expires_at };
+  const results = [];
+  for (let i = 0; i < options.length; i++) {
+    const opt = options[i];
+    const optLabel = `options[${i}]`;
+    if (!opt || typeof opt !== "object" || Array.isArray(opt) || typeof opt.label !== "string" || !opt.label.trim() || opt.label.length > 80) {
+      results.push({ label: typeof opt?.label === "string" ? opt.label : optLabel, valid: false, errors: [{ code: "INVALID_ARG", message: `${optLabel} needs a label (1-80 characters)` }] });
+      continue;
+    }
+    if (!Array.isArray(opt.ops) || opt.ops.length < 1 || opt.ops.length > 100) {
+      results.push({ label: opt.label, valid: false, errors: [{ code: "INVALID_ARG", message: `${optLabel} ("${opt.label}") ops must be an array of 1-100 operations, got: ${Array.isArray(opt.ops) ? `${opt.ops.length} operations` : typeof opt.ops}` }] });
+      continue;
+    }
+    const { ops: compacted, removed, removed_count } = compactManifestOps(doc, opt.ops);
+    const base = { label: opt.label, ops: compacted, ops_original: opt.ops.length, ops_compacted: removed_count, compacted_away: removed };
+    if (!compacted.length) {
+      results.push({ ...base, valid: false, errors: [{ code: "INVALID_ARG", message: `option "${opt.label}" has no effective change against revision ${currentRevision} — every op is a no-op` }] });
+      continue;
+    }
+    try {
+      // Prove the option with the same checks a real patch takes
+      // (op validation + apply + manifest --dry-run), via the
+      // helpers patchManifest itself uses — so a valid option is
+      // guaranteed committable with the apply arguments below.
+      // No lease check here on purpose: a proposal writes nothing,
+      // and a held lease must never block proposing (the lease
+      // still gates the apply in patch_manifest).
+      validateManifestOps(doc, compacted);
+      const { next, changes } = applyManifestOps(doc, compacted);
+      next.revision = currentRevision + 1;
+      const planned = await validatePatchedManifest(next, manifestAbs);
+      results.push({
+        ...base,
+        valid: true,
+        changes,
+        impact: diffManifestDocs(doc, next),
+        revision_after: currentRevision + 1,
+        candidate: next,
+        validated: { dry_run: true, steps: planned.steps.length, output: planned.output },
+        apply: { tool: "patch_manifest", arguments: { manifest_path: manifestAbs, patch: compacted, expected_revision: currentRevision } },
+      });
+    } catch (e) {
+      results.push({ ...base, valid: false, errors: [{ code: e.code ?? "INVALID_ARG", message: e.message }] });
+    }
+  }
+  const proposalId = createHash("sha256").update(`${baseSha256}\n${JSON.stringify(options)}`, "utf8").digest("hex").slice(0, 16);
+  return {
+    operation: "propose_edit",
+    proposal_id: proposalId,
+    manifest: manifestAbs,
+    base_revision: currentRevision,
+    base_sha256: baseSha256,
+    lease: leaseInfo,
+    options: results,
+    valid_options: results.filter((r) => r.valid).length,
+    total_options: results.length,
+    note: "Apply a valid option with patch_manifest using apply.arguments — expected_revision must still equal base_revision; a stale base is refused with REVISION_MISMATCH, so re-propose after any other write.",
+  };
+}
+
+// Manifest op validation + application, factored out of
+// patchManifest so propose_edit can prove each option the same way
+// patch_manifest proves a real patch (same checks, same messages) —
+// without the lease gate, which guards writes: a proposal writes
+// nothing, so a held lease must never block proposing.
+// patchManifest keeps its lease check; it calls these helpers after it.
+function validateManifestOps(doc, patch) {
+// Validate every op structurally BEFORE touching the doc, so a bad
+// op list fails as a whole instead of half-applying. Ops apply in
+// order, each addressing the list as the previous ops left it
+// (JSON Patch semantics) — so the bounds below simulate the
+// running step count: an add grows it, a remove shrinks it, and a
+// batch that would empty the list is refused at the remove that
+// would take the last step, not after the fact.
+const steps = doc.steps;
+if (!Array.isArray(steps) || !steps.length) {
+  throw new MediaKitError("manifest has no steps to patch", "INVALID_ARG");
+}
+let simLen = steps.length;
+const stepIndex = (v, label) => {
+  if (!Number.isInteger(v) || v < 0 || v >= simLen) {
+    throw new MediaKitError(`${label} must be a step index 0-${simLen - 1}, got: ${v}`, "INVALID_ARG");
+  }
+  return v;
+};
+const checkStepShape = (s, label) => {
+  if (!s || typeof s !== "object" || Array.isArray(s) || typeof s.tool !== "string" || !s.tool.trim()) {
+    throw new MediaKitError(`${label} must be an object {tool, args?} with a tool name`, "INVALID_ARG");
+  }
+  if (s.args !== undefined && s.args !== null && (typeof s.args !== "object" || Array.isArray(s.args))) {
+    throw new MediaKitError(`${label}.args must be an object`, "INVALID_ARG");
+  }
+  for (const k of Object.keys(s)) {
+    if (k !== "tool" && k !== "args") throw new MediaKitError(`${label} does not take "${k}" (only tool, args)`, "INVALID_ARG");
+  }
+};
+for (let i = 0; i < patch.length; i++) {
+  const op = patch[i];
+  const label = `patch[${i}]`;
+  if (!op || typeof op !== "object" || Array.isArray(op) || typeof op.op !== "string") {
+    throw new MediaKitError(`${label} must be an object with an "op"`, "INVALID_ARG");
+  }
+  if (op.op === "set") {
+    if (typeof op.path !== "string" || !op.path.trim()) throw new MediaKitError(`${label} (set) needs a path`, "INVALID_ARG");
+    if (op.value !== null && typeof op.value !== "string" && typeof op.value !== "number" && typeof op.value !== "boolean") {
+      throw new MediaKitError(`${label} (set) value must be a string, number, boolean or null`, "INVALID_ARG");
+    }
+    const parts = op.path.split(".");
+    if (["version", "revision"].includes(parts[0]) || (parts[0] === "steps" && parts.length < 3) || parts.length > 4) {
+      throw new MediaKitError(`${label} (set) cannot set "${op.path}" — version/revision are managed, whole steps change via add/remove/replace_step`, "INVALID_ARG");
+    }
+    if (parts[0] === "steps") {
+      const idx = stepIndex(Number(parts[1]), `${label} (set)`);
+      if (parts.length !== 3 && parts.length !== 4) throw new MediaKitError(`${label} (set) path must be steps.N.tool or steps.N.args.KEY, got: ${op.path}`, "INVALID_ARG");
+      if (parts[2] === "tool" && parts.length !== 3) throw new MediaKitError(`${label} (set) path must be steps.N.tool or steps.N.args.KEY, got: ${op.path}`, "INVALID_ARG");
+      if (parts[2] === "args" && parts.length !== 4) throw new MediaKitError(`${label} (set) path must be steps.N.tool or steps.N.args.KEY, got: ${op.path}`, "INVALID_ARG");
+      if (parts[2] !== "tool" && parts[2] !== "args") throw new MediaKitError(`${label} (set) path must be steps.N.tool or steps.N.args.KEY, got: ${op.path}`, "INVALID_ARG");
+      if (parts[2] === "tool" && (typeof op.value !== "string" || !op.value.trim())) throw new MediaKitError(`${label} (set) steps.${idx}.tool needs a tool name`, "INVALID_ARG");
+    } else if (!["input", "output", "qa"].includes(parts[0]) || parts.length !== 1) {
+      throw new MediaKitError(`${label} (set) path must be input, output, qa, steps.N.tool or steps.N.args.KEY, got: ${op.path}`, "INVALID_ARG");
+    }
+  } else if (op.op === "add_step") {
+    checkStepShape(op.step, `${label} (add_step).step`);
+    if (op.index !== undefined && op.index !== null && (!Number.isInteger(op.index) || op.index < 0 || op.index > simLen)) {
+      throw new MediaKitError(`${label} (add_step) index must be 0-${simLen} (append), got: ${op.index}`, "INVALID_ARG");
+    }
+    simLen += 1;
+  } else if (op.op === "remove_step") {
+    stepIndex(op.index, `${label} (remove_step) index`);
+    if (simLen === 1) throw new MediaKitError(`${label} (remove_step) cannot remove the last remaining step`, "INVALID_ARG");
+    simLen -= 1;
+  } else if (op.op === "replace_step") {
+    stepIndex(op.index, `${label} (replace_step) index`);
+    checkStepShape(op.step, `${label} (replace_step).step`);
+  } else {
+    throw new MediaKitError(`${label}: unknown op "${op.op}" (supported: set, add_step, remove_step, replace_step)`, "INVALID_ARG");
+  }
+}
+}
+
+function applyManifestOps(doc, patch) {
+// Apply to a clone, in order — each op addresses the list as the
+// previous ops left it, exactly as the simulation above checked.
+const next = JSON.parse(JSON.stringify(doc));
+const changes = [];
+for (const op of patch) {
+  if (op.op === "set") {
+    const parts = op.path.split(".");
+    if (parts[0] === "steps") {
+      const idx = Number(parts[1]);
+      if (parts[2] === "tool") {
+        const old = next.steps[idx].tool;
+        next.steps[idx].tool = op.value;
+        changes.push(`set steps.${parts[1]}.tool = ${JSON.stringify(op.value)} (was ${JSON.stringify(old)})`);
+      } else {
+        next.steps[idx].args = next.steps[idx].args ?? {};
+        const old = next.steps[idx].args[parts[3]];
+        next.steps[idx].args[parts[3]] = op.value;
+        changes.push(`set steps.${parts[1]}.args.${parts[3]} = ${JSON.stringify(op.value)} (was ${JSON.stringify(old ?? null)})`);
+      }
+    } else {
+      const old = next[parts[0]];
+      next[parts[0]] = op.value;
+      changes.push(`set ${parts[0]} = ${JSON.stringify(op.value)} (was ${JSON.stringify(old ?? null)})`);
+    }
+  } else if (op.op === "add_step") {
+    const at = op.index ?? next.steps.length;
+    const entry = { tool: op.step.tool, args: op.step.args ?? {} };
+    next.steps.splice(at, 0, entry);
+    changes.push(`add step ${at} (${op.step.tool})`);
+  } else if (op.op === "remove_step") {
+    const removed = next.steps.splice(op.index, 1)[0];
+    changes.push(`remove step ${op.index} (${removed.tool})`);
+  } else if (op.op === "replace_step") {
+    const old = next.steps[op.index].tool;
+    next.steps[op.index] = { tool: op.step.tool, args: op.step.args ?? {} };
+    changes.push(`replace step ${op.index} (${old} -> ${op.step.tool})`);
+  }
+}
+  return { next, changes };
+}
+
+async function validatePatchedManifest(next, manifestAbs) {
+// Prove the patched manifest still lints + plans before writing
+// it: run the real validator (manifest --dry-run) on a temp copy
+// in the same directory, so relative paths resolve identically.
+// A failure here leaves the original file untouched.
+const tmpValidate = path.join(path.dirname(manifestAbs), `.mediakit-patch-validate-${process.pid}-${randomBytes(4).toString("hex")}.json`);
+let planned;
+try {
+  await writeFile(tmpValidate, JSON.stringify(next, null, 2), "utf8");
+  planned = await manifest({ manifestPath: tmpValidate, dryRun: true });
+} catch (e) {
+  throw new MediaKitError(`patched manifest fails validation: ${e.message}`, e.code ?? "INVALID_ARG");
+} finally {
+  await rm(tmpValidate, { force: true }).catch(() => {});
+}
+  return planned;
+}
+
 export async function patchManifest({ manifestPath, patch, expectedRevision, dryRun = false, leaseId = null }) {
   const manifestAbs = await requireInput(manifestPath, "manifest");
   const expected = num(expectedRevision, "expected_revision", { min: 0, integer: true });
@@ -18339,132 +18701,12 @@ export async function patchManifest({ manifestPath, patch, expectedRevision, dry
     throw new MediaKitError(`manifest revision is ${currentRevision}, expected ${expected} — re-read the manifest and retry with the current revision (nothing was written)`, "REVISION_MISMATCH");
   }
 
-  // Validate every op structurally BEFORE touching the doc, so a bad
-  // op list fails as a whole instead of half-applying. Ops apply in
-  // order, each addressing the list as the previous ops left it
-  // (JSON Patch semantics) — so the bounds below simulate the
-  // running step count: an add grows it, a remove shrinks it, and a
-  // batch that would empty the list is refused at the remove that
-  // would take the last step, not after the fact.
-  const steps = doc.steps;
-  if (!Array.isArray(steps) || !steps.length) {
-    throw new MediaKitError("manifest has no steps to patch", "INVALID_ARG");
-  }
-  let simLen = steps.length;
-  const stepIndex = (v, label) => {
-    if (!Number.isInteger(v) || v < 0 || v >= simLen) {
-      throw new MediaKitError(`${label} must be a step index 0-${simLen - 1}, got: ${v}`, "INVALID_ARG");
-    }
-    return v;
-  };
-  const checkStepShape = (s, label) => {
-    if (!s || typeof s !== "object" || Array.isArray(s) || typeof s.tool !== "string" || !s.tool.trim()) {
-      throw new MediaKitError(`${label} must be an object {tool, args?} with a tool name`, "INVALID_ARG");
-    }
-    if (s.args !== undefined && s.args !== null && (typeof s.args !== "object" || Array.isArray(s.args))) {
-      throw new MediaKitError(`${label}.args must be an object`, "INVALID_ARG");
-    }
-    for (const k of Object.keys(s)) {
-      if (k !== "tool" && k !== "args") throw new MediaKitError(`${label} does not take "${k}" (only tool, args)`, "INVALID_ARG");
-    }
-  };
-  for (let i = 0; i < patch.length; i++) {
-    const op = patch[i];
-    const label = `patch[${i}]`;
-    if (!op || typeof op !== "object" || Array.isArray(op) || typeof op.op !== "string") {
-      throw new MediaKitError(`${label} must be an object with an "op"`, "INVALID_ARG");
-    }
-    if (op.op === "set") {
-      if (typeof op.path !== "string" || !op.path.trim()) throw new MediaKitError(`${label} (set) needs a path`, "INVALID_ARG");
-      if (op.value !== null && typeof op.value !== "string" && typeof op.value !== "number" && typeof op.value !== "boolean") {
-        throw new MediaKitError(`${label} (set) value must be a string, number, boolean or null`, "INVALID_ARG");
-      }
-      const parts = op.path.split(".");
-      if (["version", "revision"].includes(parts[0]) || (parts[0] === "steps" && parts.length < 3) || parts.length > 4) {
-        throw new MediaKitError(`${label} (set) cannot set "${op.path}" — version/revision are managed, whole steps change via add/remove/replace_step`, "INVALID_ARG");
-      }
-      if (parts[0] === "steps") {
-        const idx = stepIndex(Number(parts[1]), `${label} (set)`);
-        if (parts.length !== 3 && parts.length !== 4) throw new MediaKitError(`${label} (set) path must be steps.N.tool or steps.N.args.KEY, got: ${op.path}`, "INVALID_ARG");
-        if (parts[2] === "tool" && parts.length !== 3) throw new MediaKitError(`${label} (set) path must be steps.N.tool or steps.N.args.KEY, got: ${op.path}`, "INVALID_ARG");
-        if (parts[2] === "args" && parts.length !== 4) throw new MediaKitError(`${label} (set) path must be steps.N.tool or steps.N.args.KEY, got: ${op.path}`, "INVALID_ARG");
-        if (parts[2] !== "tool" && parts[2] !== "args") throw new MediaKitError(`${label} (set) path must be steps.N.tool or steps.N.args.KEY, got: ${op.path}`, "INVALID_ARG");
-        if (parts[2] === "tool" && (typeof op.value !== "string" || !op.value.trim())) throw new MediaKitError(`${label} (set) steps.${idx}.tool needs a tool name`, "INVALID_ARG");
-      } else if (!["input", "output", "qa"].includes(parts[0]) || parts.length !== 1) {
-        throw new MediaKitError(`${label} (set) path must be input, output, qa, steps.N.tool or steps.N.args.KEY, got: ${op.path}`, "INVALID_ARG");
-      }
-    } else if (op.op === "add_step") {
-      checkStepShape(op.step, `${label} (add_step).step`);
-      if (op.index !== undefined && op.index !== null && (!Number.isInteger(op.index) || op.index < 0 || op.index > simLen)) {
-        throw new MediaKitError(`${label} (add_step) index must be 0-${simLen} (append), got: ${op.index}`, "INVALID_ARG");
-      }
-      simLen += 1;
-    } else if (op.op === "remove_step") {
-      stepIndex(op.index, `${label} (remove_step) index`);
-      if (simLen === 1) throw new MediaKitError(`${label} (remove_step) cannot remove the last remaining step`, "INVALID_ARG");
-      simLen -= 1;
-    } else if (op.op === "replace_step") {
-      stepIndex(op.index, `${label} (replace_step) index`);
-      checkStepShape(op.step, `${label} (replace_step).step`);
-    } else {
-      throw new MediaKitError(`${label}: unknown op "${op.op}" (supported: set, add_step, remove_step, replace_step)`, "INVALID_ARG");
-    }
-  }
+  validateManifestOps(doc, patch);
 
-  // Apply to a clone, in order — each op addresses the list as the
-  // previous ops left it, exactly as the simulation above checked.
-  const next = JSON.parse(JSON.stringify(doc));
-  const changes = [];
-  for (const op of patch) {
-    if (op.op === "set") {
-      const parts = op.path.split(".");
-      if (parts[0] === "steps") {
-        const idx = Number(parts[1]);
-        if (parts[2] === "tool") {
-          const old = next.steps[idx].tool;
-          next.steps[idx].tool = op.value;
-          changes.push(`set steps.${parts[1]}.tool = ${JSON.stringify(op.value)} (was ${JSON.stringify(old)})`);
-        } else {
-          next.steps[idx].args = next.steps[idx].args ?? {};
-          const old = next.steps[idx].args[parts[3]];
-          next.steps[idx].args[parts[3]] = op.value;
-          changes.push(`set steps.${parts[1]}.args.${parts[3]} = ${JSON.stringify(op.value)} (was ${JSON.stringify(old ?? null)})`);
-        }
-      } else {
-        const old = next[parts[0]];
-        next[parts[0]] = op.value;
-        changes.push(`set ${parts[0]} = ${JSON.stringify(op.value)} (was ${JSON.stringify(old ?? null)})`);
-      }
-    } else if (op.op === "add_step") {
-      const at = op.index ?? next.steps.length;
-      const entry = { tool: op.step.tool, args: op.step.args ?? {} };
-      next.steps.splice(at, 0, entry);
-      changes.push(`add step ${at} (${op.step.tool})`);
-    } else if (op.op === "remove_step") {
-      const removed = next.steps.splice(op.index, 1)[0];
-      changes.push(`remove step ${op.index} (${removed.tool})`);
-    } else if (op.op === "replace_step") {
-      const old = next.steps[op.index].tool;
-      next.steps[op.index] = { tool: op.step.tool, args: op.step.args ?? {} };
-      changes.push(`replace step ${op.index} (${old} -> ${op.step.tool})`);
-    }
-  }
+  const { next, changes } = applyManifestOps(doc, patch);
   next.revision = currentRevision + 1;
 
-  // Prove the patched manifest still lints + plans before writing
-  // it: run the real validator (manifest --dry-run) on a temp copy
-  // in the same directory, so relative paths resolve identically.
-  // A failure here leaves the original file untouched.
-  const tmpValidate = path.join(path.dirname(manifestAbs), `.mediakit-patch-validate-${process.pid}-${randomBytes(4).toString("hex")}.json`);
-  let planned;
-  try {
-    await writeFile(tmpValidate, JSON.stringify(next, null, 2), "utf8");
-    planned = await manifest({ manifestPath: tmpValidate, dryRun: true });
-  } catch (e) {
-    throw new MediaKitError(`patched manifest fails validation: ${e.message}`, e.code ?? "INVALID_ARG");
-  } finally {
-    await rm(tmpValidate, { force: true }).catch(() => {});
-  }
+  const planned = await validatePatchedManifest(next, manifestAbs);
 
   // Dry-run: the candidate is proven, return it without writing
   // anything — no .bak, no .partial, no revision bump. The caller

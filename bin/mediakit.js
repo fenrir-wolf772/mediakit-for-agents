@@ -1222,6 +1222,14 @@ const COMMANDS = {
       ["--lease-id", "Edit-lease id from `lease acquire` — required to write while your own lease is active; a patch without it is refused with LEASE_HELD while any lease is held"],
     ],
   },
+  "propose-edit": {
+    usage: "mediakit propose-edit <manifest.json> --options-file <options.json>",
+    desc: "Propose edit options for a manifest before committing to one (OpenChatCut's proposal idea): each option in --options-file is {label, ops} with 1-100 patch ops in the patch-manifest format. The call snapshots the base document (base_revision + base_sha256), compacts each option's ops (a `set` that writes the value already there is dropped; adjacent `set`s on the same path fold to the last one), proves each option with the same checks patch-manifest uses, and diffs it against the base (steps/tools added/removed/changed, input/output/qa flips). An option that fails validation comes back valid:false with the error instead of failing the whole proposal. Nothing is written — no file, no .bak, no revision bump — and a held edit lease never blocks proposing (the lease state is reported). Apply a valid option with `mediakit patch-manifest` using the option's apply.arguments; expected_revision must still equal base_revision.",
+    args: [{ name: "manifest", required: true }],
+    options: [
+      ["--options-file", "JSON file holding an array of 1-5 options {label, ops} (required)"],
+    ],
+  },
   lease: {
     usage: "mediakit lease <acquire|release|renew|status> <manifest.json> [--holder <id>] [--lease-id <id>] [--ttl <seconds>]",
     desc: "Hold a cooperative edit lease on a manifest (CutVoke's edit_lock idea: a TTL write lock for multi-step edits). The patch-manifest revision guard only checks at the single moment of a write — two writers can both read revision 5 and the second one's patch silently wins — so a director editing across several calls acquires a lease first: while it is active, patch-manifest refuses every write that does not present the matching --lease-id (LEASE_HELD, naming the holder and the seconds left). acquire needs --holder (a name for who holds it) and returns a lease_id — keep it, only the holder can renew or release; --ttl clamps to 120-300s (default 180) and both the requested and applied TTL are reported; re-acquiring with the same holder renews the same lease_id. renew extends the expiry by --ttl; release deletes the lease file; status reports state none/active/expired with holder, expiry and seconds left. The lease is one JSON sidecar <manifest>.lease.json written atomically; an expired lease stops blocking, a corrupt lease file is treated as no lease, and the LEASE_HELD error never names the lease_id. A lease is cooperative, not security.",
@@ -2660,6 +2668,22 @@ async function main() {
           expectedRevision: numOpt(opts, "expected_revision"),
           dryRun: opts.dry_run === true,
           leaseId: opts.lease_id ?? null,
+        });
+        break;
+      }
+      case "propose-edit": {
+        if (!positional[0]) fail("missing manifest file: mediakit propose-edit <manifest.json> --options-file <options.json>");
+        if (!opts.options_file) fail("missing required option: --options-file <options.json> (JSON array of 1-5 options {label, ops})");
+        const { readFile } = await import("node:fs/promises");
+        let options;
+        try {
+          options = JSON.parse(await readFile(opts.options_file, "utf8"));
+        } catch (e) {
+          fail(`could not read options JSON ${opts.options_file}: ${e.message}`);
+        }
+        result = await core.proposeEdit({
+          manifestPath: positional[0],
+          options,
         });
         break;
       }

@@ -1285,6 +1285,27 @@ Inspect the candidate, then re-issue the same call without
 against a stale revision is still refused, because a candidate
 computed from a stale base is meaningless.
 
+When you are choosing between several edits instead of committing to
+one, propose them first (`propose_edit`, OpenChatCut's proposal
+idea): one call with 1–5 options, each a label + 1–100 patch ops in
+the `patch_manifest` format. The call snapshots the base document
+(`base_revision` + `base_sha256` of the exact bytes read), compacts
+each option's ops — a `set` that writes the value already there is
+a no-op and is dropped, adjacent `set`s on the same path fold to the
+last one, and the compaction is reported per option (`ops_compacted`
++ `compacted_away`), never hidden — proves each option with the same
+checks `patch_manifest` uses, and diffs it against the base
+(`impact`: steps added/removed/changed, tools added/removed,
+`input`/`output`/`qa` flips). An option that fails validation comes
+back `valid:false` with the error instead of failing the whole
+proposal, so a risky option can sit next to a safe one. Nothing is
+written — no file, no `.bak`, no revision bump — and a held edit
+lease never blocks proposing (the lease state is reported, never the
+lease id). Apply the option you pick with `patch_manifest` using
+the option's `apply.arguments`; `expected_revision` must still
+equal `base_revision`, so a stale base is refused with
+`REVISION_MISMATCH` and you re-propose after any other write.
+
 The revision guard only checks at the single moment of a write — two
 writers can both read revision 5, both patch, and the second one's
 patch silently wins. For a multi-step edit (plan → preview →
@@ -2040,13 +2061,15 @@ one tier — `mediakit safety` lists them, and the MCP `tools/list`
 carries the same tiers as standard annotations
 (`readOnlyHint` / `destructiveHint` / `idempotentHint` /
 `openWorldHint`), so a client can gate on them instead of trusting
-prose. READ (30 tools) only probes and writes nothing; PLAN (4)
+prose. READ (30 tools) only probes and writes nothing; PLAN (5)
 answers a question by transient work and leaves no artifact —
 `determinism` renders to a hidden work dir that is removed,
 `verify_cuts` renders a draft to temp (plus caller-requested
 review strips when `strips: true`), `estimate_conversion`
-sample-encodes to temp, `job` only reads/cancels job state; WRITE
-(60) produces a file the caller asked for and never overwrites its
+sample-encodes to temp, `job` only reads/cancels job state,
+`propose_edit` validates options with the patch_manifest helpers
+and writes nothing; WRITE
+(62) produces a file the caller asked for and never overwrites its
 own input; DESTRUCTIVE (1 — `patch_manifest`, guarded by
 `expected_revision` plus a `.bak` backup) replaces a user artifact
 in place. The tier is a property of the tool, not its arguments: a
@@ -2161,7 +2184,7 @@ Off by default; the verify stays probe-only without it.
 
 ### 58h. Browse the catalog before you dump it — progressive discovery
 
-97 tools is too many schemas to pay for in every turn. Don't start
+98 tools is too many schemas to pay for in every turn. Don't start
 from `tools/list` — start from `list_operations`: one compact line
 per tool (name, family, tier, one-sentence summary), optionally
 narrowed with `family` (`inspect`, `edit`, `text`, `image`,

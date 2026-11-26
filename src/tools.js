@@ -41,6 +41,21 @@ async function safe(fn) {
 
 const pathSchema = z.string().min(1).describe("Path to the file (relative or absolute)");
 
+// The patch op union, shared by patch_manifest and propose_edit so
+// the two tools can never drift apart on what an op looks like
+// (propose_edit proves each option with a patch_manifest dry-run,
+// so its schema must accept exactly the ops patch_manifest does).
+const manifestPatchOpSchema = z.union([
+  z.object({ op: z.literal("set"), path: z.string().min(1), value: z.union([z.string(), z.number(), z.boolean(), z.null()]) }).strict(),
+  z.object({ op: z.literal("add_step"), step: z.object({ tool: z.string().min(1), args: z.record(z.any()).optional() }).passthrough(), index: z.number().int().min(0).optional() }).strict(),
+  z.object({ op: z.literal("remove_step"), index: z.number().int().min(0) }).strict(),
+  z.object({ op: z.literal("replace_step"), index: z.number().int().min(0), step: z.object({ tool: z.string().min(1), args: z.record(z.any()).optional() }).passthrough() }).strict(),
+  // Catch-all so an unknown op name reaches core instead of dying
+  // in zod with a bare "Invalid input" — core names the op
+  // (unknown op "move_step") and the supported list.
+  z.object({ op: z.string() }).passthrough(),
+]);
+
 export const TOOL_DEFS = [
   {
     name: "probe",
@@ -1917,16 +1932,7 @@ export const TOOL_DEFS = [
     expected_revision: z.number().int().min(0).describe("The revision the caller last read from the file (absent = 0). Must match the file's current revision or the call is refused with REVISION_MISMATCH and nothing is written"),
     lease_id: z.string().min(1).optional().describe("Edit-lease id from `lease acquire` (optional). While another holder's lease is active on this manifest, a patch without the matching lease_id is refused with LEASE_HELD — pass the id to write through your own lease"),
     dry_run: z.boolean().default(false).describe("Preview only: run the revision guard + op checks + manifest validation and return the exact candidate document (with revision + 1) in `candidate`, writing nothing — no .bak, no revision bump. Re-issue without dry_run to commit"),
-    patch: z.array(z.union([
-      z.object({ op: z.literal("set"), path: z.string().min(1), value: z.union([z.string(), z.number(), z.boolean(), z.null()]) }).strict(),
-      z.object({ op: z.literal("add_step"), step: z.object({ tool: z.string().min(1), args: z.record(z.any()).optional() }).passthrough(), index: z.number().int().min(0).optional() }).strict(),
-      z.object({ op: z.literal("remove_step"), index: z.number().int().min(0) }).strict(),
-      z.object({ op: z.literal("replace_step"), index: z.number().int().min(0), step: z.object({ tool: z.string().min(1), args: z.record(z.any()).optional() }).passthrough() }).strict(),
-      // Catch-all so an unknown op name reaches core instead of dying
-      // in zod with a bare "Invalid input" — core names the op
-      // (unknown op "move_step") and the supported list.
-      z.object({ op: z.string() }).passthrough(),
-    ])).min(1).max(100).describe("1-100 patch operations, applied in order — each op addresses the list as the previous ops left it"),
+    patch: z.array(manifestPatchOpSchema).min(1).max(100).describe("1-100 patch operations, applied in order — each op addresses the list as the previous ops left it"),
   },
     handler: async (a) => safe(() => core.patchManifest({
     manifestPath: a.manifest_path,
@@ -1934,6 +1940,24 @@ export const TOOL_DEFS = [
     expectedRevision: a.expected_revision,
     dryRun: a.dry_run === true,
     leaseId: a.lease_id ?? null,
+  })),
+  },
+
+
+  {
+    name: "propose_edit",
+    tier: "PLAN",
+    description: "Propose edit options for a manifest before committing to one (0xsline/OpenChatCut's proposal idea: a director never edits a timeline directly — it proposes options, the caller picks one, and the commit replays it atomically). Each option is a label + 1-100 patch ops in the patch_manifest format; the call snapshots the base document (base_revision + base_sha256 of the exact bytes read), compacts each option's ops (a `set` that writes the value already there is a no-op and is dropped; adjacent `set`s on the same path fold to the last one — the compaction is reported per option, never hidden), proves each option with the same checks patch_manifest uses (op validation + apply + manifest --dry-run, via the shared helpers), and diffs it against the base: steps added/removed/changed, tools added/removed, input/output/qa flips. An option that fails validation comes back valid:false with the error instead of failing the whole proposal, so a risky option can sit next to a safe one. Nothing is written — no file, no .bak, no revision bump — and a held edit lease never blocks proposing (the lease state is reported so the caller knows whether patch_manifest will accept the apply; the lease id is never printed). Apply a valid option with patch_manifest using the option's apply.arguments; expected_revision must still equal base_revision, so a stale base is refused with REVISION_MISMATCH and the caller re-proposes after any other write.",
+    schema: {
+    manifest_path: pathSchema.describe("Path to the manifest JSON file to propose edits for"),
+    options: z.array(z.object({
+      label: z.string().min(1).max(80).describe("Short label for the option, shown when the caller picks one (1-80 characters)"),
+      ops: z.array(manifestPatchOpSchema).min(1).max(100).describe("1-100 patch operations in the patch_manifest format, applied in order — each op addresses the list as the previous ops left it"),
+    }).strict()).min(1).max(5).describe("1-5 edit options to compare — each is validated and diffed independently"),
+  },
+    handler: async (a) => safe(() => core.proposeEdit({
+    manifestPath: a.manifest_path,
+    options: a.options,
   })),
   },
 
@@ -2490,7 +2514,7 @@ export const TOOL_DEFS = [
   {
     name: "safety",
     tier: "READ",
-    description: "Safety tiers for every MediaKit tool (EncodeX's safety-tier idea): READ tools only probe and write nothing (probe, check, hook, diagnose); PLAN tools answer a question by transient work and leave no artifact (determinism renders to a hidden work dir that is removed, verify_cuts renders a draft to temp — plus caller-requested review strips when strips:true and the cut-sheet overview when cut_sheet:true, estimate_conversion sample-encodes to temp, job only reads/cancels job state); WRITE tools produce a file the caller asked for and never overwrite their own input (prepareOutput refuses that); DESTRUCTIVE tools replace or remove a user artifact in place — only patch_manifest, and it is guarded by expected_revision plus a .bak backup. Returns the tier table with every tool named, the counts, and the rules. Read this before letting an agent loose on a workspace.",
+    description: "Safety tiers for every MediaKit tool (EncodeX's safety-tier idea): READ tools only probe and write nothing (probe, check, hook, diagnose); PLAN tools answer a question by transient work and leave no artifact (determinism renders to a hidden work dir that is removed, verify_cuts renders a draft to temp — plus caller-requested review strips when strips:true and the cut-sheet overview when cut_sheet:true, estimate_conversion sample-encodes to temp, job only reads/cancels job state, propose_edit validates options with the patch_manifest helpers and writes nothing); WRITE tools produce a file the caller asked for and never overwrite their own input (prepareOutput refuses that); DESTRUCTIVE tools replace or remove a user artifact in place — only patch_manifest, and it is guarded by expected_revision plus a .bak backup. Returns the tier table with every tool named, the counts, and the rules. Read this before letting an agent loose on a workspace.",
     schema: {},
     handler: async () => safe(() => listSafetyTiers()),
   },
@@ -2576,7 +2600,7 @@ export const TOOL_DEFS = [
   {
     name: "list_operations",
     tier: "READ",
-    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 97 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 98 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
     schema: {
     family: z.enum(["inspect", "edit", "text", "image", "assemble", "meta"]).optional().describe("Narrow to one family; omit for the whole catalog"),
   },
@@ -2726,7 +2750,7 @@ export function listSafetyTiers() {
 }
 
 // ---------------------------------------------------------------- progressive discovery
-// The catalog is 97 tools and tools/list dumps the full JSON schema
+// The catalog is 98 tools and tools/list dumps the full JSON schema
 // of every one on every turn — kinocut's answer is progressive
 // discovery: a compact list first, full schema only for the tools
 // actually used (lượt 147, idea: KyaniteLabs/kinocut
@@ -2774,7 +2798,7 @@ export const TOOL_FAMILY_OF = {
   // image (8)
   thumbnail: "image", frames: "image", extract_frames: "image", preview_compare: "image", image_to_video: "image",
   slideshow: "image", export_gif: "image", svg_animate: "image",
-  // assemble (16)
+  // assemble (17)
   assemble: "assemble", manifest: "assemble", patch_manifest: "assemble",
   init_project: "assemble", export_timeline: "assemble", job: "assemble",
   release_checkpoint: "assemble", package: "assemble", publish_kit: "assemble",
@@ -2782,7 +2806,7 @@ export const TOOL_FAMILY_OF = {
   validate_template_package: "assemble",
   validate_shot_spec: "assemble",
   project_summary: "assemble",
-  lease: "assemble",
+  lease: "assemble", propose_edit: "assemble",
   // meta (2)
   list_operations: "meta", describe_operation: "meta",
 };
