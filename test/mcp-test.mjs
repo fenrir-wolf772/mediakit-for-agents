@@ -7899,6 +7899,47 @@ try {
   chunkBigOverlapThrew = /must not overlap/.test(e.message ?? "");
 }
 checkOk(chunkBigOverlapThrew === true, "chunkCaptions still refuses a 200ms overlap", "no throw or wrong message");
+// A word fully inside the previous one with a small overlap (the
+// "Pick"/"a" case from round 174: "a" 4.62-4.66 inside "Pick" 4.60-4.70)
+// is repaired, not refused: the previous word's end is trimmed to
+// this word's start and the repair is warned + counted.
+const chunkedContained = chunkCaptions([
+  { word: "Pick", start: 4.6, end: 4.7 },
+  { word: "a", start: 4.62, end: 4.66 },
+  { word: "test", start: 4.66, end: 4.9 },
+]);
+checkOk(chunkedContained.cues.length === 1 && chunkedContained.cues[0]?.text === "Pick a test" && chunkedContained.cues[0]?.end === 4.9 && chunkedContained.repaired_words === 1 && chunkedContained.warnings.length === 1 && /trimmed from 4.700s to 4.620s/.test(chunkedContained.warnings[0]), "chunkCaptions repairs a word fully inside the previous one (small overlap) by trimming the previous end", JSON.stringify(chunkedContained.warnings));
+// ...but a fully-contained word with a big overlap still refuses.
+let chunkContainedBigThrew = false;
+try {
+  chunkCaptions([
+    { word: "Pick", start: 4.6, end: 4.9 },
+    { word: "a", start: 4.62, end: 4.66 },
+  ]);
+} catch (e) {
+  chunkContainedBigThrew = /must not overlap/.test(e.message ?? "");
+}
+checkOk(chunkContainedBigThrew === true, "chunkCaptions still refuses a word fully inside the previous one when the overlap is over 100ms", "no throw or wrong message");
+// audio_duration clamps the last word (whisper.cpp tiny overshoot:
+// "last" stamped to 24.66s on 24.0s of audio) and counts it.
+const chunkedClamp = chunkCaptions([
+  { word: "One", start: 0, end: 0.5 }, { word: "two", start: 0.5, end: 1.0 },
+  { word: "last", start: 23.5, end: 24.66 },
+], { audioDuration: 24 });
+checkOk(chunkedClamp.cues[chunkedClamp.cues.length - 1]?.end === 24 && chunkedClamp.clamped_words === 1 && chunkedClamp.audio_duration === 24 && chunkedClamp.warnings.some((w) => /clamped to the audio duration 24.000s/.test(w)), "chunkCaptions clamps a word end overshooting the audio duration and counts it", JSON.stringify(chunkedClamp.cues.map((c) => c.end)));
+// A word starting at/after the audio duration is dropped, warned,
+// and counted — the kept words still chunk normally.
+const chunkedDrop = chunkCaptions([
+  { word: "One", start: 0, end: 0.5 },
+  { word: "ghost", start: 24.5, end: 25.0 },
+], { audioDuration: 24 });
+checkOk(chunkedDrop.cues.length === 1 && chunkedDrop.cues[0]?.text === "One" && chunkedDrop.dropped_words === 1 && chunkedDrop.words_in === 1 && chunkedDrop.warnings.some((w) => /dropped \(ASR overshoot\)/.test(w)), "chunkCaptions drops a word starting at/after the audio duration and warns", JSON.stringify(chunkedDrop.warnings));
+let chunkAllDroppedThrew = false;
+try { chunkCaptions([{ word: "x", start: 25, end: 26 }], { audioDuration: 24 }); } catch (e) { chunkAllDroppedThrew = /nothing to chunk/.test(e.message ?? ""); }
+checkOk(chunkAllDroppedThrew === true, "chunkCaptions refuses when every word starts at/after the audio duration", "no throw or wrong message");
+let chunkBadDurationThrew = false;
+try { chunkCaptions([{ word: "x", start: 0, end: 1 }], { audioDuration: 0 }); } catch (e) { chunkBadDurationThrew = /positive duration/.test(e.message ?? ""); }
+checkOk(chunkBadDurationThrew === true, "chunkCaptions refuses a non-positive audio_duration", "no throw or wrong message");
 // Errors: cues + words together, and neither.
 const genBothRes = await client.callTool({
   name: "generate_srt",
@@ -7956,6 +7997,32 @@ const chunkJitterRes = await client.callTool({
 });
 const chunkJitterJson = JSON.parse(chunkJitterRes.content[0].text);
 checkOk(chunkJitterRes.isError !== true && chunkJitterJson.cues_out === 1 && chunkJitterJson.warnings?.length === 1 && /clamped/.test(chunkJitterJson.warnings[0] ?? ""), "chunk_captions clamps a 40ms ASR overlap over MCP and warns", JSON.stringify(chunkJitterJson.warnings));
+// MCP: audio_duration clamps the overshooting last word over the wire,
+// and the contained-word repair works inline too.
+const chunkClampRes = await client.callTool({
+  name: "chunk_captions",
+  arguments: {
+    words: [{ word: "One", start: 0, end: 0.5 }, { word: "last", start: 23.5, end: 24.66 }],
+    audio_duration: 24,
+    output: path.join(root, "outputs/mcp-chunk-clamp.json"),
+  },
+});
+const chunkClampJson = JSON.parse(chunkClampRes.content[0].text);
+checkOk(chunkClampRes.isError !== true && chunkClampJson.cues[chunkClampJson.cues.length - 1]?.end === 24 && chunkClampJson.clamped_words === 1 && chunkClampJson.audio_duration === 24, "chunk_captions audio_duration clamps the last cue end to 24s over MCP", JSON.stringify(chunkClampJson.cues.map((c) => c.end)));
+const chunkRepairRes = await client.callTool({
+  name: "chunk_captions",
+  arguments: {
+    words: [{ word: "Pick", start: 4.6, end: 4.7 }, { word: "a", start: 4.62, end: 4.66 }, { word: "test", start: 4.66, end: 4.9 }],
+    output: path.join(root, "outputs/mcp-chunk-repair.json"),
+  },
+});
+const chunkRepairJson = JSON.parse(chunkRepairRes.content[0].text);
+checkOk(chunkRepairRes.isError !== true && chunkRepairJson.cues_out === 1 && chunkRepairJson.cues[0]?.text === "Pick a test" && chunkRepairJson.repaired_words === 1, "chunk_captions repairs the contained word over MCP instead of refusing", JSON.stringify(chunkRepairJson.cues));
+// CLI: --audio-duration clamps too (MM:SS form accepted). Fixture word
+// "runs" straddles 3.1s (3.0-3.2) so its end clamps to 3.1; the 4 words
+// starting at/after 3.1 drop.
+const chunkCliClampJson = await runCliJson(["chunk-captions", "--words-file", path.join(root, "test/chunk-words.json"), "-o", path.join(root, "outputs/mcp-chunk-cli-clamp.json"), "--audio-duration", "0:03.1"]);
+checkOk(chunkCliClampJson.cues[chunkCliClampJson.cues.length - 1]?.end === 3.1 && chunkCliClampJson.clamped_words === 1 && chunkCliClampJson.dropped_words === 4 && chunkCliClampJson.audio_duration === 3.1, "CLI chunk-captions --audio-duration 0:03.1 clamps the last cue end to 3.1s and drops 4 later words", JSON.stringify(chunkCliClampJson.cues.map((c) => c.end)));
 
 // publish_kit: thumbnail 1280x720 from the 10s fixture + 5 titles +
 // chapters inside the measured duration -> metadata.md + publishing.json.

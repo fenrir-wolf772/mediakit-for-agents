@@ -2715,7 +2715,7 @@
       "family": "text",
       "tier": "WRITE",
       "summary": "Chunk word timings into subtitle cues (the director's caption step): words from transcribe --word-timestamps become cues [{start, end, text}] in a .json file,…",
-      "description": "Chunk word timings into subtitle cues (the director's caption step): words from transcribe --word-timestamps become cues [{start, end, text}] in a .json file, ready for generate_srt (or for burn_captions via --words-file). Defaults are the locked TikTok standard: at most 6 words per cue, 84 chars (2 lines), split on pauses over 0.4s, on sentence ends, and — with split_on_punctuation — after a comma/semicolon/colon once the cue already holds 3 words; a cue never ends on a stranded word like 'the'/'of'. Pure text, no ffmpeg: the grouping is deterministic, same words in, same cues out. The result returns the cues plus stats (words_in, cues_out, max_words_in_cue, split_reasons) — a cue cut by a sentence end or a pause may hold fewer than 3 words, that is the rule, not a bug. Pass words inline or a words_file, never both.",
+      "description": "Chunk word timings into subtitle cues (the director's caption step): words from transcribe --word-timestamps become cues [{start, end, text}] in a .json file, ready for generate_srt (or for burn_captions via --words-file). Defaults are the locked TikTok standard: at most 6 words per cue, 84 chars (2 lines), split on pauses over 0.4s, on sentence ends, and — with split_on_punctuation — after a comma/semicolon/colon once the cue already holds 3 words; a cue never ends on a stranded word like 'the'/'of'. Pure text, no ffmpeg: the grouping is deterministic, same words in, same cues out. The result returns the cues plus stats (words_in, cues_out, max_words_in_cue, split_reasons) — a cue cut by a sentence end or a pause may hold fewer than 3 words, that is the rule, not a bug. ASR jitter is repaired, never hidden: a word starting up to 100ms before the previous ends is clamped and warned, and a word fully inside the previous one with overlap up to 100ms has the previous word's end trimmed to its start and warned; a bigger overlap still refuses. Pass audio_duration (seconds or MM:SS, the measured length of the voice audio) and word ends are clamped to it, words starting at/after it are dropped — whisper.cpp tiny can stamp the last word past the end of the audio. Pass words inline or a words_file, never both.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2797,6 +2797,13 @@
             "type": "boolean",
             "default": true,
             "description": "Also split after a comma/semicolon/colon once the cue holds 3 words (default true); sentence ends always split"
+          },
+          "audio_duration": {
+            "type": [
+              "number",
+              "string"
+            ],
+            "description": "Measured length of the voice audio, seconds or \"MM:SS\" — word/cue ends are clamped to it and words starting at/after it are dropped (whisper.cpp tiny can overshoot the last word past the end of the audio); omit when unknown"
           }
         },
         "required": [
@@ -6356,5 +6363,5 @@
       }
     }
   ],
-  "spec_hash": "ee85074831f93e9f4808e855fa9f10968e2c10222cdf2c9086532a9dc583ede0"
+  "spec_hash": "ea01a8bb8c8875a8c4c4573104eca2032d3788c3e1d8e50a9dca71b9cef45bbe"
 }

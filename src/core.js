@@ -4390,6 +4390,19 @@ export function chunkCaptions(words, opts = {}) {
   if (typeof splitOnPunctuation !== "boolean") {
     throw new MediaKitError("split_on_punctuation must be true or false", "INVALID_ARG");
   }
+  // audioDuration (seconds or "MM:SS", optional): whisper.cpp tiny can
+  // stamp the last word past the end of the audio (overshoot ~0.8-1.2s
+  // seen in rounds 173/174), which used to make the last cue run past
+  // the film. When known, clamp word ends to it and drop words that
+  // start at/after it — never silently, always warned and counted.
+  let audioDurationMs = null;
+  if (opts.audioDuration !== undefined && opts.audioDuration !== null) {
+    const audioDurationS = parseTime(opts.audioDuration, "audio_duration");
+    if (!(audioDurationS > 0)) {
+      throw new MediaKitError(`audio_duration must be a positive duration, got ${opts.audioDuration}`, "INVALID_ARG");
+    }
+    audioDurationMs = Math.round(audioDurationS * 1000);
+  }
   const lineChars = Math.max(10, Math.floor(maxChars / 2));
   if (!Array.isArray(words) || words.length === 0) {
     throw new MediaKitError("chunkCaptions needs a non-empty words array", "INVALID_ARG");
@@ -4412,16 +4425,65 @@ export function chunkCaptions(words, opts = {}) {
     }
     return { startMs: Math.round(start * 1000), endMs: Math.round(end * 1000), word: w.word.trim() };
   });
+  // Clamp to the known audio duration first, so the overlap repair
+  // below sees the clamped timings, not the overshot ones.
+  const clampWarnings = [];
+  let clampedWords = 0;
+  let droppedWords = 0;
+  if (audioDurationMs !== null) {
+    const kept = [];
+    for (const w of normalized) {
+      if (w.startMs >= audioDurationMs) {
+        droppedWords++;
+        if (droppedWords === 1) {
+          clampWarnings.push(`word "${w.word}" starts at ${(w.startMs / 1000).toFixed(3)}s, at/after the audio duration ${(audioDurationMs / 1000).toFixed(3)}s — dropped (ASR overshoot)`);
+        }
+        continue;
+      }
+      if (w.endMs > audioDurationMs) {
+        clampedWords++;
+        w.endMs = audioDurationMs;
+      }
+      kept.push(w);
+    }
+    if (droppedWords > 1) {
+      clampWarnings.push(`${droppedWords - 1} more word(s) starting at/after the audio duration were dropped`);
+    }
+    if (clampedWords > 0) {
+      clampWarnings.push(`${clampedWords} word end(s) clamped to the audio duration ${(audioDurationMs / 1000).toFixed(3)}s (ASR overshoot)`);
+    }
+    if (kept.length === 0) {
+      throw new MediaKitError(`all words start at/after the audio duration ${(audioDurationMs / 1000).toFixed(3)}s — nothing to chunk`, "INVALID_ARG");
+    }
+    normalized.length = 0;
+    normalized.push(...kept);
+  }
   // Real ASR word timings jitter: a word can start a few ms before the
   // previous ends (whisper.cpp does this). Clamp micro-overlaps (<=100ms)
-  // to the previous end and warn; anything bigger — or a word fully
-  // inside the previous one — is genuinely bad input and still refuses,
-  // so a broken transcript cannot silently re-time.
-  const clampWarnings = [];
+  // to the previous end and warn; anything bigger is genuinely bad
+  // input and still refuses, so a broken transcript cannot silently
+  // re-time. One more jitter shape: a word fully INSIDE the previous
+  // one ("a" 4.62-4.66 inside "Pick" 4.60-4.70, seen in round 174) —
+  // when the overlap is also <=100ms, trim the previous word's end to
+  // this word's start instead of refusing the whole file; a bigger
+  // containment still refuses.
+  let repairedWords = 0;
   for (let i = 1; i < normalized.length; i++) {
     if (normalized[i].startMs < normalized[i - 1].endMs) {
       const overlapMs = normalized[i - 1].endMs - normalized[i].startMs;
-      if (overlapMs > 100 || normalized[i].endMs <= normalized[i - 1].endMs) {
+      if (normalized[i].endMs <= normalized[i - 1].endMs) {
+        if (overlapMs <= 100 && normalized[i].startMs > normalized[i - 1].startMs) {
+          clampWarnings.push(`word ${i + 1} ("${normalized[i].word}") sits fully inside word ${i} ("${normalized[i - 1].word}") — word ${i} end trimmed from ${(normalized[i - 1].endMs / 1000).toFixed(3)}s to ${(normalized[i].startMs / 1000).toFixed(3)}s (ASR jitter)`);
+          normalized[i - 1].endMs = normalized[i].startMs;
+          repairedWords++;
+          continue;
+        }
+        throw new MediaKitError(
+          `word ${i + 1} starts at ${(normalized[i].startMs / 1000).toFixed(3)}s, before word ${i} ends at ${(normalized[i - 1].endMs / 1000).toFixed(3)}s — words must be in order and must not overlap`,
+          "INVALID_ARG",
+        );
+      }
+      if (overlapMs > 100) {
         throw new MediaKitError(
           `word ${i + 1} starts at ${(normalized[i].startMs / 1000).toFixed(3)}s, before word ${i} ends at ${(normalized[i - 1].endMs / 1000).toFixed(3)}s — words must be in order and must not overlap`,
           "INVALID_ARG",
@@ -4496,6 +4558,10 @@ export function chunkCaptions(words, opts = {}) {
     longest_cue_chars: Math.max(...cues.map((c) => c.text.replace(/\n/g, " ").length)),
     split_reasons: splitReasons,
     warnings,
+    audio_duration: audioDurationMs === null ? null : +(audioDurationMs / 1000).toFixed(3),
+    repaired_words: repairedWords,
+    clamped_words: clampedWords,
+    dropped_words: droppedWords,
   };
 }
 
@@ -4594,7 +4660,7 @@ export async function generateSrt({ cues = null, words = null, output }) {
 // 6 words per cue, 84 chars (2 lines), split on pauses > 0.4s and on
 // punctuation. Pass words inline (MCP) or a words file (CLI / the
 // JSON transcribe --word-timestamps prints), never both.
-export async function chunkCaptionsFile({ wordsFile = null, words = null, output, maxWords = 6, maxChars = 84, maxSeconds = 3.5, pauseSeconds = 0.4, splitOnPunctuation = true }) {
+export async function chunkCaptionsFile({ wordsFile = null, words = null, output, maxWords = 6, maxChars = 84, maxSeconds = 3.5, pauseSeconds = 0.4, splitOnPunctuation = true, audioDuration = null }) {
   if (wordsFile && words) {
     throw new MediaKitError("chunk_captions takes words_file or words, not both — words_file is a transcribe --word-timestamps JSON, words is the same array inline", "INVALID_ARG");
   }
@@ -4610,7 +4676,7 @@ export async function chunkCaptionsFile({ wordsFile = null, words = null, output
   } else {
     list = normalizeTranscriptWords(words, "words", "chunk_captions");
   }
-  const grouped = chunkCaptions(list, { maxWords, maxChars, maxSeconds, pauseSeconds, splitOnPunctuation });
+  const grouped = chunkCaptions(list, { maxWords, maxChars, maxSeconds, pauseSeconds, splitOnPunctuation, audioDuration });
   const outPath = await prepareOutput(output, wordsPath ? [wordsPath] : []);
   if (path.extname(outPath).toLowerCase() !== ".json") {
     throw new MediaKitError(`chunk_captions output must end in .json, got ${path.extname(outPath) || "(no extension)"}`, "INVALID_ARG");
@@ -4625,6 +4691,10 @@ export async function chunkCaptionsFile({ wordsFile = null, words = null, output
       longest_cue_chars: grouped.longest_cue_chars,
       split_reasons: grouped.split_reasons,
       warnings: grouped.warnings,
+      audio_duration: grouped.audio_duration,
+      repaired_words: grouped.repaired_words,
+      clamped_words: grouped.clamped_words,
+      dropped_words: grouped.dropped_words,
     },
   };
   await writeFile(outPath, `${JSON.stringify(doc, null, 2)}\n`, "utf8");

@@ -1076,7 +1076,7 @@ export const TOOL_DEFS = [
   {
     name: "chunk_captions",
     tier: "WRITE",
-    description: "Chunk word timings into subtitle cues (the director's caption step): words from transcribe --word-timestamps become cues [{start, end, text}] in a .json file, ready for generate_srt (or for burn_captions via --words-file). Defaults are the locked TikTok standard: at most 6 words per cue, 84 chars (2 lines), split on pauses over 0.4s, on sentence ends, and — with split_on_punctuation — after a comma/semicolon/colon once the cue already holds 3 words; a cue never ends on a stranded word like 'the'/'of'. Pure text, no ffmpeg: the grouping is deterministic, same words in, same cues out. The result returns the cues plus stats (words_in, cues_out, max_words_in_cue, split_reasons) — a cue cut by a sentence end or a pause may hold fewer than 3 words, that is the rule, not a bug. Pass words inline or a words_file, never both.",
+    description: "Chunk word timings into subtitle cues (the director's caption step): words from transcribe --word-timestamps become cues [{start, end, text}] in a .json file, ready for generate_srt (or for burn_captions via --words-file). Defaults are the locked TikTok standard: at most 6 words per cue, 84 chars (2 lines), split on pauses over 0.4s, on sentence ends, and — with split_on_punctuation — after a comma/semicolon/colon once the cue already holds 3 words; a cue never ends on a stranded word like 'the'/'of'. Pure text, no ffmpeg: the grouping is deterministic, same words in, same cues out. The result returns the cues plus stats (words_in, cues_out, max_words_in_cue, split_reasons) — a cue cut by a sentence end or a pause may hold fewer than 3 words, that is the rule, not a bug. ASR jitter is repaired, never hidden: a word starting up to 100ms before the previous ends is clamped and warned, and a word fully inside the previous one with overlap up to 100ms has the previous word's end trimmed to its start and warned; a bigger overlap still refuses. Pass audio_duration (seconds or MM:SS, the measured length of the voice audio) and word ends are clamped to it, words starting at/after it are dropped — whisper.cpp tiny can stamp the last word past the end of the audio. Pass words inline or a words_file, never both.",
     schema: {
     words_file: pathSchema.optional().describe("Transcript JSON with a words array — the stdout of `transcribe --word-timestamps` saved to a file, or a hand-written {words:[{start,end,word}]}"),
     words: z.array(z.object({
@@ -1090,6 +1090,7 @@ export const TOOL_DEFS = [
     max_seconds: z.number().min(0.1).max(60).default(3.5).describe("Max cue duration in seconds (default 3.5)"),
     pause_seconds: z.number().min(0).max(5).default(0.4).describe("Split on a pause longer than this, in seconds (default 0.4)"),
     split_on_punctuation: z.boolean().default(true).describe("Also split after a comma/semicolon/colon once the cue holds 3 words (default true); sentence ends always split"),
+    audio_duration: z.union([z.number(), z.string()]).optional().describe("Measured length of the voice audio, seconds or \"MM:SS\" — word/cue ends are clamped to it and words starting at/after it are dropped (whisper.cpp tiny can overshoot the last word past the end of the audio); omit when unknown"),
   },
     handler: async (a) => safe(() => core.chunkCaptionsFile({
     wordsFile: a.words_file ?? null,
@@ -1100,6 +1101,7 @@ export const TOOL_DEFS = [
     maxSeconds: a.max_seconds ?? 3.5,
     pauseSeconds: a.pause_seconds ?? 0.4,
     splitOnPunctuation: a.split_on_punctuation ?? true,
+    audioDuration: a.audio_duration ?? null,
   })),
   },
 

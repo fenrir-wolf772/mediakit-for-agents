@@ -607,7 +607,12 @@ splits a cue once it already holds 3 words. It writes a cues JSON
 Real ASR timings jitter: a word starting up to 100ms before the
 previous ends is clamped to the previous end and reported in `warnings`
 (a bigger overlap still refuses — that is a broken transcript, not
-jitter); check the warnings when a chain runs on fresh ASR output.
+jitter); a word fully inside the previous one with overlap up to 100ms
+has the previous word's end trimmed to its start, also warned and
+counted in `repaired_words`. Pass `audio_duration` (the measured voice
+length) and word/cue ends clamp to it, words starting at/after it drop
+— whisper.cpp tiny can stamp the last word past the end of the audio;
+check the warnings when a chain runs on fresh ASR output.
 
 When `MEDIAKIT_WORKDIR` is set, every user-supplied input/output path
 must stay inside that directory — `..` traversal and symlink escapes
