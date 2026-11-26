@@ -4402,6 +4402,13 @@ const MAX_SRT_CUES = 10_000;
 //     the hard limits and sentence ends break)
 //   - flush BEFORE a word that would push the cue past maxWords,
 //     maxSeconds, or maxChars
+//   - mergeGap (opt-in, default 0 = off): after chunking, adjacent
+//     cues with a gap shorter than mergeGap merge back together when
+//     the merged cue still fits the limits — never across a
+//     sentence-end split (autocut's <0.5s segment-merge rule, for
+//     captions: it absorbs 1-word micro-cues split by a short pause,
+//     e.g. "captions" 22.82-23.20s in round 175; the 0.02s "going."
+//     cue stays alone because it ends a sentence)
 //   - a cue never ends on a stranded function word (the/a/of/to/...):
 //     that word moves to the next cue instead
 // Pure function (no I/O) so tests can call it directly. Deterministic:
@@ -4442,6 +4449,18 @@ export function chunkCaptions(words, opts = {}) {
   if (typeof splitOnPunctuation !== "boolean") {
     throw new MediaKitError("split_on_punctuation must be true or false", "INVALID_ARG");
   }
+  // mergeGap (seconds, default 0 = off): after chunking, merge adjacent
+  // cues whose gap is shorter than this — the autocut rule (merge
+  // segments split by a gap < 0.5s) applied to captions, so a 1-word
+  // micro-cue split by a short pause ("captions" 22.82-23.20s, seen in
+  // round 175) joins its neighbour instead of flashing for a frame.
+  // Only merges when the result still respects
+  // maxWords/maxChars/maxSeconds, and NEVER across a sentence-end
+  // split — a sentence never runs across cues, even when the gap is
+  // tiny (so the 0.02s "going." cue from round 175 stays its own cue:
+  // it ends a sentence). Opt-in: the locked TikTok defaults keep
+  // merge_gap 0.
+  const mergeGapMs = Math.round(num(opts.mergeGap ?? 0, "merge_gap", { min: 0, max: 5 }) * 1000);
   // audioDuration (seconds or "MM:SS", optional): whisper.cpp tiny can
   // stamp the last word past the end of the audio (overshoot ~0.8-1.2s
   // seen in rounds 173/174), which used to make the last cue run past
@@ -4592,7 +4611,41 @@ export function chunkCaptions(words, opts = {}) {
     cue.words.pop();
     raw[i + 1].words.unshift(last);
   }
-  const cues = raw.map((c) => {
+  // Merge pass (mergeGap > 0 only): absorb a cue into the previous one
+  // when the gap between them is shorter than mergeGap. Chained merges
+  // are allowed (A+B can still absorb C). The merged cue keeps the
+  // last cue's split reason, so a sentence-end still blocks the next
+  // merge after it. `built` keeps word lists so the merge can re-check
+  // the limits on the real words, not on wrapped text.
+  let built = raw.map((c) => ({ words: c.words, reason: c.reason }));
+  let mergedCues = 0;
+  if (mergeGapMs > 0 && built.length > 1) {
+    const merged = [];
+    let acc = built[0];
+    for (let i = 1; i < built.length; i++) {
+      const next = built[i];
+      const gapMs = next.words[0].startMs - acc.words[acc.words.length - 1].endMs;
+      const mergedWords = [...acc.words, ...next.words];
+      const mergedText = mergedWords.map((w) => w.word).join(" ").replace(/\s+([,.!?;:])/g, "$1");
+      const mergedDurS = (next.words[next.words.length - 1].endMs - acc.words[0].startMs) / 1000;
+      if (
+        acc.reason !== "sentence-end" &&
+        gapMs < mergeGapMs &&
+        mergedWords.length <= maxWords &&
+        mergedText.length <= maxChars &&
+        mergedDurS <= maxSeconds
+      ) {
+        acc = { words: mergedWords, reason: next.reason };
+        mergedCues++;
+      } else {
+        merged.push(acc);
+        acc = next;
+      }
+    }
+    merged.push(acc);
+    built = merged;
+  }
+  const cues = built.map((c) => {
     const text = c.words.map((w) => w.word).join(" ").replace(/\s+([,.!?;:])/g, "$1");
     return {
       startMs: c.words[0].startMs,
@@ -4626,6 +4679,8 @@ export function chunkCaptions(words, opts = {}) {
     repaired_words: repairedWords,
     clamped_words: clampedWords,
     dropped_words: droppedWords,
+    merged_cues: mergedCues,
+    merge_gap: +(mergeGapMs / 1000).toFixed(3),
   };
 }
 
@@ -4724,7 +4779,7 @@ export async function generateSrt({ cues = null, words = null, output }) {
 // 6 words per cue, 84 chars (2 lines), split on pauses > 0.4s and on
 // punctuation. Pass words inline (MCP) or a words file (CLI / the
 // JSON transcribe --word-timestamps prints), never both.
-export async function chunkCaptionsFile({ wordsFile = null, words = null, output, maxWords = 6, maxChars = 84, maxSeconds = 3.5, pauseSeconds = 0.4, splitOnPunctuation = true, audioDuration = null }) {
+export async function chunkCaptionsFile({ wordsFile = null, words = null, output, maxWords = 6, maxChars = 84, maxSeconds = 3.5, pauseSeconds = 0.4, splitOnPunctuation = true, audioDuration = null, mergeGap = 0 }) {
   if (wordsFile && words) {
     throw new MediaKitError("chunk_captions takes words_file or words, not both — words_file is a transcribe --word-timestamps JSON, words is the same array inline", "INVALID_ARG");
   }
@@ -4740,7 +4795,7 @@ export async function chunkCaptionsFile({ wordsFile = null, words = null, output
   } else {
     list = normalizeTranscriptWords(words, "words", "chunk_captions");
   }
-  const grouped = chunkCaptions(list, { maxWords, maxChars, maxSeconds, pauseSeconds, splitOnPunctuation, audioDuration });
+  const grouped = chunkCaptions(list, { maxWords, maxChars, maxSeconds, pauseSeconds, splitOnPunctuation, audioDuration, mergeGap });
   const outPath = await prepareOutput(output, wordsPath ? [wordsPath] : []);
   if (path.extname(outPath).toLowerCase() !== ".json") {
     throw new MediaKitError(`chunk_captions output must end in .json, got ${path.extname(outPath) || "(no extension)"}`, "INVALID_ARG");
@@ -4759,6 +4814,8 @@ export async function chunkCaptionsFile({ wordsFile = null, words = null, output
       repaired_words: grouped.repaired_words,
       clamped_words: grouped.clamped_words,
       dropped_words: grouped.dropped_words,
+      merged_cues: grouped.merged_cues,
+      merge_gap: grouped.merge_gap,
     },
   };
   await writeFile(outPath, `${JSON.stringify(doc, null, 2)}\n`, "utf8");

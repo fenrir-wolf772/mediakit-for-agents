@@ -617,7 +617,14 @@ to it; it refuses when the midpoint leaves no room for the second word.
 Pass `audio_duration` (the measured voice
 length) and word/cue ends clamp to it, words starting at/after it drop
 — whisper.cpp tiny can stamp the last word past the end of the audio;
-check the warnings when a chain runs on fresh ASR output.
+check the warnings when a chain runs on fresh ASR output. Pass
+`merge_gap` (seconds, default 0 = off; 0.5 follows the autocut rule)
+to merge adjacent cues split by a shorter gap — a 1-word micro-cue
+split by a short pause joins its neighbour instead of flashing for a
+frame; a merge only happens when the result still fits the limits and
+never across a sentence end; calibrated on 9 real transcripts (10 of
+134 cues merged at 0.5s, no sentence crossed); the result counts
+`merged_cues`.
 
 When `MEDIAKIT_WORKDIR` is set, every user-supplied input/output path
 must stay inside that directory — `..` traversal and symlink escapes

@@ -639,8 +639,8 @@ const COMMANDS = {
     ],
   },
   "chunk-captions": {
-    usage: "mediakit chunk-captions --words-file <words.json> -o <output.json> [--max-words 6] [--max-chars 84] [--max-seconds 3.5] [--pause-seconds 0.4] [--no-split-on-punctuation] [--audio-duration <s|MM:SS>]",
-    desc: "Chunk word timings into subtitle cues: words from transcribe --word-timestamps become cues [{start, end, text}] in a .json file, ready for generate-srt (or for burn-captions via --words-file). Defaults are the locked TikTok standard: at most 6 words per cue, 84 chars (2 lines), split on pauses over 0.4s, on sentence ends, and after a comma/semicolon/colon once the cue holds 3 words. Pure text, no ffmpeg. ASR jitter is repaired, never hidden: a word starting up to 100ms before the previous ends is clamped and warned, and a word fully inside the previous one (overlap up to 100ms) has the previous word's end trimmed to its start and warned; the same-start variant (two words stamped on the same span) is repaired by nudging the second word's start to the midpoint of the first word's span, then trimming — it refuses when the midpoint leaves no room; a bigger overlap still refuses. --audio-duration clamps word/cue ends to the measured voice length (whisper.cpp tiny can overshoot the last word past the end of the audio) and drops words starting at/after it.",
+    usage: "mediakit chunk-captions --words-file <words.json> -o <output.json> [--max-words 6] [--max-chars 84] [--max-seconds 3.5] [--pause-seconds 0.4] [--no-split-on-punctuation] [--audio-duration <s|MM:SS>] [--merge-gap <seconds>]",
+    desc: "Chunk word timings into subtitle cues: words from transcribe --word-timestamps become cues [{start, end, text}] in a .json file, ready for generate-srt (or for burn-captions via --words-file). Defaults are the locked TikTok standard: at most 6 words per cue, 84 chars (2 lines), split on pauses over 0.4s, on sentence ends, and after a comma/semicolon/colon once the cue holds 3 words. Pure text, no ffmpeg. ASR jitter is repaired, never hidden: a word starting up to 100ms before the previous ends is clamped and warned, and a word fully inside the previous one (overlap up to 100ms) has the previous word's end trimmed to its start and warned; the same-start variant (two words stamped on the same span) is repaired by nudging the second word's start to the midpoint of the first word's span, then trimming — it refuses when the midpoint leaves no room; a bigger overlap still refuses. --audio-duration clamps word/cue ends to the measured voice length (whisper.cpp tiny can overshoot the last word past the end of the audio) and drops words starting at/after it. --merge-gap merges adjacent cues split by a shorter gap (0.5 follows the autocut rule), only when the merged cue still fits the limits, never across a sentence end.",
     args: [],
     options: [
       ["--words-file", "JSON file with the word array (may also be {\"words\": [...]}) (required)"],
@@ -650,6 +650,7 @@ const COMMANDS = {
       ["--pause-seconds", "Split on a pause longer than this, in seconds (default 0.4)"],
       ["--no-split-on-punctuation", "Do not split after a comma/semicolon/colon (sentence ends still split)"],
       ["--audio-duration", "Measured voice length, seconds or MM:SS — clamp word/cue ends to it, drop words starting at/after it"],
+      ["--merge-gap", "Merge adjacent cues split by a gap shorter than this, in seconds (default 0 = off; 0.5 follows the autocut rule) — only when the merged cue still fits the limits, never across a sentence end"],
       ["-o, --output", "Output .json file with cues + stats (required)"],
     ],
   },
@@ -2064,6 +2065,7 @@ async function main() {
           pauseSeconds: numOpt(opts, "pause_seconds") ?? 0.4,
           splitOnPunctuation: opts.split_on_punctuation !== false,
           audioDuration: opts.audio_duration ?? null,
+          mergeGap: numOpt(opts, "merge_gap") ?? 0,
         });
         break;
       }

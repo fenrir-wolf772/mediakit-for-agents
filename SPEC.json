@@ -2715,7 +2715,7 @@
       "family": "text",
       "tier": "WRITE",
       "summary": "Chunk word timings into subtitle cues (the director's caption step): words from transcribe --word-timestamps become cues [{start, end, text}] in a .json file,…",
-      "description": "Chunk word timings into subtitle cues (the director's caption step): words from transcribe --word-timestamps become cues [{start, end, text}] in a .json file, ready for generate_srt (or for burn_captions via --words-file). Defaults are the locked TikTok standard: at most 6 words per cue, 84 chars (2 lines), split on pauses over 0.4s, on sentence ends, and — with split_on_punctuation — after a comma/semicolon/colon once the cue already holds 3 words; a cue never ends on a stranded word like 'the'/'of'. Pure text, no ffmpeg: the grouping is deterministic, same words in, same cues out. The result returns the cues plus stats (words_in, cues_out, max_words_in_cue, split_reasons) — a cue cut by a sentence end or a pause may hold fewer than 3 words, that is the rule, not a bug. ASR jitter is repaired, never hidden: a word starting up to 100ms before the previous ends is clamped and warned, and a word fully inside the previous one with overlap up to 100ms has the previous word's end trimmed to its start and warned; a bigger overlap still refuses. Pass audio_duration (seconds or MM:SS, the measured length of the voice audio) and word ends are clamped to it, words starting at/after it are dropped — whisper.cpp tiny can stamp the last word past the end of the audio. Pass words inline or a words_file, never both.",
+      "description": "Chunk word timings into subtitle cues (the director's caption step): words from transcribe --word-timestamps become cues [{start, end, text}] in a .json file, ready for generate_srt (or for burn_captions via --words-file). Defaults are the locked TikTok standard: at most 6 words per cue, 84 chars (2 lines), split on pauses over 0.4s, on sentence ends, and — with split_on_punctuation — after a comma/semicolon/colon once the cue already holds 3 words; a cue never ends on a stranded word like 'the'/'of'. Pure text, no ffmpeg: the grouping is deterministic, same words in, same cues out. The result returns the cues plus stats (words_in, cues_out, max_words_in_cue, split_reasons) — a cue cut by a sentence end or a pause may hold fewer than 3 words, that is the rule, not a bug. ASR jitter is repaired, never hidden: a word starting up to 100ms before the previous ends is clamped and warned, and a word fully inside the previous one with overlap up to 100ms has the previous word's end trimmed to its start and warned; a bigger overlap still refuses. Pass audio_duration (seconds or MM:SS, the measured length of the voice audio) and word ends are clamped to it, words starting at/after it are dropped — whisper.cpp tiny can stamp the last word past the end of the audio. Pass merge_gap (seconds, default 0 = off) to merge adjacent cues split by a gap shorter than that — the autocut <0.5s rule for captions, so a 1-word micro-cue split by a short pause joins its neighbour instead of flashing for a frame; a merge only happens when the result still fits max_words/max_chars/max_seconds and never across a sentence end; calibrated on 9 real transcripts (10 of 134 cues merged at 0.5s, no sentence crossed, no limit broken); the result counts merged_cues. Pass words inline or a words_file, never both.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2804,6 +2804,13 @@
               "string"
             ],
             "description": "Measured length of the voice audio, seconds or \"MM:SS\" — word/cue ends are clamped to it and words starting at/after it are dropped (whisper.cpp tiny can overshoot the last word past the end of the audio); omit when unknown"
+          },
+          "merge_gap": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 5,
+            "default": 0,
+            "description": "Merge adjacent cues split by a gap shorter than this, in seconds (default 0 = off; 0.5 follows the autocut rule) — only when the merged cue still fits max_words/max_chars/max_seconds, never across a sentence end; calibrated on 9 real transcripts (10 of 134 cues merged at 0.5s, no sentence crossed); the result counts merged_cues"
           }
         },
         "required": [
@@ -6600,5 +6607,5 @@
       }
     }
   ],
-  "spec_hash": "360e03a4b6da9c38737859be2825592d6dcd3dd62a98017727df95de0426ba5f"
+  "spec_hash": "eae8b85cb96676c1788d2ae4dd75a3ad65613fcc53f5474a228a4d7ff7f8f7dc"
 }

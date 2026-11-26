@@ -8229,6 +8229,46 @@ checkOk(chunkAllDroppedThrew === true, "chunkCaptions refuses when every word st
 let chunkBadDurationThrew = false;
 try { chunkCaptions([{ word: "x", start: 0, end: 1 }], { audioDuration: 0 }); } catch (e) { chunkBadDurationThrew = /positive duration/.test(e.message ?? ""); }
 checkOk(chunkBadDurationThrew === true, "chunkCaptions refuses a non-positive audio_duration", "no throw or wrong message");
+// merge_gap (lượt 181): adjacent cues split by a gap shorter than
+// merge_gap merge back together — the autocut <0.5s rule for
+// captions — but only when the merged cue still fits the limits and
+// never across a sentence end.
+const chunkMergeWords = [
+  { word: "One", start: 0, end: 0.4 }, { word: "two", start: 0.4, end: 0.8 },
+  { word: "three,", start: 0.8, end: 1.2 }, { word: "four", start: 1.6, end: 2.0 },
+];
+const chunkedMergeBase = chunkCaptions(chunkMergeWords);
+checkOk(chunkedMergeBase.cues_out === 2 && chunkedMergeBase.cues[0]?.text === "One two three," && chunkedMergeBase.merged_cues === 0 && chunkedMergeBase.merge_gap === 0, "chunkCaptions without merge_gap keeps the comma-split cues apart (gap 0.4s)", JSON.stringify(chunkedMergeBase.cues.map((c) => c.text)));
+const chunkedMerged = chunkCaptions(chunkMergeWords, { mergeGap: 0.5 });
+checkOk(chunkedMerged.cues_out === 1 && chunkedMerged.cues[0]?.text === "One two three, four" && chunkedMerged.cues[0]?.split_reason === "end" && chunkedMerged.merged_cues === 1 && chunkedMerged.merge_gap === 0.5, "chunkCaptions merge_gap 0.5 merges cues split by a 0.4s gap", JSON.stringify(chunkedMerged.cues.map((c) => c.text)));
+const chunkedMergeSent = chunkCaptions([
+  { word: "Go", start: 0, end: 0.4 }, { word: "home.", start: 0.4, end: 0.8 },
+  { word: "Stay", start: 1.2, end: 1.6 }, { word: "safe.", start: 1.6, end: 2.0 },
+], { mergeGap: 0.5 });
+checkOk(chunkedMergeSent.cues_out === 2 && chunkedMergeSent.merged_cues === 0 && chunkedMergeSent.cues.map((c) => c.text).join(" | ") === "Go home. | Stay safe.", "chunkCaptions never merges across a sentence end, even when the gap is under merge_gap", JSON.stringify(chunkedMergeSent.cues.map((c) => c.text)));
+const chunkedMergeFar = chunkCaptions([
+  { word: "One", start: 0, end: 0.4 }, { word: "two", start: 0.4, end: 0.8 },
+  { word: "three,", start: 0.8, end: 1.2 }, { word: "four", start: 1.8, end: 2.2 },
+], { mergeGap: 0.5 });
+checkOk(chunkedMergeFar.cues_out === 2 && chunkedMergeFar.merged_cues === 0, "chunkCaptions does not merge when the gap (0.6s) is at/over merge_gap", JSON.stringify(chunkedMergeFar.cues.map((c) => c.text)));
+const chunkedMergeFull = chunkCaptions([
+  { word: "One", start: 0, end: 0.4 }, { word: "two", start: 0.4, end: 0.8 },
+  { word: "three", start: 0.8, end: 1.2 }, { word: "four", start: 1.2, end: 1.6 },
+  { word: "five", start: 1.6, end: 2.0 }, { word: "six", start: 2.0, end: 2.4 },
+  { word: "seven", start: 2.8, end: 3.2 },
+], { mergeGap: 0.5 });
+checkOk(chunkedMergeFull.cues_out === 2 && chunkedMergeFull.merged_cues === 0, "chunkCaptions does not merge when the merged cue would exceed max_words (7 > 6)", JSON.stringify(chunkedMergeFull.cues.map((c) => c.text)));
+const chunkedMergeChain = chunkCaptions([
+  { word: "One", start: 0, end: 0.4 }, { word: "two", start: 0.4, end: 0.8 },
+  { word: "three,", start: 0.8, end: 1.2 },
+  { word: "four", start: 1.5, end: 1.9 }, { word: "five", start: 1.9, end: 2.3 },
+  { word: "six,", start: 2.3, end: 2.7 },
+  { word: "seven", start: 3.0, end: 3.4 },
+], { mergeGap: 0.5, maxWords: 8 });
+checkOk(chunkedMergeChain.cues_out === 1 && chunkedMergeChain.cues[0]?.text === "One two three, four five six, seven" && chunkedMergeChain.merged_cues === 2, "chunkCaptions chains merges (3 cues -> 1, merged_cues 2) when every step fits", JSON.stringify(chunkedMergeChain.cues.map((c) => c.text)));
+let chunkBadGapThrew = false;
+try { chunkCaptions([{ word: "x", start: 0, end: 1 }], { mergeGap: 6 }); } catch (e) { chunkBadGapThrew = /merge_gap must be <= 5/.test(e.message ?? ""); }
+checkOk(chunkBadGapThrew === true, "chunkCaptions refuses merge_gap over 5", "no throw or wrong message");
 // Errors: cues + words together, and neither.
 const genBothRes = await client.callTool({
   name: "generate_srt",
@@ -8274,9 +8314,29 @@ const chunkSameStartRes = await client.callTool({
 });
 const chunkSameStartJson = JSON.parse(chunkSameStartRes.content[0].text);
 checkOk(chunkSameStartRes.isError !== true && chunkSameStartJson.cues_out === 1 && chunkSameStartJson.cues[0]?.text === "it is written." && chunkSameStartJson.repaired_words === 1 && chunkSameStartJson.warnings?.length === 2, "chunk_captions tool repairs same-start contained words (repaired_words 1, 2 warnings)", JSON.stringify(chunkSameStartJson.warnings));
+// merge_gap through the tool (lượt 181): the same 4 words chunk to
+// 2 cues by default and to 1 cue with merge_gap 0.5.
+const chunkMergeRes = await client.callTool({
+  name: "chunk_captions",
+  arguments: {
+    words: [
+      { word: "One", start: 0, end: 0.4 }, { word: "two", start: 0.4, end: 0.8 },
+      { word: "three,", start: 0.8, end: 1.2 }, { word: "four", start: 1.6, end: 2.0 },
+    ],
+    merge_gap: 0.5,
+    output: path.join(root, "outputs/mcp-chunk-merge.json"),
+  },
+});
+const chunkMergeJson = JSON.parse(chunkMergeRes.content[0].text);
+checkOk(chunkMergeRes.isError !== true && chunkMergeJson.cues_out === 1 && chunkMergeJson.cues[0]?.text === "One two three, four" && chunkMergeJson.merged_cues === 1 && chunkMergeJson.merge_gap === 0.5, "chunk_captions tool merges cues with merge_gap 0.5 (merged_cues 1)", JSON.stringify(chunkMergeJson.cues));
 // CLI chunk-captions with --max-words 3 forces shorter cues.
 const chunkCliJson = await runCliJson(["chunk-captions", "--words-file", path.join(root, "test/chunk-words.json"), "-o", path.join(root, "outputs/mcp-chunk-cli.json"), "--max-words", "3"]);
 checkOk(chunkCliJson.cues_out === 6 && chunkCliJson.max_words_in_cue === 4 && chunkCliJson.cues[0]?.text === "The quick brown", "CLI chunk-captions --max-words 3 re-chunks to 6 cues (stranded 'over' moves on, so one cue holds 4 words)", JSON.stringify(chunkCliJson.cues?.map((c) => c.text)));
+// CLI chunk-captions --merge-gap 0.5 on the fixture: the gaps are
+// 0.05s but every cue already holds 5-6 words, so the limits block
+// every merge — 4 cues, merged_cues 0.
+const chunkMergeCliJson = await runCliJson(["chunk-captions", "--words-file", path.join(root, "test/chunk-words.json"), "-o", path.join(root, "outputs/mcp-chunk-merge-cli.json"), "--merge-gap", "0.5"]);
+checkOk(chunkMergeCliJson.cues_out === 4 && chunkMergeCliJson.merged_cues === 0 && chunkMergeCliJson.merge_gap === 0.5, "CLI chunk-captions --merge-gap 0.5 keeps the fixture at 4 cues (limits block the merge)", JSON.stringify(chunkMergeCliJson));
 // Errors: words_file + words together, and a non-.json output.
 const chunkBothRes = await client.callTool({
   name: "chunk_captions",
