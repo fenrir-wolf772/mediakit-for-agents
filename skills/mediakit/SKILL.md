@@ -640,7 +640,14 @@ stepping down fps, then width, then palette colours; each attempt is
 measured on disk and the result reports `size_budget_met` honestly —
 when the budget cannot be met even at 320px/8fps/64 colours, the
 result says so with a `warning` instead of silently shipping an
-oversize file. Defaults are 15fps at 640px wide.
+oversize file. If the ladder still misses the budget, one last-resort
+palette retry runs at the last geometry (palettegen `stats_mode=diff`
++ paletteuse `dither=bayer`, pagecast's palette) and is kept only
+when smaller — calibrated 2026-11-26: it saves ~24–34% on busy/noisy
+clips but is bigger on flat ones (+17–30%), so it is a retry rung,
+never a new default; the result reports `palette_mode` +
+`palette_retry {tried, used, size_bytes, saved_bytes}`, and a losing
+retry is named in the warning. Defaults are 15fps at 640px wide.
 
 When a call fails, the error ends with the exact retry command: the
 CLI prints `Retry: mediakit <the command you ran>` on stderr, and an
@@ -1663,7 +1670,7 @@ exactly the unguarded pattern brookcs3/m3u8-mcp-server's
 verify) — MediaKit's `download` exists so the agent never has to.
 
 ### 52. Test a tool over HTTP before wiring up an MCP client — same tools, curl instead of stdio
-`mediakit mcp --http [--port 3000]` serves the same 69 tools over
+`mediakit mcp --http [--port 3000]` serves the same 98 tools over
 HTTP on `127.0.0.1`: `GET /mcp` (metadata), `GET /mcp/tools`
 (every tool + JSON input schema), `POST /mcp/tools/{name}/invoke`
 (`{"arguments": {...}}`), and `POST /` for JSON-RPC 2.0
