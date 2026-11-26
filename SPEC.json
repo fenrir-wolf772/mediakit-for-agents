@@ -1,7 +1,7 @@
 {
   "spec_version": 1,
   "mediakit_version": "0.1.0",
-  "tool_count": 98,
+  "tool_count": 99,
   "transports": [
     "stdio",
     "http"
@@ -30,7 +30,7 @@
     {
       "name": "assemble",
       "description": "Director workflow: film, manifest, jobs and release.",
-      "count": 17
+      "count": 18
     },
     {
       "name": "meta",
@@ -6136,7 +6136,7 @@
       "family": "inspect",
       "tier": "READ",
       "summary": "Safety tiers for every MediaKit tool (EncodeX's safety-tier idea): READ tools only probe and write nothing (probe, check, hook, diagnose); PLAN tools answer a…",
-      "description": "Safety tiers for every MediaKit tool (EncodeX's safety-tier idea): READ tools only probe and write nothing (probe, check, hook, diagnose); PLAN tools answer a question by transient work and leave no artifact (determinism renders to a hidden work dir that is removed, verify_cuts renders a draft to temp — plus caller-requested review strips when strips:true and the cut-sheet overview when cut_sheet:true, estimate_conversion sample-encodes to temp, job only reads/cancels job state, propose_edit validates options with the patch_manifest helpers and writes nothing); WRITE tools produce a file the caller asked for and never overwrite their own input (prepareOutput refuses that); DESTRUCTIVE tools replace or remove a user artifact in place — only patch_manifest, and it is guarded by expected_revision plus a .bak backup. Returns the tier table with every tool named, the counts, and the rules. Read this before letting an agent loose on a workspace.",
+      "description": "Safety tiers for every MediaKit tool (EncodeX's safety-tier idea): READ tools only probe and write nothing (probe, check, hook, diagnose); PLAN tools answer a question by transient work and leave no artifact (determinism renders to a hidden work dir that is removed, verify_cuts renders a draft to temp — plus caller-requested review strips when strips:true and the cut-sheet overview when cut_sheet:true, estimate_conversion sample-encodes to temp, job only reads/cancels job state, propose_edit validates options with the patch_manifest helpers and writes nothing); WRITE tools produce a file the caller asked for and never overwrite their own input (prepareOutput refuses that); DESTRUCTIVE tools replace or remove a user artifact in place — patch_manifest, guarded by expected_revision plus a .bak backup, and the edit_session commit, guarded by a base sha256 + revision stale check plus a session checkpoint. Returns the tier table with every tool named, the counts, and the rules. Read this before letting an agent loose on a workspace.",
       "inputSchema": {
         "type": "object",
         "properties": {},
@@ -6305,7 +6305,7 @@
       "family": "meta",
       "tier": "READ",
       "summary": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the…",
-      "description": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 98 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+      "description": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 99 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -6544,7 +6544,61 @@
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
       }
+    },
+    {
+      "name": "edit_session",
+      "family": "assemble",
+      "tier": "DESTRUCTIVE",
+      "summary": "Edit a manifest inside an isolated draft session (ZiAn-Su/OCC-ForAgent's edit-session idea: a director never edits the live timeline directly — it stages work…",
+      "description": "Edit a manifest inside an isolated draft session (ZiAn-Su/OCC-ForAgent's edit-session idea: a director never edits the live timeline directly — it stages work in a draft, reviews it, then commits atomically). Actions: start (needs `holder`; snapshots the live manifest's bytes sha256 + revision into a draft copy `<manifest>.draft-<id>.json` plus a sidecar `<manifest>.edit-session.json` — the live file is untouched, one active session per manifest; a second start is refused with SESSION_ACTIVE unless `force: true` takes it over and discards the old draft); commit (needs `session_id`; refuses SESSION_STALE when the live manifest moved since the base snapshot, validates the draft with the same manifest --dry-run patch_manifest uses, saves the pre-commit bytes to `<manifest>.session-checkpoint.json` plus `.bak`, then renames the draft over the manifest atomically and deletes the sidecar — the live revision becomes the draft's revision); abort (needs `session_id`; deletes the draft + sidecar, the live manifest is never touched); status (never throws for a missing session — reports none/active/stale/broken/committed with holder, base + live + draft revisions and the staged operation count; a sidecar that survived its own commit reports committed, not broken); resume (rejoins a staged draft, or reports the session already committed); restore (puts the pre-commit bytes back from the checkpoint — one-shot undo, the checkpoint is consumed, the replaced bytes go to .bak first; refused with SESSION_ACTIVE while a session is live, and with CHECKPOINT_NOT_FOUND when no commit has happened). Edit the draft with patch_manifest (expected_revision = the draft's revision, starting at the base revision) — each patch is atomic, so a failed patch leaves the draft exactly as it was. Commit honours a held edit lease exactly like patch_manifest: pass that lease's `lease_id` or the commit is refused with LEASE_HELD.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "start",
+              "commit",
+              "abort",
+              "status",
+              "resume",
+              "restore"
+            ],
+            "description": "start: snapshot the live manifest into an isolated draft; commit: atomically replace the live manifest with the draft; abort: discard the draft; status: report the session (never throws for a missing one); resume: rejoin a staged draft; restore: put the pre-commit bytes back from the checkpoint"
+          },
+          "manifest_path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Path to the manifest JSON file the session edits"
+          },
+          "holder": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Who starts the session (start only, required) — a name such as an agent id, shown in SESSION_ACTIVE errors"
+          },
+          "session_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Session id from start (commit/abort only, required)"
+          },
+          "force": {
+            "type": "boolean",
+            "description": "Start only: take over an existing session and discard its draft instead of refusing with SESSION_ACTIVE"
+          },
+          "lease_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Edit-lease id from `lease acquire` (commit only, optional) — required to commit while another holder's lease is active, like patch_manifest"
+          }
+        },
+        "required": [
+          "action",
+          "manifest_path"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
     }
   ],
-  "spec_hash": "1c65ba8cf134faf8b246a1418bc502d5147520b81d31ee4a5c6c246e1c8b14c6"
+  "spec_hash": "360e03a4b6da9c38737859be2825592d6dcd3dd62a98017727df95de0426ba5f"
 }

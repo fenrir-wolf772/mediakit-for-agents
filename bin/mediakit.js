@@ -1240,6 +1240,17 @@ const COMMANDS = {
       ["--ttl", "Lease lifetime in seconds (acquire/renew only) — clamped to 120-300, default 180"],
     ],
   },
+  "edit-session": {
+    usage: "mediakit edit-session <start|commit|abort|status|resume|restore> <manifest.json> [--holder <id>] [--session-id <id>] [--force] [--lease-id <id>]",
+    desc: "Edit a manifest inside an isolated draft session (OCC-ForAgent's edit-session idea): start snapshots the live manifest (bytes sha256 + revision) into a draft copy <manifest>.draft-<id>.json plus a sidecar <manifest>.edit-session.json — the live file is untouched, one active session per manifest; edit the draft with `mediakit patch-manifest` (expected_revision = the draft's revision, starting at the base revision); commit validates the draft, saves the pre-commit bytes to <manifest>.session-checkpoint.json plus .bak, then renames the draft over the manifest atomically; abort discards the draft; status never throws for a missing session (none/active/stale/broken/committed); resume rejoins a staged draft; restore puts the pre-commit bytes back from the checkpoint (one-shot undo, refused while a session is live). A second start is refused with SESSION_ACTIVE unless --force takes it over and discards the old draft. Commit honours a held edit lease like patch-manifest: pass that lease's --lease-id.",
+    args: [{ name: "action", required: true }, { name: "manifest", required: true }],
+    options: [
+      ["--holder", "Who starts the session (start only, required) — a name such as an agent id, shown in SESSION_ACTIVE errors"],
+      ["--session-id", "Session id from start (commit/abort only, required)"],
+      ["--force", "Start only: take over an existing session and discard its draft instead of refusing with SESSION_ACTIVE"],
+      ["--lease-id", "Edit-lease id from `lease acquire` (commit only) — required to commit while another holder's lease is active"],
+    ],
+  },
   determinism: {
     usage: "mediakit determinism <manifest.json> [--runs 2] [--keep-outputs]",
     desc: "Check whether a linear pipeline manifest reproduces byte-identically: run the same manifest N times (default 2, max 5) with the cache OFF, then compare byte sha256, decoded-frame digest (framemd5), and measured properties (duration/frames/dimensions) across runs. Verdict byte_identical means the pipeline reproduces exactly; content_identical means the frames match but container bytes differ, with the differing format tags named; differs means the pipeline itself is nondeterministic, with the first differing run pair named. A download-first manifest re-fetches its URL on every run. --keep-outputs keeps the per-run outputs under .mediakit-determinism-<pid> next to the manifest (removed by default; always kept when a run fails).",
@@ -1271,7 +1282,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 98 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 99 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -2702,6 +2713,28 @@ async function main() {
           result = await core.renewEditLease({ manifestPath: positional[1], leaseId: opts.lease_id, ttlSeconds: numOpt(opts, "ttl") ?? null });
         } else {
           result = await core.editLeaseStatus({ manifestPath: positional[1] });
+        }
+        break;
+      }
+      case "edit-session": {
+        const action = positional[0];
+        if (!["start", "commit", "abort", "status", "resume", "restore"].includes(action)) fail("edit-session action must be start, commit, abort, status, resume or restore: mediakit edit-session <action> <manifest.json> [--holder <id>] [--session-id <id>] [--force] [--lease-id <id>]");
+        if (!positional[1]) fail(`missing manifest file: mediakit edit-session ${action} <manifest.json>`);
+        if (action === "start") {
+          if (!opts.holder) fail("missing required option: --holder <id> (who starts the session)");
+          result = await core.startEditSession({ manifestPath: positional[1], holder: opts.holder, force: opts.force === true });
+        } else if (action === "commit") {
+          if (!opts.session_id) fail("missing required option: --session-id <id> (the session id from start)");
+          result = await core.commitEditSession({ manifestPath: positional[1], sessionId: opts.session_id, leaseId: opts.lease_id ?? null });
+        } else if (action === "abort") {
+          if (!opts.session_id) fail("missing required option: --session-id <id> (the session id from start)");
+          result = await core.abortEditSession({ manifestPath: positional[1], sessionId: opts.session_id });
+        } else if (action === "resume") {
+          result = await core.resumeEditSession({ manifestPath: positional[1] });
+        } else if (action === "restore") {
+          result = await core.restoreEditSessionCheckpoint({ manifestPath: positional[1] });
+        } else {
+          result = await core.editSessionStatus({ manifestPath: positional[1] });
         }
         break;
       }

@@ -12941,6 +12941,11 @@ const TOOL_REQUIREMENTS = {
   // ffmpeg capability.
   propose_edit: {},
   lease: {},
+  // edit_session snapshots a manifest to a draft copy and renames it
+  // back on commit — pure Node JSON + file moves, same (lack of)
+  // ffmpeg capability. The draft validation reuses manifest's
+  // --dry-run, so its requirements ride along there.
+  edit_session: {},
   // verify_cuts renders a 270p draft (scale + libx264) and measures
   // cuts with the content scene detector (signalstats per frame) +
   // frame diffs (blend on rgb24 + signalstats).
@@ -19030,6 +19035,468 @@ export async function editLeaseStatus({ manifestPath }) {
     expired_seconds_ago: state === "expired" ? Math.max(0, Math.floor((nowMs - expiresMs) / 1000)) : 0,
     revision: lease.revision ?? null,
     lease_corrupt: false,
+  };
+}
+
+// ---------------------------------------------------------------- edit session
+// An isolated draft session for editing a manifest (ZiAn-Su/
+// OCC-ForAgent's edit-session idea, the agent-focused fork of
+// 0xsline/OpenChatCut: begin -> draft -> review -> commit atomically,
+// with a durable checkpoint after every call and recovery for
+// orphaned sessions — read as code in lượt 178, NOT copied: OCC is
+// AGPL-3.0 TypeScript + Electron, MediaKit is MIT Node + ffmpeg).
+//
+// Why a session, when patch_manifest already has a revision guard?
+// The guard only checks at the single moment of a write: a director
+// editing across several calls (propose -> patch draft -> preview ->
+// approve -> render) has no place to stage work that is visible and
+// reviewable but not yet live, and no way to throw it all away.
+// The session is that place:
+//   start  — snapshot the live manifest (bytes sha256 + revision)
+//            into a draft copy `<manifest>.draft-<id>.json` and a
+//            sidecar `<manifest>.edit-session.json`; the live file
+//            is untouched. One active session per manifest.
+//   patch  — the draft is an ordinary manifest file: edit it with
+//            the existing patch_manifest (expected_revision = the
+//            draft's revision, starting at the base revision). Each
+//            patch is atomic, like OCC's fork-per-tool-call: a
+//            failed patch leaves the draft exactly as it was.
+//   commit — stale check first (live sha256 + revision must still
+//            equal the base snapshot, else SESSION_STALE and the
+//            draft is kept), then the draft is validated with the
+//            same manifest --dry-run patch_manifest uses, the
+//            pre-commit bytes are saved to
+//            `<manifest>.session-checkpoint.json`, .bak is written,
+//            and the draft is renamed over the manifest atomically.
+//            The sidecar is deleted; the session is done.
+//   abort  — delete the draft + sidecar; the live manifest is never
+//            touched.
+//   status/resume — report the session (never throw for a missing
+//            one, like lease status); resume returns the draft path
+//            so a later turn can pick the staged work back up.
+//   restore — after a commit, put the pre-commit bytes back from
+//            the checkpoint (consumed on use, one-shot undo); the
+//            bytes being replaced go to .bak first, so a restore is
+//            itself reversible one step. Refused while a session is
+//            active — abort the session first.
+// A crash between the commit rename and the sidecar delete leaves a
+// stale sidecar whose draft is gone: status recognises it (the
+// checkpoint carries the same session id) and reports the session as
+// "committed" instead of blocking the next start forever. A session
+// has no TTL — unlike a lease, a draft is not a lock, it is staged
+// work; `start --force` is the explicit takeover that discards it.
+// The session id is returned by start/status, so naming it in
+// errors is safe (unlike a lease id, which only its holder knows).
+export const EDIT_SESSION_VERSION = 1;
+
+const editSessionFilePath = (manifestAbs) => `${manifestAbs}.edit-session.json`;
+const editSessionCheckpointPath = (manifestAbs) => `${manifestAbs}.session-checkpoint.json`;
+const editSessionDraftPath = (manifestAbs, sessionId) => `${manifestAbs}.draft-${sessionId}.json`;
+
+const sha256Hex = (text) => createHash("sha256").update(text, "utf8").digest("hex");
+
+async function writeFileAtomic(filePath, text) {
+  const partial = `${filePath}.partial-${process.pid}-${randomBytes(4).toString("hex")}`;
+  try {
+    await writeFile(partial, text, "utf8");
+    await rename(partial, filePath);
+  } catch (e) {
+    await rm(partial, { force: true }).catch(() => {});
+    throw e;
+  }
+}
+
+async function readEditSessionFile(manifestAbs) {
+  const sessionPath = editSessionFilePath(manifestAbs);
+  let raw;
+  try {
+    raw = await readFile(sessionPath, "utf8");
+  } catch {
+    return { session: null, corrupt: false, sessionPath };
+  }
+  try {
+    const session = JSON.parse(raw);
+    if (!session || typeof session !== "object" || Array.isArray(session)
+      || typeof session.session_id !== "string" || typeof session.holder !== "string"
+      || typeof session.manifest !== "string" || typeof session.draft !== "string"
+      || !Number.isInteger(session.base_revision) || session.base_revision < 0
+      || typeof session.base_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(session.base_sha256)
+      || typeof session.created_at !== "string") {
+      return { session: null, corrupt: true, sessionPath };
+    }
+    return { session, corrupt: false, sessionPath };
+  } catch {
+    return { session: null, corrupt: true, sessionPath };
+  }
+}
+
+async function writeEditSessionFile(sessionPath, session) {
+  await writeFileAtomic(sessionPath, `${JSON.stringify(session, null, 2)}\n`);
+}
+
+async function readEditSessionCheckpoint(manifestAbs) {
+  const checkpointPath = editSessionCheckpointPath(manifestAbs);
+  let raw;
+  try {
+    raw = await readFile(checkpointPath, "utf8");
+  } catch {
+    return { checkpoint: null, corrupt: false, checkpointPath };
+  }
+  try {
+    const checkpoint = JSON.parse(raw);
+    if (!checkpoint || typeof checkpoint !== "object" || Array.isArray(checkpoint)
+      || typeof checkpoint.session_id !== "string" || typeof checkpoint.manifest_raw !== "string"
+      || typeof checkpoint.pre_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(checkpoint.pre_sha256)
+      || !Number.isInteger(checkpoint.pre_revision) || checkpoint.pre_revision < 0
+      || !Number.isInteger(checkpoint.post_revision) || checkpoint.post_revision < 0
+      || typeof checkpoint.committed_at !== "string"
+      || sha256Hex(checkpoint.manifest_raw) !== checkpoint.pre_sha256) {
+      return { checkpoint: null, corrupt: true, checkpointPath };
+    }
+    return { checkpoint, corrupt: false, checkpointPath };
+  } catch {
+    return { checkpoint: null, corrupt: true, checkpointPath };
+  }
+}
+
+// Load + normalise a session: "none" (no sidecar, or a corrupt one —
+// fail-open, like a corrupt lease), "active" (live manifest still
+// equals the base snapshot), "stale" (the live manifest moved),
+// "broken" (draft missing or unparsable — the session cannot commit),
+// "committed" (the sidecar survived a commit whose draft is already
+// renamed away; the checkpoint proves it — clean up and say so).
+async function loadEditSession(manifestAbs) {
+  const { session, corrupt, sessionPath } = await readEditSessionFile(manifestAbs);
+  const checkpointPath = editSessionCheckpointPath(manifestAbs);
+  const { checkpoint } = await readEditSessionCheckpoint(manifestAbs);
+  const empty = { session: null, sessionPath, state: "none", corrupt, checkpoint, checkpointPath, draftPath: null, draftDoc: null, draftRevision: null, liveRevision: null, liveSha256: null, operations: 0 };
+  if (!session) return empty;
+  const draftPath = editSessionDraftPath(manifestAbs, session.session_id);
+  let draftRaw = null;
+  try {
+    draftRaw = await readFile(draftPath, "utf8");
+  } catch {
+    draftRaw = null;
+  }
+  if (draftRaw === null) {
+    if (checkpoint && checkpoint.session_id === session.session_id) {
+      await rm(sessionPath, { force: true }).catch(() => {});
+      return { ...empty, state: "committed", corrupt: false, committed_session_id: session.session_id, draftPath };
+    }
+    return { ...empty, session, state: "broken", corrupt: false, reason: "draft_missing", draftPath };
+  }
+  let draftDoc;
+  try {
+    draftDoc = JSON.parse(draftRaw);
+  } catch {
+    return { ...empty, session, state: "broken", corrupt: false, reason: "draft_corrupt", draftPath };
+  }
+  if (!draftDoc || typeof draftDoc !== "object" || Array.isArray(draftDoc)) {
+    return { ...empty, session, state: "broken", corrupt: false, reason: "draft_corrupt", draftPath };
+  }
+  const draftRevision = Number.isInteger(draftDoc.revision) && draftDoc.revision >= 0 ? draftDoc.revision : 0;
+  let liveRaw = null;
+  let liveSha256 = null;
+  let liveRevision = null;
+  try {
+    liveRaw = await readFile(manifestAbs, "utf8");
+  } catch {
+    liveRaw = null;
+  }
+  if (liveRaw !== null) {
+    liveSha256 = sha256Hex(liveRaw);
+    try {
+      const liveDoc = JSON.parse(liveRaw);
+      liveRevision = Number.isInteger(liveDoc?.revision) && liveDoc.revision >= 0 ? liveDoc.revision : 0;
+    } catch {
+      liveRevision = null;
+    }
+  }
+  const state = liveSha256 !== null && liveSha256 === session.base_sha256 && liveRevision === session.base_revision ? "active" : "stale";
+  return {
+    session, sessionPath, state, corrupt: false, reason: null, checkpoint, checkpointPath,
+    draftPath, draftDoc, draftRevision, liveRevision, liveSha256,
+    operations: Math.max(0, draftRevision - session.base_revision),
+  };
+}
+
+function editSessionPublicFields(loaded) {
+  if (!loaded.session) return {};
+  const base = {
+    session_id: loaded.session.session_id,
+    holder: loaded.session.holder,
+    draft: loaded.draftPath,
+    draft_path: loaded.draftPath,
+    base_revision: loaded.session.base_revision,
+    base_sha256: loaded.session.base_sha256,
+    created_at: loaded.session.created_at,
+  };
+  if (loaded.state === "broken") return { ...base, reason: loaded.reason };
+  return { ...base, draft_revision: loaded.draftRevision, live_revision: loaded.liveRevision, live_sha256: loaded.liveSha256, operations: loaded.operations };
+}
+
+export async function startEditSession({ manifestPath, holder, force = false }) {
+  const manifestAbs = await requireInput(manifestPath, "manifest");
+  if (typeof holder !== "string" || !holder.trim()) {
+    throw new MediaKitError(`holder must be a non-empty string, got: ${JSON.stringify(holder)}`, "INVALID_ARG");
+  }
+  const loaded = await loadEditSession(manifestAbs);
+  if (loaded.session && ["active", "stale", "broken"].includes(loaded.state)) {
+    if (!force) {
+      throw new MediaKitError(`manifest already has an ${loaded.state} edit session (started by "${loaded.session.holder}" at ${loaded.session.created_at}) — abort it first, or start with force: true to take it over and discard its draft`, "SESSION_ACTIVE");
+    }
+    await rm(loaded.draftPath, { force: true }).catch(() => {});
+    await rm(loaded.sessionPath, { force: true }).catch(() => {});
+  }
+  let raw;
+  try {
+    raw = await readFile(manifestAbs, "utf8");
+  } catch (e) {
+    throw new MediaKitError(`cannot read manifest ${manifestPath}: ${e.message}`, "INVALID_INPUT");
+  }
+  let doc;
+  try {
+    doc = JSON.parse(raw);
+  } catch (e) {
+    throw new MediaKitError(`manifest is not valid JSON: ${e.message}`, "INVALID_ARG");
+  }
+  if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
+    throw new MediaKitError("manifest must be a JSON object {version, input, steps}", "INVALID_ARG");
+  }
+  const baseRevision = doc.revision ?? 0;
+  if (!Number.isInteger(baseRevision) || baseRevision < 0) {
+    throw new MediaKitError(`manifest revision must be a non-negative integer, got: ${doc.revision}`, "INVALID_ARG");
+  }
+  const sessionId = `es-${randomBytes(8).toString("hex")}`;
+  const draftPath = editSessionDraftPath(manifestAbs, sessionId);
+  // The draft is an exact byte copy of the live manifest, so
+  // patch_manifest on the draft starts from the same revision and
+  // the same bytes — and a byte-identical draft is the proof the
+  // session started clean.
+  await writeFileAtomic(draftPath, raw);
+  const session = {
+    version: EDIT_SESSION_VERSION,
+    session_id: sessionId,
+    holder: holder.trim(),
+    manifest: manifestAbs,
+    draft: draftPath,
+    base_revision: baseRevision,
+    base_sha256: sha256Hex(raw),
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  await writeEditSessionFile(loaded.sessionPath, session);
+  return {
+    operation: "edit_session",
+    action: "start",
+    session_id: sessionId,
+    holder: session.holder,
+    manifest: manifestAbs,
+    draft: draftPath,
+    draft_path: draftPath,
+    base_revision: baseRevision,
+    base_sha256: session.base_sha256,
+    created_at: session.created_at,
+    resumed: false,
+    note: "Patch the draft with patch_manifest (expected_revision = the draft's revision, starting at base_revision) — the live manifest is untouched until commit.",
+  };
+}
+
+export async function editSessionStatus({ manifestPath }) {
+  const manifestAbs = await requireInput(manifestPath, "manifest");
+  const loaded = await loadEditSession(manifestAbs);
+  const base = {
+    operation: "edit_session",
+    action: "status",
+    state: loaded.state,
+    manifest: manifestAbs,
+    session_file: loaded.sessionPath,
+    checkpoint_file: loaded.checkpointPath,
+    has_checkpoint: loaded.checkpoint !== null,
+    session_corrupt: loaded.corrupt === true,
+  };
+  if (!loaded.session) {
+    return { ...base, ...(loaded.state === "committed" ? { committed_session_id: loaded.committed_session_id } : {}) };
+  }
+  return { ...base, ...editSessionPublicFields(loaded) };
+}
+
+export async function resumeEditSession({ manifestPath }) {
+  const manifestAbs = await requireInput(manifestPath, "manifest");
+  const loaded = await loadEditSession(manifestAbs);
+  if (!loaded.session) {
+    if (loaded.state === "committed") {
+      return {
+        operation: "edit_session", action: "resume", resumed: false, state: "committed",
+        committed_session_id: loaded.committed_session_id, manifest: manifestAbs,
+        note: "That session already committed — start a new session to edit further.",
+      };
+    }
+    throw new MediaKitError(`no edit session on ${manifestPath} to resume — start one first`, "SESSION_NOT_FOUND");
+  }
+  if (loaded.state === "broken") {
+    throw new MediaKitError(`edit session ${loaded.session.session_id} on ${manifestPath} is broken (${loaded.reason}) — abort it and start a new session`, "SESSION_BROKEN");
+  }
+  const status = await editSessionStatus({ manifestPath });
+  return {
+    ...status,
+    action: "resume",
+    resumed: true,
+    note: loaded.state === "stale"
+      ? "The live manifest changed since this session started — commit will refuse with SESSION_STALE; abort and start over, or re-read the manifest first."
+      : "Continue patching the draft with patch_manifest, then commit.",
+  };
+}
+
+export async function commitEditSession({ manifestPath, sessionId, leaseId = null }) {
+  const manifestAbs = await requireInput(manifestPath, "manifest");
+  if (typeof sessionId !== "string" || !sessionId) {
+    throw new MediaKitError("session_id is required to commit an edit session", "INVALID_ARG");
+  }
+  const loaded = await loadEditSession(manifestAbs);
+  if (!loaded.session) {
+    throw new MediaKitError(`no edit session on ${manifestPath} to commit — start one first`, "SESSION_NOT_FOUND");
+  }
+  if (loaded.state === "broken") {
+    throw new MediaKitError(`edit session ${loaded.session.session_id} on ${manifestPath} is broken (${loaded.reason}) — abort it and start a new session`, "SESSION_BROKEN");
+  }
+  if (sessionId !== loaded.session.session_id) {
+    throw new MediaKitError(`session_id does not match the active edit session on ${manifestPath} (started by "${loaded.session.holder}") — nothing was committed`, "SESSION_MISMATCH");
+  }
+  // A held edit lease still gates the write, exactly like
+  // patch_manifest: the session holder must also hold the lease (or
+  // present its lease_id) while another holder's lease is active.
+  // Checked before the stale comparison, like patch_manifest does.
+  await assertNoConflictingLease(manifestAbs, leaseId);
+  if (loaded.state === "stale") {
+    throw new MediaKitError(`live manifest changed since this session started (base revision ${loaded.session.base_revision}, live revision ${loaded.liveRevision}) — the draft is kept, abort the session and start over, or re-propose against the new base`, "SESSION_STALE");
+  }
+  const planned = await validatePatchedManifest(loaded.draftDoc, loaded.draftPath);
+  let liveRaw;
+  try {
+    liveRaw = await readFile(manifestAbs, "utf8");
+  } catch (e) {
+    throw new MediaKitError(`cannot read manifest ${manifestPath}: ${e.message}`, "INVALID_INPUT");
+  }
+  let draftRaw;
+  try {
+    draftRaw = await readFile(loaded.draftPath, "utf8");
+  } catch (e) {
+    throw new MediaKitError(`cannot read session draft ${loaded.draftPath}: ${e.message}`, "INVALID_INPUT");
+  }
+  // Checkpoint FIRST: the pre-commit bytes are saved before the
+  // rename, so an interruption after the rename still leaves the
+  // pre-image recoverable via restore.
+  const checkpoint = {
+    version: EDIT_SESSION_VERSION,
+    session_id: loaded.session.session_id,
+    holder: loaded.session.holder,
+    manifest: manifestAbs,
+    committed_at: new Date().toISOString(),
+    pre_revision: loaded.session.base_revision,
+    pre_sha256: loaded.session.base_sha256,
+    post_revision: loaded.draftRevision,
+    post_sha256: sha256Hex(draftRaw),
+    manifest_raw: liveRaw,
+  };
+  await writeFileAtomic(loaded.checkpointPath, `${JSON.stringify(checkpoint, null, 2)}\n`);
+  await prepareOutput(manifestAbs, []);
+  const backupPath = `${manifestAbs}.bak`;
+  try {
+    await writeFile(backupPath, liveRaw, "utf8");
+  } catch (e) {
+    throw new MediaKitError(`cannot write manifest backup ${backupPath}: ${e.message}`, "WRITE_FAILED");
+  }
+  await rename(loaded.draftPath, manifestAbs);
+  await rm(loaded.sessionPath, { force: true }).catch(() => {});
+  return {
+    operation: "edit_session",
+    action: "commit",
+    session_id: loaded.session.session_id,
+    holder: loaded.session.holder,
+    manifest: manifestAbs,
+    revision_before: loaded.session.base_revision,
+    revision_after: loaded.draftRevision,
+    operations: loaded.operations,
+    checkpoint: loaded.checkpointPath,
+    checkpoint_file: loaded.checkpointPath,
+    backup: backupPath,
+    validated: { dry_run: true, steps: planned.steps.length, output: planned.output },
+    note: "The live manifest is now the draft. Restore the pre-commit bytes with edit_session restore (consumes the checkpoint) if the commit was a mistake.",
+  };
+}
+
+export async function abortEditSession({ manifestPath, sessionId }) {
+  const manifestAbs = await requireInput(manifestPath, "manifest");
+  if (typeof sessionId !== "string" || !sessionId) {
+    throw new MediaKitError("session_id is required to abort an edit session", "INVALID_ARG");
+  }
+  const loaded = await loadEditSession(manifestAbs);
+  if (!loaded.session) {
+    throw new MediaKitError(`no edit session on ${manifestPath} to abort — start one first`, "SESSION_NOT_FOUND");
+  }
+  if (sessionId !== loaded.session.session_id) {
+    throw new MediaKitError(`session_id does not match the active edit session on ${manifestPath} (started by "${loaded.session.holder}") — nothing was aborted`, "SESSION_MISMATCH");
+  }
+  const draftMissing = loaded.state === "broken" && loaded.reason === "draft_missing";
+  await rm(loaded.draftPath, { force: true }).catch(() => {});
+  await rm(loaded.sessionPath, { force: true }).catch(() => {});
+  return {
+    operation: "edit_session",
+    action: "abort",
+    aborted: true,
+    session_id: loaded.session.session_id,
+    holder: loaded.session.holder,
+    manifest: manifestAbs,
+    draft: loaded.draftPath,
+    draft_missing: draftMissing,
+    note: "The live manifest was not touched — only the draft and the session sidecar were removed.",
+  };
+}
+
+export async function restoreEditSessionCheckpoint({ manifestPath }) {
+  const manifestAbs = await requireInput(manifestPath, "manifest");
+  const loaded = await loadEditSession(manifestAbs);
+  if (loaded.session && ["active", "stale"].includes(loaded.state)) {
+    throw new MediaKitError(`manifest has an ${loaded.state} edit session (started by "${loaded.session.holder}") — abort it first, then restore`, "SESSION_ACTIVE");
+  }
+  const { checkpoint, corrupt, checkpointPath } = await readEditSessionCheckpoint(manifestAbs);
+  if (!checkpoint) {
+    throw new MediaKitError(
+      corrupt
+        ? `session checkpoint on ${manifestPath} is corrupt — refusing to restore from it`
+        : `no session checkpoint on ${manifestPath} to restore — restore only works after an edit_session commit`,
+      corrupt ? "CHECKPOINT_CORRUPT" : "CHECKPOINT_NOT_FOUND",
+    );
+  }
+  let liveRaw;
+  try {
+    liveRaw = await readFile(manifestAbs, "utf8");
+  } catch (e) {
+    throw new MediaKitError(`cannot read manifest ${manifestPath}: ${e.message}`, "INVALID_INPUT");
+  }
+  // The restore itself is reversible one step: the bytes being
+  // replaced go to .bak first (patch_manifest's rule: .bak is always
+  // the revision just before the current one).
+  await prepareOutput(manifestAbs, []);
+  const backupPath = `${manifestAbs}.bak`;
+  try {
+    await writeFile(backupPath, liveRaw, "utf8");
+  } catch (e) {
+    throw new MediaKitError(`cannot write manifest backup ${backupPath}: ${e.message}`, "WRITE_FAILED");
+  }
+  await writeFileAtomic(manifestAbs, checkpoint.manifest_raw);
+  await rm(checkpointPath, { force: true }).catch(() => {});
+  return {
+    operation: "edit_session",
+    action: "restore",
+    restored: true,
+    manifest: manifestAbs,
+    restored_revision: checkpoint.pre_revision,
+    checkpoint_session_id: checkpoint.session_id,
+    committed_at: checkpoint.committed_at,
+    backup: backupPath,
+    note: "The checkpoint is consumed — a second restore reports CHECKPOINT_NOT_FOUND.",
   };
 }
 

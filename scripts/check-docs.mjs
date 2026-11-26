@@ -125,8 +125,19 @@ for (const t of tierLines) {
   if (!TIERS.includes(t)) problems.push(`unknown safety tier "${t}" (must be one of ${TIERS.join(", ")})`);
 }
 const destructiveTools = serverTools.filter((_, i) => tierLines[i] === "DESTRUCTIVE");
-if (!destructiveTools.includes("patch_manifest")) problems.push("patch_manifest must stay DESTRUCTIVE — it is the only tool that rewrites a user artifact in place");
-if (destructiveTools.length !== 1) problems.push(`expected exactly 1 DESTRUCTIVE tool (patch_manifest), got ${destructiveTools.length}: ${destructiveTools.join(", ")}`);
+if (!destructiveTools.includes("patch_manifest")) problems.push("patch_manifest must stay DESTRUCTIVE — it rewrites a user artifact in place");
+if (!destructiveTools.includes("edit_session")) problems.push("edit_session must stay DESTRUCTIVE — its commit rewrites a user artifact in place");
+// DESTRUCTIVE is a closed set, not a count: exactly the two tools
+// whose guarded write replaces a user artifact in place
+// (patch_manifest: expected_revision + .bak; edit_session commit:
+// base sha256 + revision stale check + session checkpoint). A third
+// DESTRUCTIVE claim is a design decision, not a typo — update this
+// allowlist deliberately, with its guard named, when one ships.
+const DESTRUCTIVE_ALLOWLIST = ["patch_manifest", "edit_session"];
+for (const t of destructiveTools) {
+  if (!DESTRUCTIVE_ALLOWLIST.includes(t)) problems.push(`unexpected DESTRUCTIVE tool "${t}" — the allowlist is ${DESTRUCTIVE_ALLOWLIST.join(", ")}; a new in-place writer needs its guard named here first`);
+}
+if (destructiveTools.length !== DESTRUCTIVE_ALLOWLIST.length) problems.push(`expected exactly ${DESTRUCTIVE_ALLOWLIST.length} DESTRUCTIVE tools (${DESTRUCTIVE_ALLOWLIST.join(", ")}), got ${destructiveTools.length}: ${destructiveTools.join(", ")}`);
 
 // Tool-count prose guard (lượt 177, idea: nexu-io/openmotion's
 // template-runtime-check — the catalog count must match everywhere

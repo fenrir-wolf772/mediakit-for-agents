@@ -2514,7 +2514,7 @@ export const TOOL_DEFS = [
   {
     name: "safety",
     tier: "READ",
-    description: "Safety tiers for every MediaKit tool (EncodeX's safety-tier idea): READ tools only probe and write nothing (probe, check, hook, diagnose); PLAN tools answer a question by transient work and leave no artifact (determinism renders to a hidden work dir that is removed, verify_cuts renders a draft to temp — plus caller-requested review strips when strips:true and the cut-sheet overview when cut_sheet:true, estimate_conversion sample-encodes to temp, job only reads/cancels job state, propose_edit validates options with the patch_manifest helpers and writes nothing); WRITE tools produce a file the caller asked for and never overwrite their own input (prepareOutput refuses that); DESTRUCTIVE tools replace or remove a user artifact in place — only patch_manifest, and it is guarded by expected_revision plus a .bak backup. Returns the tier table with every tool named, the counts, and the rules. Read this before letting an agent loose on a workspace.",
+    description: "Safety tiers for every MediaKit tool (EncodeX's safety-tier idea): READ tools only probe and write nothing (probe, check, hook, diagnose); PLAN tools answer a question by transient work and leave no artifact (determinism renders to a hidden work dir that is removed, verify_cuts renders a draft to temp — plus caller-requested review strips when strips:true and the cut-sheet overview when cut_sheet:true, estimate_conversion sample-encodes to temp, job only reads/cancels job state, propose_edit validates options with the patch_manifest helpers and writes nothing); WRITE tools produce a file the caller asked for and never overwrite their own input (prepareOutput refuses that); DESTRUCTIVE tools replace or remove a user artifact in place — patch_manifest, guarded by expected_revision plus a .bak backup, and the edit_session commit, guarded by a base sha256 + revision stale check plus a session checkpoint. Returns the tier table with every tool named, the counts, and the rules. Read this before letting an agent loose on a workspace.",
     schema: {},
     handler: async () => safe(() => listSafetyTiers()),
   },
@@ -2600,7 +2600,7 @@ export const TOOL_DEFS = [
   {
     name: "list_operations",
     tier: "READ",
-    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 98 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 99 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
     schema: {
     family: z.enum(["inspect", "edit", "text", "image", "assemble", "meta"]).optional().describe("Narrow to one family; omit for the whole catalog"),
   },
@@ -2697,6 +2697,28 @@ export const TOOL_DEFS = [
       return core.editLeaseStatus({ manifestPath: a.manifest_path });
     }),
   },
+
+  {
+    name: "edit_session",
+    tier: "DESTRUCTIVE",
+    description: "Edit a manifest inside an isolated draft session (ZiAn-Su/OCC-ForAgent's edit-session idea: a director never edits the live timeline directly — it stages work in a draft, reviews it, then commits atomically). Actions: start (needs `holder`; snapshots the live manifest's bytes sha256 + revision into a draft copy `<manifest>.draft-<id>.json` plus a sidecar `<manifest>.edit-session.json` — the live file is untouched, one active session per manifest; a second start is refused with SESSION_ACTIVE unless `force: true` takes it over and discards the old draft); commit (needs `session_id`; refuses SESSION_STALE when the live manifest moved since the base snapshot, validates the draft with the same manifest --dry-run patch_manifest uses, saves the pre-commit bytes to `<manifest>.session-checkpoint.json` plus `.bak`, then renames the draft over the manifest atomically and deletes the sidecar — the live revision becomes the draft's revision); abort (needs `session_id`; deletes the draft + sidecar, the live manifest is never touched); status (never throws for a missing session — reports none/active/stale/broken/committed with holder, base + live + draft revisions and the staged operation count; a sidecar that survived its own commit reports committed, not broken); resume (rejoins a staged draft, or reports the session already committed); restore (puts the pre-commit bytes back from the checkpoint — one-shot undo, the checkpoint is consumed, the replaced bytes go to .bak first; refused with SESSION_ACTIVE while a session is live, and with CHECKPOINT_NOT_FOUND when no commit has happened). Edit the draft with patch_manifest (expected_revision = the draft's revision, starting at the base revision) — each patch is atomic, so a failed patch leaves the draft exactly as it was. Commit honours a held edit lease exactly like patch_manifest: pass that lease's `lease_id` or the commit is refused with LEASE_HELD.",
+    schema: {
+    action: z.enum(["start", "commit", "abort", "status", "resume", "restore"]).describe("start: snapshot the live manifest into an isolated draft; commit: atomically replace the live manifest with the draft; abort: discard the draft; status: report the session (never throws for a missing one); resume: rejoin a staged draft; restore: put the pre-commit bytes back from the checkpoint"),
+    manifest_path: pathSchema.describe("Path to the manifest JSON file the session edits"),
+    holder: z.string().min(1).optional().describe("Who starts the session (start only, required) — a name such as an agent id, shown in SESSION_ACTIVE errors"),
+    session_id: z.string().min(1).optional().describe("Session id from start (commit/abort only, required)"),
+    force: z.boolean().optional().describe("Start only: take over an existing session and discard its draft instead of refusing with SESSION_ACTIVE"),
+    lease_id: z.string().min(1).optional().describe("Edit-lease id from `lease acquire` (commit only, optional) — required to commit while another holder's lease is active, like patch_manifest"),
+  },
+    handler: async (a) => safe(async () => {
+      if (a.action === "start") return core.startEditSession({ manifestPath: a.manifest_path, holder: a.holder, force: a.force ?? false });
+      if (a.action === "commit") return core.commitEditSession({ manifestPath: a.manifest_path, sessionId: a.session_id, leaseId: a.lease_id ?? null });
+      if (a.action === "abort") return core.abortEditSession({ manifestPath: a.manifest_path, sessionId: a.session_id });
+      if (a.action === "resume") return core.resumeEditSession({ manifestPath: a.manifest_path });
+      if (a.action === "restore") return core.restoreEditSessionCheckpoint({ manifestPath: a.manifest_path });
+      return core.editSessionStatus({ manifestPath: a.manifest_path });
+    }),
+  },
 ];
 
 // ---------------------------------------------------------------- safety tiers
@@ -2724,7 +2746,7 @@ const TIER_DESCRIPTIONS = {
   READ: "Probe-only: reads media and returns measurements, writes nothing.",
   PLAN: "Answers a question by transient work (a draft render, sample encodes, a job lookup) and leaves no artifact behind.",
   WRITE: "Produces a file the caller asked for; never overwrites its own input (prepareOutput refuses that).",
-  DESTRUCTIVE: "Replaces or removes a user artifact in place — needs a human-checked guard (patch_manifest: expected_revision + .bak backup).",
+  DESTRUCTIVE: "Replaces or removes a user artifact in place — needs a human-checked guard (patch_manifest: expected_revision + .bak backup; edit_session commit: base sha256 + revision stale check + session checkpoint).",
 };
 
 export function listSafetyTiers() {
@@ -2750,7 +2772,7 @@ export function listSafetyTiers() {
 }
 
 // ---------------------------------------------------------------- progressive discovery
-// The catalog is 98 tools and tools/list dumps the full JSON schema
+// The catalog is 99 tools and tools/list dumps the full JSON schema
 // of every one on every turn — kinocut's answer is progressive
 // discovery: a compact list first, full schema only for the tools
 // actually used (lượt 147, idea: KyaniteLabs/kinocut
@@ -2798,7 +2820,7 @@ export const TOOL_FAMILY_OF = {
   // image (8)
   thumbnail: "image", frames: "image", extract_frames: "image", preview_compare: "image", image_to_video: "image",
   slideshow: "image", export_gif: "image", svg_animate: "image",
-  // assemble (17)
+  // assemble (18)
   assemble: "assemble", manifest: "assemble", patch_manifest: "assemble",
   init_project: "assemble", export_timeline: "assemble", job: "assemble",
   release_checkpoint: "assemble", package: "assemble", publish_kit: "assemble",
@@ -2806,7 +2828,7 @@ export const TOOL_FAMILY_OF = {
   validate_template_package: "assemble",
   validate_shot_spec: "assemble",
   project_summary: "assemble",
-  lease: "assemble", propose_edit: "assemble",
+  lease: "assemble", propose_edit: "assemble", edit_session: "assemble",
   // meta (2)
   list_operations: "meta", describe_operation: "meta",
 };

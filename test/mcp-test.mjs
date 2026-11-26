@@ -15,7 +15,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
-import { acquireEditLease, analyzeSeamSamples, applyContentBaseline, averageHash, buildZoomChains, chunkCaptions, compactManifestOps, compareDeterminismRuns, countClippedRuns, cutSheetRows, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, endInPause, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, projectSummary, proposeEdit, releaseEditLease, renewEditLease, resolveQcPolicy, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, snapKeepSegmentsToPauses, spectralFluxOnset, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, SHORTS_STYLE_IDS } from "../src/core.js";
+import { acquireEditLease, analyzeSeamSamples, applyContentBaseline, averageHash, buildZoomChains, chunkCaptions, commitEditSession, compactManifestOps, compareDeterminismRuns, countClippedRuns, cutSheetRows, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, projectSummary, proposeEdit, releaseEditLease, renewEditLease, resolveQcPolicy, restoreEditSessionCheckpoint, resumeEditSession, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, snapKeepSegmentsToPauses, spectralFluxOnset, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
@@ -201,19 +201,19 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "normalize", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "magnify", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut", "clean_voice", "measure_pace", "highlights", "align_voice", "safety", "estimate_conversion", "release_checkpoint", "list_operations", "describe_operation", "list_templates", "validate_template_package", "chunk_captions", "validate_shot_spec", "lease", "project_summary"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "normalize", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "magnify", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut", "clean_voice", "measure_pace", "highlights", "align_voice", "safety", "estimate_conversion", "release_checkpoint", "list_operations", "describe_operation", "list_templates", "validate_template_package", "chunk_captions", "validate_shot_spec", "lease", "project_summary", "preview_compare", "propose_edit", "edit_session"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 98 tools present");
-checkOk(missing.length === 0, "tools/list has all 98 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 99 tools present");
+checkOk(missing.length === 0, "tools/list has all 99 tools", `missing: ${missing.join(", ")}`);
 
 // Progressive discovery (lượt 147, idea: KyaniteLabs/kinocut):
 // the compact catalog first, full schema only on demand.
 const discAll = listOperations({});
 console.log("list_operations:", discAll.tools.length, "tools | families", discAll.families.map((f) => `${f.name}:${f.count}`).join(" "));
-checkOk(discAll.total_tools === 98 && discAll.tools.length === 98 && discAll.profile === "full" && discAll.visible_tools === 98, "list_operations (pure) lists all 98 tools in full profile", JSON.stringify({ total: discAll.total_tools, visible: discAll.visible_tools, profile: discAll.profile }));
-checkOk(discAll.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:27 edit:37 text:7 image:8 assemble:17 meta:2", "list_operations families split 27/37/7/8/17/2", discAll.families.map((f) => `${f.name}:${f.count}`).join(" "));
+checkOk(discAll.total_tools === 99 && discAll.tools.length === 99 && discAll.profile === "full" && discAll.visible_tools === 99, "list_operations (pure) lists all 99 tools in full profile", JSON.stringify({ total: discAll.total_tools, visible: discAll.visible_tools, profile: discAll.profile }));
+checkOk(discAll.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:27 edit:37 text:7 image:8 assemble:18 meta:2", "list_operations families split 27/37/7/8/18/2", discAll.families.map((f) => `${f.name}:${f.count}`).join(" "));
 checkOk(discAll.tools.every((t) => typeof t.name === "string" && ["inspect", "edit", "text", "image", "assemble", "meta"].includes(t.family) && ["READ", "PLAN", "WRITE", "DESTRUCTIVE"].includes(t.tier) && typeof t.summary === "string" && t.summary.length > 10 && t.summary.length <= 161 && (t.summary.endsWith(".") || t.summary.endsWith("…"))), "every list_operations entry has a known family, a tier and a one-sentence summary (<=160 chars, ends . or …)", discAll.tools.filter((t) => !(t.summary.endsWith(".") || t.summary.endsWith("…"))).map((t) => t.name).join(","));
-checkOk(Object.keys(TOOL_FAMILY_OF).length === 98 && TOOL_DEFS.every((t) => TOOL_FAMILY_OF[t.name] !== undefined) && new Set(Object.values(TOOL_FAMILY_OF)).size === 6, "TOOL_FAMILY_OF covers every TOOL_DEFS entry exactly once, in 6 families", `map=${Object.keys(TOOL_FAMILY_OF).length} defs=${TOOL_DEFS.length}`);
+checkOk(Object.keys(TOOL_FAMILY_OF).length === 99 && TOOL_DEFS.every((t) => TOOL_FAMILY_OF[t.name] !== undefined) && new Set(Object.values(TOOL_FAMILY_OF)).size === 6, "TOOL_FAMILY_OF covers every TOOL_DEFS entry exactly once, in 6 families", `map=${Object.keys(TOOL_FAMILY_OF).length} defs=${TOOL_DEFS.length}`);
 const discEdit = listOperations({ family: "edit" });
 checkOk(discEdit.tools.length === 37 && discEdit.tools.every((t) => t.family === "edit"), "list_operations family=edit narrows to the 37 edit tools", `got ${discEdit.tools.length}`);
 let discBadFamily = null;
@@ -246,12 +246,12 @@ for (const [badArgs, why] of [[{ category: "nope" }, "unknown category"], [{ tim
   try { await listSceneTemplates(badArgs); } catch (e) { threw = e; }
   checkOk(threw?.code === "INVALID_ARG" && typeof threw?.message === "string" && threw.message.length > 0, `listSceneTemplates rejects ${why} with INVALID_ARG`, threw?.message ?? "no throw");
 }
-checkOk(toolProfile() === "full" && visibleTools().length === 98 && HOT_TOOLS.length === 18 && HOT_TOOLS.every((n) => TOOL_DEFS.some((t) => t.name === n)), "default profile is full (98 visible) and the 18 hot tools all exist", `profile=${toolProfile()} hot=${HOT_TOOLS.length}`);
+checkOk(toolProfile() === "full" && visibleTools().length === 99 && HOT_TOOLS.length === 18 && HOT_TOOLS.every((n) => TOOL_DEFS.some((t) => t.name === n)), "default profile is full (99 visible) and the 18 hot tools all exist", `profile=${toolProfile()} hot=${HOT_TOOLS.length}`);
 process.env.MEDIAKIT_TOOL_PROFILE = "hot";
 checkOk(toolProfile() === "hot" && visibleTools().length === 20 && visibleTools().some((t) => t.name === "list_operations") && visibleTools().some((t) => t.name === "describe_operation") && !visibleTools().some((t) => t.name === "chroma_key"), "hot profile narrows tools/list to 20 (18 hot + 2 discovery), chroma_key hidden", `visible=${visibleTools().length}`);
-checkOk(listOperations({}).tools.length === 98 && listOperations({}).visible_tools === 20, "list_operations still reports the FULL 98-tool catalog in hot profile (visible_tools 20)", JSON.stringify({ tools: listOperations({}).tools.length, visible: listOperations({}).visible_tools }));
+checkOk(listOperations({}).tools.length === 99 && listOperations({}).visible_tools === 20, "list_operations still reports the FULL 99-tool catalog in hot profile (visible_tools 20)", JSON.stringify({ tools: listOperations({}).tools.length, visible: listOperations({}).visible_tools }));
 process.env.MEDIAKIT_TOOL_PROFILE = "bogus";
-checkOk(toolProfile() === "full" && visibleTools().length === 98, "an unknown MEDIAKIT_TOOL_PROFILE value falls back to full (98 visible)", `profile=${toolProfile()}`);
+checkOk(toolProfile() === "full" && visibleTools().length === 99, "an unknown MEDIAKIT_TOOL_PROFILE value falls back to full (99 visible)", `profile=${toolProfile()}`);
 delete process.env.MEDIAKIT_TOOL_PROFILE;
 // Machine-readable contract (lượt 149): SPEC.json is generated from
 // the same TOOL_DEFS registry — the committed file must equal a
@@ -264,10 +264,10 @@ const specFresh = await buildSpec();
 checkOk(specOnDisk.spec_version === SPEC_VERSION && specFresh.spec_version === SPEC_VERSION, "SPEC.json carries spec_version 1", `on-disk=${specOnDisk.spec_version} fresh=${specFresh.spec_version}`);
 const pkgJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 checkOk(specOnDisk.mediakit_version === pkgJson.version && specFresh.mediakit_version === pkgJson.version, "SPEC.json mediakit_version matches package.json", `spec=${specOnDisk.mediakit_version} pkg=${pkgJson.version}`);
-checkOk(specOnDisk.tool_count === 98 && specFresh.tool_count === 98 && specOnDisk.tools.length === 98, "SPEC.json lists all 98 tools", `on-disk=${specOnDisk.tool_count} fresh=${specFresh.tool_count}`);
+checkOk(specOnDisk.tool_count === 99 && specFresh.tool_count === 99 && specOnDisk.tools.length === 99, "SPEC.json lists all 99 tools", `on-disk=${specOnDisk.tool_count} fresh=${specFresh.tool_count}`);
 checkOk(specText(specOnDisk) === specText(specFresh), "committed SPEC.json equals a fresh build byte for byte (regenerate with `npm run spec` when it drifts)", `hash on-disk=${specOnDisk.spec_hash?.slice(0, 12)} fresh=${specFresh.spec_hash.slice(0, 12)}`);
 checkOk(specOnDisk.spec_hash === specHash(specOnDisk.tools) && specFresh.spec_hash === specHash(specFresh.tools), "SPEC spec_hash is the sha256 of its own tools array", `hash=${specOnDisk.spec_hash.slice(0, 12)}…`);
-checkOk(specOnDisk.transports.join(",") === "stdio,http" && specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:27 edit:37 text:7 image:8 assemble:17 meta:2" && specOnDisk.families.reduce((n, f) => n + f.count, 0) === 98, "SPEC families split 27/37/7/8/17/2, sum to 98, transports stdio+http", specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" "));
+checkOk(specOnDisk.transports.join(",") === "stdio,http" && specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:27 edit:37 text:7 image:8 assemble:18 meta:2" && specOnDisk.families.reduce((n, f) => n + f.count, 0) === 99, "SPEC families split 27/37/7/8/18/2, sum to 99, transports stdio+http", specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" "));
 checkOk(specOnDisk.tools.every((t) => typeof t.name === "string" && ["inspect", "edit", "text", "image", "assemble", "meta"].includes(t.family) && ["READ", "PLAN", "WRITE", "DESTRUCTIVE"].includes(t.tier) && typeof t.summary === "string" && t.summary.length > 10 && t.summary.length <= 161 && typeof t.description === "string" && t.description.length > t.summary.length && t.inputSchema?.type === "object" && typeof t.inputSchema.properties === "object" && (t.inputSchema.required === undefined || Array.isArray(t.inputSchema.required))), "every SPEC tool entry has a known family/tier, a one-sentence summary, a longer description and an object JSON Schema with properties (required present only when the tool has required params — an all-optional schema has none)", specOnDisk.tools.filter((t) => !(t.inputSchema?.type === "object")).map((t) => t.name).join(","));
 checkOk(JSON.stringify(specOnDisk.tools.map((t) => t.name)) === JSON.stringify(TOOL_DEFS.map((t) => t.name)), "SPEC tool order follows the TOOL_DEFS registry order", `first=${specOnDisk.tools[0].name} last=${specOnDisk.tools.at(-1).name}`);
 checkOk(specOnDisk.tools.find((t) => t.name === "probe")?.inputSchema.properties.input?.type === "string" && specOnDisk.tools.find((t) => t.name === "trim")?.inputSchema.properties.stream_copy?.type === "boolean" && specOnDisk.tools.find((t) => t.name === "patch_manifest")?.tier === "DESTRUCTIVE", "SPEC schemas carry real parameter types (probe.input string, trim.stream_copy boolean) and patch_manifest stays DESTRUCTIVE", "");
@@ -3497,7 +3497,7 @@ checkOk(dedupCliJson.frame_count === 1 && dedupCliJson.dedup?.dropped === 19, "C
 // list_operations / describe_operation over MCP (lượt 147).
 const listOpsRes = await client.callTool({ name: "list_operations", arguments: {} });
 const listOpsJson = JSON.parse(listOpsRes.content[0].text);
-checkOk(listOpsJson.total_tools === 98 && listOpsJson.tools?.length === 98 && listOpsJson.families?.find((f) => f.name === "edit")?.count === 37 && listOpsJson.tools?.every((t) => typeof t.summary === "string"), "MCP list_operations lists 98 tools with families (edit 37) and summaries", `total=${listOpsJson.total_tools}`);
+checkOk(listOpsJson.total_tools === 99 && listOpsJson.tools?.length === 99 && listOpsJson.families?.find((f) => f.name === "edit")?.count === 37 && listOpsJson.tools?.every((t) => typeof t.summary === "string"), "MCP list_operations lists 99 tools with families (edit 37) and summaries", `total=${listOpsJson.total_tools}`);
 const listOpsEditRes = await client.callTool({ name: "list_operations", arguments: { family: "image" } });
 const listOpsEditJson = JSON.parse(listOpsEditRes.content[0].text);
 checkOk(listOpsEditJson.tools?.length === 8 && listOpsEditJson.tools?.every((t) => t.family === "image"), "MCP list_operations family=image returns the 8 image tools", `got ${listOpsEditJson.tools?.length}`);
@@ -3859,6 +3859,141 @@ checkOk(leaseCliStatusJson.state === "active" && leaseCliStatusJson.holder === "
 const leaseCliRelease = await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "lease", "release", leasePath, "--lease-id", leaseCliAcquireJson.lease_id]);
 const leaseCliReleaseJson = JSON.parse(leaseCliRelease.stdout);
 checkOk(leaseCliReleaseJson.released === true, "CLI lease release frees the lease", JSON.stringify(leaseCliReleaseJson.released));
+
+// edit session (lượt 179, idea: ZiAn-Su/OCC-ForAgent's edit session):
+// an isolated draft + a base sha256/revision stale check + a durable
+// checkpoint + one-shot restore — the director stages work off the
+// live file and commits it atomically, or throws it away.
+const esPath = path.join(root, "outputs/mcp-manifest-edit-session.json");
+const esOriginal = JSON.stringify({ version: 1, input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-manifest-es-out.mp4"), steps: [{ tool: "trim", args: { start: 2, end: 8 } }, { tool: "reframe", args: { mode: "blur", width: 1080, height: 1920 } }, { tool: "loudness", args: { target_lufs: -14 } }], qa: "tiktok" }, null, 2);
+await writeFile(esPath, esOriginal, "utf8");
+const esSidecar = `${esPath}.edit-session.json`;
+const esCheckpoint = `${esPath}.session-checkpoint.json`;
+await rm(esSidecar, { force: true });
+await rm(esCheckpoint, { force: true });
+await rm(`${esPath}.bak`, { force: true });
+// Pure: no session at first, and commit/abort/resume refuse.
+const esNone = await editSessionStatus({ manifestPath: esPath });
+checkOk(esNone.state === "none" && esNone.has_checkpoint === false && esNone.session_corrupt === false, "edit_session status on a manifest with no session reports state none, no checkpoint", JSON.stringify(esNone.state));
+let esNoCommitErr = null;
+try { await commitEditSession({ manifestPath: esPath, sessionId: "es-none" }); } catch (e) { esNoCommitErr = e; }
+checkOk(esNoCommitErr?.code === "SESSION_NOT_FOUND", "edit_session commit with no session refuses with SESSION_NOT_FOUND", esNoCommitErr?.code ?? "");
+let esNoAbortErr = null;
+try { await abortEditSession({ manifestPath: esPath, sessionId: "es-none" }); } catch (e) { esNoAbortErr = e; }
+checkOk(esNoAbortErr?.code === "SESSION_NOT_FOUND", "edit_session abort with no session refuses with SESSION_NOT_FOUND", esNoAbortErr?.code ?? "");
+let esNoResumeErr = null;
+try { await resumeEditSession({ manifestPath: esPath }); } catch (e) { esNoResumeErr = e; }
+checkOk(esNoResumeErr?.code === "SESSION_NOT_FOUND", "edit_session resume with no session refuses with SESSION_NOT_FOUND", esNoResumeErr?.code ?? "");
+// Pure: start snapshots the base; the draft is an exact byte copy.
+const esStart = await startEditSession({ manifestPath: esPath, holder: "director" });
+checkOk(/^es-[0-9a-f]{16}$/.test(esStart.session_id) && esStart.base_revision === 0 && esStart.base_sha256.length === 64 && esStart.draft_path.endsWith(`.draft-${esStart.session_id}.json`), "edit_session start returns a session id, base revision 0 + sha256, and the draft path", JSON.stringify({ id: esStart.session_id, rev: esStart.base_revision }));
+checkOk((await readFile(esStart.draft_path, "utf8")) === esOriginal, "start writes the draft as an exact byte copy of the live manifest", "");
+// Pure: a second start is refused; force takes over and discards the old draft.
+let esSecondErr = null;
+try { await startEditSession({ manifestPath: esPath, holder: "other" }); } catch (e) { esSecondErr = e; }
+checkOk(esSecondErr?.code === "SESSION_ACTIVE" && /director/.test(esSecondErr.message), "a second start refuses with SESSION_ACTIVE naming the holder", esSecondErr?.message?.slice(0, 100) ?? "");
+const esForce = await startEditSession({ manifestPath: esPath, holder: "director", force: true });
+checkOk(esForce.session_id !== esStart.session_id, "start with force takes over with a new session id", JSON.stringify(esForce.session_id));
+let esOldDraftGone = false;
+try { await readFile(esStart.draft_path, "utf8"); } catch { esOldDraftGone = true; }
+checkOk(esOldDraftGone, "force start discards the old draft file", "");
+// Pure: resume rejoins the staged draft.
+const esResume = await resumeEditSession({ manifestPath: esPath });
+checkOk(esResume.resumed === true && esResume.state === "active" && esResume.session_id === esForce.session_id, "edit_session resume rejoins the active session", JSON.stringify({ resumed: esResume.resumed, state: esResume.state }));
+// Pure: patch the DRAFT — the live file stays at revision 0.
+const esDraftPatch = await patchManifest({ manifestPath: esForce.draft_path, patch: [{ op: "set", path: "qa", value: "youtube" }], expectedRevision: 0 });
+checkOk(esDraftPatch.revision_after === 1, "patch_manifest on the draft commits there (draft revision 0 -> 1)", JSON.stringify(esDraftPatch.revision_after));
+const esLiveAfterDraftPatch = JSON.parse(await readFile(esPath, "utf8"));
+checkOk(esLiveAfterDraftPatch.qa === "tiktok" && (esLiveAfterDraftPatch.revision ?? 0) === 0, "patching the draft leaves the live manifest untouched (qa still tiktok, revision 0)", JSON.stringify({ qa: esLiveAfterDraftPatch.qa }));
+const esActive = await editSessionStatus({ manifestPath: esPath });
+checkOk(esActive.state === "active" && esActive.operations === 1 && esActive.draft_revision === 1 && esActive.live_revision === 0, "edit_session status reports active with 1 staged operation (draft rev 1, live rev 0)", JSON.stringify({ ops: esActive.operations, draft: esActive.draft_revision, live: esActive.live_revision }));
+// Pure: a direct patch to the live file makes the session stale;
+// commit refuses SESSION_STALE and keeps the draft.
+await patchManifest({ manifestPath: esPath, patch: [{ op: "set", path: "output", value: path.join(root, "outputs/mcp-manifest-es-out2.mp4") }], expectedRevision: 0 });
+const esStale = await editSessionStatus({ manifestPath: esPath });
+checkOk(esStale.state === "stale" && esStale.live_revision === 1, "edit_session status reports stale once the live manifest moves (live rev 1)", JSON.stringify({ state: esStale.state, live: esStale.live_revision }));
+let esStaleCommitErr = null;
+try { await commitEditSession({ manifestPath: esPath, sessionId: esForce.session_id }); } catch (e) { esStaleCommitErr = e; }
+checkOk(esStaleCommitErr?.code === "SESSION_STALE", "edit_session commit on a stale base refuses with SESSION_STALE", esStaleCommitErr?.code ?? "");
+checkOk(JSON.parse(await readFile(esForce.draft_path, "utf8")).qa === "youtube", "the refused commit keeps the draft intact (qa still youtube)", "");
+// Pure: commit/abort with the wrong id change nothing.
+let esMismatchErr = null;
+try { await commitEditSession({ manifestPath: esPath, sessionId: "es-wrong" }); } catch (e) { esMismatchErr = e; }
+checkOk(esMismatchErr?.code === "SESSION_MISMATCH", "edit_session commit with a wrong id refuses with SESSION_MISMATCH", esMismatchErr?.code ?? "");
+let esAbortWrongErr = null;
+try { await abortEditSession({ manifestPath: esPath, sessionId: "es-wrong" }); } catch (e) { esAbortWrongErr = e; }
+checkOk(esAbortWrongErr?.code === "SESSION_MISMATCH" && (await editSessionStatus({ manifestPath: esPath })).state === "stale", "edit_session abort with a wrong id refuses with SESSION_MISMATCH and the session stays stale", esAbortWrongErr?.code ?? "");
+// Pure: abort discards the draft; the live manifest is untouched.
+const esAbort = await abortEditSession({ manifestPath: esPath, sessionId: esForce.session_id });
+checkOk(esAbort.aborted === true && esAbort.draft_missing === false, "edit_session abort discards the session", JSON.stringify(esAbort.aborted));
+checkOk(JSON.parse(await readFile(esPath, "utf8")).qa === "tiktok", "abort leaves the live manifest untouched (qa still tiktok)", "");
+// Pure: a clean session commits — the live file becomes the draft,
+// and the checkpoint + .bak hold the exact pre-commit bytes.
+const esLiveBeforeCommit = await readFile(esPath, "utf8");
+const esStart2 = await startEditSession({ manifestPath: esPath, holder: "director" });
+await patchManifest({ manifestPath: esStart2.draft_path, patch: [{ op: "set", path: "qa", value: "youtube" }], expectedRevision: 1 });
+const esCommit = await commitEditSession({ manifestPath: esPath, sessionId: esStart2.session_id });
+checkOk(esCommit.revision_before === 1 && esCommit.revision_after === 2 && esCommit.operations === 1 && esCommit.validated?.steps === 3, "edit_session commit replaces the live manifest with the draft (revision 1 -> 2, 3 steps validated)", JSON.stringify({ before: esCommit.revision_before, after: esCommit.revision_after, steps: esCommit.validated?.steps }));
+const esLiveAfterCommit = JSON.parse(await readFile(esPath, "utf8"));
+checkOk(esLiveAfterCommit.qa === "youtube" && esLiveAfterCommit.revision === 2, "the live manifest is now the draft (qa youtube, revision 2)", JSON.stringify({ qa: esLiveAfterCommit.qa, rev: esLiveAfterCommit.revision }));
+const esCkpt = JSON.parse(await readFile(esCheckpoint, "utf8"));
+checkOk(esCkpt.pre_revision === 1 && esCkpt.post_revision === 2 && esCkpt.manifest_raw === esLiveBeforeCommit && esCkpt.session_id === esStart2.session_id, "the commit checkpoint holds the exact pre-commit bytes (rev 1) for the committed session", JSON.stringify({ pre: esCkpt.pre_revision, post: esCkpt.post_revision }));
+checkOk((await readFile(`${esPath}.bak`, "utf8")) === esLiveBeforeCommit, "commit writes .bak with the exact pre-commit bytes, like patch_manifest", "");
+// Pure: restore puts the pre-commit bytes back and consumes the checkpoint.
+const esRestore = await restoreEditSessionCheckpoint({ manifestPath: esPath });
+checkOk(esRestore.restored === true && esRestore.restored_revision === 1, "edit_session restore returns the manifest to revision 1", JSON.stringify(esRestore.restored_revision));
+checkOk((await readFile(esPath, "utf8")) === esLiveBeforeCommit, "restore returns the live manifest to its exact pre-commit bytes", "");
+let esRestoreAgainErr = null;
+try { await restoreEditSessionCheckpoint({ manifestPath: esPath }); } catch (e) { esRestoreAgainErr = e; }
+checkOk(esRestoreAgainErr?.code === "CHECKPOINT_NOT_FOUND", "a second restore refuses with CHECKPOINT_NOT_FOUND (the checkpoint is consumed)", esRestoreAgainErr?.code ?? "");
+// Pure: restore is refused while a session is live.
+const esStart3 = await startEditSession({ manifestPath: esPath, holder: "director" });
+let esRestoreActiveErr = null;
+try { await restoreEditSessionCheckpoint({ manifestPath: esPath }); } catch (e) { esRestoreActiveErr = e; }
+checkOk(esRestoreActiveErr?.code === "SESSION_ACTIVE", "edit_session restore while a session is live refuses with SESSION_ACTIVE", esRestoreActiveErr?.code ?? "");
+await abortEditSession({ manifestPath: esPath, sessionId: esStart3.session_id });
+// Pure: a stale sidecar whose draft is gone after a commit reports
+// "committed", not broken — the crash window between the commit
+// rename and the sidecar delete. (Simulated: commit deletes the
+// sidecar, so recreate it exactly as it was.)
+const esStart4 = await startEditSession({ manifestPath: esPath, holder: "director" });
+await patchManifest({ manifestPath: esStart4.draft_path, patch: [{ op: "set", path: "qa", value: "youtube" }], expectedRevision: 1 });
+await commitEditSession({ manifestPath: esPath, sessionId: esStart4.session_id });
+await writeFile(esSidecar, JSON.stringify({ version: 1, session_id: esStart4.session_id, holder: "director", manifest: esPath, draft: esStart4.draft_path, base_revision: 1, base_sha256: "0".repeat(64), created_at: new Date().toISOString(), updated_at: new Date().toISOString() }, null, 2), "utf8");
+const esCommitted = await editSessionStatus({ manifestPath: esPath });
+checkOk(esCommitted.state === "committed" && esCommitted.committed_session_id === esStart4.session_id, "status on a sidecar that survived its own commit reports committed (crash window), not broken", JSON.stringify(esCommitted.state));
+const esAfterCrash = await editSessionStatus({ manifestPath: esPath });
+checkOk(esAfterCrash.state === "none", "the stale sidecar is cleaned up, so the next status is none", JSON.stringify(esAfterCrash.state));
+// Pure: commit honours a held lease exactly like patch_manifest.
+const esStart5 = await startEditSession({ manifestPath: esPath, holder: "director" });
+await patchManifest({ manifestPath: esStart5.draft_path, patch: [{ op: "set", path: "output", value: path.join(root, "outputs/mcp-manifest-es-out3.mp4") }], expectedRevision: 2 });
+const esLease = await acquireEditLease({ manifestPath: esPath, holder: "lease-holder" });
+let esLeaseHeldErr = null;
+try { await commitEditSession({ manifestPath: esPath, sessionId: esStart5.session_id }); } catch (e) { esLeaseHeldErr = e; }
+checkOk(esLeaseHeldErr?.code === "LEASE_HELD", "edit_session commit without the lease id is refused with LEASE_HELD while another holder's lease is active", esLeaseHeldErr?.code ?? "");
+const esCommitLeased = await commitEditSession({ manifestPath: esPath, sessionId: esStart5.session_id, leaseId: esLease.lease_id });
+checkOk(esCommitLeased.revision_after === 3 && esCommitLeased.revision_before === 2, "edit_session commit with the matching lease id succeeds (revision 2 -> 3)", JSON.stringify({ before: esCommitLeased.revision_before, after: esCommitLeased.revision_after }));
+await releaseEditLease({ manifestPath: esPath, leaseId: esLease.lease_id });
+// MCP + CLI: start/status/commit/abort round-trip, including a
+// no-op commit (a draft with no patches commits at the same revision).
+const esMcp = await client.callTool({ name: "edit_session", arguments: { action: "start", manifest_path: esPath, holder: "mcp-director" } });
+const esMcpJson = JSON.parse(esMcp.content[0].text);
+checkOk(esMcp.isError !== true && /^es-[0-9a-f]{16}$/.test(esMcpJson.session_id), "MCP edit_session start returns a session id", JSON.stringify({ id: esMcpJson.session_id }));
+const esMcpStatus = await client.callTool({ name: "edit_session", arguments: { action: "status", manifest_path: esPath } });
+const esMcpStatusJson = JSON.parse(esMcpStatus.content[0].text);
+checkOk(esMcpStatusJson.state === "active" && esMcpStatusJson.holder === "mcp-director", "MCP edit_session status reports the active session and its holder", JSON.stringify(esMcpStatusJson.state));
+const esMcpCommit = await client.callTool({ name: "edit_session", arguments: { action: "commit", manifest_path: esPath, session_id: esMcpJson.session_id } });
+const esMcpCommitJson = JSON.parse(esMcpCommit.content[0].text);
+checkOk(esMcpCommitJson.revision_before === 3 && esMcpCommitJson.revision_after === 3 && esMcpCommitJson.operations === 0, "MCP edit_session commit with no draft patches is a no-op commit (revision 3 -> 3, 0 operations)", JSON.stringify({ before: esMcpCommitJson.revision_before, after: esMcpCommitJson.revision_after }));
+const esCliStart = await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "edit-session", "start", esPath, "--holder", "cli-director"]);
+const esCliStartJson = JSON.parse(esCliStart.stdout);
+checkOk(/^es-[0-9a-f]{16}$/.test(esCliStartJson.session_id) && esCliStartJson.holder === "cli-director", "CLI edit-session start returns a session id for the holder", JSON.stringify(esCliStartJson.session_id));
+const esCliStatus = await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "edit-session", "status", esPath]);
+const esCliStatusJson = JSON.parse(esCliStatus.stdout);
+checkOk(esCliStatusJson.state === "active" && esCliStatusJson.holder === "cli-director", "CLI edit-session status reports the active session", JSON.stringify(esCliStatusJson.state));
+const esCliAbort = await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "edit-session", "abort", esPath, "--session-id", esCliStartJson.session_id]);
+const esCliAbortJson = JSON.parse(esCliAbort.stdout);
+checkOk(esCliAbortJson.aborted === true, "CLI edit-session abort discards the session", JSON.stringify(esCliAbortJson.aborted));
 
 const overlayRes = await client.callTool({
   name: "overlay",
@@ -9132,7 +9267,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 98 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 98 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 99 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 99 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -12189,8 +12324,8 @@ checkOk(explainSynth("REVISION_MISMATCH", "revision mismatch").kind === "fix-arg
 // the tier table, the MCP annotations, and the measured estimate.
 const safetyRes = await client.callTool({ name: "safety", arguments: {} });
 const safetyJson = JSON.parse(safetyRes.content[0].text);
-checkOk(safetyJson.total_tools === 98 && safetyJson.counts.READ === 30 && safetyJson.counts.PLAN === 5 && safetyJson.counts.WRITE === 62 && safetyJson.counts.DESTRUCTIVE === 1, "safety counts the tiers: 30 READ / 5 PLAN / 62 WRITE / 1 DESTRUCTIVE of 98 tools", JSON.stringify(safetyJson.counts));
-checkOk(JSON.stringify(safetyJson.tiers.DESTRUCTIVE.tools) === JSON.stringify(["patch_manifest"]), "patch_manifest is the only DESTRUCTIVE tool", JSON.stringify(safetyJson.tiers.DESTRUCTIVE.tools));
+checkOk(safetyJson.total_tools === 99 && safetyJson.counts.READ === 30 && safetyJson.counts.PLAN === 5 && safetyJson.counts.WRITE === 62 && safetyJson.counts.DESTRUCTIVE === 2, "safety counts the tiers: 30 READ / 5 PLAN / 62 WRITE / 2 DESTRUCTIVE of 99 tools", JSON.stringify(safetyJson.counts));
+checkOk(JSON.stringify(safetyJson.tiers.DESTRUCTIVE.tools) === JSON.stringify(["patch_manifest", "edit_session"]), "DESTRUCTIVE is a closed set of two guarded in-place writers: patch_manifest + edit_session", JSON.stringify(safetyJson.tiers.DESTRUCTIVE.tools));
 const tierOf = {};
 for (const [tier, v] of Object.entries(safetyJson.tiers)) for (const n of v.tools) tierOf[n] = tier;
 const badAnnotations = tools.tools.filter((t) => {
@@ -12355,7 +12490,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 98 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 99 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -12415,11 +12550,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 98, "GET /mcp reports name/version/transport and 98 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 99, "GET /mcp reports name/version/transport and 99 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 98 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 98 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 99 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 99 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 // Progressive discovery over HTTP (lượt 147): hot profile narrows
 // tools/list on the wire too — listTools() reads the env per call,
 // so flipping it here changes the same in-process server, and the
@@ -12433,7 +12568,7 @@ const httpRpcHot = await httpCall("POST", "/", { jsonrpc: "2.0", id: 7, method: 
 checkOk(httpRpcHot.status === 200 && httpRpcHot.json?.result?.tools?.length === 20, "JSON-RPC tools/list in hot profile also returns 20 tools", `count=${httpRpcHot.json?.result?.tools?.length}`);
 delete process.env.MEDIAKIT_TOOL_PROFILE;
 const httpToolsFull = await httpCall("GET", "/mcp/tools");
-checkOk(httpToolsFull.json?.tools?.length === 98, "clearing MEDIAKIT_TOOL_PROFILE restores the full 98-tool list", `count=${httpToolsFull.json?.tools?.length}`);
+checkOk(httpToolsFull.json?.tools?.length === 99, "clearing MEDIAKIT_TOOL_PROFILE restores the full 99-tool list", `count=${httpToolsFull.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -12534,7 +12669,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 98, "JSON-RPC tools/list returns the same 98 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 99, "JSON-RPC tools/list returns the same 99 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

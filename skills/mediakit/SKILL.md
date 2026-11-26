@@ -1331,6 +1331,31 @@ file is treated as no lease, and the `LEASE_HELD` error never names
 the lease id. A lease is cooperative, not security — it stops honest
 concurrent writers, it does not stop a writer that ignores it.
 
+A lease stops a concurrent writer, but it gives the director nowhere
+to stage a multi-step edit that is visible and reviewable but not yet
+live. For that, open an edit session (`edit_session`, OCC-ForAgent's
+edit-session idea): `start` with a `holder` name snapshots the live
+manifest (bytes sha256 + revision) into a draft copy
+`<manifest>.draft-<id>.json` plus a sidecar
+`<manifest>.edit-session.json` — the live file is untouched, one
+active session per manifest. Edit the draft with `patch_manifest`
+(`expected_revision` = the draft's revision, starting at the base
+revision); each patch is atomic, so a failed patch leaves the draft
+exactly as it was. `commit` with the `session_id` refuses
+`SESSION_STALE` when the live manifest moved since the base snapshot,
+validates the draft with the same manifest `--dry-run`
+`patch_manifest` uses, saves the pre-commit bytes to
+`<manifest>.session-checkpoint.json` plus `.bak`, then renames the
+draft over the manifest atomically — the live revision becomes the
+draft's revision. `abort` discards the draft (the live file is never
+touched); `status` never throws for a missing session
+(`none`/`active`/`stale`/`broken`/`committed`); `resume` rejoins a
+staged draft; `restore` puts the pre-commit bytes back from the
+checkpoint — one-shot undo, refused while a session is live. A second
+`start` is refused with `SESSION_ACTIVE` unless `force: true` takes
+it over and discards the old draft. Commit honours a held edit lease
+exactly like `patch_manifest`: pass that lease's `lease_id`.
+
 ### 41. One style id for the whole video — don't retype hex values
 Pick the style once (`clean-bold`, `minimal-line` or `warm-story`,
 locked in `skills/shorts-video/styles.json`) and pass
@@ -1670,7 +1695,7 @@ exactly the unguarded pattern brookcs3/m3u8-mcp-server's
 verify) — MediaKit's `download` exists so the agent never has to.
 
 ### 52. Test a tool over HTTP before wiring up an MCP client — same tools, curl instead of stdio
-`mediakit mcp --http [--port 3000]` serves the same 98 tools over
+`mediakit mcp --http [--port 3000]` serves the same 99 tools over
 HTTP on `127.0.0.1`: `GET /mcp` (metadata), `GET /mcp/tools`
 (every tool + JSON input schema), `POST /mcp/tools/{name}/invoke`
 (`{"arguments": {...}}`), and `POST /` for JSON-RPC 2.0
@@ -2077,16 +2102,17 @@ sample-encodes to temp, `job` only reads/cancels job state,
 `propose_edit` validates options with the patch_manifest helpers
 and writes nothing; WRITE
 (62) produces a file the caller asked for and never overwrites its
-own input; DESTRUCTIVE (1 — `patch_manifest`, guarded by
-`expected_revision` plus a `.bak` backup) replaces a user artifact
-in place. The tier is a property of the tool, not its arguments: a
+own input; DESTRUCTIVE (2 — `patch_manifest`, guarded by
+`expected_revision` plus a `.bak` backup, and the `edit_session`
+commit, guarded by a base sha256 + revision stale check plus a
+session checkpoint) replaces a user artifact in place. The tier is a property of the tool, not its arguments: a
 WRITE tool with `dry_run=true` still reports WRITE. `download`
 alone has `openWorldHint` because it alone touches the network.
 This is EncodeX's `safety.ts` (READ/PLAN/WRITE/DESTRUCTIVE), with
 one deliberate difference: EncodeX's DESTRUCTIVE tier is a
-permission a human grants per call, while MediaKit's single
-DESTRUCTIVE tool carries its guard in the call itself (revision +
-backup), so no separate approval step exists to forget.
+permission a human grants per call, while MediaKit's two
+DESTRUCTIVE tools carry their guards in the call itself (revision +
+backup, stale check + checkpoint), so no separate approval step exists to forget.
 
 `estimate_conversion` answers "how big / how long will this
 convert be" before the convert runs — measured, never a bitrate
@@ -2191,7 +2217,7 @@ Off by default; the verify stays probe-only without it.
 
 ### 58h. Browse the catalog before you dump it — progressive discovery
 
-98 tools is too many schemas to pay for in every turn. Don't start
+99 tools is too many schemas to pay for in every turn. Don't start
 from `tools/list` — start from `list_operations`: one compact line
 per tool (name, family, tier, one-sentence summary), optionally
 narrowed with `family` (`inspect`, `edit`, `text`, `image`,
