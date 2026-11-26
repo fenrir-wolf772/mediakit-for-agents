@@ -422,6 +422,20 @@ Verify a pip with `extract_frame` inside the PiP rect — the pixels
 there must match the PiP source at the same timestamp, not the main
 clip.
 
+`magnify` zooms one rectangle of the frame into a bordered inset at one
+of the same 9 positions (the pagecast magnified-tooltip idea): `--x
+--y --width --height` pick the region in display pixels, `--factor`
+(1.5–8, default 2) sets the zoom, `--border` (0–32, default 4) and
+`--border-color` (default FFFFFF) draw the frame, `--start`/`--end`
+window it in time. The inset is the live picture, so it tracks motion
+inside the region — use it to call out a detail (a face, a button, a
+score) without cutting away from the main shot. A region outside the
+display frame, or an inset that does not fit the frame at the chosen
+factor, is refused with the max factor named. Verify with
+`extract_frame` inside the inset rect: the pixels there must match the
+source region at the same timestamp, and outside a `--start`/`--end`
+window the same spot must show the main frame.
+
 ### 18. Open with a title card, not a bare first frame
 `titlecard "THE MOON IS LEAVING US"` renders a PNG: big bold hook
 (3-6 words, wrapped to short lines) in yellow on an orange box, on a
@@ -2142,7 +2156,7 @@ Off by default; the verify stays probe-only without it.
 
 ### 58h. Browse the catalog before you dump it — progressive discovery
 
-96 tools is too many schemas to pay for in every turn. Don't start
+97 tools is too many schemas to pay for in every turn. Don't start
 from `tools/list` — start from `list_operations`: one compact line
 per tool (name, family, tier, one-sentence summary), optionally
 narrowed with `family` (`inspect`, `edit`, `text`, `image`,

@@ -810,6 +810,26 @@ const COMMANDS = {
       ["-o, --output", "Output file (required)"],
     ],
   },
+  magnify: {
+    usage: "mediakit magnify <input> --x <px> --y <px> --width <px> --height <px> -o <output> [--factor 2] [--position bottom-right|top-left|top-center|top-right|center-left|center|center-right|bottom-left|bottom-center] [--margin 24] [--border 4] [--border-color FFFFFF] [--start <s>] [--end <s>] [--dry-run]",
+    desc: "Magnify inset: zoom one rectangle of the frame into a bordered inset at one of 9 positions, with factor, border and timing window. The inset is the live picture, not a still. --dry-run prints the exact ffmpeg command and writes no file.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--x", "Region left edge in display pixels (required)"],
+      ["--y", "Region top edge in display pixels (required)"],
+      ["--width", "Region width in display pixels (required)"],
+      ["--height", "Region height in display pixels (required)"],
+      ["--factor", "Magnification factor 1.5-8 (default 2)"],
+      ["--position", "bottom-right (default) | 8 other corners/edges/center"],
+      ["--margin", "Margin from the edge in pixels (default 24)"],
+      ["--border", "Inset border width in pixels, 0-32 (default 4, 0 = no border)"],
+      ["--border-color", "Inset border color as 6-digit hex (default FFFFFF)"],
+      ["--start", "Show the inset from this time in seconds"],
+      ["--end", "Hide the inset after this time in seconds"],
+      ["--dry-run", "Print the exact ffmpeg command and write no file"],
+      ["-o, --output", "Output file (required)"],
+    ],
+  },
   broll: {
     usage: "mediakit broll <input> --clip <file>@<at>[@<duration>] [--clip ...] -o <output> [--position fullscreen|top-left|top-center|top-right|center-left|center|center-right|bottom-left|bottom-center|bottom-right] [--scale 0.5] [--width <px>] [--margin 24] [--fade <s>] [--audio main|broll|mix]",
     desc: "Insert B-roll clips into the main video at timestamps. --clip is repeatable (max 8): <file>@<seconds|MM:SS>[@<duration>] — the clip covers the whole frame (fullscreen, default) or sits as a PiP at --position, dissolving in/out over --fade seconds. Windows must not overlap; a window running past the end of the main video is clamped. The output duration is exactly the main duration. --audio broll swaps the main audio for B-roll audio inside each window, mix keeps both.",
@@ -2179,6 +2199,29 @@ async function main() {
           start: opts.start ?? null,
           end: opts.end ?? null,
           audio: opts.audio ?? "main",
+          dryRun: opts.dry_run === true,
+        });
+        break;
+      }
+      case "magnify": {
+        const mx = numOpt(opts, "x");
+        const my = numOpt(opts, "y");
+        const mw = numOpt(opts, "width");
+        const mh = numOpt(opts, "height");
+        if (mx === null || mx === undefined) fail("missing required option: --x <px>");
+        if (my === null || my === undefined) fail("missing required option: --y <px>");
+        if (mw === null || mw === undefined) fail("missing required option: --width <px>");
+        if (mh === null || mh === undefined) fail("missing required option: --height <px>");
+        result = await core.magnifyMedia({
+          input: needInput(), output: needOutput(opts),
+          x: mx, y: my, width: mw, height: mh,
+          factor: numOpt(opts, "factor") ?? 2,
+          position: opts.position ?? "bottom-right",
+          margin: numOpt(opts, "margin") ?? 24,
+          border: numOpt(opts, "border") ?? 4,
+          borderColor: opts.border_color ?? "FFFFFF",
+          start: opts.start ?? null,
+          end: opts.end ?? null,
           dryRun: opts.dry_run === true,
         });
         break;

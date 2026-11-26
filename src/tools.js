@@ -1506,6 +1506,43 @@ export const TOOL_DEFS = [
     dryRun: a.dry_run,
   })),
   },
+  {
+    name: "magnify",
+    tier: "WRITE",
+    description: "Magnify inset: zoom one rectangle of the frame into a bordered inset at one of 9 named positions (pagecast's magnified-tooltip idea — the inset is the live picture, not a PNG). Region x/y/width/height in display pixels, factor 1.5-8 (default 2), margin from the edge, border width + hex color (default 4px white), and start/end (seconds) show it only during that window. Geometry is measured on display frames like pip, so a rotated clip magnifies what the viewer sees. Audio is the main track, copied untouched. Set dry_run=true to print the exact ffmpeg command and write no file (x/y/inset_size are computed from the display probe, so they are exact; duration/size report null — measured on the real output).",
+    schema: {
+    input: pathSchema,
+    output: pathSchema,
+    x: z.number().int().min(0).describe("Region left edge in display pixels"),
+    y: z.number().int().min(0).describe("Region top edge in display pixels"),
+    width: z.number().int().min(2).describe("Region width in display pixels"),
+    height: z.number().int().min(2).describe("Region height in display pixels"),
+    factor: z.number().min(1.5).max(8).default(2).describe("Magnification factor (inset = region x factor)"),
+    position: z.enum(["top-left", "top-center", "top-right", "center-left", "center", "center-right", "bottom-left", "bottom-center", "bottom-right"]).default("bottom-right").describe("Inset placement (9 positions)"),
+    margin: z.number().int().min(0).default(24).describe("Margin from the edge in pixels"),
+    border: z.number().int().min(0).max(32).default(4).describe("Inset border width in pixels (0 = no border)"),
+    border_color: z.string().default("FFFFFF").describe("Inset border color as 6-digit hex (default white)"),
+    start: z.number().min(0).optional().describe("Show the inset from this time in seconds"),
+    end: z.number().min(0).optional().describe("Hide the inset after this time in seconds"),
+    dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
+  },
+    handler: async (a) => safe(() => core.magnifyMedia({
+    input: a.input,
+    output: a.output,
+    x: a.x,
+    y: a.y,
+    width: a.width,
+    height: a.height,
+    factor: a.factor,
+    position: a.position,
+    margin: a.margin,
+    border: a.border,
+    borderColor: a.border_color,
+    start: a.start ?? null,
+    end: a.end ?? null,
+    dryRun: a.dry_run,
+  })),
+  },
 
 
   {
@@ -2537,7 +2574,7 @@ export const TOOL_DEFS = [
   {
     name: "list_operations",
     tier: "READ",
-    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 96 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 97 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
     schema: {
     family: z.enum(["inspect", "edit", "text", "image", "assemble", "meta"]).optional().describe("Narrow to one family; omit for the whole catalog"),
   },
@@ -2687,7 +2724,7 @@ export function listSafetyTiers() {
 }
 
 // ---------------------------------------------------------------- progressive discovery
-// The catalog is 96 tools and tools/list dumps the full JSON schema
+// The catalog is 97 tools and tools/list dumps the full JSON schema
 // of every one on every turn — kinocut's answer is progressive
 // discovery: a compact list first, full schema only for the tools
 // actually used (lượt 147, idea: KyaniteLabs/kinocut
@@ -2720,14 +2757,14 @@ export const TOOL_FAMILY_OF = {
   determinism: "inspect", verify: "inspect", verify_cuts: "inspect", diagnose: "inspect",
   transitions: "inspect", estimate_conversion: "inspect", doctor: "inspect",
   qa_report: "inspect", audit: "inspect", safety: "inspect", receipt: "inspect",
-  // edit (36)
+  // edit (37)
   trim: "edit", crop: "edit", resize: "edit", extract_audio: "edit", extract_frame: "edit",
   loudness: "edit", concat: "edit", grade: "edit", make_loopable: "edit", freeze: "edit",
   fastforward: "edit", reverse: "edit", rotate: "edit", boomerang: "edit",
   chroma_key: "edit", zoom_pan: "edit", interpolate: "edit", denoise: "edit",
   segment: "edit", convert: "edit", normalize: "edit", compress: "edit", silence: "edit",
   cut_words: "edit", remove_retakes: "edit", smart_cut: "edit", clean_voice: "edit",
-  mix: "edit", overlay: "edit", pip: "edit", broll: "edit", fit: "edit",
+  mix: "edit", overlay: "edit", pip: "edit", magnify: "edit", broll: "edit", fit: "edit",
   reframe: "edit", mux: "edit", burn_captions: "edit", download: "edit",
   // text (7)
   transcribe: "text", convert_captions: "text", generate_srt: "text", chunk_captions: "text",

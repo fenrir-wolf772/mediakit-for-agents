@@ -12683,7 +12683,7 @@ export async function searchWords({ wordsFile, query, padBefore = 0.5, padAfter 
 const DOCTOR_FILTERS = [
   "silencedetect", "loudnorm", "subtitles", "ass", "scale", "crop",
   "cropdetect", "blackdetect", "freezedetect", "gblur", "trim", "atrim", "concat", "select", "tile", "pad", "overlay",
-  "drawtext", "volume", "sidechaincompress", "amix", "aresample",
+  "drawtext", "drawbox", "volume", "sidechaincompress", "amix", "aresample",
   "acompressor",
   "xfade", "acrossfade", "fps", "anullsrc", "setpts", "asetpts",
   "format", "colorchannelmixer", "atempo", "aloop", "geq", "color",
@@ -12839,6 +12839,7 @@ const TOOL_REQUIREMENTS = {
   keyframes: {},
   fit: { filters: ["setpts", "atempo", "fps"], encoders: ["libx264", "aac"] },
   pip: { filters: ["overlay", "format", "scale", "colorchannelmixer", "amix"], encoders: ["libx264"] },
+  magnify: { filters: ["split", "crop", "scale", "format", "drawbox", "overlay"], encoders: ["libx264"] },
   // broll overlays like pip (plus trim/setpts/fade on each clip)
   // and mutes the main track inside windows with volume:enable
   // (broll audio mode) or mixes delayed B-roll tracks in (mix).
@@ -14190,6 +14191,121 @@ export async function pictureInPicture({
     pip_source_dimensions: `${pipDisp.width}x${pipDisp.height}`,
     ...(s !== null ? { visible_from_seconds: s } : {}),
     ...(e !== null ? { visible_until_seconds: e } : {}),
+    ...info,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+    duration_seconds: out.duration_seconds,
+  };
+}
+
+// ---------------------------------------------------------------- magnify
+// Magnify inset: zoom one rectangle of the frame into a bordered inset
+// (mcpware/pagecast's magnified-tooltip idea — their tooltip is a PNG
+// drawn per interaction; here the inset is the live picture, one filter
+// graph, no intermediate files). The region is cropped from the same
+// input, scaled by `factor`, and overlaid at one of the 9 named
+// positions with a border; start/end show it only during that window
+// (the director's callout: "look at this detail, right now"). Geometry
+// is measured on the display frame like pip/overlay, so a rotated clip
+// magnifies what the viewer sees, not the stored axes. Audio is the
+// main track, copied untouched — a magnifier changes the picture, never
+// the sound.
+
+export async function magnifyMedia({
+  input, output,
+  x, y, width, height, factor = 2,
+  position = "bottom-right", margin = 24,
+  border = 4, borderColor = "FFFFFF",
+  start = null, end = null, dryRun = false,
+}) {
+  const inPath = await requireInput(input);
+  const outPath = await prepareOutput(output, [inPath]);
+  if (!PIP_POSITIONS.includes(position)) {
+    throw new MediaKitError(`magnify position must be one of ${PIP_POSITIONS.join(", ")}, got: ${position}`, "INVALID_ARG");
+  }
+  const rx = num(x, "x", { min: 0, integer: true });
+  const ry = num(y, "y", { min: 0, integer: true });
+  const rw = num(width, "width", { min: 2, integer: true });
+  const rh = num(height, "height", { min: 2, integer: true });
+  const f = num(factor, "factor", { min: 1.5, max: 8 });
+  const m = num(margin, "margin", { min: 0, integer: true });
+  const b = num(border, "border", { min: 0, max: 32, integer: true });
+  if (typeof borderColor !== "string" || !/^#?[0-9A-Fa-f]{6}$/.test(borderColor.trim())) {
+    throw new MediaKitError(`magnify border_color must be a 6-digit hex color, got: ${borderColor}`, "INVALID_ARG");
+  }
+  const bc = borderColor.trim().replace(/^#/, "").toUpperCase();
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("magnify needs a video input", "INVALID_ARG");
+  const disp = displayDims(meta);
+  const sw = disp.width;
+  const sh = disp.height;
+  if (rx + rw > sw || ry + rh > sh) {
+    throw new MediaKitError(`magnify region ${rw}x${rh} at ${rx},${ry} leaves the display frame ${sw}x${sh} (stored ${meta.video.width}x${meta.video.height}, rotation ${meta.video.rotation ?? "none"})`, "INVALID_ARG");
+  }
+  // Inset dims stay even (yuv420p + overlay chroma subsampling
+  // misbehave on odd widths/heights, same rule as pip).
+  const iwRaw = Math.round(rw * f);
+  const ihRaw = Math.round(rh * f);
+  const iw = Math.max(2, iwRaw - (iwRaw % 2));
+  const ih = Math.max(2, ihRaw - (ihRaw % 2));
+  if (iw + 2 * m > sw || ih + 2 * m > sh) {
+    const maxF = Math.min((sw - 2 * m) / rw, (sh - 2 * m) / rh);
+    throw new MediaKitError(`magnify inset ${iw}x${ih} at factor ${f} with margin ${m}px does not fit display ${sw}x${sh} — use factor at most ${Math.floor(maxF * 10) / 10} for this region`, "INVALID_ARG");
+  }
+  let s = null;
+  let e = null;
+  if (start !== null && start !== undefined) s = parseTime(start, "start");
+  if (end !== null && end !== undefined) e = parseTime(end, "end");
+  if (s !== null && e !== null && e <= s) throw new MediaKitError(`end (${e}) must be greater than start (${s})`, "INVALID_ARG");
+  const duration = meta.duration_seconds;
+  if (s !== null && duration !== null && s >= duration) {
+    throw new MediaKitError(`start (${s}) is past the end of the video (${duration}s)`, "INVALID_ARG");
+  }
+  if (e !== null && duration !== null && e > duration) e = duration;
+  const ox = position.endsWith("left") ? m
+    : position.endsWith("right") ? sw - iw - m
+    : Math.floor((sw - iw) / 2);
+  const oy = position.startsWith("top") ? m
+    : position.startsWith("bottom") ? sh - ih - m
+    : Math.floor((sh - ih) / 2);
+  let enable = "";
+  if (s !== null && e !== null) enable = `:enable=between(t\\,${s}\\,${e})`;
+  else if (s !== null) enable = `:enable=gte(t\\,${s})`;
+  else if (e !== null) enable = `:enable=lte(t\\,${e})`;
+  const borderFilter = b > 0 ? `,drawbox=x=0:y=0:w=${iw}:h=${ih}:color=0x${bc}:t=${b}` : "";
+  const graph = `[0:v]split[base][magsrc];[magsrc]crop=${rw}:${rh}:${rx}:${ry},scale=${iw}:${ih}:flags=lanczos,format=yuv420p${borderFilter}[mag];[base][mag]overlay=${ox}:${oy}${enable}[out]`;
+  const args = [
+    "-y", "-i", inPath,
+    "-filter_complex", graph, "-map", "[out]", "-map", "0:a?", "-c:a", "copy",
+    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "medium",
+    "-movflags", "+faststart", outPath,
+  ];
+  const result = {
+    operation: "magnify",
+    input: inPath, output: outPath,
+    region: `${rx},${ry} ${rw}x${rh}`,
+    factor: f,
+    inset_size: `${iw}x${ih}`,
+    position, x: ox, y: oy, margin: m,
+    border: b, border_color: bc,
+    source_dimensions: `${sw}x${sh}`,
+    source_rotation: disp.rotation,
+    ...(s !== null ? { visible_from_seconds: s } : {}),
+    ...(e !== null ? { visible_until_seconds: e } : {}),
+  };
+  if (dryRun) {
+    return {
+      ...result, dry_run: true,
+      dimensions: `${sw}x${sh}`,
+      duration_seconds: null, size_bytes: null,
+      commands: [formatCommand(args)],
+      note: "Dry run: no file written. duration/size are measured on the real output, so they report null here.",
+    };
+  }
+  await run(FFMPEG, args);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  return {
+    ...result,
     ...info,
     dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
     duration_seconds: out.duration_seconds,

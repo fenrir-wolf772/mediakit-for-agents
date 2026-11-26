@@ -1,7 +1,7 @@
 {
   "spec_version": 1,
   "mediakit_version": "0.1.0",
-  "tool_count": 96,
+  "tool_count": 97,
   "transports": [
     "stdio",
     "http"
@@ -15,7 +15,7 @@
     {
       "name": "edit",
       "description": "Change one clip: cut, transform, grade, mix or convert it.",
-      "count": 36
+      "count": 37
     },
     {
       "name": "text",
@@ -3864,6 +3864,112 @@
       }
     },
     {
+      "name": "magnify",
+      "family": "edit",
+      "tier": "WRITE",
+      "summary": "Magnify inset: zoom one rectangle of the frame into a bordered inset at one of 9 named positions (pagecast's magnified-tooltip idea — the inset is the live…",
+      "description": "Magnify inset: zoom one rectangle of the frame into a bordered inset at one of 9 named positions (pagecast's magnified-tooltip idea — the inset is the live picture, not a PNG). Region x/y/width/height in display pixels, factor 1.5-8 (default 2), margin from the edge, border width + hex color (default 4px white), and start/end (seconds) show it only during that window. Geometry is measured on display frames like pip, so a rotated clip magnifies what the viewer sees. Audio is the main track, copied untouched. Set dry_run=true to print the exact ffmpeg command and write no file (x/y/inset_size are computed from the display probe, so they are exact; duration/size report null — measured on the real output).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Path to the file (relative or absolute)"
+          },
+          "output": {
+            "$ref": "#/properties/input"
+          },
+          "x": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Region left edge in display pixels"
+          },
+          "y": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Region top edge in display pixels"
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 2,
+            "description": "Region width in display pixels"
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 2,
+            "description": "Region height in display pixels"
+          },
+          "factor": {
+            "type": "number",
+            "minimum": 1.5,
+            "maximum": 8,
+            "default": 2,
+            "description": "Magnification factor (inset = region x factor)"
+          },
+          "position": {
+            "type": "string",
+            "enum": [
+              "top-left",
+              "top-center",
+              "top-right",
+              "center-left",
+              "center",
+              "center-right",
+              "bottom-left",
+              "bottom-center",
+              "bottom-right"
+            ],
+            "default": "bottom-right",
+            "description": "Inset placement (9 positions)"
+          },
+          "margin": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 24,
+            "description": "Margin from the edge in pixels"
+          },
+          "border": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32,
+            "default": 4,
+            "description": "Inset border width in pixels (0 = no border)"
+          },
+          "border_color": {
+            "type": "string",
+            "default": "FFFFFF",
+            "description": "Inset border color as 6-digit hex (default white)"
+          },
+          "start": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Show the inset from this time in seconds"
+          },
+          "end": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Hide the inset after this time in seconds"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "default": false,
+            "description": "Print the exact ffmpeg command and write no file"
+          }
+        },
+        "required": [
+          "input",
+          "output",
+          "x",
+          "y",
+          "width",
+          "height"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "broll",
       "family": "edit",
       "tier": "WRITE",
@@ -6009,7 +6115,7 @@
       "family": "meta",
       "tier": "READ",
       "summary": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the…",
-      "description": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 96 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+      "description": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 97 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -6250,5 +6356,5 @@
       }
     }
   ],
-  "spec_hash": "05362bdff0031787a7cbf0bb91cae810164ff8eca70912717c2c885090b88e46"
+  "spec_hash": "ee85074831f93e9f4808e855fa9f10968e2c10222cdf2c9086532a9dc583ede0"
 }

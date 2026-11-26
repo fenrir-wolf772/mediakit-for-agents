@@ -201,21 +201,21 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "normalize", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut", "clean_voice", "measure_pace", "highlights", "align_voice", "safety", "estimate_conversion", "release_checkpoint", "list_operations", "describe_operation", "list_templates", "validate_template_package", "chunk_captions", "validate_shot_spec", "lease", "project_summary"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "normalize", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "magnify", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut", "clean_voice", "measure_pace", "highlights", "align_voice", "safety", "estimate_conversion", "release_checkpoint", "list_operations", "describe_operation", "list_templates", "validate_template_package", "chunk_captions", "validate_shot_spec", "lease", "project_summary"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 96 tools present");
-checkOk(missing.length === 0, "tools/list has all 96 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 97 tools present");
+checkOk(missing.length === 0, "tools/list has all 97 tools", `missing: ${missing.join(", ")}`);
 
 // Progressive discovery (lượt 147, idea: KyaniteLabs/kinocut):
 // the compact catalog first, full schema only on demand.
 const discAll = listOperations({});
 console.log("list_operations:", discAll.tools.length, "tools | families", discAll.families.map((f) => `${f.name}:${f.count}`).join(" "));
-checkOk(discAll.total_tools === 96 && discAll.tools.length === 96 && discAll.profile === "full" && discAll.visible_tools === 96, "list_operations (pure) lists all 96 tools in full profile", JSON.stringify({ total: discAll.total_tools, visible: discAll.visible_tools, profile: discAll.profile }));
-checkOk(discAll.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:27 edit:36 text:7 image:8 assemble:16 meta:2", "list_operations families split 27/36/7/8/16/2", discAll.families.map((f) => `${f.name}:${f.count}`).join(" "));
+checkOk(discAll.total_tools === 97 && discAll.tools.length === 97 && discAll.profile === "full" && discAll.visible_tools === 97, "list_operations (pure) lists all 97 tools in full profile", JSON.stringify({ total: discAll.total_tools, visible: discAll.visible_tools, profile: discAll.profile }));
+checkOk(discAll.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:27 edit:37 text:7 image:8 assemble:16 meta:2", "list_operations families split 27/37/7/8/16/2", discAll.families.map((f) => `${f.name}:${f.count}`).join(" "));
 checkOk(discAll.tools.every((t) => typeof t.name === "string" && ["inspect", "edit", "text", "image", "assemble", "meta"].includes(t.family) && ["READ", "PLAN", "WRITE", "DESTRUCTIVE"].includes(t.tier) && typeof t.summary === "string" && t.summary.length > 10 && t.summary.length <= 161 && (t.summary.endsWith(".") || t.summary.endsWith("…"))), "every list_operations entry has a known family, a tier and a one-sentence summary (<=160 chars, ends . or …)", discAll.tools.filter((t) => !(t.summary.endsWith(".") || t.summary.endsWith("…"))).map((t) => t.name).join(","));
-checkOk(Object.keys(TOOL_FAMILY_OF).length === 96 && TOOL_DEFS.every((t) => TOOL_FAMILY_OF[t.name] !== undefined) && new Set(Object.values(TOOL_FAMILY_OF)).size === 6, "TOOL_FAMILY_OF covers every TOOL_DEFS entry exactly once, in 6 families", `map=${Object.keys(TOOL_FAMILY_OF).length} defs=${TOOL_DEFS.length}`);
+checkOk(Object.keys(TOOL_FAMILY_OF).length === 97 && TOOL_DEFS.every((t) => TOOL_FAMILY_OF[t.name] !== undefined) && new Set(Object.values(TOOL_FAMILY_OF)).size === 6, "TOOL_FAMILY_OF covers every TOOL_DEFS entry exactly once, in 6 families", `map=${Object.keys(TOOL_FAMILY_OF).length} defs=${TOOL_DEFS.length}`);
 const discEdit = listOperations({ family: "edit" });
-checkOk(discEdit.tools.length === 36 && discEdit.tools.every((t) => t.family === "edit"), "list_operations family=edit narrows to the 36 edit tools", `got ${discEdit.tools.length}`);
+checkOk(discEdit.tools.length === 37 && discEdit.tools.every((t) => t.family === "edit"), "list_operations family=edit narrows to the 37 edit tools", `got ${discEdit.tools.length}`);
 let discBadFamily = null;
 try { listOperations({ family: "nope" }); } catch (e) { discBadFamily = e; }
 checkOk(discBadFamily?.code === "INVALID_ARG" && /inspect, edit/.test(discBadFamily?.message ?? ""), "list_operations rejects an unknown family with INVALID_ARG + the family list", discBadFamily?.message ?? "");
@@ -246,12 +246,12 @@ for (const [badArgs, why] of [[{ category: "nope" }, "unknown category"], [{ tim
   try { await listSceneTemplates(badArgs); } catch (e) { threw = e; }
   checkOk(threw?.code === "INVALID_ARG" && typeof threw?.message === "string" && threw.message.length > 0, `listSceneTemplates rejects ${why} with INVALID_ARG`, threw?.message ?? "no throw");
 }
-checkOk(toolProfile() === "full" && visibleTools().length === 96 && HOT_TOOLS.length === 18 && HOT_TOOLS.every((n) => TOOL_DEFS.some((t) => t.name === n)), "default profile is full (96 visible) and the 18 hot tools all exist", `profile=${toolProfile()} hot=${HOT_TOOLS.length}`);
+checkOk(toolProfile() === "full" && visibleTools().length === 97 && HOT_TOOLS.length === 18 && HOT_TOOLS.every((n) => TOOL_DEFS.some((t) => t.name === n)), "default profile is full (97 visible) and the 18 hot tools all exist", `profile=${toolProfile()} hot=${HOT_TOOLS.length}`);
 process.env.MEDIAKIT_TOOL_PROFILE = "hot";
 checkOk(toolProfile() === "hot" && visibleTools().length === 20 && visibleTools().some((t) => t.name === "list_operations") && visibleTools().some((t) => t.name === "describe_operation") && !visibleTools().some((t) => t.name === "chroma_key"), "hot profile narrows tools/list to 20 (18 hot + 2 discovery), chroma_key hidden", `visible=${visibleTools().length}`);
-checkOk(listOperations({}).tools.length === 96 && listOperations({}).visible_tools === 20, "list_operations still reports the FULL 96-tool catalog in hot profile (visible_tools 20)", JSON.stringify({ tools: listOperations({}).tools.length, visible: listOperations({}).visible_tools }));
+checkOk(listOperations({}).tools.length === 97 && listOperations({}).visible_tools === 20, "list_operations still reports the FULL 97-tool catalog in hot profile (visible_tools 20)", JSON.stringify({ tools: listOperations({}).tools.length, visible: listOperations({}).visible_tools }));
 process.env.MEDIAKIT_TOOL_PROFILE = "bogus";
-checkOk(toolProfile() === "full" && visibleTools().length === 96, "an unknown MEDIAKIT_TOOL_PROFILE value falls back to full (96 visible)", `profile=${toolProfile()}`);
+checkOk(toolProfile() === "full" && visibleTools().length === 97, "an unknown MEDIAKIT_TOOL_PROFILE value falls back to full (97 visible)", `profile=${toolProfile()}`);
 delete process.env.MEDIAKIT_TOOL_PROFILE;
 // Machine-readable contract (lượt 149): SPEC.json is generated from
 // the same TOOL_DEFS registry — the committed file must equal a
@@ -264,10 +264,10 @@ const specFresh = await buildSpec();
 checkOk(specOnDisk.spec_version === SPEC_VERSION && specFresh.spec_version === SPEC_VERSION, "SPEC.json carries spec_version 1", `on-disk=${specOnDisk.spec_version} fresh=${specFresh.spec_version}`);
 const pkgJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 checkOk(specOnDisk.mediakit_version === pkgJson.version && specFresh.mediakit_version === pkgJson.version, "SPEC.json mediakit_version matches package.json", `spec=${specOnDisk.mediakit_version} pkg=${pkgJson.version}`);
-checkOk(specOnDisk.tool_count === 96 && specFresh.tool_count === 96 && specOnDisk.tools.length === 96, "SPEC.json lists all 96 tools", `on-disk=${specOnDisk.tool_count} fresh=${specFresh.tool_count}`);
+checkOk(specOnDisk.tool_count === 97 && specFresh.tool_count === 97 && specOnDisk.tools.length === 97, "SPEC.json lists all 97 tools", `on-disk=${specOnDisk.tool_count} fresh=${specFresh.tool_count}`);
 checkOk(specText(specOnDisk) === specText(specFresh), "committed SPEC.json equals a fresh build byte for byte (regenerate with `npm run spec` when it drifts)", `hash on-disk=${specOnDisk.spec_hash?.slice(0, 12)} fresh=${specFresh.spec_hash.slice(0, 12)}`);
 checkOk(specOnDisk.spec_hash === specHash(specOnDisk.tools) && specFresh.spec_hash === specHash(specFresh.tools), "SPEC spec_hash is the sha256 of its own tools array", `hash=${specOnDisk.spec_hash.slice(0, 12)}…`);
-checkOk(specOnDisk.transports.join(",") === "stdio,http" && specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:27 edit:36 text:7 image:8 assemble:16 meta:2" && specOnDisk.families.reduce((n, f) => n + f.count, 0) === 96, "SPEC families split 27/36/7/8/16/2, sum to 96, transports stdio+http", specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" "));
+checkOk(specOnDisk.transports.join(",") === "stdio,http" && specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:27 edit:37 text:7 image:8 assemble:16 meta:2" && specOnDisk.families.reduce((n, f) => n + f.count, 0) === 97, "SPEC families split 27/37/7/8/16/2, sum to 97, transports stdio+http", specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" "));
 checkOk(specOnDisk.tools.every((t) => typeof t.name === "string" && ["inspect", "edit", "text", "image", "assemble", "meta"].includes(t.family) && ["READ", "PLAN", "WRITE", "DESTRUCTIVE"].includes(t.tier) && typeof t.summary === "string" && t.summary.length > 10 && t.summary.length <= 161 && typeof t.description === "string" && t.description.length > t.summary.length && t.inputSchema?.type === "object" && typeof t.inputSchema.properties === "object" && (t.inputSchema.required === undefined || Array.isArray(t.inputSchema.required))), "every SPEC tool entry has a known family/tier, a one-sentence summary, a longer description and an object JSON Schema with properties (required present only when the tool has required params — an all-optional schema has none)", specOnDisk.tools.filter((t) => !(t.inputSchema?.type === "object")).map((t) => t.name).join(","));
 checkOk(JSON.stringify(specOnDisk.tools.map((t) => t.name)) === JSON.stringify(TOOL_DEFS.map((t) => t.name)), "SPEC tool order follows the TOOL_DEFS registry order", `first=${specOnDisk.tools[0].name} last=${specOnDisk.tools.at(-1).name}`);
 checkOk(specOnDisk.tools.find((t) => t.name === "probe")?.inputSchema.properties.input?.type === "string" && specOnDisk.tools.find((t) => t.name === "trim")?.inputSchema.properties.stream_copy?.type === "boolean" && specOnDisk.tools.find((t) => t.name === "patch_manifest")?.tier === "DESTRUCTIVE", "SPEC schemas carry real parameter types (probe.input string, trim.stream_copy boolean) and patch_manifest stays DESTRUCTIVE", "");
@@ -2431,6 +2431,12 @@ const doctorRes = await client.callTool({
 const doctorJson = JSON.parse(doctorRes.content[0].text);
 console.log("doctor call: ok =", doctorJson.ok, "| ffmpeg", doctorJson.ffmpeg_version, "| tools available:", Object.values(doctorJson.tools).filter((t) => t.available).length + "/" + Object.keys(doctorJson.tools).length);
 checkOk(doctorJson.ok === true, "doctor ok=true", JSON.stringify(doctorJson.tools));
+// Regression (lượt 174): magnify declares filter:drawbox, and the
+// doctor probe only checks filters listed in DOCTOR_FILTERS —
+// drawbox was missing from that list, so doctor reported magnify
+// unavailable even though ffmpeg has drawbox. Name magnify here so
+// the next probe-list miss fails with the tool in the message.
+checkOk(doctorJson.tools.magnify?.available === true, "doctor: magnify is available (drawbox probed)", JSON.stringify(doctorJson.tools.magnify ?? null));
 // transcribe is optional (no engine on a fresh machine): every OTHER
 // tool must be available, and transcribe reports its own engine state.
 const { transcribe: doctorAsr, ...otherTools } = doctorJson.tools;
@@ -3399,7 +3405,7 @@ checkOk(dedupCliJson.frame_count === 1 && dedupCliJson.dedup?.dropped === 19, "C
 // list_operations / describe_operation over MCP (lượt 147).
 const listOpsRes = await client.callTool({ name: "list_operations", arguments: {} });
 const listOpsJson = JSON.parse(listOpsRes.content[0].text);
-checkOk(listOpsJson.total_tools === 96 && listOpsJson.tools?.length === 96 && listOpsJson.families?.find((f) => f.name === "edit")?.count === 36 && listOpsJson.tools?.every((t) => typeof t.summary === "string"), "MCP list_operations lists 96 tools with families (edit 36) and summaries", `total=${listOpsJson.total_tools}`);
+checkOk(listOpsJson.total_tools === 97 && listOpsJson.tools?.length === 97 && listOpsJson.families?.find((f) => f.name === "edit")?.count === 37 && listOpsJson.tools?.every((t) => typeof t.summary === "string"), "MCP list_operations lists 97 tools with families (edit 37) and summaries", `total=${listOpsJson.total_tools}`);
 const listOpsEditRes = await client.callTool({ name: "list_operations", arguments: { family: "image" } });
 const listOpsEditJson = JSON.parse(listOpsEditRes.content[0].text);
 checkOk(listOpsEditJson.tools?.length === 8 && listOpsEditJson.tools?.every((t) => t.family === "image"), "MCP list_operations family=image returns the 8 image tools", `got ${listOpsEditJson.tools?.length}`);
@@ -3621,21 +3627,32 @@ checkOk(psPure.shots[2].source === "color:1C1917" && psPure.voice.file === "voic
 checkOk(psPure.one_line === "3 shots · 9s · 1080x1920@30 · voice 8.1s · no music · 1 sfx · captions 5 cues · 0 blockers", "summarizeProject one_line reads as one sentence", psPure.one_line);
 const psSingular = summarizeProject({ ...fakePlan, shots: [fakePlan.shots[0]], total_seconds: 3, total_frames: 90, sfx: [], captions: null, music: { path: "/x/bed.mp3", volume: 0.3, duck_db: 12 } });
 checkOk(psSingular.one_line === "1 shot · 3s · 1080x1920@30 · voice 8.1s · music · no sfx · no captions · 0 blockers", "summarizeProject one_line singularizes 1 shot and names music when present", psSingular.one_line);
-// MCP + CLI on the real luot 172 report film (voice + captions on disk).
-const psRes = await client.callTool({ name: "project_summary", arguments: { film: path.join(root, "report-luot172/film.json") } });
+// MCP + CLI on a hermetic film fixture built here (lượt 174: the luot 173
+// version read report-luot172/film.json, which is gitignored — on CI the
+// file does not exist, project_summary threw INPUT_NOT_FOUND, and the
+// diagnostic psJson.shots.map crashed the whole run). Voice is the
+// committed test/mix-voice.mp3 (9.0s): lead 0.5 + voice 9.0 + tail 0.4 =
+// 9.9s = 297 frames, so the three 3.3s shots (99 frames each) cover it
+// exactly.
+const psDir = path.join(root, "outputs/project-summary");
+await rm(psDir, { recursive: true, force: true });
+await mkdir(psDir, { recursive: true });
+const psCapsFile = path.join(psDir, "caps.srt");
+await writeFile(psCapsFile, "1\n00:00:00,500 --> 00:00:03,000\nFirst cue\n\n2\n00:00:03,500 --> 00:00:06,000\nSecond cue\n\n3\n00:00:06,500 --> 00:00:09,000\nThird cue\n", "utf8");
+const psFilmFile = path.join(psDir, "film.json");
+await writeFile(psFilmFile, JSON.stringify({ version: 1, title: "Hermetic summary test", preset: "vertical", brand: "warm-story", voice: { path: path.join(root, "test/mix-voice.mp3"), lead: 0.5, tail: 0.4 }, captions: psCapsFile, chapters: [{ at: 0, title: "Start" }, { at: 3.3, title: "Middle" }], shots: [{ id: "s1", kind: "canvas_scene", template: "rings", duration: 3.3, role: "hook", text: { position: "top", text: "SUMMARY\nTEST" } }, { id: "s2", kind: "canvas_scene", template: "bounce", duration: 3.3 }, { id: "s3", kind: "canvas_scene", template: "spring-in", params: { text: "96" }, duration: 3.3, text: { position: "top", text: "96 CHECKS, ALL PASS" } }] }, null, 2));
+const psRes = await client.callTool({ name: "project_summary", arguments: { film: psFilmFile } });
 const psJson = JSON.parse(psRes.content[0].text);
-checkOk(psRes.isError !== true && psJson.valid === true && psJson.title === "Before and after, side by side — round report" && psJson.total_seconds === 26.125 && psJson.shots.length === 3 && psJson.shots[0].source === "template:rings" && psJson.shots[2].text === "2428 CHECKS, ALL PASS" && psJson.voice.file === "voice-master.wav" && psJson.captions.cue_count === 12 && psJson.ready === true, "MCP project_summary on the luot 172 film: 3 shots, 26.125s, rings/bounce/spring-in, voice 25.225s, 12 caption cues", JSON.stringify({ shots: psJson.shots.map((s) => s.source), caps: psJson.captions.cue_count }));
-checkOk(psJson.one_line === "3 shots · 26.125s · 1080x1920@30 · voice 25.225s · no music · no sfx · captions 12 cues · 0 blockers", "MCP project_summary one_line on the real film", psJson.one_line);
+checkOk(psRes.isError !== true && psJson.valid === true && psJson.title === "Hermetic summary test" && psJson.total_seconds === 9.9 && psJson.shots.length === 3 && psJson.shots[0].source === "template:rings" && psJson.shots[2].text === "96 CHECKS, ALL PASS" && psJson.voice.file === "mix-voice.mp3" && psJson.voice.duration_seconds === 9 && psJson.captions.cue_count === 3 && psJson.ready === true, "MCP project_summary on a hermetic film fixture: 3 shots, 9.9s, rings/bounce/spring-in, voice 9s, 3 caption cues", JSON.stringify({ shots: psJson.shots?.map((s) => s.source), caps: psJson.captions?.cue_count }));
+checkOk(psJson.one_line === "3 shots · 9.9s · 1080x1920@30 · voice 9s · no music · no sfx · captions 3 cues · 0 blockers", "MCP project_summary one_line on the hermetic film", psJson.one_line);
 // A film that fails validation reports valid:false, never a throw.
-const psBadDir = path.join(root, "outputs/project-summary");
-await rm(psBadDir, { recursive: true, force: true });
-await mkdir(psBadDir, { recursive: true });
-await copyFile(path.join(root, "report-luot172/voice-master.wav"), path.join(psBadDir, "voice.wav"));
+const psBadDir = psDir;
+await copyFile(path.join(root, "test/mix-voice.mp3"), path.join(psBadDir, "voice.wav"));
 const psBadFile = path.join(psBadDir, "bad.json");
 await writeFile(psBadFile, JSON.stringify({ version: 1, title: "bad", preset: "vertical", brand: "warm-story", voice: { path: "voice.wav", lead: 0.5, tail: 0.4 }, shots: [{ id: "s1", kind: "canvas_scene", template: "rings", duration: 10 }] }));
 const psBadRes = await client.callTool({ name: "project_summary", arguments: { film: psBadFile } });
 const psBadJson = JSON.parse(psBadRes.content[0].text);
-checkOk(psBadRes.isError !== true && psBadJson.valid === false && psBadJson.issues.some((i) => /shots cover 300 frames \(10\.000s\) but the voice timeline is 784 frames \(26\.125s\)/.test(i)), "MCP project_summary on a film whose shots do not cover the voice returns valid:false naming the frame gap", JSON.stringify(psBadJson.issues));
+checkOk(psBadRes.isError !== true && psBadJson.valid === false && psBadJson.issues.some((i) => /shots cover 300 frames \(10\.000s\) but the voice timeline is 297 frames \(9\.9s\)/.test(i)), "MCP project_summary on a film whose shots do not cover the voice returns valid:false naming the frame gap", JSON.stringify(psBadJson.issues));
 const psVerFile = path.join(psBadDir, "version.json");
 await writeFile(psVerFile, JSON.stringify({ version: 2 }));
 const psVerRes = await client.callTool({ name: "project_summary", arguments: { film: psVerFile } });
@@ -3644,9 +3661,9 @@ checkOk(psVerRes.isError !== true && psVerJson.valid === false && psVerJson.issu
 const psMissingRes = await client.callTool({ name: "project_summary", arguments: { film: path.join(psBadDir, "does-not-exist.json") } });
 const psMissingJson = JSON.parse(psMissingRes.content[0].text);
 checkOk(psMissingRes.isError === true && psMissingJson.code === "INPUT_NOT_FOUND", "MCP project_summary on a missing film file throws INPUT_NOT_FOUND (a bad film reports valid:false, a missing file is an input error)", JSON.stringify(psMissingJson.code));
-const psCli = await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "project-summary", path.join(root, "report-luot172/film.json")]);
+const psCli = await execFileAsync("node", [path.join(root, "bin/mediakit.js"), "project-summary", psFilmFile]);
 const psCliJson = JSON.parse(psCli.stdout);
-checkOk(psCliJson.valid === true && psCliJson.shots.length === 3 && psCliJson.one_line.includes("3 shots"), "CLI project-summary on the luot 172 film reports valid:true + 3 shots", JSON.stringify({ valid: psCliJson.valid, shots: psCliJson.shots.length }));
+checkOk(psCliJson.valid === true && psCliJson.shots.length === 3 && psCliJson.one_line.includes("3 shots"), "CLI project-summary on the hermetic film reports valid:true + 3 shots", JSON.stringify({ valid: psCliJson.valid, shots: psCliJson.shots.length }));
 
 // edit lease (lượt 171, idea: frankShan001/CutVoke's edit_lock): a TTL
 // write lock for a manifest, so a director editing across several
@@ -5853,6 +5870,97 @@ checkOk(pipDryJson.commands?.length === 1 && pipDryJson.commands[0].includes("-s
 checkOk(!existsSync(path.join(root, "outputs/mcp-pip-dry.mp4")), "pip dry-run writes no file", "outputs/mcp-pip-dry.mp4");
 const pipDryCli = await runCliJson(["pip", path.join(root, "test/source.mp4"), "--pip", path.join(root, "test/rotated.mp4"), "-o", path.join(root, "outputs/mcp-pip-cli-dry.mp4"), "--audio", "mix", "--dry-run"]);
 checkOk(pipDryCli.dry_run === true && pipDryCli.commands?.[0]?.includes("-stream_loop -1") && !existsSync(path.join(root, "outputs/mcp-pip-cli-dry.mp4")), "CLI pip --dry-run prints the command and writes no file", JSON.stringify(pipDryCli.commands));
+
+// magnify (lượt 174, idea: mcpware/pagecast's magnified tooltip): crop
+// one rectangle of the frame into a bordered inset at a named position.
+// rotate-source.mp4 is left-red/right-blue 640x360, so a 160x90 region
+// at 0,0 (red) at factor 2 is a 320x180 inset at bottom-right (296,156).
+const magRes = await client.callTool({
+  name: "magnify",
+  arguments: {
+    input: path.join(root, "test/rotate-source.mp4"),
+    output: path.join(root, "outputs/mcp-magnify.mp4"),
+    x: 0, y: 0, width: 160, height: 90,
+  },
+});
+const magJson = JSON.parse(magRes.content[0].text);
+console.log("magnify:", magJson.region, "->", magJson.inset_size, "at", magJson.x + "," + magJson.y, "|", magJson.dimensions, magJson.duration_seconds + "s");
+checkOk(magRes.isError !== true && magJson.region === "0,0 160x90" && magJson.factor === 2 && magJson.inset_size === "320x180" && magJson.x === 296 && magJson.y === 156 && magJson.position === "bottom-right" && magJson.border === 4 && magJson.border_color === "FFFFFF" && magJson.source_dimensions === "640x360" && magJson.dimensions === "640x360" && near(magJson.duration_seconds, 5, 0.1), "magnify red region 160x90 factor 2 lands as a 320x180 inset at 296,156", JSON.stringify({ region: magJson.region, inset: magJson.inset_size, x: magJson.x, y: magJson.y }));
+const magR = await planeMean(path.join(root, "outputs/mcp-magnify.mp4"), "160:90:376:201", "r", 3);
+const magB = await planeMean(path.join(root, "outputs/mcp-magnify.mp4"), "160:90:376:201", "b", 3);
+console.log("magnify pixels: inset interior R/B =", magR, magB);
+checkOk(magR !== null && magR > 200, "magnify inset interior is the red region (R > 200)", `got R=${magR}`);
+checkOk(magB !== null && magB < 20, "magnify inset interior has no blue (B < 20)", `got B=${magB}`);
+// The white border is really drawn: the 4px strip along the inset top
+// edge measures near-white on all three channels.
+const magBorderR = await planeMean(path.join(root, "outputs/mcp-magnify.mp4"), "320:4:296:156", "r", 3);
+const magBorderG = await planeMean(path.join(root, "outputs/mcp-magnify.mp4"), "320:4:296:156", "g", 3);
+const magBorderB = await planeMean(path.join(root, "outputs/mcp-magnify.mp4"), "320:4:296:156", "b", 3);
+console.log("magnify pixels: border R/G/B =", magBorderR, magBorderG, magBorderB);
+checkOk(magBorderR !== null && magBorderR > 200 && magBorderG > 200 && magBorderB > 200, "magnify inset border is white on all channels (R/G/B > 200)", `got ${magBorderR}/${magBorderG}/${magBorderB}`);
+// A region from the blue half magnifies blue, at another position.
+const magBlueRes = await client.callTool({
+  name: "magnify",
+  arguments: {
+    input: path.join(root, "test/rotate-source.mp4"),
+    output: path.join(root, "outputs/mcp-magnify-blue.mp4"),
+    x: 480, y: 0, width: 160, height: 90, position: "top-left",
+  },
+});
+const magBlueJson = JSON.parse(magBlueRes.content[0].text);
+checkOk(magBlueJson.x === 24 && magBlueJson.y === 24 && magBlueJson.inset_size === "320x180", "magnify blue region lands top-left at 24,24 as 320x180", JSON.stringify({ x: magBlueJson.x, y: magBlueJson.y, inset: magBlueJson.inset_size }));
+const magBlueB = await planeMean(path.join(root, "outputs/mcp-magnify-blue.mp4"), "160:90:104:69", "b", 3);
+const magBlueR = await planeMean(path.join(root, "outputs/mcp-magnify-blue.mp4"), "160:90:104:69", "r", 3);
+checkOk(magBlueB !== null && magBlueB > 200, "magnify blue region inset is blue (B > 200)", `got B=${magBlueB}`);
+checkOk(magBlueR !== null && magBlueR < 20, "magnify blue region inset has no red (R < 20)", `got R=${magBlueR}`);
+// Time window: the inset shows only between 2-4s — at t=1 the same
+// spot shows the main frame (blue right half), at t=3 the red inset.
+const magWinRes = await client.callTool({
+  name: "magnify",
+  arguments: {
+    input: path.join(root, "test/rotate-source.mp4"),
+    output: path.join(root, "outputs/mcp-magnify-window.mp4"),
+    x: 0, y: 0, width: 160, height: 90, start: 2, end: 4,
+  },
+});
+const magWinJson = JSON.parse(magWinRes.content[0].text);
+checkOk(magWinJson.visible_from_seconds === 2 && magWinJson.visible_until_seconds === 4, "magnify window reports visible 2-4s", JSON.stringify({ from: magWinJson.visible_from_seconds, until: magWinJson.visible_until_seconds }));
+const magWinOutR = await planeMean(path.join(root, "outputs/mcp-magnify-window.mp4"), "160:90:376:201", "r", 1);
+const magWinOutB = await planeMean(path.join(root, "outputs/mcp-magnify-window.mp4"), "160:90:376:201", "b", 1);
+const magWinInR = await planeMean(path.join(root, "outputs/mcp-magnify-window.mp4"), "160:90:376:201", "r", 3);
+checkOk(magWinOutR !== null && magWinOutR < 20 && magWinOutB !== null && magWinOutB > 200, "magnify inset is hidden before its window (main blue shows through at t=1)", `got R=${magWinOutR} B=${magWinOutB}`);
+checkOk(magWinInR !== null && magWinInR > 200, "magnify inset is visible inside its window (red at t=3)", `got R=${magWinInR}`);
+// Dry-run: exact geometry + command, no file. Border 0 drops drawbox.
+const magDryRes = await client.callTool({
+  name: "magnify",
+  arguments: { input: path.join(root, "test/rotate-source.mp4"), output: path.join(root, "outputs/mcp-magnify-dry.mp4"), x: 0, y: 0, width: 160, height: 90, border: 0, dry_run: true },
+});
+const magDryJson = JSON.parse(magDryRes.content[0].text);
+checkOk(magDryJson.dry_run === true && magDryJson.inset_size === "320x180" && magDryJson.x === 296 && magDryJson.y === 156 && magDryJson.dimensions === "640x360" && magDryJson.duration_seconds === null, "magnify dry-run reports the exact geometry (320x180 at 296,156), duration null", JSON.stringify(magDryJson));
+checkOk(magDryJson.commands?.length === 1 && magDryJson.commands[0].includes("crop=160:90:0:0") && magDryJson.commands[0].includes("scale=320:180") && magDryJson.commands[0].includes("overlay=296:156") && !magDryJson.commands[0].includes("drawbox"), "magnify dry-run prints the exact crop/scale/overlay command and border 0 drops drawbox", magDryJson.commands?.[0] ?? "");
+checkOk(!existsSync(path.join(root, "outputs/mcp-magnify-dry.mp4")), "magnify dry-run writes no file", "outputs/mcp-magnify-dry.mp4");
+const magDryCli = await runCliJson(["magnify", path.join(root, "test/rotate-source.mp4"), "--x", "0", "--y", "0", "--width", "160", "--height", "90", "-o", path.join(root, "outputs/mcp-magnify-cli-dry.mp4"), "--dry-run"]);
+checkOk(magDryCli.dry_run === true && magDryCli.commands?.[0]?.includes("crop=160:90:0:0") && !existsSync(path.join(root, "outputs/mcp-magnify-cli-dry.mp4")), "CLI magnify --dry-run prints the command and writes no file", JSON.stringify(magDryCli.commands));
+// Refusals: region outside the frame, factor out of range, inset too
+// big for the frame, end before start, bad hex color.
+const magBadRegionRes = await client.callTool({ name: "magnify", arguments: { input: path.join(root, "test/rotate-source.mp4"), output: path.join(root, "outputs/mcp-magnify-bad.mp4"), x: 500, y: 0, width: 160, height: 90 } });
+const magBadRegionJson = JSON.parse(magBadRegionRes.content[0].text);
+checkOk(magBadRegionRes.isError === true && /leaves the display frame 640x360/.test(magBadRegionJson.error ?? ""), "magnify refuses a region outside the 640x360 frame", JSON.stringify(magBadRegionJson.error ?? ""));
+// factor 10 is refused by the MCP schema itself (zod max 8) before
+// the tool runs — the client throws -32602, so callExpectThrow (the
+// extract_frames dedup-11 pattern); a plain callTool + JSON.parse
+// crashes the suite on the non-JSON error text.
+const magBadFactorText = await callExpectThrow("magnify", { input: path.join(root, "test/rotate-source.mp4"), output: path.join(root, "outputs/mcp-magnify-bad.mp4"), x: 0, y: 0, width: 160, height: 90, factor: 10 });
+checkOk(/less than or equal to 8/.test(magBadFactorText) && /factor/.test(magBadFactorText), "magnify refuses factor 10 (over the 8 cap, MCP schema validation)", magBadFactorText.slice(0, 200));
+const magBadFitRes = await client.callTool({ name: "magnify", arguments: { input: path.join(root, "test/rotate-source.mp4"), output: path.join(root, "outputs/mcp-magnify-bad.mp4"), x: 0, y: 0, width: 320, height: 180, factor: 2 } });
+const magBadFitJson = JSON.parse(magBadFitRes.content[0].text);
+checkOk(magBadFitRes.isError === true && /does not fit display 640x360/.test(magBadFitJson.error ?? "") && /at most 1\.7/.test(magBadFitJson.error ?? ""), "magnify refuses an inset that does not fit and names the max factor (1.7)", JSON.stringify(magBadFitJson.error ?? ""));
+const magBadWinRes = await client.callTool({ name: "magnify", arguments: { input: path.join(root, "test/rotate-source.mp4"), output: path.join(root, "outputs/mcp-magnify-bad.mp4"), x: 0, y: 0, width: 160, height: 90, start: 4, end: 2 } });
+const magBadWinJson = JSON.parse(magBadWinRes.content[0].text);
+checkOk(magBadWinRes.isError === true && /must be greater than start/.test(magBadWinJson.error ?? ""), "magnify refuses end before start", JSON.stringify(magBadWinJson.error ?? ""));
+const magBadHexRes = await client.callTool({ name: "magnify", arguments: { input: path.join(root, "test/rotate-source.mp4"), output: path.join(root, "outputs/mcp-magnify-bad.mp4"), x: 0, y: 0, width: 160, height: 90, border_color: "red" } });
+const magBadHexJson = JSON.parse(magBadHexRes.content[0].text);
+checkOk(magBadHexRes.isError === true && /6-digit hex/.test(magBadHexJson.error ?? ""), "magnify refuses a non-hex border color", JSON.stringify(magBadHexJson.error ?? ""));
 
 // concat per-clip trim: {file, start, end} objects (MCP) and
 // path@start-end (CLI). Trims re-encode through the filter graph —
@@ -8837,7 +8945,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 96 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 96 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 97 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 97 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -11874,7 +11982,7 @@ checkOk(explainSynth("REVISION_MISMATCH", "revision mismatch").kind === "fix-arg
 // the tier table, the MCP annotations, and the measured estimate.
 const safetyRes = await client.callTool({ name: "safety", arguments: {} });
 const safetyJson = JSON.parse(safetyRes.content[0].text);
-checkOk(safetyJson.total_tools === 96 && safetyJson.counts.READ === 30 && safetyJson.counts.PLAN === 4 && safetyJson.counts.WRITE === 61 && safetyJson.counts.DESTRUCTIVE === 1, "safety counts the tiers: 30 READ / 4 PLAN / 61 WRITE / 1 DESTRUCTIVE of 96 tools", JSON.stringify(safetyJson.counts));
+checkOk(safetyJson.total_tools === 97 && safetyJson.counts.READ === 30 && safetyJson.counts.PLAN === 4 && safetyJson.counts.WRITE === 62 && safetyJson.counts.DESTRUCTIVE === 1, "safety counts the tiers: 30 READ / 4 PLAN / 62 WRITE / 1 DESTRUCTIVE of 97 tools", JSON.stringify(safetyJson.counts));
 checkOk(JSON.stringify(safetyJson.tiers.DESTRUCTIVE.tools) === JSON.stringify(["patch_manifest"]), "patch_manifest is the only DESTRUCTIVE tool", JSON.stringify(safetyJson.tiers.DESTRUCTIVE.tools));
 const tierOf = {};
 for (const [tier, v] of Object.entries(safetyJson.tiers)) for (const n of v.tools) tierOf[n] = tier;
@@ -12040,7 +12148,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 96 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 97 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -12100,11 +12208,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 96, "GET /mcp reports name/version/transport and 96 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 97, "GET /mcp reports name/version/transport and 97 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 96 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 96 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 97 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 97 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 // Progressive discovery over HTTP (lượt 147): hot profile narrows
 // tools/list on the wire too — listTools() reads the env per call,
 // so flipping it here changes the same in-process server, and the
@@ -12118,7 +12226,7 @@ const httpRpcHot = await httpCall("POST", "/", { jsonrpc: "2.0", id: 7, method: 
 checkOk(httpRpcHot.status === 200 && httpRpcHot.json?.result?.tools?.length === 20, "JSON-RPC tools/list in hot profile also returns 20 tools", `count=${httpRpcHot.json?.result?.tools?.length}`);
 delete process.env.MEDIAKIT_TOOL_PROFILE;
 const httpToolsFull = await httpCall("GET", "/mcp/tools");
-checkOk(httpToolsFull.json?.tools?.length === 96, "clearing MEDIAKIT_TOOL_PROFILE restores the full 96-tool list", `count=${httpToolsFull.json?.tools?.length}`);
+checkOk(httpToolsFull.json?.tools?.length === 97, "clearing MEDIAKIT_TOOL_PROFILE restores the full 97-tool list", `count=${httpToolsFull.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -12219,7 +12327,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 96, "JSON-RPC tools/list returns the same 96 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 97, "JSON-RPC tools/list returns the same 97 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));
