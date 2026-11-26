@@ -36,6 +36,91 @@ export function ffmpegTimeoutMs() {
   return Math.min(3_600_000, Math.max(60_000, Math.floor(n)));
 }
 
+// Adaptive ffmpeg timeout (lượt 182 — yolo-ffmpeg-mcp's idea that a
+// timeout should scale with duration × resolution × complexity, but
+// with coefficients CALIBRATED on this machine instead of their
+// hand estimates): wall-clock budget for one ffmpeg pass, from the
+// work it must do. Calibration (ffmpeg 8.1.2, 4 cores, 2026-11-27,
+// /tmp/bench182, preset medium crf 23 unless noted): plain
+// 1080x1920 10s = 17.19s (1.72 s wall per s video); 720x1280 10s =
+// 10.12s (1.01); video-shot scale/crop 25s = 32.81s (1.31); xfade
+// 19.5s = 30.12s (1.54); burn-captions 25s = 54.72s (2.19); zoompan
+// 10s = 20.58s (2.06); PNG-sequence encode 5s = 20.30s (4.06);
+// plain ultrafast 10s = 8.48s (0.85, 0.49x medium); burn-captions
+// 540x960 ultrafast 20s = 9.31s (0.47). Base rate 0.5 + 0.65*Mpx
+// covers plain at both resolutions (1.85 vs 1.72 measured at
+// 1080x1920; 1.10 vs 1.01 at 720x1280); work 1.5 covers
+// burn-captions/zoompan (2.78 vs 2.19/2.06 measured); work 2.5
+// covers PNG-sequence canvas encode (4.63 vs 4.06). Buffer 1.5 is
+// yolo-ffmpeg-mcp's factor. Floor 300s = the old default, so short
+// jobs keep the fail-fast behaviour; cap 1h = the env cap. The
+// estimate only ever RAISES the cap — effective = max(env or
+// default, estimate) — because MEDIAKIT_FFMPEG_TIMEOUT_MS is
+// documented above as a raise-only knob. Honest limit: this covers
+// duration-driven cost, NOT contention — a busy machine can still
+// exceed it (the lượt 98 incident was a 25s burn pass under load);
+// the env override stays the escape hatch for that.
+export const FFMPEG_TIMEOUT_FLOOR_MS = 300_000;
+export const FFMPEG_TIMEOUT_CAP_MS = 3_600_000;
+export function estimateFfmpegTimeoutMs({ durationSeconds, width, height, fps = 30, work = 1, preset = "medium" } = {}) {
+  if (!(durationSeconds > 0) || !Number.isFinite(durationSeconds)) {
+    throw new MediaKitError(`estimateFfmpegTimeoutMs needs durationSeconds > 0, got: ${durationSeconds}`, "INVALID_ARG");
+  }
+  if (!(width > 0) || !Number.isFinite(width) || !(height > 0) || !Number.isFinite(height)) {
+    throw new MediaKitError(`estimateFfmpegTimeoutMs needs width/height > 0, got: ${width}x${height}`, "INVALID_ARG");
+  }
+  if (!(fps > 0) || !Number.isFinite(fps)) {
+    throw new MediaKitError(`estimateFfmpegTimeoutMs needs fps > 0, got: ${fps}`, "INVALID_ARG");
+  }
+  if (!Number.isFinite(work) || work < 0.1 || work > 10) {
+    throw new MediaKitError(`estimateFfmpegTimeoutMs needs work in 0.1..10, got: ${work}`, "INVALID_ARG");
+  }
+  const megapixels = (width * height) / 1_000_000;
+  // Only medium (1) and ultrafast (0.5) are measured — every other
+  // preset is treated as medium (conservative), never guessed.
+  const presetFactor = preset === "ultrafast" ? 0.5 : 1;
+  const rate = (0.5 + 0.65 * megapixels) * (fps / 30) * presetFactor * work;
+  const estimated = Math.ceil(durationSeconds * rate * 1.5 * 1000);
+  return Math.min(FFMPEG_TIMEOUT_CAP_MS, Math.max(ffmpegTimeoutMs(), estimated));
+}
+
+// Per-pass work factors for assemble (lượt 182, same calibration
+// run as estimateFfmpegTimeoutMs): a canvas_scene shot encodes a
+// PNG sequence (4.06 s/s measured — the slowest pass on this
+// machine), image shots run the zoompan filter (2.06), burn-captions
+// and text layers run a filter re-encode (2.19 / drawtext), while
+// video-shot scale/crop (1.31), xfade joins (1.54) and flat colour
+// (testsrc-class) sit at or below the plain-encode base rate.
+export const ASSEMBLE_SHOT_WORK = { canvas_scene: 2.5, image: 1.5, video: 1, color: 1 };
+export const ASSEMBLE_TEXT_WORK = 1.5;
+export const ASSEMBLE_JOIN_WORK = 1;
+export const ASSEMBLE_CAPTIONS_WORK = 1.5;
+
+// Timeout for ONE assemble shot (base encode, or the text-layer
+// re-encode when it is slower) at the render geometry. `shot` takes
+// { durationSeconds, kind, hasText } so the plan disclosure — which
+// only has nominal shot durations — can use the same math as the
+// render path instead of a second formula.
+export function assembleShotTimeoutMs({ durationSeconds, kind, hasText }, { width, height, fps, preset }) {
+  const base = estimateFfmpegTimeoutMs({ durationSeconds, width, height, fps, work: ASSEMBLE_SHOT_WORK[kind] ?? 1, preset });
+  if (!hasText) return base;
+  return Math.max(base, estimateFfmpegTimeoutMs({ durationSeconds, width, height, fps, work: ASSEMBLE_TEXT_WORK, preset }));
+}
+
+// Timeout block for a whole assemble render: the slowest shot, the
+// join over the full film, and the captions pass over the full film.
+// Reported in the plan disclosure and in the preview/final receipts
+// so the operator sees the budget before approving a render.
+export function assembleTimeoutBlock({ shots, totalSeconds, width, height, fps, preset }) {
+  const geom = { width, height, fps, preset };
+  return {
+    shots_ms: Math.max(0, ...shots.map((s) => assembleShotTimeoutMs(s, geom))),
+    join_ms: estimateFfmpegTimeoutMs({ durationSeconds: totalSeconds, width, height, fps, work: ASSEMBLE_JOIN_WORK, preset }),
+    captions_ms: estimateFfmpegTimeoutMs({ durationSeconds: totalSeconds, width, height, fps, work: ASSEMBLE_CAPTIONS_WORK, preset }),
+    basis: { duration_seconds: totalSeconds, width, height, fps, preset },
+  };
+}
+
 // ---------------------------------------------------------------- sandbox
 // Workspace sandbox (opt-in). Idea from alanveloper-epam/ffmpeg-mcp-server
 // (FFMPEG_MCP_WORKDIR) and the sandboxing in
@@ -4083,7 +4168,7 @@ function assColor(value, label) {
   return `&H00${hex.slice(4, 6)}${hex.slice(2, 4)}${hex.slice(0, 2)}&`;
 }
 
-export async function burnCaptions({ input, output, captions = null, wordsFile = null, fontSize = null, fontColor = "white", box = true, marginV = null, style = null, outlineColor = "black", maxLines = null, platform = null, onProgress = null, dryRun = false }) {
+export async function burnCaptions({ input, output, captions = null, wordsFile = null, fontSize = null, fontColor = "white", box = true, marginV = null, style = null, outlineColor = "black", maxLines = null, platform = null, onProgress = null, dryRun = false, timeoutMs = undefined }) {
   const inPath = await requireInput(input);
   if (captions && wordsFile) {
     throw new MediaKitError("burn_captions takes captions or words_file, not both — captions is a finished .srt/.ass/.vtt, words_file is word timings to chunk first", "INVALID_ARG");
@@ -4257,6 +4342,7 @@ export async function burnCaptions({ input, output, captions = null, wordsFile =
   try {
     await runFfmpegWithProgress(args, {
       totalSeconds: meta.duration_seconds, onProgress,
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     });
     const info = await fileInfo(outPath);
     const out = await probe(outPath);
@@ -8918,7 +9004,7 @@ export function buildZoomChainFilter(chains, width, height, fps) {
   const yExpr = `min(max(${fy}*ih-ih/zoom/2,0),ih-ih/zoom)`;
   return `zoompan=z='${z}':x='${xExpr}':y='${yExpr}':d=1:s=${width}x${height}:fps=${fps}`;
 }
-export async function zoomPan({ input, output, duration = 5, fps = 30, zoomFrom = 1, zoomTo = 1.5, focusX = 0.5, focusY = 0.5, focusEndX = null, focusEndY = null, width = 1280, height = 720, crf = 23, onProgress = null, dryRun = false, eventsFile = null, zoom = 2, chainGapSeconds = 2.5, transitionSeconds = 0.3, preLeadSeconds = 0.2, panSeconds = 0.25, holdSeconds = 0.8 }) {
+export async function zoomPan({ input, output, duration = 5, fps = 30, zoomFrom = 1, zoomTo = 1.5, focusX = 0.5, focusY = 0.5, focusEndX = null, focusEndY = null, width = 1280, height = 720, crf = 23, onProgress = null, dryRun = false, eventsFile = null, zoom = 2, chainGapSeconds = 2.5, transitionSeconds = 0.3, preLeadSeconds = 0.2, panSeconds = 0.25, holdSeconds = 0.8, timeoutMs = undefined }) {
   const inPath = await requireInput(input);
   const outPath = await prepareOutput(output, [inPath]);
   const c = num(crf, "crf", { min: 0, max: 51, integer: true });
@@ -8961,7 +9047,7 @@ export async function zoomPan({ input, output, duration = 5, fps = 30, zoomFrom 
     if (dryRun) {
       return { ...base, dry_run: true, duration_seconds: null, expected_duration_seconds: meta.duration_seconds, frames: null, size_bytes: null, commands: [formatCommand(args)] };
     }
-    await runFfmpegWithProgress(args, { totalSeconds: meta.duration_seconds, onProgress });
+    await runFfmpegWithProgress(args, { totalSeconds: meta.duration_seconds, onProgress, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
     const info = await fileInfo(outPath);
     const out = await probe(outPath);
     const frames = await countVideoFrames(outPath);
@@ -9013,7 +9099,7 @@ export async function zoomPan({ input, output, duration = 5, fps = 30, zoomFrom 
       note: "Dry run: no file written. The zoompan window count and the zoom/focus expressions are computed from the arguments, so they are exact; duration/frames are measured on the real output, so they report null.",
     };
   }
-  await runFfmpegWithProgress(args, { totalSeconds: dur, onProgress });
+  await runFfmpegWithProgress(args, { totalSeconds: dur, onProgress, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
   const info = await fileInfo(outPath);
   const out = await probe(outPath);
   const frames = await countVideoFrames(outPath);
@@ -22024,7 +22110,7 @@ function loadCanvasPackage(label) {
 // inside tmpDir, encode them to one segment. Frame count is
 // counted on disk, like every other shot kind. The scratch dir is
 // removed with tmpDir by the caller.
-async function buildAssembleCanvasShot(plan, shot, opts, outPath, tmpDir, onEncodeProgress = null) {
+async function buildAssembleCanvasShot(plan, shot, opts, outPath, tmpDir, onEncodeProgress = null, timeoutMs = undefined) {
   const { width, height, fps, crf, preset } = opts;
   const frames = shot.buildFrames;
   const { createCanvas, loadImage } = loadCanvasPackage(`assemble shot ${shot.id}`);
@@ -22062,6 +22148,7 @@ async function buildAssembleCanvasShot(plan, shot, opts, outPath, tmpDir, onEnco
     ], {
       totalSeconds: shot.buildSeconds,
       onProgress: typeof onEncodeProgress === "function" ? (p) => onEncodeProgress(p.fraction, p) : null,
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     });
   } finally {
     await rm(framesDir, { recursive: true, force: true });
@@ -22086,7 +22173,7 @@ async function buildAssembleCanvasShot(plan, shot, opts, outPath, tmpDir, onEnco
 // on a 540-wide frame overflows both sides (measured 2026-11-13:
 // "MINUS 14 LUFS" clipped to "NUS 14 LU" in the preview). So the
 // layer is re-wrapped for the render width here, not at validate.
-async function applyAssembleTextLayers(plan, shot, opts, inPath, onTextProgress = null) {
+async function applyAssembleTextLayers(plan, shot, opts, inPath, onTextProgress = null, timeoutMs = undefined) {
   const layers = shot.textLayers ?? [];
   if (!layers.length) return inPath;
   const { fps, crf, preset } = opts;
@@ -22119,6 +22206,7 @@ async function applyAssembleTextLayers(plan, shot, opts, inPath, onTextProgress 
     ], {
       totalSeconds: shot.buildSeconds,
       onProgress: typeof onTextProgress === "function" ? (p) => onTextProgress(p.fraction, p) : null,
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     });
     await rename(tmpOut, inPath);
   } finally {
@@ -22158,8 +22246,17 @@ async function buildAssembleShot(plan, shot, opts, outPath, onShotProgress = nul
   const textProgress = typeof onShotProgress === "function"
     ? (frac, p) => { try { onShotProgress((1 + frac) / encodes, detailFor(p, "text")); } catch { /* advisory */ } }
     : null;
+  // Adaptive timeout (lượt 182): one budget for the whole shot — the
+  // slower of the base encode and the text-layer re-encode — so a
+  // long canvas_scene shot (PNG-sequence encode, the slowest pass on
+  // this machine) does not die on the flat 300s cap. The text pass
+  // reuses the same budget: it is the max of both, never tighter.
+  const shotTimeoutMs = assembleShotTimeoutMs(
+    { durationSeconds: shot.buildSeconds, kind: shot.kind, hasText: Boolean(shot.textLayers?.length) },
+    { width, height, fps, preset },
+  );
   if (shot.kind === "canvas_scene") {
-    await buildAssembleCanvasShot(plan, shot, opts, outPath, opts.tmpDir, baseProgress);
+    await buildAssembleCanvasShot(plan, shot, opts, outPath, opts.tmpDir, baseProgress, shotTimeoutMs);
   } else if (shot.kind === "image") {
     const z = shot.zoom ?? { from: 1, to: 1, focus: [0.5, 0.5], focus_end: [0.5, 0.5] };
     const r = await zoomPan({
@@ -22167,7 +22264,7 @@ async function buildAssembleShot(plan, shot, opts, outPath, onShotProgress = nul
       zoomFrom: z.from, zoomTo: z.to,
       focusX: z.focus[0], focusY: z.focus[1],
       focusEndX: z.focus_end[0], focusEndY: z.focus_end[1],
-      width, height, crf,
+      width, height, crf, timeoutMs: shotTimeoutMs,
       onProgress: baseProgress ? (p) => baseProgress(p.fraction, p) : null,
     });
     if (r.frames !== shot.buildFrames) {
@@ -22182,6 +22279,7 @@ async function buildAssembleShot(plan, shot, opts, outPath, onShotProgress = nul
     ], {
       totalSeconds: shot.buildSeconds,
       onProgress: baseProgress ? (p) => baseProgress(p.fraction, p) : null,
+      timeoutMs: shotTimeoutMs,
     });
   } else {
     await runFfmpegWithProgress([
@@ -22191,9 +22289,10 @@ async function buildAssembleShot(plan, shot, opts, outPath, onShotProgress = nul
     ], {
       totalSeconds: shot.buildSeconds,
       onProgress: baseProgress ? (p) => baseProgress(p.fraction, p) : null,
+      timeoutMs: shotTimeoutMs,
     });
   }
-  await applyAssembleTextLayers(plan, shot, opts, outPath, textProgress);
+  await applyAssembleTextLayers(plan, shot, opts, outPath, textProgress, shotTimeoutMs);
   const counted = await countVideoFrames(outPath);
   if (counted !== shot.buildFrames) {
     throw new MediaKitError(`assemble shot ${shot.id}: built ${counted} frames, expected ${shot.buildFrames}`, "ASSEMBLE_FRAME_MISMATCH");
@@ -22220,7 +22319,7 @@ async function buildAssembleShot(plan, shot, opts, outPath, onShotProgress = nul
 // joined video has exactly the nominal frame count; the caller
 // verifies that on disk. The final fps filter pins the frame rate
 // after the chain.
-async function joinAssembleSegments(segmentPaths, joins, opts, outPath, onJoinProgress = null, totalSeconds = null) {
+async function joinAssembleSegments(segmentPaths, joins, opts, outPath, onJoinProgress = null, totalSeconds = null, timeoutMs = undefined) {
   const { fps, crf, preset } = opts;
   const graph = [];
   let vLabel = "0:v";
@@ -22271,6 +22370,7 @@ async function joinAssembleSegments(segmentPaths, joins, opts, outPath, onJoinPr
   await runFfmpegWithProgress(args, {
     totalSeconds,
     onProgress: typeof onJoinProgress === "function" ? (p) => onJoinProgress(p.fraction, p) : null,
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
   });
   return outPath;
 }
@@ -22836,6 +22936,14 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
     // above are the plan branch's own probes, so the blockers cost
     // no extra decode.
     const blockers = computePlanBlockers({ totalSeconds: plan.total_seconds, music: musicPlan, sfx: sfxPlan });
+    // Adaptive timeouts (lượt 182): the budget the full render will
+    // use, disclosed here so the approve step sees it before any
+    // render is attempted. Full render = manifest size, preset
+    // medium (preview halves both, so its budget is smaller).
+    const planTimeouts = assembleTimeoutBlock({
+      shots: plan.shots.map((s) => ({ durationSeconds: s.duration, kind: s.kind, hasText: Boolean(s.textLayers?.length) })),
+      totalSeconds: plan.total_seconds, width: plan.width, height: plan.height, fps: plan.fps, preset: "medium",
+    });
     const planResult = {
       ...base,
       note: planFile != null
@@ -22843,6 +22951,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
         : "plan is a read-only disclosure of the resolved timeline — it writes nothing and does not approve the film; preview + approve are still required before render.",
       exportable: blockers.length === 0,
       blockers,
+      timeout: planTimeouts,
       fingerprint_parts: plan.fingerprint_parts,
       timeline,
       audio: {
@@ -22954,6 +23063,20 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
   const renderShotsBuilt = videoPlan.shots;
   const joins = videoPlan.joins;
 
+  // Adaptive timeouts (lượt 182): one budget per ffmpeg video pass,
+  // from the render geometry + durations — computed once here and
+  // passed to every video pass below, and reported in the receipts
+  // so the operator sees the budget before approving. Preview
+  // renders at half size with preset ultrafast, so its budget is
+  // smaller than the full render's; the plan disclosure (full
+  // render, medium) is the one that matters for approval. The
+  // concat-copy join above keeps the flat default (a copy is fast);
+  // only the re-encoding join gets the adaptive budget.
+  const timeouts = assembleTimeoutBlock({
+    shots: renderShotsBuilt.map((s) => ({ durationSeconds: s.buildSeconds, kind: s.kind, hasText: Boolean(s.textLayers?.length) })),
+    totalSeconds: renderTotalSeconds, width: outW, height: outH, fps: plan.fps, preset,
+  });
+
   const tmpDir = path.join(outDirAbs, `.mediakit-assemble-tmp-${process.pid}`);
   await mkdir(tmpDir, { recursive: true });
   let cacheHits = 0;
@@ -23010,7 +23133,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
     } else {
       await joinAssembleSegments(segmentPaths, joins, opts, videoOnlyPath, (frac, p) => {
         emitProgress("join", frac, p?.speed != null ? `join · ${p.speed}x` : "join");
-      }, renderTotalSeconds);
+      }, renderTotalSeconds, timeouts.join_ms);
     }
     emitProgress("join", 1);
     const concatFrames = await countVideoFrames(videoOnlyPath);
@@ -23097,6 +23220,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
         marginV: bv.margin_v == null ? null : Math.max(0, Math.round(bv.margin_v * burnScale)),
         style: bv.style ?? "background",
         onProgress: (p) => emitProgress("captions", p.fraction, p?.speed != null ? `captions · ${p.speed}x` : "captions"),
+        timeoutMs: timeouts.captions_ms,
       });
     } else {
       await copyFile(muxedPath, finalPath);
@@ -23120,6 +23244,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
         ...(checkpointAbs ? { checkpoint_file: checkpointAbs, checkpoint: { mode, shots_done: checkpointShotsDone, shots_total: renderShotsBuilt.length, ...(checkpointResetFrom ? { reset_from_mode: checkpointResetFrom } : {}) } } : {}),
         ...(audioLevelsApplied.length ? { audio_levels: audioLevelsApplied } : {}),
         transition_warnings: previewWarnings,
+        timeout: timeouts,
         elapsed_seconds: elapsed,
         ...(planDoc ? { plan_file: planAbs, ...(planDoc.exportable === false ? { plan_blockers: planDoc.blockers ?? [] } : {}) } : {}),
       };
@@ -23138,6 +23263,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       ...base,
       approval: approvalStatus,
       output: finalPath,
+      timeout: timeouts,
       ...(planDoc ? { plan_file: planAbs } : {}),
       // Render manifest digests (leclap's render-manifest idea):
       // per-input content hashes + the paths they were read from, so

@@ -1578,7 +1578,18 @@ adjacent shot, and a `video` shot needs the handle footage to exist
 in its source (start ≥ incoming handle, start + duration +
 outgoing handle ≤ source end) — validate refuses otherwise.
 In a preview, a transition whose next shot is clipped below its
-handle is dropped (hard cut, recorded in `transition_warnings`). The four modes are a pipeline, in order: `validate`
+handle is dropped (hard cut, recorded in `transition_warnings`).
+Each ffmpeg video pass gets an adaptive timeout, estimated from
+duration × resolution × fps × pass kind × preset (canvas_scene
+PNG-sequence encode is the slowest pass measured on this machine;
+plain encode is the base rate), × 1.5 buffer, floor 300s and cap
+1h — the plan discloses it as `timeout` (`shots_ms`/`join_ms`/
+`captions_ms` + `basis`), and the preview/render receipts carry
+the same block. A short film behaves exactly as before (all
+floors); a long film's passes get real headroom instead of dying
+on the flat 300s cap. `MEDIAKIT_FFMPEG_TIMEOUT_MS` only ever
+raises the cap further, for contention on a busy machine, which
+the estimate cannot predict. The four modes are a pipeline, in order: `validate`
 (writes nothing), `preview` (first N seconds at half size —
 show it to the user), `approve` (records the fingerprint of the
 exact manifest + voice + assets + captions the preview showed),

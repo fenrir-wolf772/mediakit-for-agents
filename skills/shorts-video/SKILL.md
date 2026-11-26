@@ -203,8 +203,7 @@ reports `estimate_remaining_seconds` (rough upper-bound ETA, null
 when too early to tell) with `estimate_basis` naming how it was
 derived — `progress-rate` from the rate over the most recent 30s of
 the percent history when that window holds at least 2 points, else
-the whole-run average rate — a guide for the user, never a promise. Long renders on a busy machine can also
-hit the 300s ffmpeg timeout — raise it with
+the whole-run average rate — a guide for the user, never a promise. Long renders get an adaptive ffmpeg timeout, estimated from duration × resolution × fps × pass kind × preset (floor 300s, cap 1h — disclosed as `timeout` in the plan and the receipts), so a long film no longer dies on the flat 300s cap; a busy machine can still exceed the estimate, so raise the cap further with
 `MEDIAKIT_FFMPEG_TIMEOUT_MS` (60000–3600000). A shot after the first may carry
 `transition: {type, duration}` (one of the 58 xfade names — see the
 `transitions` tool for the catalog grouped by family,

@@ -15,7 +15,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
-import { acquireEditLease, analyzeSeamSamples, applyContentBaseline, averageHash, buildZoomChains, chunkCaptions, commitEditSession, compactManifestOps, compareDeterminismRuns, countClippedRuns, cutSheetRows, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, projectSummary, proposeEdit, releaseEditLease, renewEditLease, resolveQcPolicy, restoreEditSessionCheckpoint, resumeEditSession, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, snapKeepSegmentsToPauses, spectralFluxOnset, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
+import { acquireEditLease, analyzeSeamSamples, applyContentBaseline, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, commitEditSession, compactManifestOps, compareDeterminismRuns, countClippedRuns, cutSheetRows, detectVoiceVenv, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, projectSummary, proposeEdit, releaseEditLease, renewEditLease, resolveQcPolicy, restoreEditSessionCheckpoint, resumeEditSession, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, snapKeepSegmentsToPauses, spectralFluxOnset, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
@@ -10221,6 +10221,52 @@ checkOk(/short by 15 frames/.test(planGapText ?? ""), "assemble plan refuses sho
 checkOk(!existsSync(path.join(planStage.dir, "assemble-film-transitions.assemble-approval.json")), "assemble plan writes no approval file (a plan is a disclosure, not an approval)", planStage.dir);
 const planCli = await runCliJson(["assemble", planStage.manifestPath, "--mode", "plan"]);
 checkOk(planCli.mode === "plan" && planCli.timeline?.length === 4 && planCli.joins?.length === 3 && planCli.audio?.music?.loops === 2, "CLI assemble --mode plan returns the same disclosure", JSON.stringify({ mode: planCli.mode, shots: planCli.timeline?.length, joins: planCli.joins?.length }));
+// Lượt 182: assemble adaptive ffmpeg timeout — estimateFfmpegTimeoutMs
+// (yolo-ffmpeg-mcp's duration × resolution × complexity idea, with
+// coefficients calibrated on this machine: /tmp/bench182 — plain
+// 1080x1920 medium 1.72 s wall per s video, burn-captions 2.19,
+// PNG-sequence canvas encode 4.06, ultrafast 0.49x medium). Floor
+// 300s = the old default, cap 1h = the env cap.
+checkOk(estimateFfmpegTimeoutMs({ durationSeconds: 10, width: 1080, height: 1920 }) === 300000, "timeout: short 10s film stays at the 300s floor (no behaviour change for report videos)", String(estimateFfmpegTimeoutMs({ durationSeconds: 10, width: 1080, height: 1920 })));
+checkOk(estimateFfmpegTimeoutMs({ durationSeconds: 25, width: 1080, height: 1920, work: 1.5 }) === 300000, "timeout: 25s burn-captions pass (104s raw) stays at the floor", String(estimateFfmpegTimeoutMs({ durationSeconds: 25, width: 1080, height: 1920, work: 1.5 })));
+const timeout120burn = estimateFfmpegTimeoutMs({ durationSeconds: 120, width: 1080, height: 1920, work: 1.5 });
+checkOk(timeout120burn >= 490000 && timeout120burn <= 510000, "timeout: 120s burn-captions estimates ~499s (a 2-minute film no longer dies on the flat 300s cap)", String(timeout120burn));
+checkOk(estimateFfmpegTimeoutMs({ durationSeconds: 600, width: 1080, height: 1920, work: 2.5 }) === 3600000, "timeout: 600s canvas shot caps at 1h (the env cap)", String(estimateFfmpegTimeoutMs({ durationSeconds: 600, width: 1080, height: 1920, work: 2.5 })));
+const timeout600_720 = estimateFfmpegTimeoutMs({ durationSeconds: 600, width: 720, height: 1280 });
+const timeout600_1080 = estimateFfmpegTimeoutMs({ durationSeconds: 600, width: 1080, height: 1920 });
+checkOk(timeout600_720 >= 980000 && timeout600_720 <= 1000000 && timeout600_1080 >= 1650000 && timeout600_1080 <= 1670000 && timeout600_720 < timeout600_1080, "timeout: resolution scales the budget — 600s at 720x1280 ~990s vs 1080x1920 ~1663s", `${timeout600_720} vs ${timeout600_1080}`);
+const timeout600ultra = estimateFfmpegTimeoutMs({ durationSeconds: 600, width: 1080, height: 1920, preset: "ultrafast" });
+checkOk(timeout600ultra >= 820000 && timeout600ultra <= 840000, "timeout: ultrafast halves the budget (~832s for a 600s film)", String(timeout600ultra));
+const timeout600_60fps = estimateFfmpegTimeoutMs({ durationSeconds: 600, width: 1080, height: 1920, fps: 60 });
+checkOk(timeout600_60fps >= 3300000 && timeout600_60fps <= 3350000, "timeout: 60fps doubles the budget (~3326s for a 600s film)", String(timeout600_60fps));
+let timeoutBad = 0;
+for (const bad of [{ durationSeconds: 0, width: 1080, height: 1920 }, { durationSeconds: 10, width: -5, height: 1920 }, { durationSeconds: 10, width: 1080, height: 1920, work: 0 }, { durationSeconds: 10, width: 1080, height: 1920, fps: 0 }]) {
+  try { estimateFfmpegTimeoutMs(bad); } catch (e) { if (e.code === "INVALID_ARG") timeoutBad++; }
+}
+checkOk(timeoutBad === 4, "timeout: 0s / negative width / work 0 / fps 0 all throw INVALID_ARG", `threw=${timeoutBad}/4`);
+const timeoutShotCanvas5 = assembleShotTimeoutMs({ durationSeconds: 5, kind: "canvas_scene", hasText: false }, { width: 1080, height: 1920, fps: 30, preset: "medium" });
+const timeoutShotColorText5 = assembleShotTimeoutMs({ durationSeconds: 5, kind: "color", hasText: true }, { width: 1080, height: 1920, fps: 30, preset: "medium" });
+checkOk(timeoutShotCanvas5 === 300000 && timeoutShotColorText5 === 300000, "timeout: short shots (canvas 5s, colour+text 5s) stay at the floor", `${timeoutShotCanvas5}/${timeoutShotColorText5}`);
+const timeoutBlock10 = assembleTimeoutBlock({ shots: [{ durationSeconds: 5, kind: "canvas_scene", hasText: false }, { durationSeconds: 5, kind: "color", hasText: true }], totalSeconds: 10, width: 1080, height: 1920, fps: 30, preset: "medium" });
+checkOk(timeoutBlock10.shots_ms === 300000 && timeoutBlock10.join_ms === 300000 && timeoutBlock10.captions_ms === 300000 && timeoutBlock10.basis.duration_seconds === 10 && timeoutBlock10.basis.preset === "medium", "timeout block: 10s film reports all floors + basis", JSON.stringify(timeoutBlock10));
+const timeoutBlock600 = assembleTimeoutBlock({ shots: [{ durationSeconds: 600, kind: "canvas_scene", hasText: false }], totalSeconds: 600, width: 1080, height: 1920, fps: 30, preset: "medium" });
+checkOk(timeoutBlock600.shots_ms === 3600000 && timeoutBlock600.join_ms >= 1650000 && timeoutBlock600.join_ms <= 1670000 && timeoutBlock600.captions_ms >= 2490000 && timeoutBlock600.captions_ms <= 2500000, "timeout block: 600s canvas film — shots capped 1h, join ~1663s, captions ~2495s", JSON.stringify(timeoutBlock600));
+checkOk(planJson.timeout?.shots_ms === 300000 && planJson.timeout?.join_ms === 300000 && planJson.timeout?.captions_ms === 300000 && planJson.timeout?.basis?.duration_seconds === 10 && planJson.timeout?.basis?.width === 1080 && planJson.timeout?.basis?.height === 1920 && planJson.timeout?.basis?.preset === "medium", "assemble plan discloses the timeout budget (10s film: all floors, basis 1080x1920/medium)", JSON.stringify(planJson.timeout));
+// Long film, plan only (no render): lead 300 + 9s voice + tail 291 =
+// 600s, ten 60s canvas_scene shots (colour cards cap at 2.5s and
+// canvas_scene caps at 60s per shot, both measured) — exercises the
+// >300s branch without a 28 MB 600s audio fixture. Plan never renders.
+const longFilmDir = path.join(root, `outputs/mcp-assemble-long-${process.pid}`);
+await rm(longFilmDir, { recursive: true, force: true });
+await mkdir(longFilmDir, { recursive: true });
+const longFilm = { version: 1, title: "Long film timeout probe", fps: 30, width: 1080, height: 1920, voice: { path: path.join(root, "test", "mix-voice.mp3"), lead: 300, tail: 291 }, shots: Array.from({ length: 10 }, (_, i) => ({ id: `s${i + 1}`, kind: "canvas_scene", template: "rings", duration: 60 })) };
+const longFilmPath = path.join(longFilmDir, "film.json");
+await writeFile(longFilmPath, JSON.stringify(longFilm), "utf8");
+const longPlanRes = await client.callTool({ name: "assemble", arguments: { manifest_path: longFilmPath, mode: "plan" } });
+const longPlanJson = JSON.parse(longPlanRes.content[0].text);
+checkOk(longPlanJson.total_seconds === 600 && longPlanJson.timeout?.captions_ms >= 2490000 && longPlanJson.timeout?.captions_ms <= 2500000 && longPlanJson.timeout?.join_ms >= 1650000 && longPlanJson.timeout?.join_ms <= 1670000 && longPlanJson.timeout?.shots_ms >= 410000 && longPlanJson.timeout?.shots_ms <= 420000, "assemble plan on a 600s film raises the budget: captions ~2495s, join ~1663s, canvas shots ~416s", JSON.stringify(longPlanJson.timeout));
+const longPlanCli = await runCliJson(["assemble", longFilmPath, "--mode", "plan"]);
+checkOk(longPlanCli.timeout?.captions_ms === longPlanJson.timeout?.captions_ms && longPlanCli.timeout?.shots_ms === longPlanJson.timeout?.shots_ms, "CLI assemble --mode plan returns the same timeout budget", JSON.stringify(longPlanCli.timeout));
 // Lượt 160: assemble --mode plan is durable + exportable/blockers
 // (MakeMyClip's checkExportable idea): --plan-file writes the plan
 // (timeline + fingerprint + exportable/blockers, atomic), and
@@ -10513,6 +10559,7 @@ const assemblePreviewFrames = await countFrames(assemblePreviewPath);
 checkOk(assemblePreviewFrames === 90, "assemble preview has exactly 90 frames (3s x 30fps)", `frames=${assemblePreviewFrames}`);
 const assemblePreviewDoc = JSON.parse(await readFile(path.join(assembleOut, "preview.json"), "utf8"));
 checkOk(assemblePreviewDoc.fingerprint === assembleValidateJson.fingerprint, "assemble preview.json on disk carries the fingerprint", assemblePreviewDoc.fingerprint ?? "");
+checkOk(assemblePreviewJson.timeout?.shots_ms === 300000 && assemblePreviewJson.timeout?.join_ms === 300000 && assemblePreviewJson.timeout?.captions_ms === 300000 && assemblePreviewJson.timeout?.basis?.duration_seconds === 3 && assemblePreviewJson.timeout?.basis?.width === 540 && assemblePreviewJson.timeout?.basis?.height === 960 && assemblePreviewJson.timeout?.basis?.preset === "ultrafast", "assemble preview reports the timeout budget (3s at 540x960/ultrafast: all floors)", JSON.stringify(assemblePreviewJson.timeout));
 const assembleApproveRes = await client.callTool({ name: "assemble", arguments: { manifest_path: assembleStage.manifestPath, mode: "approve", output_dir: assembleOut } });
 const assembleApproveJson = JSON.parse(assembleApproveRes.content[0].text);
 const assembleApprovalDoc = JSON.parse(await readFile(assembleApprovalPath, "utf8"));
@@ -10527,6 +10574,7 @@ const assembleFinalProbe = await probeStreams(assembleFinalPath);
 const assembleFinalFrames = await countFrames(assembleFinalPath);
 const assembleFinalLufs = await measureLufs(assembleFinalPath);
 checkOk(assembleRenderJson.approval === "approved" && assembleRenderJson.fingerprint === assembleValidateJson.fingerprint, "assemble render is approved with the matching fingerprint", JSON.stringify(assembleRenderJson.approval));
+checkOk(assembleRenderJson.timeout?.shots_ms === 300000 && assembleRenderJson.timeout?.join_ms === 300000 && assembleRenderJson.timeout?.captions_ms === 300000 && assembleRenderJson.timeout?.basis?.duration_seconds === 10 && assembleRenderJson.timeout?.basis?.width === 1080 && assembleRenderJson.timeout?.basis?.preset === "medium", "assemble render receipt reports the timeout budget (10s film, medium, all floors)", JSON.stringify(assembleRenderJson.timeout));
 checkOk(assembleFinalProbe?.streams?.find((s) => s.codec_type === "video")?.width === 1080 && near(parseFloat(assembleFinalProbe?.format?.duration), 10, 0.15) && assembleFinalFrames === 300, "assemble final is 1080x1920, 10s, exactly 300 frames", `duration=${assembleFinalProbe?.format?.duration} frames=${assembleFinalFrames}`);
 checkOk(assembleFinalLufs !== null && near(assembleFinalLufs, -14, 0.5), "assemble final measures -14 LUFS independently", `LUFS=${assembleFinalLufs}`);
 const assembleReceipt = JSON.parse(await readFile(path.join(assembleOut, "assemble-receipt.json"), "utf8"));
