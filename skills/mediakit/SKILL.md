@@ -1186,7 +1186,11 @@ tool for platform-spec detail (bitrate warnings, safe zones,
 `--content` time ranges); `qa_report` is the last gate. The
 thumbnail sheet labels each tile with its own timestamp in `MM:SS.d`
 (each tile is captured at that exact timestamp), so read the times
-off the sheet when you decide where to cut. `--start-delay-percent`
+off the sheet when you decide where to cut. Use `demo_frames`
+instead of `thumbnail` when you are the one looking: same sheet
+(9 frames, 3x3, header on by default), but the picture comes back
+in the result as an image, so you see it in context instead of
+opening a file. `--start-delay-percent`
 / `--end-delay-percent` skip the intro/credits before spacing the
 tiles. `--header` adds a metadata band on top (filename, measured
 duration, resolution, fps, codecs, size, grid) — use it when the
@@ -1718,7 +1722,7 @@ exactly the unguarded pattern brookcs3/m3u8-mcp-server's
 verify) — MediaKit's `download` exists so the agent never has to.
 
 ### 52. Test a tool over HTTP before wiring up an MCP client — same tools, curl instead of stdio
-`mediakit mcp --http [--port 3000]` serves the same 99 tools over
+`mediakit mcp --http [--port 3000]` serves the same 100 tools over
 HTTP on `127.0.0.1`: `GET /mcp` (metadata), `GET /mcp/tools`
 (every tool + JSON input schema), `POST /mcp/tools/{name}/invoke`
 (`{"arguments": {...}}`), and `POST /` for JSON-RPC 2.0
@@ -2124,7 +2128,7 @@ review strips when `strips: true`), `estimate_conversion`
 sample-encodes to temp, `job` only reads/cancels job state,
 `propose_edit` validates options with the patch_manifest helpers
 and writes nothing; WRITE
-(62) produces a file the caller asked for and never overwrites its
+(63) produces a file the caller asked for and never overwrites its
 own input; DESTRUCTIVE (2 — `patch_manifest`, guarded by
 `expected_revision` plus a `.bak` backup, and the `edit_session`
 commit, guarded by a base sha256 + revision stale check plus a
@@ -2240,7 +2244,7 @@ Off by default; the verify stays probe-only without it.
 
 ### 58h. Browse the catalog before you dump it — progressive discovery
 
-99 tools is too many schemas to pay for in every turn. Don't start
+100 tools is too many schemas to pay for in every turn. Don't start
 from `tools/list` — start from `list_operations`: one compact line
 per tool (name, family, tier, one-sentence summary), optionally
 narrowed with `family` (`inspect`, `edit`, `text`, `image`,

@@ -114,6 +114,25 @@ const COMMANDS = {
       ["-o, --output", "Output file (required)"],
     ],
   },
+  "demo-frames": {
+    usage: "mediakit demo-frames <input> -o <output.png|jpg> [--frames <n>] [--columns <n>] [--width <px>] [--no-timestamps] [--no-header] [--start-delay-percent <n>] [--end-delay-percent <n>] [--timestamps-list <s,s,...>] [--sharpest] [--sharpest-samples <n>] [--include-image]",
+    desc: "Eye-check a video: same contact sheet as thumbnail, but the sheet also comes back inline — over MCP as an image block, over HTTP as base64 in the JSON body — so the agent sees the frames in context instead of opening a file. Defaults are tuned for the eye: 9 frames in a 3x3 grid, 360px tiles, header band on (turn it off with --no-header). --include-image prints the sheet base64 into the CLI JSON (off by default, so stdout stays small); sheets over 2 MB are downscaled for the inline copy only and image_downscaled says so.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--frames", "Number of frames (default 9)"],
+      ["--columns", "Grid columns (default 3)"],
+      ["--width", "Width of each tile in pixels (default 360)"],
+      ["--no-timestamps", "Do not label tiles with timestamps"],
+      ["--no-header", "Drop the metadata band on top (on by default)"],
+      ["--start-delay-percent", "Skip this percent at the start before spacing tiles (default 0)"],
+      ["--end-delay-percent", "Skip this percent at the end before spacing tiles (default 0)"],
+      ["--timestamps-list", "Explicit tile times, comma-separated seconds or MM:SS (e.g. 1,6,0:30); sets the tile count"],
+      ["--sharpest", "Pick the sharpest frame in each tile's window instead of the window start"],
+      ["--sharpest-samples", "Candidate frames sampled per window when --sharpest (default 5, 2-16)"],
+      ["--include-image", "Print the sheet base64 (image_base64) into the JSON output"],
+      ["-o, --output", "Output file (required)"],
+    ],
+  },
   loudness: {
     usage: "mediakit loudness <input> -o <output> [--target-lufs <n>] [--format <fmt>] [--compressor] [--compressor-threshold <dB>] [--compressor-ratio <n>] [--dry-run]",
     desc: "Normalize loudness (default -14 LUFS, YouTube/Spotify standard). --compressor runs a gentle compressor (threshold -24 dB, ratio 4) before the loudnorm pass, for quiet high-crest speech. --dry-run prints the exact ffmpeg command(s) that would run and writes no file (with --compressor the loudnorm measured_* values come from the uncompressed input — the real run re-measures the compressed temp first).",
@@ -1283,7 +1302,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 99 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 100 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -1617,6 +1636,22 @@ async function main() {
           timestampsList: opts.timestamps_list === undefined ? null : String(opts.timestamps_list).split(",").map((s) => s.trim()).filter(Boolean),
           sharpest: opts.sharpest === true,
           sharpestSamples: numOpt(opts, "sharpest_samples") ?? 5,
+        });
+        break;
+      case "demo-frames":
+        result = await core.demoFrames({
+          input: needInput(), output: needOutput(opts),
+          frames: numOpt(opts, "frames") ?? 9,
+          columns: numOpt(opts, "columns") ?? 3,
+          width: numOpt(opts, "width") ?? 360,
+          timestamps: opts.timestamps ?? true,
+          header: opts.header ?? true,
+          startDelayPercent: numOpt(opts, "start_delay_percent") ?? 0,
+          endDelayPercent: numOpt(opts, "end_delay_percent") ?? 0,
+          timestampsList: opts.timestamps_list === undefined ? null : String(opts.timestamps_list).split(",").map((s) => s.trim()).filter(Boolean),
+          sharpest: opts.sharpest === true,
+          sharpestSamples: numOpt(opts, "sharpest_samples") ?? 5,
+          includeImage: opts.include_image === true,
         });
         break;
       case "loudness":

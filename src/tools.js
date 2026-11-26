@@ -225,6 +225,61 @@ export const TOOL_DEFS = [
 
 
   {
+    name: "demo_frames",
+    tier: "WRITE",
+    description: "Eye-check a video without opening a file: build the same contact sheet as thumbnail (N evenly spaced frames, each captured at its exact timestamp and labelled MM:SS.d) and return the sheet itself as an image in this result — look at it before cutting, grading or publishing. Defaults are tuned for the eye, not the disk: 9 frames in a 3x3 grid, 360px tiles, header band on (filename, duration, resolution, fps, codecs, size, grid) so the sheet still names its source in context. The sheet is also written to output, with the same metadata thumbnail reports (timestamps_seconds, dimensions, file size). include_image=false returns only the file + metadata (use it over HTTP when you do not want the base64 in the JSON body, or from the CLI). Sheets over 2 MB are downscaled for the inline copy only (max 1280px wide, halving until it fits) and image_downscaled says so; the file on disk keeps full size.",
+    schema: {
+    input: pathSchema,
+    output: pathSchema,
+    frames: z.number().int().min(1).max(64).default(9),
+    columns: z.number().int().min(1).max(8).default(3),
+    width: z.number().int().min(80).max(1280).default(360).describe("Width of each tile in pixels"),
+    timestamps: z.boolean().default(true).describe("Label each tile with its timestamp (MM:SS.d); set false for a clean sheet"),
+    header: z.boolean().default(true).describe("Add a metadata band on top: filename, duration, resolution, fps, codecs, size, grid"),
+    start_delay_percent: z.number().min(0).max(90).default(0).describe("Skip this percent of the file at the start before spacing tiles (intros)"),
+    end_delay_percent: z.number().min(0).max(90).default(0).describe("Skip this percent of the file at the end before spacing tiles (credits)"),
+    timestamps_list: z.array(z.union([z.number(), z.string()])).min(1).max(64).optional().describe("Explicit tile times in seconds or MM:SS (e.g. [1, 6, \"0:30\"]); sets the tile count, cannot combine with the delay percents"),
+    sharpest: z.boolean().default(false).describe("Pick the sharpest frame in each tile's window (Laplacian mean, measured on disk) instead of the window start"),
+    sharpest_samples: z.number().int().min(2).max(16).default(5).describe("Candidate frames sampled per window when sharpest=true (default 5)"),
+    include_image: z.boolean().default(true).describe("Return the sheet as an image in this result (MCP image block; base64 in the HTTP JSON body). False returns only the file + metadata."),
+  },
+    handler: async (a) => {
+      const res = await safe(() => core.demoFrames({
+        input: a.input,
+        output: a.output,
+        frames: a.frames,
+        columns: a.columns,
+        width: a.width,
+        timestamps: a.timestamps,
+        header: a.header,
+        startDelayPercent: a.start_delay_percent,
+        endDelayPercent: a.end_delay_percent,
+        timestampsList: a.timestamps_list ?? null,
+        sharpest: a.sharpest,
+        sharpestSamples: a.sharpest_samples,
+        includeImage: a.include_image,
+      }));
+      if (res.isError) return res;
+      // The sheet goes back as a real image block, not as base64
+      // buried in the JSON text: the model sees the picture in
+      // context (demo-recorder's demo_frames idea). The JSON keeps
+      // everything except the bytes — the audit trail in server.js
+      // parses content[0] as JSON, and it must stay parseable and
+      // small, so the base64 lives only in the image block.
+      const body = JSON.parse(res.content?.[0]?.text ?? "{}");
+      if (!body.image_base64) return res;
+      const { image_base64, ...rest } = body;
+      return {
+        content: [
+          { type: "text", text: JSON.stringify(rest, null, 2) },
+          { type: "image", data: image_base64, mimeType: body.image_mime_type || "image/png" },
+        ],
+      };
+    },
+  },
+
+
+  {
     name: "loudness",
     tier: "WRITE",
     description: "Normalize loudness to a target (default -14 LUFS, the YouTube/Spotify standard) with two-pass loudnorm: the input is measured first, then the exact linear gain is applied, and the output is re-measured on disk. Pass compressor=true for quiet, high-crest speech (a gentle compressor, threshold -24 dB / ratio 4 by default, runs before the loudnorm pass — without it a peak-limited voice stalls below target and the result says so in `warning`). Good for speech and creator audio. Set dry_run=true to print the exact ffmpeg command(s) that would run and write no file (the loudnorm measurement still runs, read-only; with a compressor the loudnorm measured_* values come from the uncompressed input because the real run re-measures the compressed temp first — the note says so).",
@@ -2602,7 +2657,7 @@ export const TOOL_DEFS = [
   {
     name: "list_operations",
     tier: "READ",
-    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 99 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 100 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
     schema: {
     family: z.enum(["inspect", "edit", "text", "image", "assemble", "meta"]).optional().describe("Narrow to one family; omit for the whole catalog"),
   },
@@ -2774,7 +2829,7 @@ export function listSafetyTiers() {
 }
 
 // ---------------------------------------------------------------- progressive discovery
-// The catalog is 99 tools and tools/list dumps the full JSON schema
+// The catalog is 100 tools and tools/list dumps the full JSON schema
 // of every one on every turn — kinocut's answer is progressive
 // discovery: a compact list first, full schema only for the tools
 // actually used (lượt 147, idea: KyaniteLabs/kinocut
@@ -2819,9 +2874,9 @@ export const TOOL_FAMILY_OF = {
   // text (7)
   transcribe: "text", convert_captions: "text", generate_srt: "text", chunk_captions: "text",
   titlecard: "text", intro: "text", align_voice: "text",
-  // image (8)
+  // image (9)
   thumbnail: "image", frames: "image", extract_frames: "image", preview_compare: "image", image_to_video: "image",
-  slideshow: "image", export_gif: "image", svg_animate: "image",
+  slideshow: "image", export_gif: "image", svg_animate: "image", demo_frames: "image",
   // assemble (18)
   assemble: "assemble", manifest: "assemble", patch_manifest: "assemble",
   init_project: "assemble", export_timeline: "assemble", job: "assemble",

@@ -1,7 +1,7 @@
 {
   "spec_version": 1,
   "mediakit_version": "0.1.0",
-  "tool_count": 99,
+  "tool_count": 100,
   "transports": [
     "stdio",
     "http"
@@ -25,7 +25,7 @@
     {
       "name": "image",
       "description": "Stills and frame sequences: sample, export or build from images.",
-      "count": 8
+      "count": 9
     },
     {
       "name": "assemble",
@@ -425,6 +425,104 @@
             "maximum": 16,
             "default": 5,
             "description": "Candidate frames sampled per window when sharpest=true (default 5)"
+          }
+        },
+        "required": [
+          "input",
+          "output"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "demo_frames",
+      "family": "image",
+      "tier": "WRITE",
+      "summary": "Eye-check a video without opening a file: build the same contact sheet as thumbnail (N evenly spaced frames, each captured at its exact timestamp and labelled…",
+      "description": "Eye-check a video without opening a file: build the same contact sheet as thumbnail (N evenly spaced frames, each captured at its exact timestamp and labelled MM:SS.d) and return the sheet itself as an image in this result — look at it before cutting, grading or publishing. Defaults are tuned for the eye, not the disk: 9 frames in a 3x3 grid, 360px tiles, header band on (filename, duration, resolution, fps, codecs, size, grid) so the sheet still names its source in context. The sheet is also written to output, with the same metadata thumbnail reports (timestamps_seconds, dimensions, file size). include_image=false returns only the file + metadata (use it over HTTP when you do not want the base64 in the JSON body, or from the CLI). Sheets over 2 MB are downscaled for the inline copy only (max 1280px wide, halving until it fits) and image_downscaled says so; the file on disk keeps full size.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Path to the file (relative or absolute)"
+          },
+          "output": {
+            "$ref": "#/properties/input"
+          },
+          "frames": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 64,
+            "default": 9
+          },
+          "columns": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8,
+            "default": 3
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 80,
+            "maximum": 1280,
+            "default": 360,
+            "description": "Width of each tile in pixels"
+          },
+          "timestamps": {
+            "type": "boolean",
+            "default": true,
+            "description": "Label each tile with its timestamp (MM:SS.d); set false for a clean sheet"
+          },
+          "header": {
+            "type": "boolean",
+            "default": true,
+            "description": "Add a metadata band on top: filename, duration, resolution, fps, codecs, size, grid"
+          },
+          "start_delay_percent": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 90,
+            "default": 0,
+            "description": "Skip this percent of the file at the start before spacing tiles (intros)"
+          },
+          "end_delay_percent": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 90,
+            "default": 0,
+            "description": "Skip this percent of the file at the end before spacing tiles (credits)"
+          },
+          "timestamps_list": {
+            "type": "array",
+            "items": {
+              "type": [
+                "number",
+                "string"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 64,
+            "description": "Explicit tile times in seconds or MM:SS (e.g. [1, 6, \"0:30\"]); sets the tile count, cannot combine with the delay percents"
+          },
+          "sharpest": {
+            "type": "boolean",
+            "default": false,
+            "description": "Pick the sharpest frame in each tile's window (Laplacian mean, measured on disk) instead of the window start"
+          },
+          "sharpest_samples": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 16,
+            "default": 5,
+            "description": "Candidate frames sampled per window when sharpest=true (default 5)"
+          },
+          "include_image": {
+            "type": "boolean",
+            "default": true,
+            "description": "Return the sheet as an image in this result (MCP image block; base64 in the HTTP JSON body). False returns only the file + metadata."
           }
         },
         "required": [
@@ -6312,7 +6410,7 @@
       "family": "meta",
       "tier": "READ",
       "summary": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the…",
-      "description": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 99 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+      "description": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 100 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -6607,5 +6705,5 @@
       }
     }
   ],
-  "spec_hash": "eae8b85cb96676c1788d2ae4dd75a3ad65613fcc53f5474a228a4d7ff7f8f7dc"
+  "spec_hash": "cde06775d936836045cbd07345241b00222edb4c7e8c315545a0654255db8af4"
 }

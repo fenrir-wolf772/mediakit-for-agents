@@ -2070,6 +2070,84 @@ export async function thumbnail({ input, output, frames = 6, columns = 3, width 
   };
 }
 
+// ---------------------------------------------------------------- demo_frames
+// A contact sheet returned TO the agent, not just written to disk
+// (demo-recorder's `demo_frames` idea, lượt 182 — priority: an agent
+// that has to open the sheet file itself usually never looks at it).
+// Same sheet as thumbnail() — 9 frames, 3x3, 360px tiles, header on
+// by default so the sheet still names its source when it lands in
+// context — plus the sheet bytes inline: `image_base64` when
+// includeImage (mime sniffed from the bytes, not the extension), so
+// the MCP handler can hand the model the picture directly as an
+// image content block. Sheets over the inline cap
+// (2 MB) are downscaled for the inline copy only (max 1280px wide,
+// halving until it fits or 160px); the file on disk keeps full size
+// and `image_downscaled` says so. includeImage=false returns only
+// the file + metadata (what the CLI wants — no megabytes of base64
+// on stdout).
+export const INLINE_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
+const INLINE_IMAGE_MAX_WIDTH = 1280;
+const INLINE_IMAGE_MIN_WIDTH = 160;
+
+export async function inlineSheetImage(sheetPath, maxBytes = INLINE_IMAGE_MAX_BYTES) {
+  // Mime from the bytes, not the extension: thumbnail() copies the
+  // PNG sheet straight to a .jpg output when there is no header, so
+  // the extension can lie about the format.
+  const mimeOf = (buf) => {
+    if (buf.length >= 12 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return "image/png";
+    if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image/jpeg";
+    if (buf.length >= 12 && buf.toString("ascii", 0, 4) === "RIFF" && buf.toString("ascii", 8, 12) === "WEBP") return "image/webp";
+    return "image/png";
+  };
+  const full = await readFile(sheetPath);
+  const dimsOf = async (p) => {
+    const m = await probe(p);
+    return m.video ? { width: m.video.width, height: m.video.height } : { width: null, height: null };
+  };
+  if (full.length <= maxBytes) {
+    const d = await dimsOf(sheetPath);
+    return { data_base64: full.toString("base64"), bytes: full.length, downscaled: false, mime_type: mimeOf(full), ...d };
+  }
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-inline-"));
+  try {
+    // First step is strictly smaller than the sheet itself: scaling a
+    // 1080-wide sheet "down" to 1280 would upscale it.
+    const sheetDims = await dimsOf(sheetPath);
+    let width = Math.floor(Math.min(INLINE_IMAGE_MAX_WIDTH, sheetDims.width ?? INLINE_IMAGE_MAX_WIDTH) / 2);
+    let buf = full;
+    let smallPath = sheetPath;
+    while (buf.length > maxBytes && width >= INLINE_IMAGE_MIN_WIDTH) {
+      smallPath = path.join(tmpDir, `inline-${width}.png`);
+      await run(FFMPEG, ["-y", "-i", sheetPath, "-vf", `scale=${width}:-2`, "-frames:v", "1", smallPath]);
+      buf = await readFile(smallPath);
+      width = Math.floor(width / 2);
+    }
+    const d = await dimsOf(smallPath);
+    return { data_base64: buf.toString("base64"), bytes: buf.length, downscaled: true, mime_type: "image/png", ...d };
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+export async function demoFrames({ input, output, frames = 9, columns = 3, width = 360, timestamps = true, header = true, startDelayPercent = 0, endDelayPercent = 0, timestampsList = null, sharpest = false, sharpestSamples = 5, includeImage = true }) {
+  const sheet = await thumbnail({
+    input, output, frames, columns, width, timestamps, header,
+    startDelayPercent, endDelayPercent, timestampsList, sharpest, sharpestSamples,
+  });
+  const out = { ...sheet, operation: "demo_frames" };
+  if (includeImage === false) return { ...out, image_included: false };
+  const inline = await inlineSheetImage(sheet.output);
+  return {
+    ...out,
+    image_included: true,
+    image_mime_type: inline.mime_type,
+    image_bytes: inline.bytes,
+    image_dimensions: `${inline.width}x${inline.height}`,
+    image_downscaled: inline.downscaled,
+    image_base64: inline.data_base64,
+  };
+}
+
 // ---------------------------------------------------------------- frames
 // Extract N evenly spaced frames as separate image files, so an agent
 // can actually LOOK at a video (ffmpeg-mcp's extract_frames idea):
@@ -13005,6 +13083,7 @@ const TOOL_REQUIREMENTS = {
   extract_audio: { encoders: ["libmp3lame", "aac", "pcm_s16le", "libvorbis", "libopus", "flac"] },
   extract_frame: {},
   thumbnail: { filters: ["scale", "tile", "drawtext", "vstack", "convolution", "signalstats"] },
+  demo_frames: { filters: ["scale", "tile", "drawtext", "vstack", "convolution", "signalstats"] },
   loudness: { filters: ["loudnorm", "acompressor"] },
   qa_report: { filters: ["loudnorm", "blackdetect", "freezedetect", "silencedetect", "astats", "ametadata", "select"] },
   concat: { filters: ["concat", "xfade", "acrossfade", "fps", "scale", "pad"] },

@@ -2,7 +2,7 @@
 /**
  * mediakit-for-agents — MCP over HTTP (REST + JSON-RPC).
  *
- * The same 99 tools as the stdio server (src/tools.js is the single
+ * The same 100 tools as the stdio server (src/tools.js is the single
  * source of truth), reachable with curl instead of an MCP client —
  * for hand-testing, for agents that can only speak HTTP, and for
  * debugging a tool call without launching a client:
@@ -258,6 +258,14 @@ export async function invokeTool(name, args) {
     if (body.retry_after_seconds != null) err.retry_after_seconds = body.retry_after_seconds;
     record(body, "error", err.code);
     throw err;
+  }
+  // demo_frames returns the sheet as an MCP image block (content[1]);
+  // the REST body is plain JSON, so the bytes ride here as base64
+  // instead — same field names core.demoFrames reports.
+  const imageBlock = res.content?.find((c) => c?.type === "image");
+  if (imageBlock?.data) {
+    body.image_base64 = imageBlock.data;
+    body.image_mime_type = imageBlock.mimeType || "image/png";
   }
   record(body, "ok", null);
   return body;
