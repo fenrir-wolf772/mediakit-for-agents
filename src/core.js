@@ -2379,6 +2379,21 @@ export async function extractFramesSequence({ input, outputDir, format = "png", 
 // was met instead of silently shipping an oversize file. (Idea:
 // TMHSDigital/screencast-mcp's export_gif, which lowers fps/width/
 // quality until the budget fits.)
+//
+// Last-resort palette retry (lượt 177, idea: mcpware/pagecast's
+// export_gif, which uses palettegen stats_mode=diff + paletteuse
+// dither=bayer): when the ladder still misses the budget, one extra
+// encode at the last geometry with a diff-weighted palette and Bayer
+// dithering is tried — and kept ONLY when it is smaller than the
+// ladder's best. Calibrated 2026-11-26 on ffmpeg 8.1.2 (probe first,
+// /tmp/gifcal): the combo is content-dependent, not a universal win —
+// noisy 5s 640x360 at 8fps/320px/64c: 382,098 → 253,787 bytes (−33.6%),
+// and 15fps/640px/256c: 3,173,211 → 2,415,452 (−23.9%, PSNR −0.21 dB);
+// but flat motion-ball at 8fps/320px/64c: 41,633 → 48,633 bytes
+// (+16.8% — bigger, correctly rejected) and at 15fps/640px/256c
+// +29.6% bigger. So it is a retry rung, never a new default: content
+// that fits the budget early never sees it, and a retry that loses
+// is deleted, never shipped.
 
 export async function exportGif({ input, output, start = null, end = null, fps = null, width = null, maxSizeMb = 10, dryRun = false }) {
   const inPath = await requireInput(input);
@@ -2436,7 +2451,7 @@ export async function exportGif({ input, output, start = null, end = null, fps =
       first_step: first,
       ladder,
       commands: [formatCommand(args)],
-      note: "Dry run: no file written. The first ladder step is printed; the real run steps fps, then width, then palette colours down until the size budget is met. Size/duration/frames are measured on the real output, so they report null.",
+      note: "Dry run: no file written. The first ladder step is printed; the real run steps fps, then width, then palette colours down until the size budget is met. If the ladder still misses the budget, one last-resort palette retry runs at the last geometry (stats_mode=diff + dither=bayer) and is kept only when smaller. Size/duration/frames are measured on the real output, so they report null.",
     };
   }
   const attempts = [];
@@ -2449,6 +2464,38 @@ export async function exportGif({ input, output, start = null, end = null, fps =
     chosen = info;
     if (info.size_bytes <= budgetBytes) break;
   }
+  // Last-resort palette retry: only when the ladder missed the budget.
+  // Written to a temp sibling and moved over the output ONLY when
+  // smaller, so a losing retry can never make the result worse.
+  let paletteMode = "full+sierra2_4a";
+  const paletteRetry = { tried: false, used: false, size_bytes: null, size_human: null, saved_bytes: 0 };
+  let met = chosen.size_bytes <= budgetBytes;
+  if (!met) {
+    const last = attempts[attempts.length - 1];
+    // Temp sibling must keep a .gif suffix — ffmpeg picks the muxer
+    // from the extension, and a bare ".palette-retry" fails with
+    // "Unable to find a suitable output format" (caught in probe,
+    // lượt 177: the first retry attempt errored exactly this way).
+    const retryPath = outPath.replace(/\.gif$/i, ".palette-retry.gif");
+    try {
+      const vf = `fps=${last.fps},scale=${last.width}:-2:flags=lanczos,split[a][b];[a]palettegen=max_colors=${last.colors}:stats_mode=diff[p];[b][p]paletteuse=dither=bayer`;
+      await run(FFMPEG, ["-y", "-ss", String(s), "-i", inPath, "-t", String(clipLen), "-vf", vf, "-an", retryPath]);
+      const retryInfo = await fileInfo(retryPath);
+      paletteRetry.tried = true;
+      paletteRetry.size_bytes = retryInfo.size_bytes;
+      paletteRetry.size_human = retryInfo.size_human;
+      if (retryInfo.size_bytes < chosen.size_bytes) {
+        paletteRetry.used = true;
+        paletteRetry.saved_bytes = chosen.size_bytes - retryInfo.size_bytes;
+        await rename(retryPath, outPath);
+        chosen = retryInfo;
+        paletteMode = "diff+bayer";
+        met = chosen.size_bytes <= budgetBytes;
+      }
+    } finally {
+      await unlink(retryPath).catch(() => {});
+    }
+  }
   const out = await probe(outPath);
   let frames = null;
   try {
@@ -2456,8 +2503,12 @@ export async function exportGif({ input, output, start = null, end = null, fps =
     const n = parseInt(stdout.trim(), 10);
     if (Number.isFinite(n)) frames = n;
   } catch { /* frame count is informational; the GIF itself is already verified by probe */ }
-  const met = chosen.size_bytes <= budgetBytes;
   const last = attempts[attempts.length - 1];
+  const retryNote = paletteRetry.tried
+    ? (paletteRetry.used
+      ? ` Palette retry (stats_mode=diff + dither=bayer) saved ${paletteRetry.saved_bytes} bytes and met the budget.`
+      : ` Palette retry (stats_mode=diff + dither=bayer) was ${paletteRetry.size_human} (${paletteRetry.size_bytes} bytes) — not smaller than the ladder's best, so it was discarded.`)
+    : "";
   return {
     operation: "export_gif", input: inPath, output: outPath,
     start_seconds: s, end_seconds: clipEnd, duration_seconds: out.duration_seconds,
@@ -2467,7 +2518,8 @@ export async function exportGif({ input, output, start = null, end = null, fps =
     size_before_bytes: before.size_bytes,
     size_budget_mb: budgetMb, size_budget_bytes: budgetBytes,
     size_budget_met: met, attempts_tried: attempts.length, attempts,
-    ...(met ? {} : { warning: `size budget ${budgetMb} MB could not be met even at ${last.width}px / ${last.fps}fps / ${last.colors} colours — smallest output is ${chosen.size_human} (${chosen.size_bytes} bytes)` }),
+    palette_mode: paletteMode, palette_retry: paletteRetry,
+    ...(met ? {} : { warning: `size budget ${budgetMb} MB could not be met even at ${last.width}px / ${last.fps}fps / ${last.colors} colours — smallest output is ${chosen.size_human} (${chosen.size_bytes} bytes).${retryNote}` }),
   };
 }
 

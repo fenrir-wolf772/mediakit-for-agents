@@ -128,6 +128,77 @@ const destructiveTools = serverTools.filter((_, i) => tierLines[i] === "DESTRUCT
 if (!destructiveTools.includes("patch_manifest")) problems.push("patch_manifest must stay DESTRUCTIVE — it is the only tool that rewrites a user artifact in place");
 if (destructiveTools.length !== 1) problems.push(`expected exactly 1 DESTRUCTIVE tool (patch_manifest), got ${destructiveTools.length}: ${destructiveTools.join(", ")}`);
 
+// Tool-count prose guard (lượt 177, idea: nexu-io/openmotion's
+// template-runtime-check — the catalog count must match everywhere
+// it is stated, not just in the README table and ci.yml). The table
+// guard above missed prose: when this guard was written, SKILL.md
+// said "69 tools", src/http.js "55 tools" and bin/mediakit.js
+// "79 tools" while the catalog was 98 — three stale counts no
+// table/CI guard could ever see. Every "N tools" that states
+// MediaKit's own catalog size must equal TOOL_DEFS length.
+const proseFiles = ["README.md", path.join("skills", "mediakit", "SKILL.md"), path.join("src", "tools.js"), path.join("src", "http.js"), path.join("src", "server.js"), path.join("bin", "mediakit.js")];
+for (const rel of proseFiles) {
+  const text = await readFile(path.join(root, rel), "utf8");
+  for (const line of text.split("\n")) {
+    // Tier prose ("READ (30 tools)", "READ tools only probe ...
+    // (30 tools)") states a tier count, not the catalog total —
+    // checked by the tier guard below, not here.
+    if (/READ\s*\(|READ tools/.test(line)) continue;
+    // The hot-list comment ("The 18 tools a director reaches for
+    // first") states the HOT_TOOLS length, not the catalog total —
+    // checked by the hot-list guard below.
+    if (/director reaches for first/.test(line)) continue;
+    for (const m of line.matchAll(/(\d+) tools\b/g)) {
+      if (Number(m[1]) !== serverTools.length) {
+        problems.push(`${rel}: prose says "${m[1]} tools" but src/tools.js has ${serverTools.length} tools — bump the prose when a tool ships`);
+      }
+    }
+  }
+}
+
+// Tier-count prose guard (lượt 177): the tier numbers stated in the
+// README safety row and the SKILL.md safety paragraph must equal the
+// tier counts derived from TOOL_DEFS above. The README row was stale
+// once (lượt 176 fixed 24/4/57 → 30/5/62 by hand); the guard makes
+// the next drift fail here instead of in a reader's head.
+const tierCounts = Object.fromEntries(TIERS.map((t) => [t, tierLines.filter((x) => x === t).length]));
+const readmeText = await readFile(path.join(root, "README.md"), "utf8");
+const skillText = await readFile(path.join(root, "skills", "mediakit", "SKILL.md"), "utf8");
+const tierProse = [
+  ["README.md", readmeText, /READ tools only probe and write nothing \((\d+) tools\)/, "READ"],
+  ["README.md", readmeText, /PLAN tools answer a question by transient work and leave no artifact \((\d+):/, "PLAN"],
+  ["README.md", readmeText, /WRITE tools produce a file the caller asked for and never overwrite their own input \((\d+)\)/, "WRITE"],
+  ["skills/mediakit/SKILL.md", skillText, /READ \((\d+) tools\)/, "READ"],
+  ["skills/mediakit/SKILL.md", skillText, /PLAN \((\d+)\)/, "PLAN"],
+  ["skills/mediakit/SKILL.md", skillText, /WRITE\s*\((\d+)\)/, "WRITE"],
+  ["skills/mediakit/SKILL.md", skillText, /DESTRUCTIVE \((\d+) —/, "DESTRUCTIVE"],
+];
+for (const [file, text, re, tier] of tierProse) {
+  const m = text.match(re);
+  if (!m) {
+    problems.push(`could not find the ${tier} tier count in ${file} — the prose guard pattern no longer matches; update the pattern or restore the count`);
+  } else if (Number(m[1]) !== tierCounts[tier]) {
+    problems.push(`${file}: prose says ${tier} has ${m[1]} tools but TOOL_DEFS has ${tierCounts[tier]} — bump the prose when a tool ships or changes tier`);
+  }
+}
+
+// Hot-list guard (lượt 177): the "The N tools a director reaches
+// for first" comment above HOT_TOOLS must equal the array's length
+// (18 + 2 discovery tools = 20 in hot mode — the 20 is prose, the
+// 18 is the array).
+const hotMatch = toolsSrc.match(/export const HOT_TOOLS = \[([\s\S]*?)\];/);
+if (!hotMatch) {
+  problems.push("could not find HOT_TOOLS in src/tools.js");
+} else {
+  const hotCount = [...hotMatch[1].matchAll(/"([a-z0-9_]+)"/g)].length;
+  const hotComment = toolsSrc.match(/The (\d+) tools a director reaches for first/);
+  if (!hotComment) {
+    problems.push("could not find the hot-list count comment in src/tools.js");
+  } else if (Number(hotComment[1]) !== hotCount) {
+    problems.push(`hot-list comment says ${hotComment[1]} tools but HOT_TOOLS has ${hotCount} entries`);
+  }
+}
+
 if (problems.length) {
   console.error("check-docs FAILED:");
   for (const p of problems) console.error(`  - ${p}`);

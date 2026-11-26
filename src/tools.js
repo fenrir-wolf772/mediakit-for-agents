@@ -1718,7 +1718,7 @@ export const TOOL_DEFS = [
   {
     name: "export_gif",
     tier: "WRITE",
-    description: "Export a clip (or segment) as an animated GIF with a two-pass palette (palettegen + paletteuse from the actual frames). Fits under max_size_mb (default 10 MB, the GitHub README limit; Slack only auto-plays GIFs under ~2 MB) by stepping down fps, then width, then palette colours — each attempt is measured on disk, and size_budget_met says honestly whether the budget was met. Set dry_run=true to print the first ladder step's command and write no file (the ladder plan is listed; later steps only run when the budget needs them; size/duration/frames report null — measured on the real output).",
+    description: "Export a clip (or segment) as an animated GIF with a two-pass palette (palettegen + paletteuse from the actual frames). Fits under max_size_mb (default 10 MB, the GitHub README limit; Slack only auto-plays GIFs under ~2 MB) by stepping down fps, then width, then palette colours — each attempt is measured on disk, and size_budget_met says honestly whether the budget was met. If the ladder still misses the budget, one last-resort palette retry runs at the last geometry (palettegen stats_mode=diff + paletteuse dither=bayer) and is kept only when smaller — it saves ~24–34% on busy/noisy clips but is bigger on flat ones, so it never replaces the default. Set dry_run=true to print the first ladder step's command and write no file (the ladder plan is listed; later steps only run when the budget needs them; size/duration/frames report null — measured on the real output).",
     schema: {
     input: pathSchema,
     output: pathSchema.describe("Output file path, must end in .gif"),

@@ -7826,6 +7826,33 @@ const gifImpossRes = await client.callTool({
 }, undefined, { timeout: 300000 });
 const gifImpossJson = JSON.parse(gifImpossRes.content[0].text);
 checkOk(gifImpossJson.size_budget_met === false && gifImpossJson.attempts_tried === 8 && typeof gifImpossJson.warning === "string" && /could not be met/.test(gifImpossJson.warning), "export_gif reports honestly when the budget cannot be met (all 8 ladder steps + warning)", JSON.stringify({ met: gifImpossJson.size_budget_met, attempts: gifImpossJson.attempts_tried }));
+// Palette retry (lượt 177, pagecast idea, calibrated in /tmp/gifcal
+// before implementation): noisy-source misses a 0.3 MB budget at the
+// last ladder step (382,098 bytes) but the diff+bayer retry at the
+// same geometry is 253,787 bytes, so it flips met=false to met=true
+// and ships the retry. motion-ball misses a 0.02 MB budget and its
+// retry is BIGGER (48,633 vs 41,633), so the retry is discarded, the
+// ladder's best ships, the warning names the retry, and no temp file
+// is left behind.
+const gifRetryRes = await client.callTool({
+  name: "export_gif",
+  arguments: { input: path.join(root, "test/noisy-source.mp4"), output: path.join(root, "outputs/mcp-demo-retry.gif"), max_size_mb: 0.3 },
+}, undefined, { timeout: 300000 });
+const gifRetryJson = JSON.parse(gifRetryRes.content[0].text);
+checkOk(gifRetryJson.size_budget_met === true && gifRetryJson.palette_mode === "diff+bayer" && gifRetryJson.palette_retry.tried === true && gifRetryJson.palette_retry.used === true, "export_gif palette retry flips an unmet budget to met on noisy content", JSON.stringify(gifRetryJson.palette_retry));
+checkOk(gifRetryJson.size_bytes < 300_000 && gifRetryJson.size_bytes > 200_000 && gifRetryJson.palette_retry.saved_bytes > 100_000, "export_gif palette retry ships the smaller file (253,787 bytes on ffmpeg 8.1.2 — range-checked for other builds)", JSON.stringify({ size: gifRetryJson.size_bytes, saved: gifRetryJson.palette_retry.saved_bytes }));
+checkOk(statSync(path.join(root, "outputs/mcp-demo-retry.gif")).size === gifRetryJson.size_bytes, "palette-retry output on disk matches the reported size_bytes", `disk ${statSync(path.join(root, "outputs/mcp-demo-retry.gif")).size} vs ${gifRetryJson.size_bytes}`);
+const gifRetryLoseRes = await client.callTool({
+  name: "export_gif",
+  arguments: { input: path.join(root, "test/motion-ball.mp4"), output: path.join(root, "outputs/mcp-demo-retry-lose.gif"), max_size_mb: 0.02 },
+}, undefined, { timeout: 300000 });
+const gifRetryLoseJson = JSON.parse(gifRetryLoseRes.content[0].text);
+checkOk(gifRetryLoseJson.size_budget_met === false && gifRetryLoseJson.palette_mode === "full+sierra2_4a" && gifRetryLoseJson.palette_retry.tried === true && gifRetryLoseJson.palette_retry.used === false, "export_gif discards a losing palette retry and keeps the ladder best", JSON.stringify(gifRetryLoseJson.palette_retry));
+checkOk(gifRetryLoseJson.size_bytes > 40_000 && gifRetryLoseJson.size_bytes < 43_000 && /Palette retry/.test(gifRetryLoseJson.warning ?? ""), "losing retry is named in the warning and the shipped size is the ladder best (41,633 bytes on ffmpeg 8.1.2)", JSON.stringify({ size: gifRetryLoseJson.size_bytes }));
+checkOk(!existsSync(path.join(root, "outputs/mcp-demo-retry-lose.palette-retry.gif")), "losing palette retry leaves no temp file behind", "outputs/mcp-demo-retry-lose.palette-retry.gif");
+// The tight-budget run above met the budget on the ladder, so no
+// retry ran there.
+checkOk(gifTightJson.palette_retry.tried === false && gifTightJson.palette_mode === "full+sierra2_4a", "export_gif does not run the palette retry when the ladder already meets the budget", JSON.stringify(gifTightJson.palette_retry));
 // Segment 2-4s: 2s / 30 frames.
 const gifSegRes = await client.callTool({
   name: "export_gif",
@@ -7861,6 +7888,7 @@ const gifDryRes = await client.callTool({
 const gifDryJson = JSON.parse(gifDryRes.content[0].text);
 checkOk(gifDryJson.dry_run === true && gifDryJson.first_step?.fps === 15 && gifDryJson.first_step?.width === 640 && gifDryJson.first_step?.colors === 256 && gifDryJson.ladder?.length === 8 && gifDryJson.size_budget_met === null && gifDryJson.size_bytes === null && gifDryJson.frames === null && !existsSync(path.join(root, "outputs/mcp-demo-dry.gif")), "export_gif dry-run reports the first ladder step (15fps/640px/256 colors) + 8-step ladder, measured fields null, writes nothing", JSON.stringify({ first: gifDryJson.first_step, ladder: gifDryJson.ladder?.length }));
 checkOk(gifDryJson.commands?.length === 1 && gifDryJson.commands[0].includes("fps=15") && gifDryJson.commands[0].includes("palettegen=max_colors=256") && gifDryJson.commands[0].includes("paletteuse"), "export_gif dry-run command is the first-step two-pass palette encode", gifDryJson.commands?.[0] ?? "");
+checkOk(/palette retry/.test(gifDryJson.note ?? ""), "export_gif dry-run names the last-resort palette retry", (gifDryJson.note ?? "").slice(0, 200));
 
 // Errors carry the exact retry call (kinocut eyes-free law).
 const retryRes = await client.callTool({
