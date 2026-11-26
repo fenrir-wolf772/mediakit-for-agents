@@ -8175,6 +8175,40 @@ try {
   chunkContainedBigThrew = /must not overlap/.test(e.message ?? "");
 }
 checkOk(chunkContainedBigThrew === true, "chunkCaptions still refuses a word fully inside the previous one when the overlap is over 100ms", "no throw or wrong message");
+// Same-start containment (the "it"/"is" shape from round 177: both
+// stamped 26.64) is repaired, not refused: this word's start is
+// nudged to the midpoint of the previous word's span, then the
+// previous end is trimmed to it — the repair repair_words.py did by
+// hand in round 177, now inside the chunker.
+const chunkedSameStart = chunkCaptions([
+  { word: "it", start: 26.64, end: 26.74 },
+  { word: "is", start: 26.64, end: 26.73 },
+  { word: "written.", start: 26.73, end: 27.0 },
+]);
+checkOk(chunkedSameStart.cues.length === 1 && chunkedSameStart.cues[0]?.text === "it is written." && chunkedSameStart.cues[0]?.start === 26.64 && chunkedSameStart.cues[0]?.end === 27 && chunkedSameStart.repaired_words === 1 && chunkedSameStart.warnings.length === 2 && /nudged from 26.640s to 26.690s/.test(chunkedSameStart.warnings[0]) && /trimmed from 26.740s to 26.690s/.test(chunkedSameStart.warnings[1]), "chunkCaptions repairs same-start contained words by nudging to the midpoint (26.69) and trimming the previous end", JSON.stringify(chunkedSameStart.warnings));
+// ...but when the midpoint leaves no room for the contained word,
+// it still refuses instead of inventing a zero-length span.
+let chunkSameStartNoRoomThrew = false;
+try {
+  chunkCaptions([
+    { word: "it", start: 10, end: 10.1 },
+    { word: "is", start: 10, end: 10.04 },
+  ]);
+} catch (e) {
+  chunkSameStartNoRoomThrew = /must not overlap/.test(e.message ?? "");
+}
+checkOk(chunkSameStartNoRoomThrew === true, "chunkCaptions still refuses same-start containment when the midpoint is at/past the contained word's end", "no throw or wrong message");
+// ...and a same-start containment over 100ms still refuses.
+let chunkSameStartBigThrew = false;
+try {
+  chunkCaptions([
+    { word: "it", start: 10, end: 10.5 },
+    { word: "is", start: 10, end: 10.4 },
+  ]);
+} catch (e) {
+  chunkSameStartBigThrew = /must not overlap/.test(e.message ?? "");
+}
+checkOk(chunkSameStartBigThrew === true, "chunkCaptions still refuses same-start containment when the overlap is over 100ms", "no throw or wrong message");
 // audio_duration clamps the last word (whisper.cpp tiny overshoot:
 // "last" stamped to 24.66s on 24.0s of audio) and counts it.
 const chunkedClamp = chunkCaptions([
@@ -8225,6 +8259,21 @@ const chunkSrtRes = await client.callTool({
 });
 const chunkSrtJson = JSON.parse(chunkSrtRes.content[0].text);
 checkOk(chunkSrtJson.cue_count === 4, "chunk_captions cues feed generate_srt directly (4 cues)", JSON.stringify(chunkSrtJson));
+// Same-start containment through the tool (round 177 "it"/"is"
+// shape): inline words in, repaired cue out, no refuse.
+const chunkSameStartRes = await client.callTool({
+  name: "chunk_captions",
+  arguments: {
+    words: [
+      { word: "it", start: 26.64, end: 26.74 },
+      { word: "is", start: 26.64, end: 26.73 },
+      { word: "written.", start: 26.73, end: 27.0 },
+    ],
+    output: path.join(root, "outputs/mcp-chunk-same-start.json"),
+  },
+});
+const chunkSameStartJson = JSON.parse(chunkSameStartRes.content[0].text);
+checkOk(chunkSameStartRes.isError !== true && chunkSameStartJson.cues_out === 1 && chunkSameStartJson.cues[0]?.text === "it is written." && chunkSameStartJson.repaired_words === 1 && chunkSameStartJson.warnings?.length === 2, "chunk_captions tool repairs same-start contained words (repaired_words 1, 2 warnings)", JSON.stringify(chunkSameStartJson.warnings));
 // CLI chunk-captions with --max-words 3 forces shorter cues.
 const chunkCliJson = await runCliJson(["chunk-captions", "--words-file", path.join(root, "test/chunk-words.json"), "-o", path.join(root, "outputs/mcp-chunk-cli.json"), "--max-words", "3"]);
 checkOk(chunkCliJson.cues_out === 6 && chunkCliJson.max_words_in_cue === 4 && chunkCliJson.cues[0]?.text === "The quick brown", "CLI chunk-captions --max-words 3 re-chunks to 6 cues (stranded 'over' moves on, so one cue holds 4 words)", JSON.stringify(chunkCliJson.cues?.map((c) => c.text)));

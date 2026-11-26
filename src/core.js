@@ -4518,12 +4518,24 @@ export function chunkCaptions(words, opts = {}) {
   // one ("a" 4.62-4.66 inside "Pick" 4.60-4.70, seen in round 174) —
   // when the overlap is also <=100ms, trim the previous word's end to
   // this word's start instead of refusing the whole file; a bigger
-  // containment still refuses.
+  // containment still refuses. And the same-start variant ("it" + "is"
+  // both stamped 26.64, seen in round 177): two different words on the
+  // same span — nudge this word's start to the midpoint of the previous
+  // word's span (the repair repair_words.py did by hand in round 177),
+  // then the trim below splits the span between them; refuses when the
+  // midpoint leaves no room for this word.
   let repairedWords = 0;
   for (let i = 1; i < normalized.length; i++) {
     if (normalized[i].startMs < normalized[i - 1].endMs) {
       const overlapMs = normalized[i - 1].endMs - normalized[i].startMs;
       if (normalized[i].endMs <= normalized[i - 1].endMs) {
+        if (overlapMs <= 100 && normalized[i].startMs === normalized[i - 1].startMs) {
+          const midMs = Math.round((normalized[i - 1].startMs + normalized[i - 1].endMs) / 2);
+          if (midMs > normalized[i - 1].startMs && midMs < normalized[i].endMs) {
+            clampWarnings.push(`word ${i + 1} ("${normalized[i].word}") starts at the same time as word ${i} ("${normalized[i - 1].word}") — start nudged from ${(normalized[i].startMs / 1000).toFixed(3)}s to ${(midMs / 1000).toFixed(3)}s (midpoint of word ${i}, ASR jitter)`);
+            normalized[i].startMs = midMs;
+          }
+        }
         if (overlapMs <= 100 && normalized[i].startMs > normalized[i - 1].startMs) {
           clampWarnings.push(`word ${i + 1} ("${normalized[i].word}") sits fully inside word ${i} ("${normalized[i - 1].word}") — word ${i} end trimmed from ${(normalized[i - 1].endMs / 1000).toFixed(3)}s to ${(normalized[i].startMs / 1000).toFixed(3)}s (ASR jitter)`);
           normalized[i - 1].endMs = normalized[i].startMs;

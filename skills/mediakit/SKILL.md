@@ -609,7 +609,12 @@ previous ends is clamped to the previous end and reported in `warnings`
 (a bigger overlap still refuses — that is a broken transcript, not
 jitter); a word fully inside the previous one with overlap up to 100ms
 has the previous word's end trimmed to its start, also warned and
-counted in `repaired_words`. Pass `audio_duration` (the measured voice
+counted in `repaired_words`. The same-start variant — two different
+words stamped on the same span (round 177: "it" + "is" both at 26.64s)
+— is repaired the same way: the second word's start is nudged to the
+midpoint of the first word's span, then the first word's end is trimmed
+to it; it refuses when the midpoint leaves no room for the second word.
+Pass `audio_duration` (the measured voice
 length) and word/cue ends clamp to it, words starting at/after it drop
 — whisper.cpp tiny can stamp the last word past the end of the audio;
 check the warnings when a chain runs on fresh ASR output.
