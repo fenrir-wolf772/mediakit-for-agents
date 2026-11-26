@@ -7,7 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "node:url";
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { copyFile, mkdir, readFile, readdir, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, mkdir, readFile, readdir, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { createCanvas } from "canvas";
@@ -1508,6 +1508,14 @@ checkOk(pmCliCapErr !== null && /1-100 operations/.test(pmCliCapErr), "CLI patch
 const pePath = path.join(root, "outputs/mcp-manifest-propose.json");
 const peOriginal = JSON.stringify({ version: 1, input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-manifest-propose-out.mp4"), steps: [{ tool: "trim", args: { start: 2, end: 8 } }, { tool: "loudness", args: { target_lufs: -14 } }], qa: "tiktok" }, null, 2);
 await writeFile(pePath, peOriginal, "utf8");
+// Lượt 178: the apply step below writes <manifest>.bak, and outputs/ is
+// a symlink to /tmp/mediakit-outputs — which survives across runs
+// unless the VM restarts — so a previous run's .bak would still be here
+// and the "no .bak appears" assert below would fail on stale state
+// (exactly what happened in run 1 of lượt 178: 1 FAIL, manifest bytes
+// identical, only the stale .bak tripped it). Remove it up front so the
+// assert measures what propose_edit itself does, not leftovers.
+await rm(`${pePath}.bak`, { force: true });
 const peRes = await client.callTool({ name: "propose_edit", arguments: { manifest_path: pePath, options: [
   { label: "quieter", ops: [{ op: "set", path: "steps.1.args.target_lufs", value: -16 }, { op: "set", path: "qa", value: "tiktok" }, { op: "set", path: "qa", value: "any" }] },
   { label: "add trim", ops: [{ op: "add_step", step: { tool: "trim", args: { start: 0, end: 2 } } }] },
@@ -10013,6 +10021,26 @@ await client.callTool({ name: "assemble", arguments: { manifest_path: planVoiceS
 await copyFile(path.join(root, "test/mix-music.mp3"), planVoicePath);
 const planVoiceText = await callExpectThrow("assemble", { manifest_path: planVoiceStage.manifestPath, mode: "preview", output_dir: path.join(planVoiceStage.dir, "out"), preview_seconds: 1, from_plan: planVoicePlanPath });
 checkOk(/is stale/.test(planVoiceText ?? "") && /voice/.test(planVoiceText ?? ""), "assemble preview --from-plan refuses a replaced voice file, naming voice as the changed part", (planVoiceText ?? "").slice(0, 200));
+// Lượt 178 — the L177 plan-fingerprint scare, pinned so it never needs
+// re-investigation: a plan fingerprint of `e3b2d5fe…` was read as "the
+// hash of an empty string" — but sha256("") is e3b0c442…, not e3b2d5fe….
+// The fingerprint is real: planning the same staged film twice gives
+// the same 64-hex value, and appending ONE byte to the staged captions
+// file moves it (and the captions part). Stage a copy of the captions
+// so the shared test fixture is never touched.
+const planFpStage = await stageAssembleManifest("assemble-film-transitions.json");
+const planFpCapPath = path.join(planFpStage.dir, "captions.srt");
+await copyFile(path.join(root, "test/captions.srt"), planFpCapPath);
+const planFpDoc = JSON.parse(await readFile(planFpStage.manifestPath, "utf8"));
+planFpDoc.captions = planFpCapPath;
+await writeFile(planFpStage.manifestPath, JSON.stringify(planFpDoc), "utf8");
+const planFp1 = JSON.parse((await client.callTool({ name: "assemble", arguments: { manifest_path: planFpStage.manifestPath, mode: "plan" } })).content[0].text);
+const planFp2 = JSON.parse((await client.callTool({ name: "assemble", arguments: { manifest_path: planFpStage.manifestPath, mode: "plan" } })).content[0].text);
+const emptySha256 = createHash("sha256").update("").digest("hex");
+checkOk(planFp1.fingerprint === planFp2.fingerprint && /^[0-9a-f]{64}$/.test(planFp1.fingerprint ?? "") && planFp1.fingerprint !== emptySha256 && planFp1.fingerprint_parts?.captions?.length === 64, "assemble plan fingerprint is deterministic and is not the empty-string hash (L177 scare: e3b2d5fe is a real fingerprint, sha256('') is e3b0c442)", `${planFp1.fingerprint?.slice(0, 12)} vs empty ${emptySha256.slice(0, 12)}`);
+await appendFile(planFpCapPath, "\n");
+const planFp3 = JSON.parse((await client.callTool({ name: "assemble", arguments: { manifest_path: planFpStage.manifestPath, mode: "plan" } })).content[0].text);
+checkOk(planFp3.fingerprint !== planFp1.fingerprint && planFp3.fingerprint_parts?.captions !== planFp1.fingerprint_parts?.captions, "assemble plan fingerprint moves when one byte is appended to the captions file", `${planFp1.fingerprint?.slice(0, 12)} -> ${planFp3.fingerprint?.slice(0, 12)}`);
 // Wrong film: the transitions plan used against the plain film.
 const planWrongText = await callExpectThrow("assemble", { manifest_path: assembleStage.manifestPath, mode: "preview", output_dir: path.join(assembleStage.dir, "plan-out"), preview_seconds: 1, from_plan: planFilePath });
 checkOk(/different manifest/.test(planWrongText ?? ""), "assemble preview --from-plan refuses a plan written for another manifest", (planWrongText ?? "").slice(0, 200));
