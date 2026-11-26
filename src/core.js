@@ -25868,7 +25868,98 @@ export async function checkJobAdmission() {
   throw new MediaKitError(`job admission limit: ${a.reason} — retry in ~${a.retry_after_seconds}s`, "JOB_ADMISSION_LIMIT", { retryable: true, retryAfterSeconds: a.retry_after_seconds });
 }
 
-export async function startAssembleJob({ manifestPath, outputDir, force = false, fromPlan = null, checkpointFile = null }) {
+// Idempotency for async renders (idea: Cassette-Editor/oh-my-cassette
+// `META_REQUEST_ID` + `LocalJobs` attach-on-same-args, lượt 183 —
+// researched in lượt 184 from mcpware/pagecast's neighbours, the
+// cassette report itself is in report-luot183/research.md): a retry
+// with the same key is answered from the first job instead of
+// rendering twice, and a retry with the same args attaches to the job
+// that is already queued or running. The rules, in order:
+//   * key given, newest job with that key is queued/running/done ->
+//     attach (the key is an explicit contract: the caller wants the
+//     first answer back, even a finished one).
+//   * key given, newest job with that key failed/cancelled -> start
+//     fresh (a retry after a failure must be allowed to run); the new
+//     record carries the same key and becomes the newest.
+//   * no key, a queued/running job with the same args fingerprint ->
+//     attach ("same_args"). A done job with the same args does NOT
+//     attach: re-rendering is legitimate and per-shot caching already
+//     makes it cheap, so a fresh render is the honest answer.
+// The fingerprint covers the manifest content hash
+// (plan.fingerprint), the output dir, force, from-plan and checkpoint
+// — the same manifest path with changed inputs hashes differently, so
+// a retry never attaches to a stale job. The lookup runs after
+// validation/approval (a bad manifest still fails fast) and before the
+// admission gate (a retry must not be refused for a start slot the
+// first call already took, and must not consume a second slot).
+// Lookup + create + spawn run under a lockdir on the jobs root (mkdir
+// is atomic; stolen after 30s, the hook-history pattern) so two
+// concurrent starts cannot both miss each other and spawn twins.
+// The lookup scans the newest 200 jobs (the same window admission
+// uses); a retry is, by nature, near in time, so an older job is
+// out of reach by design, not by accident.
+const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9._-]{1,128}$/;
+
+export function computeAssembleJobFingerprint({ manifestFingerprint, outputDir, force, fromPlan, checkpointFile }) {
+  const canonical = JSON.stringify({
+    manifest_fingerprint: manifestFingerprint ?? null,
+    output_dir: outputDir ?? null,
+    force: !!force,
+    from_plan: fromPlan ?? null,
+    checkpoint_file: checkpointFile ?? null,
+  });
+  return createHash("sha256").update(canonical).digest("hex");
+}
+
+// Pure: jobs must be newest-first (listJobs returns them that way),
+// so `find` returns the newest record for a key — the one a retry
+// must attach to or supersede.
+export function findAttachableJob(jobs, { idempotencyKey = null, argsFingerprint = null } = {}) {
+  const list = Array.isArray(jobs) ? jobs : [];
+  if (typeof idempotencyKey === "string" && idempotencyKey !== "") {
+    const newest = list.find((j) => j?.idempotency_key === idempotencyKey);
+    if (newest && (newest.status === "queued" || newest.status === "running" || newest.status === "done")) {
+      return { job: newest, attach_reason: "idempotency_key" };
+    }
+    return null;
+  }
+  if (typeof argsFingerprint === "string" && argsFingerprint !== "") {
+    const active = list.find((j) => j?.args_fingerprint === argsFingerprint && (j?.status === "queued" || j?.status === "running"));
+    if (active) return { job: active, attach_reason: "same_args" };
+  }
+  return null;
+}
+
+async function withJobsStartLock(root, fn) {
+  const lockDir = path.join(root, ".job-start.lock");
+  await mkdir(root, { recursive: true });
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    try {
+      await mkdir(lockDir);
+      break;
+    } catch {
+      // Lock held: wait a tick, or steal it if the holder crashed
+      // (mtime older than 30s) instead of waiting forever.
+      try {
+        const st = await stat(lockDir);
+        if (Date.now() - st.mtimeMs > 30_000) await rm(lockDir, { recursive: true, force: true });
+      } catch { /* lock vanished between mkdir and stat: retry */ }
+      if (Date.now() > deadline) throw new MediaKitError("async job start is locked by another start (jobs root lock)", "ERROR");
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    try { await rm(lockDir, { recursive: true, force: true }); } catch { /* lock already gone */ }
+  }
+}
+
+export async function startAssembleJob({ manifestPath, outputDir, force = false, fromPlan = null, checkpointFile = null, idempotencyKey = null }) {
+  if (idempotencyKey != null && (typeof idempotencyKey !== "string" || !IDEMPOTENCY_KEY_RE.test(idempotencyKey))) {
+    throw new MediaKitError("idempotency_key must be 1-128 characters [A-Za-z0-9._-]", "INVALID_ARG");
+  }
   // Fail fast, before spawning anything: the manifest must validate
   // and the approval gate must pass — a job that is born dead hides
   // the real error behind a poll.
@@ -25901,9 +25992,9 @@ export async function startAssembleJob({ manifestPath, outputDir, force = false,
       throw new MediaKitError(`assemble --from-plan refused: the plan is not exportable — blockers: ${codes || "unknown"}. Fix the film and re-run --mode plan.`, "INVALID_ARG");
     }
   }
-  // Admission gate: refuse before creating a record or spawning a
-  // worker, so a refused start leaves nothing behind to poll or cancel.
-  await checkJobAdmission();
+  // Admission gate moved inside the start lock, after the dedup
+  // lookup (see below): a refused start still leaves nothing behind,
+  // and a retry that attaches never reaches the gate at all.
   if (typeof outputDir !== "string" || !outputDir.trim()) {
     throw new MediaKitError("assemble --mode render needs an output directory", "INVALID_ARG");
   }
@@ -25913,54 +26004,84 @@ export async function startAssembleJob({ manifestPath, outputDir, force = false,
   // that most needs per-shot records.
   const checkpointAbs = checkpointFile != null ? await prepareOutput(checkpointFile, [manifestAbs]) : null;
   const root = jobsRoot();
-  const jobId = newJobId();
-  const jobDir = path.join(root, jobId);
-  await mkdir(jobDir, { recursive: true });
-  const now = new Date().toISOString();
-  const record = {
-    job_id: jobId, operation: "assemble", status: "queued",
-    manifest: manifestAbs, output_dir: outDirAbs, mode: "render", force: !!force,
-    ...(planAbs ? { from_plan: planAbs } : {}),
-    ...(checkpointAbs ? { checkpoint_file: checkpointAbs } : {}),
-    approval: approvalStatus, title: plan.title,
-    total_seconds: plan.total_seconds, total_frames: plan.total_frames,
-    pid: null, progress: { stage: null, percent: 0, detail: null }, progress_history: [],
-    created_at: now, updated_at: now, result: null, error: null,
-  };
-  await writeJobRecord(root, record);
-  const cliPath = fileURLToPath(new URL("../bin/mediakit.js", import.meta.url));
-  // The worker's stdout/stderr go to worker.log. spawn needs a real
-  // fd (a WriteStream is still opening when spawn runs — it threw
-  // "The argument 'stdio' is invalid"), so open the file
-  // synchronously and hand the fd over; the parent closes its own
-  // copy right after spawn, the child's inherited fd stays valid.
-  const { openSync, closeSync } = await import("node:fs");
-  const logFd = openSync(path.join(jobDir, "worker.log"), "w");
-  let child;
-  try {
-    child = spawn(process.execPath, [
-      cliPath, "assemble", manifestAbs, "--mode", "render", "-o", outDirAbs,
-      "--job-id", jobId, "--job-dir", jobDir, ...(force ? ["--force"] : []),
-      ...(planAbs ? ["--from-plan", planAbs] : []),
-      ...(checkpointAbs ? ["--checkpoint-file", checkpointAbs] : []),
-    ], { detached: true, stdio: ["ignore", logFd, logFd], env: process.env });
-  } catch (e) {
+  const argsFingerprint = computeAssembleJobFingerprint({
+    manifestFingerprint: plan.fingerprint,
+    outputDir: outDirAbs,
+    force: !!force,
+    fromPlan: planAbs,
+    checkpointFile: checkpointAbs,
+  });
+  return withJobsStartLock(root, async () => {
+    // Dedup first, inside the lock: a retry attaches to the existing
+    // job instead of spawning a twin, and consumes no admission slot.
+    const { jobs } = await listJobs({ limit: 200 });
+    const attach = findAttachableJob(jobs, { idempotencyKey, argsFingerprint });
+    if (attach) {
+      const existing = await getJob(attach.job.job_id);
+      return {
+        ...existing,
+        deduped: true,
+        attach_reason: attach.attach_reason,
+        idempotency_key: idempotencyKey ?? existing.idempotency_key ?? null,
+        args_fingerprint: argsFingerprint,
+        hint: `attached to the existing job — poll with: mediakit job ${attach.job.job_id}`,
+      };
+    }
+    // Admission gate: refuse before creating a record or spawning a
+    // worker, so a refused start leaves nothing behind to poll or cancel.
+    await checkJobAdmission();
+    const jobId = newJobId();
+    const jobDir = path.join(root, jobId);
+    await mkdir(jobDir, { recursive: true });
+    const now = new Date().toISOString();
+    const record = {
+      job_id: jobId, operation: "assemble", status: "queued",
+      manifest: manifestAbs, output_dir: outDirAbs, mode: "render", force: !!force,
+      ...(planAbs ? { from_plan: planAbs } : {}),
+      ...(checkpointAbs ? { checkpoint_file: checkpointAbs } : {}),
+      idempotency_key: idempotencyKey ?? null,
+      args_fingerprint: argsFingerprint,
+      approval: approvalStatus, title: plan.title,
+      total_seconds: plan.total_seconds, total_frames: plan.total_frames,
+      pid: null, progress: { stage: null, percent: 0, detail: null }, progress_history: [],
+      created_at: now, updated_at: now, result: null, error: null,
+    };
+    await writeJobRecord(root, record);
+    const cliPath = fileURLToPath(new URL("../bin/mediakit.js", import.meta.url));
+    // The worker's stdout/stderr go to worker.log. spawn needs a real
+    // fd (a WriteStream is still opening when spawn runs — it threw
+    // "The argument 'stdio' is invalid"), so open the file
+    // synchronously and hand the fd over; the parent closes its own
+    // copy right after spawn, the child's inherited fd stays valid.
+    const { openSync, closeSync } = await import("node:fs");
+    const logFd = openSync(path.join(jobDir, "worker.log"), "w");
+    let child;
+    try {
+      child = spawn(process.execPath, [
+        cliPath, "assemble", manifestAbs, "--mode", "render", "-o", outDirAbs,
+        "--job-id", jobId, "--job-dir", jobDir, ...(force ? ["--force"] : []),
+        ...(planAbs ? ["--from-plan", planAbs] : []),
+        ...(checkpointAbs ? ["--checkpoint-file", checkpointAbs] : []),
+      ], { detached: true, stdio: ["ignore", logFd, logFd], env: process.env });
+    } catch (e) {
+      try { closeSync(logFd); } catch { /* already closed */ }
+      await failJob(jobId, jobDir, e);
+      throw e;
+    }
     try { closeSync(logFd); } catch { /* already closed */ }
-    await failJob(jobId, jobDir, e);
-    throw e;
-  }
-  try { closeSync(logFd); } catch { /* already closed */ }
-  child.unref();
-  const started = { ...record, pid: child.pid ?? null };
-  await writeJobRecord(root, started);
-  return {
-    job_id: jobId, status: "queued", operation: "assemble",
-    jobs_root: root, manifest: manifestAbs, output_dir: outDirAbs,
-    title: plan.title, total_seconds: plan.total_seconds, total_frames: plan.total_frames,
-    approval: approvalStatus,
-    estimate_remaining_seconds: null, estimate_basis: "not-started",
-    hint: `poll with: mediakit job ${jobId}`,
-  };
+    child.unref();
+    const started = { ...record, pid: child.pid ?? null };
+    await writeJobRecord(root, started);
+    return {
+      job_id: jobId, status: "queued", operation: "assemble",
+      deduped: false, idempotency_key: idempotencyKey ?? null, args_fingerprint: argsFingerprint,
+      jobs_root: root, manifest: manifestAbs, output_dir: outDirAbs,
+      title: plan.title, total_seconds: plan.total_seconds, total_frames: plan.total_frames,
+      approval: approvalStatus,
+      estimate_remaining_seconds: null, estimate_basis: "not-started",
+      hint: `poll with: mediakit job ${jobId}`,
+    };
+  });
 }
 
 // Estimate remaining time for a durable async render job (idea:

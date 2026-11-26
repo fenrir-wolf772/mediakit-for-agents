@@ -15,7 +15,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
-import { acquireEditLease, analyzeSeamSamples, applyContentBaseline, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, commitEditSession, compactManifestOps, compareDeterminismRuns, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, projectSummary, proposeEdit, releaseEditLease, renewEditLease, resolveQcPolicy, restoreEditSessionCheckpoint, resumeEditSession, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, snapKeepSegmentsToPauses, spectralFluxOnset, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
+import { acquireEditLease, analyzeSeamSamples, applyContentBaseline, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, projectSummary, proposeEdit, releaseEditLease, renewEditLease, resolveQcPolicy, restoreEditSessionCheckpoint, resumeEditSession, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, snapKeepSegmentsToPauses, spectralFluxOnset, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
@@ -12154,6 +12154,111 @@ await admCancel(admJobB.job_id);
 const admJobD = JSON.parse((await client.callTool({ name: "assemble", arguments: { manifest_path: admStageC.manifestPath, mode: "render", output_dir: path.join(admStageC.dir, "out"), force: true, async: true } })).content[0].text);
 checkOk(typeof admJobD.job_id === "string", "cancelling both jobs re-opens the gate (fourth start admitted)", admJobD.job_id ?? "");
 await admCancel(admJobD.job_id);
+
+// Lượt 184: idempotency key + attach-on-same-args for async renders
+// (idea: Cassette-Editor/oh-my-cassette META_REQUEST_ID + LocalJobs,
+// lượt 183). Pure rules first — deterministic, no wall clock — then
+// the MCP path with seeded fake job records in the hermetic jobs
+// dir (the L122 estimate pattern): a retry must attach to the
+// seeded job and create no new job directory, and a failed job with
+// the same key must start fresh. The gate is open here (the
+// admission block just cancelled its two jobs), and only 5 real
+// starts precede this block in the trailing minute, so the 10/min
+// cap cannot bite the one fresh start below.
+const idemFpBase = { manifestFingerprint: "f".repeat(64), outputDir: "/tmp/out", force: false, fromPlan: null, checkpointFile: null };
+const idemFp1 = computeAssembleJobFingerprint(idemFpBase);
+const idemFpStable = computeAssembleJobFingerprint({ ...idemFpBase });
+const idemFpChanged = [
+  computeAssembleJobFingerprint({ ...idemFpBase, force: true }),
+  computeAssembleJobFingerprint({ ...idemFpBase, outputDir: "/tmp/other" }),
+  computeAssembleJobFingerprint({ ...idemFpBase, manifestFingerprint: "e".repeat(64) }),
+  computeAssembleJobFingerprint({ ...idemFpBase, fromPlan: "/tmp/p.json" }),
+  computeAssembleJobFingerprint({ ...idemFpBase, checkpointFile: "/tmp/c.json" }),
+];
+checkOk(/^[0-9a-f]{64}$/.test(idemFp1) && idemFp1 === idemFpStable && idemFpChanged.every((f) => f !== idemFp1) && new Set(idemFpChanged).size === 5, "assemble job fingerprint is a stable 64-hex hash that changes on every input field (force/output/manifest/plan/checkpoint)", `${idemFp1.slice(0, 12)} changed=${idemFpChanged.map((f) => f.slice(0, 8)).join(",")}`);
+const idemJobs = [
+  { job_id: "job-new", status: "running", idempotency_key: "K1", args_fingerprint: "ff1" },
+  { job_id: "job-old", status: "done", idempotency_key: "K1", args_fingerprint: "ff1" },
+  { job_id: "job-failed", status: "failed", idempotency_key: "K2", args_fingerprint: "ff2" },
+  { job_id: "job-cancelled", status: "cancelled", idempotency_key: "K3", args_fingerprint: "ff3" },
+  { job_id: "job-done-args", status: "done", idempotency_key: null, args_fingerprint: "ff4" },
+];
+const idemKeyRunning = findAttachableJob(idemJobs, { idempotencyKey: "K1" });
+const idemKeyDone = findAttachableJob([{ job_id: "job-d", status: "done", idempotency_key: "KD", args_fingerprint: "ff9" }], { idempotencyKey: "KD" });
+checkOk(idemKeyRunning?.job?.job_id === "job-new" && idemKeyRunning?.attach_reason === "idempotency_key" && idemKeyDone?.job?.job_id === "job-d" && idemKeyDone?.attach_reason === "idempotency_key" && findAttachableJob(idemJobs, { idempotencyKey: "K2" }) === null && findAttachableJob(idemJobs, { idempotencyKey: "K3" }) === null && findAttachableJob(idemJobs, { idempotencyKey: "K9" }) === null && findAttachableJob([], { idempotencyKey: "K1" }) === null, "findAttachableJob: key attaches to the newest queued/running/done job, never to failed/cancelled/unknown keys", JSON.stringify({ running: idemKeyRunning?.job?.job_id, done: idemKeyDone?.job?.job_id }));
+const idemSameArgs = findAttachableJob(idemJobs, { argsFingerprint: "ff1" });
+checkOk(idemSameArgs?.job?.job_id === "job-new" && idemSameArgs?.attach_reason === "same_args" && findAttachableJob(idemJobs, { argsFingerprint: "ff4" }) === null && findAttachableJob(idemJobs, { argsFingerprint: "ff2" }) === null && findAttachableJob(idemJobs, { argsFingerprint: "ff9" }) === null, "findAttachableJob: same-args attaches only to a queued/running job, never to a done one", JSON.stringify({ sameArgs: idemSameArgs?.job?.job_id }));
+// Seeded end-to-end: stage the async fixture, plan it for the real
+// manifest fingerprint, then seed fake jobs carrying the fingerprint
+// the real start would compute for this stage + output dir.
+const idemStage = await stageAssembleManifest("assemble-async.json");
+const idemOut = path.join(idemStage.dir, "out");
+const idemPlan = JSON.parse((await client.callTool({ name: "assemble", arguments: { manifest_path: idemStage.manifestPath, mode: "plan" } })).content[0].text);
+const idemFp = computeAssembleJobFingerprint({ manifestFingerprint: idemPlan.fingerprint, outputDir: idemOut, force: true, fromPlan: null, checkpointFile: null });
+const idemJobsDir = process.env.MEDIAKIT_JOBS_DIR;
+const idemCountDirs = async () => (await readdir(idemJobsDir, { withFileTypes: true })).filter((e) => e.isDirectory() && e.name.startsWith("job-")).length;
+const idemSeedJob = async (id, fields) => {
+  await mkdir(path.join(idemJobsDir, id), { recursive: true });
+  await writeFile(path.join(idemJobsDir, id, "job.json"), JSON.stringify({
+    job_id: id, operation: "assemble", status: "running",
+    manifest: "fake", output_dir: "fake", mode: "render", force: true,
+    approval: "forced", title: "idempotency fixture", total_seconds: 4, total_frames: 120,
+    pid: null, progress: { stage: null, percent: 0, detail: null }, progress_history: [],
+    created_at: new Date().toISOString(), updated_at: new Date().toISOString(), result: null, error: null,
+    idempotency_key: null, args_fingerprint: null, ...fields,
+  }, null, 2));
+};
+const idemCancel = async (id) => { try { await client.callTool({ name: "job", arguments: { job_id: id, action: "cancel" } }); } catch { /* already terminal */ } };
+// (a) same key, running job -> attach, no new directory, no worker.
+const idemKeyJobId = "job-20261127-045800-aa1dem01";
+await idemSeedJob(idemKeyJobId, { status: "running", idempotency_key: "luot184-key-1", args_fingerprint: idemFp });
+const idemDirsBefore = await idemCountDirs();
+const idemKeyRes = await client.callTool({ name: "assemble", arguments: { manifest_path: idemStage.manifestPath, mode: "render", output_dir: idemOut, force: true, async: true, idempotency_key: "luot184-key-1" } });
+const idemKeyJson = JSON.parse(idemKeyRes.content[0].text);
+const idemDirsAfter = await idemCountDirs();
+checkOk(idemKeyJson.job_id === idemKeyJobId && idemKeyJson.deduped === true && idemKeyJson.attach_reason === "idempotency_key" && idemKeyJson.idempotency_key === "luot184-key-1" && idemDirsAfter === idemDirsBefore, "assemble async with a repeated idempotency key attaches to the running job (same job_id, deduped) and creates no new job directory", JSON.stringify({ job_id: idemKeyJson.job_id, deduped: idemKeyJson.deduped, dirs: `${idemDirsBefore}->${idemDirsAfter}` }));
+await idemCancel(idemKeyJobId);
+// (b) no key, same args, running job -> attach as same_args.
+const idemArgsJobId = "job-20261127-045800-aa1dem02";
+await idemSeedJob(idemArgsJobId, { status: "running", idempotency_key: null, args_fingerprint: idemFp });
+const idemArgsRes = await client.callTool({ name: "assemble", arguments: { manifest_path: idemStage.manifestPath, mode: "render", output_dir: idemOut, force: true, async: true } });
+const idemArgsJson = JSON.parse(idemArgsRes.content[0].text);
+checkOk(idemArgsJson.job_id === idemArgsJobId && idemArgsJson.deduped === true && idemArgsJson.attach_reason === "same_args", "assemble async with identical args and no key attaches to the queued/running job (same_args)", JSON.stringify({ job_id: idemArgsJson.job_id, deduped: idemArgsJson.deduped }));
+await idemCancel(idemArgsJobId);
+// (c) same key, DONE job -> attach (the key is a contract: the first
+// answer comes back, even finished).
+const idemDoneJobId = "job-20261127-045800-aa1dem03";
+await idemSeedJob(idemDoneJobId, { status: "done", idempotency_key: "luot184-key-2", args_fingerprint: idemFp, result: { output: "fake/final.mp4" } });
+const idemDoneRes = await client.callTool({ name: "assemble", arguments: { manifest_path: idemStage.manifestPath, mode: "render", output_dir: idemOut, force: true, async: true, idempotency_key: "luot184-key-2" } });
+const idemDoneJson = JSON.parse(idemDoneRes.content[0].text);
+checkOk(idemDoneJson.job_id === idemDoneJobId && idemDoneJson.deduped === true && idemDoneJson.attach_reason === "idempotency_key" && idemDoneJson.status === "done", "assemble async with a key whose job already finished returns the done job (deduped, no re-render)", JSON.stringify({ job_id: idemDoneJson.job_id, status: idemDoneJson.status }));
+// (d) same key, FAILED job -> a fresh job (a retry after failure
+// must be allowed to run); cancel it right away so the gate stays open.
+const idemFailedJobId = "job-20261127-045800-aa1dem04";
+await idemSeedJob(idemFailedJobId, { status: "failed", idempotency_key: "luot184-key-3", args_fingerprint: idemFp, error: { message: "boom", code: "ERROR" } });
+const idemFreshRes = await client.callTool({ name: "assemble", arguments: { manifest_path: idemStage.manifestPath, mode: "render", output_dir: idemOut, force: true, async: true, idempotency_key: "luot184-key-3" } });
+const idemFreshJson = JSON.parse(idemFreshRes.content[0].text);
+checkOk(typeof idemFreshJson.job_id === "string" && idemFreshJson.job_id !== idemFailedJobId && idemFreshJson.deduped === false && idemFreshJson.idempotency_key === "luot184-key-3" && /^[0-9a-f]{64}$/.test(idemFreshJson.args_fingerprint ?? "") && idemFreshJson.args_fingerprint === idemFp, "assemble async with a key whose job failed starts a fresh job (new job_id, deduped:false, same key + fingerprint on the record)", JSON.stringify({ job_id: idemFreshJson.job_id, deduped: idemFreshJson.deduped }));
+const idemFreshStatus = JSON.parse((await client.callTool({ name: "job", arguments: { job_id: idemFreshJson.job_id, action: "status" } })).content[0].text);
+if (idemFreshStatus.status === "queued" || idemFreshStatus.status === "running") {
+  const idemFreshCancel = await client.callTool({ name: "job", arguments: { job_id: idemFreshJson.job_id, action: "cancel" } });
+  checkOk(JSON.parse(idemFreshCancel.content[0].text).status === "cancelled", "the fresh retry job cancels cleanly (gate re-opens for later tests)", idemFreshJson.job_id);
+} else {
+  checkOk(idemFreshStatus.status === "done", "the fresh retry job finished before the cancel landed (render beat the cancel — still terminal, gate re-opens)", idemFreshJson.job_id);
+}
+// (e) refusals: a bad key fails fast with INVALID_ARG; a key without
+// async is refused (there is nothing to dedup against).
+const idemBadKeyText = await callExpectThrow("assemble", { manifest_path: idemStage.manifestPath, mode: "render", output_dir: idemOut, force: true, async: true, idempotency_key: "bad key!" });
+checkOk(/idempotency_key must be/.test(idemBadKeyText ?? ""), "assemble async refuses a malformed idempotency key (space/! outside [A-Za-z0-9._-])", idemBadKeyText ?? "");
+const idemSyncKeyText = await callExpectThrow("assemble", { manifest_path: idemStage.manifestPath, mode: "validate", idempotency_key: "luot184-key-9" });
+checkOk(/needs async:true/.test(idemSyncKeyText ?? ""), "assemble refuses idempotency_key without async:true", idemSyncKeyText ?? "");
+// (f) CLI: --idempotency-key reaches the same dedup path (the L181
+// lesson — an unregistered CLI option would crash the whole run).
+const idemCliJobId = "job-20261127-045800-aa1dem05";
+await idemSeedJob(idemCliJobId, { status: "running", idempotency_key: "luot184-cli-key", args_fingerprint: idemFp });
+const idemCliJson = await runCliJson(["assemble", idemStage.manifestPath, "--mode", "render", "-o", idemOut, "--force", "--async", "--idempotency-key", "luot184-cli-key"]);
+checkOk(idemCliJson.job_id === idemCliJobId && idemCliJson.deduped === true && idemCliJson.attach_reason === "idempotency_key", "CLI assemble --async --idempotency-key attaches to the running job (option registered, same dedup path)", JSON.stringify({ job_id: idemCliJson.job_id, deduped: idemCliJson.deduped }));
+await idemCancel(idemCliJobId);
 
 // Lượt 122: estimate_remaining — pure estimator, deterministic
 // (nowMs pinned, so no wall-clock flake). Terminal/queued shapes

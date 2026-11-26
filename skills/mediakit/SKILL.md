@@ -1664,7 +1664,19 @@ nothing keeps encoding after the cancel — and a cancelled job
 stays cancelled, the worker never overwrites it with
 done/failed. Jobs live under `MEDIAKIT_JOBS_DIR`, else
 `<workdir>/.mediakit-jobs`, one directory per job (`job.json` +
-`worker.log`). Never poll in a tight loop: 2s between polls is
+`worker.log`). Retries are idempotent: pass `idempotency_key`
+(1–128 chars `[A-Za-z0-9._-]`, async only) and a second start
+with the same key returns the first job (`deduped:true`,
+`attach_reason:'idempotency_key'`) instead of rendering twice —
+even when the first job already finished; a failed or cancelled
+job with the same key starts fresh. Without a key, a second
+start with identical args still attaches to a queued/running job
+(`attach_reason:'same_args'`), never to a done one — the
+fingerprint is the manifest content hash + output dir + force +
+plan + checkpoint, so editing an input changes it. The dedup
+lookup runs after validation/approval and before the admission
+gate, so a retry is never refused for a slot the first call
+already took. Never poll in a tight loop: 2s between polls is
 plenty — a render takes minutes, not seconds.
 
 ### 51. Pull media from the web with `download` — never with a bare ffmpeg URL input

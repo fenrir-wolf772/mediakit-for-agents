@@ -1034,7 +1034,7 @@ const COMMANDS = {
     ],
   },
   assemble: {
-    usage: "mediakit assemble <film.json> --mode validate|plan|preview|approve|render|status [-o <output-dir>] [--preview-seconds 20] [--force] [--async] [--plan-file <path>] [--from-plan <path>] [--checkpoint-file <path>]",
+    usage: "mediakit assemble <film.json> --mode validate|plan|preview|approve|render|status [-o <output-dir>] [--preview-seconds 20] [--force] [--async] [--idempotency-key <key>] [--plan-file <path>] [--from-plan <path>] [--checkpoint-file <path>]",
     desc: "Film assembler: build a finished video from one declarative film manifest (shots on a voice-led timeline, mixed audio, burned captions, QA + receipt). The voice is the master clock — total = lead + measured voice + tail, and shots must cover it exactly in frames. validate checks the math and writes nothing; plan discloses the resolved timeline (every shot with film-time start/end, joins, the voice/music/SFX audio timeline, chapters with ends) — also writes nothing and does NOT approve the film; preview renders the first N seconds at half size; approve records the fingerprint of the previewed files (a human must have seen the preview); render needs a matching approval unless --force. --plan-file <path> (plan mode only) writes the plan to a file — timeline + fingerprint + exportable/blockers, written atomically; --from-plan <path> (preview/approve/render) refuses a stale plan (changed inputs named) and refuses a non-exportable plan at approve/render. --checkpoint-file <path> (preview/render) writes a per-shot checkpoint ledger after every shot (cache key + segment digest, atomic) — --mode status with the same file then reports each shot as done/stale/missing/pending plus resumable, without rendering anything; one file holds one mode (preview or render), handing a render a preview checkpoint starts a fresh ledger and says so. --async (render mode only) returns a job_id immediately and renders in the background — poll with `mediakit job <id>`. Chapters [{title, at}] in the manifest become MP4 chapters in final.mp4. Shot segments are cached by content hash. Schema: skills/shorts-video/references/assemble-manifest.md.",
     args: [{ name: "manifest", required: true }],
     options: [
@@ -1045,6 +1045,7 @@ const COMMANDS = {
       ["--from-plan", "Refuse a stale or non-exportable plan file (preview/approve/render)"],
       ["--checkpoint-file", "Per-shot checkpoint ledger (preview/render write it, status reads it)"],
       ["--async", "Render in the background (render mode only): validate + approval are checked now, then return a job_id immediately; poll with `mediakit job <id>`"],
+      ["--idempotency-key", "Idempotency key for --async (1-128 chars [A-Za-z0-9._-]): a retry with the same key returns the first job instead of rendering twice (a failed/cancelled job with the same key starts fresh); without a key, a second start with identical args still attaches to a queued/running job"],
       ["--job-id", "Internal: worker job id (used by the async render worker)"],
       ["--job-dir", "Internal: worker job directory (used by the async render worker)"],
       ["-o, --output", "Output directory (required for preview/approve/render)"],
@@ -2552,6 +2553,7 @@ async function main() {
             force: opts.force === true,
             fromPlan: typeof opts.from_plan === "string" ? opts.from_plan : null,
             checkpointFile: typeof opts.checkpoint_file === "string" ? opts.checkpoint_file : null,
+            idempotencyKey: typeof opts.idempotency_key === "string" ? opts.idempotency_key : null,
           });
           break;
         }

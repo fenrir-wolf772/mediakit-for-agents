@@ -198,7 +198,11 @@ is gated: at most 2 render jobs may be queued-or-running and at
 most 10 may start per minute (env `MEDIAKIT_MAX_JOBS` /
 `MEDIAKIT_MAX_JOB_STARTS_PER_MINUTE`) — a refused start creates
 no job, so check `mediakit job --admission` first when renders
-are already running. While a job runs, `mediakit job <id>` also
+are already running. Retries are idempotent: `--idempotency-key
+<key>` (async only, 1–128 chars `[A-Za-z0-9._-]`) returns the
+first job instead of rendering twice — a failed/cancelled job
+with the same key starts fresh; without a key, identical args
+still attach to a queued/running job, never a done one. While a job runs, `mediakit job <id>` also
 reports `estimate_remaining_seconds` (rough upper-bound ETA, null
 when too early to tell) with `estimate_basis` naming how it was
 derived — `progress-rate` from the rate over the most recent 30s of
