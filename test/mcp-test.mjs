@@ -15,7 +15,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
-import { acquireEditLease, analyzeHookMove, analyzeSeamSamples, applyContentBaseline, applyHook, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, clearProbeCache, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, ffmpegThreads, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, orderHookRanges, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStabTrfMotion, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, projectSummary, proposeEdit, probe, probeCacheStats, releaseEditLease, renewEditLease, resolveQcPolicy, restoreEditSessionCheckpoint, resumeEditSession, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, sharpnessVerdict, snapHookToWords, snapKeepSegmentsToPauses, spectralFluxOnset, stabilizeVerdict, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
+import { acquireEditLease, analyzeHookMove, analyzeSeamSamples, applyContentBaseline, applyHook, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, clearProbeCache, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, ffmpegThreads, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookMotionCalibration, hookOverlapSeconds, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, orderHookRanges, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStabTrfMotion, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, projectSummary, proposeEdit, probe, probeCacheStats, releaseEditLease, renewEditLease, resolveQcPolicy, restoreEditSessionCheckpoint, resumeEditSession, robustZMotionScore, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, sharpnessVerdict, snapHookToWords, snapKeepSegmentsToPauses, spectralFluxOnset, stabilizeVerdict, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
@@ -4725,6 +4725,16 @@ for (const [bad, why] of [
 }
 checkOk(JSON.stringify(snapHookToWords({ start: 16.2, end: 19.8 }, [{ start: 16, end: 16.5 }, { start: 19.5, end: 20 }])) === JSON.stringify({ start: 16, end: 20 }), "snapHookToWords widens both edges to whole words", "");
 checkOk(JSON.stringify(snapHookToWords({ start: 16, end: 20 }, [{ start: 16, end: 16.5 }, { start: 19.5, end: 20 }])) === JSON.stringify({ start: 16, end: 20 }), "snapHookToWords leaves clean edges unchanged", "");
+// hook robust-z motion (lượt 191, podcli `_robust_z`): pure math, no
+// ffmpeg. Calibration on known arrays + the z mapping + the scale
+// floor that keeps grain from ever reading as motion.
+const rzCalSparse = hookMotionCalibration([0, 0, 0, 0, 0.02, 0.02]);
+checkOk(rzCalSparse.median === 0 && rzCalSparse.mad === 0 && rzCalSparse.scale === 0.005, "hookMotionCalibration: sparse burst over quiet bins — median 0, MAD 0, scale floored at 0.005", JSON.stringify(rzCalSparse));
+const rzCalSpread = hookMotionCalibration([0.01, 0.02, 0.03]);
+checkOk(rzCalSpread.median === 0.02 && rzCalSpread.mad === 0.01 && near(rzCalSpread.scale, 0.01483, 0.00001), "hookMotionCalibration: spread values — median 0.02, MAD 0.01, scale 1.4826*MAD", JSON.stringify(rzCalSpread));
+checkOk(JSON.stringify(hookMotionCalibration([])) === JSON.stringify({ median: null, mad: null, scale: null }), "hookMotionCalibration: empty input reports nulls", "");
+checkOk(robustZMotionScore(0.02, 0, 0.005) === 1 && robustZMotionScore(0.004, 0.001, 0.005) === 0.2 && robustZMotionScore(0.001, 0, 0.005) === 0 && robustZMotionScore(0.06, 0.06, 0.005) === 0, "robustZMotionScore: burst 0.02 over median 0 is 1.0, grain 0.004 is 0.2, at/below the floor is 0, a uniform file scores 0", "");
+checkOk(robustZMotionScore(0.9, 0.01, 0.005) === 1 && robustZMotionScore(0.01, 0.01, 0.005) === 0, "robustZMotionScore: one 0.9 spike scores 1.0 without lifting the file's own 0.01 baseline (no file-max compression)", "");
 const hookMoveShots = [
   { id: "s1", kind: "video", source: "/v/take.mp4", start: 10, duration: 5 },
   { id: "s2", kind: "video", source: "/v/take.mp4", start: 0, duration: 30 },
@@ -4822,6 +4832,27 @@ const hookMotionMeanOver = (key, a, b) => { const v = hookMotionCurve.filter((x)
 const hookMotionOldStatic = 0.5 * hookMotionMeanOver("energy", 0, 10) + 0.3 * hookMotionMeanOver("speech", 0, 10);
 const hookMotionOldWinner = 0.5 * hookMotionJson.hook.energy + 0.3 * hookMotionJson.hook.speech;
 checkOk(hookMotionJson.cuts_per_minute === 0 && hookMotionOldStatic > hookMotionOldWinner, "old weights on the same bins score the static window higher (0.8 vs ~0.75) — the flip is motion", `old static=${hookMotionOldStatic.toFixed(3)} old winner=${hookMotionOldWinner.toFixed(3)}`);
+// hook robust-z motion (lượt 191, podcli `_robust_z`): fixture
+// test/hook-robustz-source.mp4 is 30s, video-only: static blue
+// [0,24), then a small moving window (testsrc2 240x135 on the same
+// blue) [24,30) — motion_fraction ~0.025 there, so the ABSOLUTE
+// scale alone scores the burst only ~0.41, while the per-video
+// robust-z (median 0, MAD 0, scale floored at 0.005) lifts it to
+// 1.0. The winner must be the burst window [24,30).
+const hookRobustzRes = await client.callTool({
+  name: "hook",
+  arguments: { input: path.join(root, "test/hook-robustz-source.mp4"), duration: 6, step: 0.5, top: 3 },
+});
+const hookRobustzJson = JSON.parse(hookRobustzRes.content[0].text);
+console.log("hook robust-z fixture:", JSON.stringify(hookRobustzJson.hook), "| norm", JSON.stringify(hookRobustzJson.motion_normalization));
+const hookRobustzCurve = hookRobustzJson.energy_curve;
+const hookRobustzQuiet = hookRobustzCurve.filter((b) => b.t < 24);
+const hookRobustzBurst = hookRobustzCurve.filter((b) => b.t >= 24);
+const hookRobustzBurstAbs = hookRobustzBurst.reduce((a, b) => a + Math.min(1, Math.max(0, (b.motion_fraction - 0.001) / 0.059)), 0) / hookRobustzBurst.length;
+checkOk(JSON.stringify(hookRobustzJson.motion_normalization) === JSON.stringify({ method: "max(absolute/0.06, robust-z)", median: 0, mad: 0, scale: 0.005 }), "hook reports its motion normalization (median 0, MAD 0, scale floored at 0.005 on the sparse-burst fixture)", JSON.stringify(hookRobustzJson.motion_normalization));
+checkOk(hookRobustzQuiet.every((b) => b.motion === 0 && b.motion_relative === 0 && b.motion_fraction === 0) && hookRobustzBurst.every((b) => b.motion === 1 && b.motion_relative === 1 && b.motion_fraction >= 0.02 && b.motion_fraction <= 0.032), "hook robust-z curve: quiet half motion 0 everywhere, burst bins motion 1.0 + motion_relative 1.0 at fraction ~0.025", `burst frac ${hookRobustzBurst.map((b) => b.motion_fraction).join(",")}`);
+checkOk(hookRobustzBurstAbs < 0.5 && hookRobustzBurst.reduce((a, b) => a + b.motion, 0) / hookRobustzBurst.length === 1, "the lift is the robust-z, not the absolute scale: absolute alone would give the burst ~0.41, max() gives 1.0", `absolute mean=${hookRobustzBurstAbs.toFixed(3)}`);
+checkOk(hookRobustzJson.hook.start === 24 && hookRobustzJson.hook.end === 30 && hookRobustzJson.hook.motion === 1 && near(hookRobustzJson.hook.score, 0.25, 0.01) && near(hookRobustzJson.hook.score, 0.3 * hookRobustzJson.hook.energy + 0.2 * hookRobustzJson.hook.speech + 0.2 * hookRobustzJson.hook.cut_score + 0.2 * hookRobustzJson.hook.motion + 0.1 * hookRobustzJson.hook.visual, 0.002), "hook robust-z winner is the burst window [24,30) with motion 1.0 (score 0.25 = 0.2M + 0.1V)", JSON.stringify(hookRobustzJson.hook));
 // hook visual (the `highlights` feed, this turn): fixture
 // test/hook-visual-source.mp4 is 30s, loud + static red [0,15) then
 // quieter + lime/blue/lime blocks [15,30) joined by 1s crossfades,
@@ -7739,7 +7770,7 @@ const findSourceJson = JSON.parse(findSourceRes.content[0].text);
 // names are all present (subset) instead of counting the fixture
 // directory; max_results 100 so a growing fixture set still returns
 // every known file in one page.
-const knownSourceFiles = ["source.mp4", "source2.mp4", "silence-source.mp4", "scenes-source.mp4", "quiet-source.mp3", "rich-source.mp4", "trim-check-source.mp4", "hook-source.mp4", "hook-motion-source.mp4", "hook-snap-source.mp4", "hook-visual-source.mp4", "sharpness-source.mp4", "rotate-source.mp4", "noisy-source.mp4", "beat-trim-source.mp4", "levels-source.wav", "pace-source.mp4", "highlights-source.mp4"];
+const knownSourceFiles = ["source.mp4", "source2.mp4", "silence-source.mp4", "scenes-source.mp4", "quiet-source.mp3", "rich-source.mp4", "trim-check-source.mp4", "hook-source.mp4", "hook-motion-source.mp4", "hook-snap-source.mp4", "hook-visual-source.mp4", "hook-robustz-source.mp4", "sharpness-source.mp4", "rotate-source.mp4", "noisy-source.mp4", "beat-trim-source.mp4", "levels-source.wav", "pace-source.mp4", "highlights-source.mp4"];
 const foundSourceNames = new Set((findSourceJson.matches ?? []).map((m) => String(m.path).split("/").pop()));
 const missingSourceFiles = knownSourceFiles.filter((f) => !foundSourceNames.has(f));
 checkOk(missingSourceFiles.length === 0 && findSourceJson.total_matches >= knownSourceFiles.length, "find 'source' returns every known *-source fixture (subset, not an absolute count — a new fixture must not break this)", `got ${findSourceJson.total_matches}, missing: ${missingSourceFiles.join(",") || "none"}`);
@@ -13209,11 +13240,18 @@ const dlCliLicOk = await runCliJson(["download", `${dlBase}/counted.mp4`, "-o", 
 checkOk(dlCliLicOk.license?.label === "CC0" && dlHits.counted === 3, "CLI: --license CC0 passes the env policy", JSON.stringify(dlCliLicOk.license));
 // Manifest: the download step takes license, and the previously
 // rejected cache:true now passes lint (lượt 90 fix — run() already
-// read it, the args list just didn't allow it).
+// read it, the args list just didn't allow it). The step gets an
+// EXPLICIT hermetic cache_dir under outputs/: the default cache
+// (~/.cache/mediakit/downloads) is shared across runs, and the test
+// server listens on a random ephemeral port — run 2 of lượt 191 drew
+// port 46421, the same port a run on 25/11 used, so a 2-day-old cache
+// entry for that exact URL served the file without a fetch and the
+// hit count stayed 3 instead of 4 (measured 2026-11-28: cache entry
+// mtime 2026-11-25T06:53:53Z, URL http://127.0.0.1:46421/counted.mp4).
 const dlManLicPath = path.join(root, "outputs/mcp-manifest-download-license.json");
 await writeFile(dlManLicPath, JSON.stringify({
   version: 1, output: "mcp-manifest-download-license.mp4",
-  steps: [{ tool: "download", args: { url: `${dlBase}/counted.mp4`, license: "CC0", cache: true } }],
+  steps: [{ tool: "download", args: { url: `${dlBase}/counted.mp4`, license: "CC0", cache: true, cache_dir: path.join(root, "outputs/dl-cache-manifest") } }],
 }, null, 2));
 const dlManLicRes = await client.callTool({ name: "manifest", arguments: { manifest_path: dlManLicPath } });
 const dlManLic = JSON.parse(dlManLicRes.content[0].text);

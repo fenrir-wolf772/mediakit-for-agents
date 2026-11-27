@@ -1844,9 +1844,15 @@ and normalized against the clip's own loudest bin), speech coverage
 of dead air), scene cuts (a window that opens on a cut scores
 higher, plus cuts inside it), real motion (the `motion` tool's
 per-frame pixel-diff curve, binned on the same step grid, normalized
-against a fixed 0.06 reference — testsrc-level motion is 1.0 — with
-a 0.001 noise floor and a 0.005 file-level gate, so a static clip
-never scores motion from encoder noise), and visual beats (the
+as the max of the absolute scale against a fixed 0.06 reference —
+testsrc-level motion is 1.0 — and a per-video robust-z against the
+file's own median/MAD, so a modest gesture on a mostly-still take
+still reads as movement instead of being compressed to ~0.3–0.4;
+with a 0.001 noise floor and a 0.005 file-level gate, so a static
+clip never scores motion from encoder noise; each curve bin also
+carries `motion_relative`, the robust-z value on its own, and the
+result reports `motion_normalization` with the file's median/MAD/
+scale), and visual beats (the
 `highlights` perceptual-hash boundaries inside the window — 2+ beats
 is fully active, 1 beat is half; a boundary at the window start
 counts, the window opens on it). The score is 0.3×energy +
@@ -1859,7 +1865,9 @@ detectors of the same picture change and must not outvote the audio.
 The result carries the ranked candidates with the score breakdown
 (each carries `visual` + `visual_beats`), the
 `highlight_boundaries`, the per-step
-energy curve (each bin also carries `motion` + `motion_fraction`),
+energy curve (each bin also carries `motion` + `motion_relative` +
+`motion_fraction`), the `motion_normalization` (method + the file's
+median/MAD/scale),
 pacing from real cuts (slow/medium/fast-cut), a `trim` object, and a
 `suggested_trim` command. The trim end snaps to the nearest quiet
 moment in the window's last 5 seconds (`--snap-window N`, 1–10):

@@ -16133,14 +16133,22 @@ export async function findHighlights({ input, fps = HIGHLIGHTS_DEFAULT_FPS, thre
 // coverage (silencedetect complement), scene cuts (a window that
 // opens on a cut, plus cuts inside it, reads as a new beat), real
 // MOTION (the motion tool's per-frame pixel-diff curve, binned on the
-// same step grid, normalized against a FIXED reference of 0.06 — the
-// measured fraction for testsrc, the motion tool's "clearly moving"
-// anchor — so motion 1.0 means "as busy as testsrc" on every file.
-// File-max normalization was tried first and rejected: one spike bin
-// (a crossfade blends every pixel, raw fraction ~0.9) compresses all
-// real motion to ~0.2, so the ranking stops seeing the moving half
-// at all. A fixed reference keeps the within-file contrast that the
-// ranking actually needs.
+// same step grid, normalized as the MAX of two scales — the absolute
+// one against a FIXED reference of 0.06, the measured fraction for
+// testsrc, the motion tool's "clearly moving" anchor, and a per-video
+// robust-z against the file's own median/MAD (podcli's `_robust_z`,
+// lượt 191). File-max normalization was tried first and rejected:
+// one spike bin (a crossfade blends every pixel, raw fraction ~0.9)
+// compresses all real motion to ~0.2, so the ranking stops seeing
+// the moving half at all. The fixed reference keeps the within-file
+// contrast that the ranking actually needs, and the robust-z adds
+// the contrast the fixed reference misses: a sparse burst over a
+// quiet baseline (a gesture on a talking head) reads 1.0 instead of
+// ~0.3-0.4. The max of the two keeps the old contract — uniform
+// testsrc still 1.0, static still 0 — and the robust-z scale floor
+// (0.005) keeps grain from ever reading as motion. Each curve bin
+// also carries `motion_relative`, the robust-z value on its own, so
+// the director can see which scale decided the bin.
 // The score is 0.3*energy + 0.2*speech + 0.2*cut + 0.2*motion +
 // 0.1*visual — audio 0.5 / video 0.5, the same split shorts-maker-gpu
 // uses for its combined action score (0.6 audio RMS+flux / 0.4 video
@@ -16170,12 +16178,14 @@ export async function findHighlights({ input, fps = HIGHLIGHTS_DEFAULT_FPS, thre
 // tool's own calibration: a per-bin fraction under 0.001 (0.1% of
 // pixels) is encoder noise, not movement, and a file whose busiest
 // bin stays under 0.005 (the measured gap between light grain 0.0013
-// and the slowest real motion 0.00695) scores motion 0 everywhere.
-// One honest exception: a hard cut reads as a one-frame motion spike
-// (red->blue = 0.067 in the 0.5s bin that holds it), so a static clip
-// with cuts still shows a small motion bump exactly on the cut — that
-// bin also earns the cut score, and the double-count is ~0.01 per
-// window, not a ranking factor.
+// and the slowest real motion 0.00695) scores motion 0 everywhere —
+// the gate applies to both scales, so the robust-z never fires on a
+// file with no real motion. One honest exception: a hard cut reads
+// as a one-frame motion spike (red->blue = 0.067 in the 0.5s bin
+// that holds it), so a static clip with cuts still shows a small
+// motion bump exactly on the cut — that bin also earns the cut
+// score, and the double-count is ~0.01 per window, not a ranking
+// factor.
 // The suggested trim does NOT end on the raw window end: it snaps to
 // the nearest QUIET moment (shorts-maker-gpu's find_smart_end_point
 // idea — search backwards from the max end for a local minimum of
@@ -16200,7 +16210,39 @@ const HOOK_MAX_DURATION_SECONDS = 1200;
 const HOOK_MOTION_FLOOR_FRACTION = 0.001;
 const HOOK_MOTION_MIN_MAX_FRACTION = 0.005;
 const HOOK_MOTION_REFERENCE_FRACTION = 0.06;
+const HOOK_MOTION_ROBUST_SCALE_FLOOR = 0.005;
+const HOOK_MOTION_ROBUST_Z_DIVISOR = 3;
 const HOOK_SNAP_WINDOW_DEFAULT_SECONDS = 5;
+
+// Robust-z motion (nmbrthirteen/podcli `saliency.py: _robust_z`,
+// lượt 191): each motion channel is normalized against the file's
+// OWN median/MAD instead of a global scale, so a modest gesture on
+// a mostly-still take still reads as movement. `hook` takes the MAX
+// of the two normalizations — the old absolute one against the fixed
+// 0.06 testsrc reference, and the robust-z one — so the old contract
+// is preserved (uniform testsrc still scores motion 1.0, a static
+// clip still 0) while a sparse burst over a quiet baseline is lifted
+// to 1.0 instead of being compressed to ~0.3-0.4 by the absolute
+// scale. The scale floor 0.005 is the file-level gate value — the
+// measured gap between light grain (max 0.0013) and the slowest real
+// motion (0.00695) — so a MAD near zero on a near-static file cannot
+// amplify grain into motion: a grain bin at 0.0013 scores at most
+// ~0.02. The divisor 3 maps z=3 to 1.0 (three robust sigmas = fully
+// moving). Pure: no ffmpeg, unit-tested directly.
+export function hookMotionCalibration(fractions) {
+  if (!fractions.length) return { median: null, mad: null, scale: null };
+  const median = percentile(fractions, 50);
+  const mad = percentile(fractions.map((f) => Math.abs(f - median)), 50);
+  const scale = Math.max(1.4826 * mad, HOOK_MOTION_ROBUST_SCALE_FLOOR);
+  return { median: +median.toFixed(5), mad: +mad.toFixed(5), scale: +scale.toFixed(5) };
+}
+
+export function robustZMotionScore(fraction, median, scale) {
+  const x = Math.max(0, fraction - HOOK_MOTION_FLOOR_FRACTION);
+  const m = Math.max(0, median - HOOK_MOTION_FLOOR_FRACTION);
+  const z = (x - m) / scale;
+  return +Math.min(1, Math.max(0, z / HOOK_MOTION_ROBUST_Z_DIVISOR)).toFixed(3);
+}
 
 // Snap a hook window's end to the nearest quiet moment (pure: no
 // ffmpeg, unit-tested directly). bins are [{t, quiet}] sorted by t,
@@ -16440,17 +16482,23 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
   // All-silent file: maxDb sits on the floor, span is 0 — every bin
   // is 0 energy, not NaN (caught in review before any test ran).
   const energySpan = maxDb === null ? 0 : maxDb - HOOK_ENERGY_FLOOR_DB;
-  // Motion is normalized against the fixed 0.06 reference (see the
-  // header comment), with the noise floor subtracted first — and a
-  // file whose busiest bin never clears 0.005 scores motion 0
+  // Motion is the MAX of two normalizations (see the header
+  // comment): the absolute one against the fixed 0.06 reference,
+  // and the per-video robust-z against the file's own median/MAD —
+  // and a file whose busiest bin never clears 0.005 scores motion 0
   // everywhere, so grain-level noise never reads as movement.
   const maxMotionFraction = motionFractions.length ? Math.max(...motionFractions.map((b) => b.motion_fraction)) : 0;
   const motionLive = maxMotionFraction >= HOOK_MOTION_MIN_MAX_FRACTION;
+  const motionCal = motionFractions.length
+    ? hookMotionCalibration(motionFractions.map((b) => b.motion_fraction))
+    : { median: null, mad: null, scale: null };
+  const motionRelativeAt = (fraction) => (motionLive ? robustZMotionScore(fraction, motionCal.median, motionCal.scale) : 0);
   const motionAt = (t) => {
     if (!motionLive) return 0;
     const found = motionFractions.find((b) => Math.abs(b.start_seconds - t) < 0.001);
     if (!found) return 0;
-    return +Math.min(1, Math.max(0, (found.motion_fraction - HOOK_MOTION_FLOOR_FRACTION) / (HOOK_MOTION_REFERENCE_FRACTION - HOOK_MOTION_FLOOR_FRACTION))).toFixed(3);
+    const absolute = Math.min(1, Math.max(0, (found.motion_fraction - HOOK_MOTION_FLOOR_FRACTION) / (HOOK_MOTION_REFERENCE_FRACTION - HOOK_MOTION_FLOOR_FRACTION)));
+    return +Math.max(absolute, robustZMotionScore(found.motion_fraction, motionCal.median, motionCal.scale)).toFixed(3);
   };
   const binCount = Math.max(1, Math.ceil(total / stepSec));
   const curve = [];
@@ -16464,7 +16512,7 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
     const silenceOverlap = silences.reduce((a, s) => a + Math.max(0, Math.min(s.end, binEnd) - Math.max(s.start, t)), 0);
     const speech = meta.audio ? +Math.min(1, Math.max(0, 1 - silenceOverlap / (binEnd - t))).toFixed(3) : 0;
     const motionFraction = motionFractions.find((b) => Math.abs(b.start_seconds - t) < 0.001)?.motion_fraction ?? 0;
-    curve.push({ t, energy_db: db, energy, speech, motion: motionAt(t), motion_fraction: motionFraction });
+    curve.push({ t, energy_db: db, energy, speech, motion: motionAt(t), motion_relative: motionRelativeAt(motionFraction), motion_fraction: motionFraction });
   }
   const binAt = (t) => curve[Math.min(curve.length - 1, Math.floor(t / stepSec))];
   const meanOver = (start, end, key) => {
@@ -16577,6 +16625,7 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
     step_seconds: stepSec,
     speech_coverage: meta.audio ? +Math.min(1, Math.max(0, speechSeconds / total)).toFixed(3) : null,
     energy_curve: curve,
+    motion_normalization: motionFractions.length ? { method: "max(absolute/0.06, robust-z)", median: motionCal.median, mad: motionCal.mad, scale: motionCal.scale } : null,
     cuts_per_minute: cutsPerMinute,
     pacing,
     highlight_boundaries: highlightBoundaries,
