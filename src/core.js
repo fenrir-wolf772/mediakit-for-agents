@@ -756,9 +756,66 @@ function numOrNull(v) {
 }
 
 // ---------------------------------------------------------------- probe
+// Probe cache (lượt 189, demilp/ffmpeg-mcp idea, backlog lượt 185):
+// ffprobe is spawned on every probe() — 173 call sites, and a manifest /
+// assemble / batch run probes the same file many times in one process.
+// The cache is IN-PROCESS ONLY (never on disk): an entry is keyed by the
+// resolved absolute path and validated on EVERY lookup by stat — mtimeMs
+// AND size must both still match. demilp's cache checked mtime only;
+// mtime alone lies when a file is rewritten inside the same clock tick
+// (or the filesystem granularity is coarse), so size is the second
+// witness. A rewrite that changes neither mtime nor size AND lands in
+// the same millisecond is the residual risk — accepted and documented
+// here: media rewrites change size in practice, and the cache never
+// crosses processes (a fresh CLI call or a restarted MCP server starts
+// empty). Entries are capped at 512 (FIFO eviction by insertion order)
+// so a long-lived MCP server cannot grow the map without bound. Cached
+// results are returned as structuredClone — callers must never mutate
+// the stored copy. Env MEDIAKIT_PROBE_CACHE=0 disables the cache
+// (every probe re-runs ffprobe); read on every call, like the other
+// env knobs. The result carries `cached: true/false` so a caller can
+// tell a fresh measurement from a replay, and doctor() reports the
+// counters in `probe_cache`.
+const PROBE_CACHE_MAX = 512;
+const probeCache = new Map();
+let probeCacheHits = 0;
+let probeCacheMisses = 0;
+
+export function probeCacheEnabled() {
+  return process.env.MEDIAKIT_PROBE_CACHE !== "0";
+}
+
+export function probeCacheStats() {
+  return { enabled: probeCacheEnabled(), entries: probeCache.size, hits: probeCacheHits, misses: probeCacheMisses };
+}
+
+// Test seam (and a manual reset): clears the entries AND the counters.
+export function clearProbeCache() {
+  probeCache.clear();
+  probeCacheHits = 0;
+  probeCacheMisses = 0;
+}
 
 export async function probe(input) {
   const inPath = await requireInput(input);
+  // Cache lookup: stat first (cheap syscall), ffprobe only on miss.
+  // A stat failure means the file vanished between requireInput and
+  // here — fall through and let ffprobe fail with the real error,
+  // caching nothing.
+  let cacheKey = null;
+  if (probeCacheEnabled()) {
+    try {
+      const st = await stat(inPath);
+      const hit = probeCache.get(inPath);
+      if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) {
+        probeCacheHits++;
+        return { ...structuredClone(hit.result), cached: true };
+      }
+      cacheKey = { mtimeMs: st.mtimeMs, size: st.size };
+    } catch {
+      cacheKey = null;
+    }
+  }
   const { stdout } = await run(FFPROBE, [
     "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", inPath,
   ]);
@@ -777,7 +834,7 @@ export async function probe(input) {
   // Only 90/270 swap the axes; other angles keep the coded size.
   const displayWidth = video ? ((rotation === 90 || rotation === 270) ? video.height : video.width) : null;
   const displayHeight = video ? ((rotation === 90 || rotation === 270) ? video.width : video.height) : null;
-  return {
+  const result = {
     input: inPath,
     format: data.format?.format_name ?? null,
     duration_seconds: Number.isFinite(duration) ? +duration.toFixed(3) : null,
@@ -808,6 +865,18 @@ export async function probe(input) {
     } : null,
     streams: (data.streams ?? []).map((s) => ({ index: s.index, type: s.codec_type, codec: s.codec_name })),
   };
+  // Store a clone (the handed-out copy is never the stored one, so a
+  // caller mutating its result cannot poison later lookups), evicting
+  // the oldest entry first when the cap is reached.
+  if (cacheKey) {
+    probeCacheMisses++;
+    if (probeCache.size >= PROBE_CACHE_MAX) {
+      const oldest = probeCache.keys().next().value;
+      if (oldest !== undefined) probeCache.delete(oldest);
+    }
+    probeCache.set(inPath, { mtimeMs: cacheKey.mtimeMs, size: cacheKey.size, result: structuredClone(result) });
+  }
+  return { ...result, cached: false };
 }
 
 function evalFps(rate) {
@@ -14093,6 +14162,11 @@ export async function doctor({ smoke = false } = {}) {
     // 8.1.2, so -threads 1 is not forced; env MEDIAKIT_FFMPEG_THREADS
     // 1–64 only overrides it when set).
     ffmpeg_threads: ffmpegThreads(),
+    // Probe cache counters (lượt 189): hits/misses since this process
+    // started, plus how many entries the in-process memo holds now.
+    // A long-lived MCP server that never probes the same file twice
+    // will show hits 0 — that is normal, not a broken cache.
+    probe_cache: probeCacheStats(),
     audit,
     jobs_dir: jobsDir,
     voice_venv: voiceVenv,

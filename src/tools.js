@@ -60,7 +60,7 @@ export const TOOL_DEFS = [
   {
     name: "probe",
     tier: "READ",
-    description: "Inspect a media file with ffprobe: duration, dimensions, codecs, streams. The video block reports the coded size plus rotation (clockwise degrees from the display matrix or rotate tag, null when absent) and the display size — what a player actually shows, so a phone clip coded 1920x1080 with rotation 90 reports display 1080x1920. It also reports time_base, which concat --fast compares before stream-copying.",
+    description: "Inspect a media file with ffprobe: duration, dimensions, codecs, streams. The video block reports the coded size plus rotation (clockwise degrees from the display matrix or rotate tag, null when absent) and the display size — what a player actually shows, so a phone clip coded 1920x1080 with rotation 90 reports display 1080x1920. It also reports time_base, which concat --fast compares before stream-copying. Probes are memoized in-process per file (validated on every call against the file's mtime + size, so a rewritten file is re-probed; env MEDIAKIT_PROBE_CACHE=0 disables it) — the result carries cached:true on a replay, cached:false on a fresh ffprobe run, and doctor reports the hit/miss counters in probe_cache.",
     schema: { input: pathSchema },
     handler: async ({ input }) => safe(() => core.probe(input)),
   },

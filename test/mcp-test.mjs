@@ -15,7 +15,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
-import { acquireEditLease, analyzeSeamSamples, applyContentBaseline, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, ffmpegThreads, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStabTrfMotion, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, projectSummary, proposeEdit, releaseEditLease, renewEditLease, resolveQcPolicy, restoreEditSessionCheckpoint, resumeEditSession, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, sharpnessVerdict, snapKeepSegmentsToPauses, spectralFluxOnset, stabilizeVerdict, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
+import { acquireEditLease, analyzeSeamSamples, applyContentBaseline, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, clearProbeCache, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, ffmpegThreads, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStabTrfMotion, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, projectSummary, proposeEdit, probe, probeCacheStats, releaseEditLease, renewEditLease, resolveQcPolicy, restoreEditSessionCheckpoint, resumeEditSession, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, sharpnessVerdict, snapKeepSegmentsToPauses, spectralFluxOnset, stabilizeVerdict, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
@@ -300,6 +300,24 @@ let madBad = null;
 try { meanAbsDiffGray(Buffer.from([1, 2]), Buffer.from([1])); } catch (e) { madBad = e; }
 checkOk(madBad?.code === "INVALID_ARG", "meanAbsDiffGray refuses unequal-length buffers with INVALID_ARG", madBad?.message ?? "");
 
+// Probe cache (lượt 189, demilp idea): in-process memo, validated by
+// mtime + size on every lookup. Unit-level, in this process (the MCP
+// server child has its own cache — covered by the MCP block below).
+clearProbeCache();
+const cacheUnitBefore = probeCacheStats();
+checkOk(cacheUnitBefore.enabled === true && cacheUnitBefore.entries === 0 && cacheUnitBefore.hits === 0 && cacheUnitBefore.misses === 0, "probeCacheStats starts empty after clearProbeCache", JSON.stringify(cacheUnitBefore));
+const cacheUnit1 = await probe(path.join(root, "test/source.mp4"));
+const cacheUnit2 = await probe(path.join(root, "test/source.mp4"));
+const cacheUnitAfter = probeCacheStats();
+checkOk(cacheUnit1.cached === false && cacheUnit2.cached === true, "probe cache (unit): first probe fresh, second replayed", JSON.stringify({ c1: cacheUnit1.cached, c2: cacheUnit2.cached }));
+checkOk(cacheUnitAfter.hits === 1 && cacheUnitAfter.misses === 1 && cacheUnitAfter.entries === 1, "probeCacheStats counts one hit + one miss + one entry", JSON.stringify(cacheUnitAfter));
+// The replay is a clone, not the stored object: mutating it must not
+// poison the next lookup.
+cacheUnit2.video.width = 999;
+const cacheUnit3 = await probe(path.join(root, "test/source.mp4"));
+checkOk(cacheUnit3.cached === true && cacheUnit3.video?.width === 1280, "probe cache: mutating a replayed result does not poison the stored copy", JSON.stringify(cacheUnit3.video));
+clearProbeCache();
+
 const probeRes = await client.callTool({
   name: "probe",
   arguments: { input: path.join(root, "test/source.mp4") },
@@ -343,6 +361,29 @@ const probeSyncDriftRes = await client.callTool({
 });
 const probeSyncDriftJson = JSON.parse(probeSyncDriftRes.content[0].text);
 checkOk(probeSyncDriftJson.video?.duration_seconds === 5 && probeSyncDriftJson.audio?.duration_seconds === 4.4, "probe reports per-stream durations 5s/4.4s on the drift fixture", JSON.stringify({ v: probeSyncDriftJson.video?.duration_seconds, a: probeSyncDriftJson.audio?.duration_seconds }));
+// Probe cache over MCP (lượt 189): the same file probed twice through
+// the long-lived server — the second call replays, and doctor's
+// probe_cache counters move by exactly one hit + one miss. A rewrite
+// (different size) invalidates the entry; MEDIAKIT_PROBE_CACHE=0
+// disables the memo in a fresh CLI process.
+const cacheScratch = path.join(root, "outputs/mcp-probe-cache.mp4");
+await copyFile(path.join(root, "test/source.mp4"), cacheScratch);
+const cacheDoctorBefore = JSON.parse((await client.callTool({ name: "doctor", arguments: {} })).content[0].text);
+const cacheMcp1 = JSON.parse((await client.callTool({ name: "probe", arguments: { input: cacheScratch } })).content[0].text);
+const cacheMcp2 = JSON.parse((await client.callTool({ name: "probe", arguments: { input: cacheScratch } })).content[0].text);
+const cacheDoctorAfter = JSON.parse((await client.callTool({ name: "doctor", arguments: {} })).content[0].text);
+checkOk(cacheMcp1.cached === false && cacheMcp2.cached === true, "probe cache (MCP): first probe fresh, second replayed", JSON.stringify({ c1: cacheMcp1.cached, c2: cacheMcp2.cached }));
+checkOk(cacheMcp1.duration_seconds === cacheMcp2.duration_seconds && cacheMcp1.size_bytes === cacheMcp2.size_bytes && cacheMcp1.video?.width === cacheMcp2.video?.width, "probe cache (MCP): replay returns the same measurement", JSON.stringify({ d: cacheMcp2.duration_seconds, s: cacheMcp2.size_bytes }));
+checkOk(cacheDoctorAfter.probe_cache?.enabled === true && cacheDoctorAfter.probe_cache.hits === cacheDoctorBefore.probe_cache.hits + 1 && cacheDoctorAfter.probe_cache.misses === cacheDoctorBefore.probe_cache.misses + 1 && cacheDoctorAfter.probe_cache.entries === cacheDoctorBefore.probe_cache.entries + 1, "doctor probe_cache counters move by exactly one hit + one miss + one entry", JSON.stringify({ before: cacheDoctorBefore.probe_cache, after: cacheDoctorAfter.probe_cache }));
+await appendFile(cacheScratch, Buffer.from([0]));
+const cacheMcp3 = JSON.parse((await client.callTool({ name: "probe", arguments: { input: cacheScratch } })).content[0].text);
+checkOk(cacheMcp3.cached === false && cacheMcp3.size_bytes === cacheMcp2.size_bytes + 1, "probe cache (MCP): rewrite with a different size re-probes", JSON.stringify({ before: cacheMcp2.size_bytes, after: cacheMcp3.size_bytes }));
+const cacheOff1 = await runCliJson(["probe", cacheScratch], { MEDIAKIT_PROBE_CACHE: "0" });
+const cacheOff2 = await runCliJson(["probe", cacheScratch], { MEDIAKIT_PROBE_CACHE: "0" });
+checkOk(cacheOff1.cached === false && cacheOff2.cached === false, "probe cache off (CLI): MEDIAKIT_PROBE_CACHE=0 probes fresh twice", JSON.stringify({ c1: cacheOff1.cached, c2: cacheOff2.cached }));
+const cacheOffDoctor = await runCliJson(["doctor"], { MEDIAKIT_PROBE_CACHE: "0" });
+checkOk(cacheOffDoctor.probe_cache?.enabled === false && cacheOffDoctor.probe_cache.hits === 0 && cacheOffDoctor.probe_cache.misses === 0 && cacheOffDoctor.probe_cache.entries === 0, "doctor with MEDIAKIT_PROBE_CACHE=0 reports the cache disabled with zero counters", JSON.stringify(cacheOffDoctor.probe_cache));
+await rm(cacheScratch, { force: true });
 // check judges dimensions as displayed: the vertical fixture is coded
 // 1920x1080 but displays 1080x1920, so its dimensions rule passes
 // TikTok; the 720x1280 rotated file reports its display size, not

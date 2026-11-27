@@ -89,6 +89,11 @@ lists exactly the options that command accepts.
 ### 1. Probe before you transform
 Always `probe` first. A crop of 720×1280 fails on a 640×360 source; a trim
 past the end of the file fails too. The probe result is the ground truth.
+Probes are memoized in-process per file (re-validated against mtime + size
+on every call, so a rewritten file is re-probed) — a repeated `probe` on an
+unchanged file returns `cached: true` instead of spawning ffprobe again.
+`MEDIAKIT_PROBE_CACHE=0` turns the memo off; `doctor` reports the hit/miss
+counters in `probe_cache`.
 
 ### 2. Re-encode vs stream copy (trim)
 - **Default trim re-encodes**: frame-accurate cuts at any timestamp.
