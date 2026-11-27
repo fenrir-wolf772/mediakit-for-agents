@@ -15,7 +15,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
-import { acquireEditLease, analyzeSeamSamples, applyContentBaseline, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, ffmpegThreads, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStabTrfMotion, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, projectSummary, proposeEdit, releaseEditLease, renewEditLease, resolveQcPolicy, restoreEditSessionCheckpoint, resumeEditSession, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, snapKeepSegmentsToPauses, spectralFluxOnset, stabilizeVerdict, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
+import { acquireEditLease, analyzeSeamSamples, applyContentBaseline, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, ffmpegThreads, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStabTrfMotion, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, projectSummary, proposeEdit, releaseEditLease, renewEditLease, resolveQcPolicy, restoreEditSessionCheckpoint, resumeEditSession, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, sharpnessVerdict, snapKeepSegmentsToPauses, spectralFluxOnset, stabilizeVerdict, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
@@ -214,19 +214,19 @@ await client.connect(transport);
 const tools = await client.listTools();
 const names = tools.tools.map((t) => t.name);
 console.log("tools/list:", names.join(", "));
-const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "normalize", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "magnify", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "stabilize", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut", "clean_voice", "measure_pace", "highlights", "align_voice", "safety", "estimate_conversion", "release_checkpoint", "list_operations", "describe_operation", "list_templates", "validate_template_package", "chunk_captions", "validate_shot_spec", "lease", "project_summary", "preview_compare", "propose_edit", "edit_session", "demo_frames"];
+const expected = ["probe", "trim", "crop", "resize", "extract_audio", "extract_frame", "thumbnail", "loudness", "concat", "burn_captions", "convert", "normalize", "reframe", "check", "silence", "doctor", "cropdetect", "package", "mix", "frames", "overlay", "scenes", "keyframes", "fit", "pip", "magnify", "broll", "titlecard", "intro", "social", "convert_captions", "generate_srt", "find", "svg_animate", "compress", "receipt", "mux", "export_gif", "transcribe", "grade", "reverse", "rotate", "make_loopable", "freeze", "fastforward", "boomerang", "batch", "interpolate", "denoise", "stabilize", "sharpness", "segment", "publish_kit", "qa_report", "manifest", "determinism", "chroma_key", "zoom_pan", "image_to_video", "cut_words", "assemble", "slideshow", "remove_retakes", "job", "download", "audit", "motion", "verify", "verify_cuts", "diagnose", "chapters", "hook", "bpm", "beat_grid", "tempo_drift", "transitions", "init_project", "patch_manifest", "export_timeline", "extract_frames", "audio_levels", "search_words", "smart_cut", "clean_voice", "measure_pace", "highlights", "align_voice", "safety", "estimate_conversion", "release_checkpoint", "list_operations", "describe_operation", "list_templates", "validate_template_package", "chunk_captions", "validate_shot_spec", "lease", "project_summary", "preview_compare", "propose_edit", "edit_session", "demo_frames"];
 const missing = expected.filter((n) => !names.includes(n));
-console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 101 tools present");
-checkOk(missing.length === 0, "tools/list has all 101 tools", `missing: ${missing.join(", ")}`);
+console.log(missing.length ? `MISSING: ${missing.join(", ")}` : "all 102 tools present");
+checkOk(missing.length === 0, "tools/list has all 102 tools", `missing: ${missing.join(", ")}`);
 
 // Progressive discovery (lượt 147, idea: KyaniteLabs/kinocut):
 // the compact catalog first, full schema only on demand.
 const discAll = listOperations({});
 console.log("list_operations:", discAll.tools.length, "tools | families", discAll.families.map((f) => `${f.name}:${f.count}`).join(" "));
-checkOk(discAll.total_tools === 101 && discAll.tools.length === 101 && discAll.profile === "full" && discAll.visible_tools === 101, "list_operations (pure) lists all 101 tools in full profile", JSON.stringify({ total: discAll.total_tools, visible: discAll.visible_tools, profile: discAll.profile }));
-checkOk(discAll.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:27 edit:38 text:7 image:9 assemble:18 meta:2", "list_operations families split 27/38/7/9/18/2", discAll.families.map((f) => `${f.name}:${f.count}`).join(" "));
+checkOk(discAll.total_tools === 102 && discAll.tools.length === 102 && discAll.profile === "full" && discAll.visible_tools === 102, "list_operations (pure) lists all 102 tools in full profile", JSON.stringify({ total: discAll.total_tools, visible: discAll.visible_tools, profile: discAll.profile }));
+checkOk(discAll.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:28 edit:38 text:7 image:9 assemble:18 meta:2", "list_operations families split 28/38/7/9/18/2", discAll.families.map((f) => `${f.name}:${f.count}`).join(" "));
 checkOk(discAll.tools.every((t) => typeof t.name === "string" && ["inspect", "edit", "text", "image", "assemble", "meta"].includes(t.family) && ["READ", "PLAN", "WRITE", "DESTRUCTIVE"].includes(t.tier) && typeof t.summary === "string" && t.summary.length > 10 && t.summary.length <= 161 && (t.summary.endsWith(".") || t.summary.endsWith("…"))), "every list_operations entry has a known family, a tier and a one-sentence summary (<=160 chars, ends . or …)", discAll.tools.filter((t) => !(t.summary.endsWith(".") || t.summary.endsWith("…"))).map((t) => t.name).join(","));
-checkOk(Object.keys(TOOL_FAMILY_OF).length === 101 && TOOL_DEFS.every((t) => TOOL_FAMILY_OF[t.name] !== undefined) && new Set(Object.values(TOOL_FAMILY_OF)).size === 6, "TOOL_FAMILY_OF covers every TOOL_DEFS entry exactly once, in 6 families", `map=${Object.keys(TOOL_FAMILY_OF).length} defs=${TOOL_DEFS.length}`);
+checkOk(Object.keys(TOOL_FAMILY_OF).length === 102 && TOOL_DEFS.every((t) => TOOL_FAMILY_OF[t.name] !== undefined) && new Set(Object.values(TOOL_FAMILY_OF)).size === 6, "TOOL_FAMILY_OF covers every TOOL_DEFS entry exactly once, in 6 families", `map=${Object.keys(TOOL_FAMILY_OF).length} defs=${TOOL_DEFS.length}`);
 const discEdit = listOperations({ family: "edit" });
 checkOk(discEdit.tools.length === 38 && discEdit.tools.every((t) => t.family === "edit"), "list_operations family=edit narrows to the 38 edit tools", `got ${discEdit.tools.length}`);
 let discBadFamily = null;
@@ -259,12 +259,12 @@ for (const [badArgs, why] of [[{ category: "nope" }, "unknown category"], [{ tim
   try { await listSceneTemplates(badArgs); } catch (e) { threw = e; }
   checkOk(threw?.code === "INVALID_ARG" && typeof threw?.message === "string" && threw.message.length > 0, `listSceneTemplates rejects ${why} with INVALID_ARG`, threw?.message ?? "no throw");
 }
-checkOk(toolProfile() === "full" && visibleTools().length === 101 && HOT_TOOLS.length === 18 && HOT_TOOLS.every((n) => TOOL_DEFS.some((t) => t.name === n)), "default profile is full (101 visible) and the 18 hot tools all exist", `profile=${toolProfile()} hot=${HOT_TOOLS.length}`);
+checkOk(toolProfile() === "full" && visibleTools().length === 102 && HOT_TOOLS.length === 18 && HOT_TOOLS.every((n) => TOOL_DEFS.some((t) => t.name === n)), "default profile is full (102 visible) and the 18 hot tools all exist", `profile=${toolProfile()} hot=${HOT_TOOLS.length}`);
 process.env.MEDIAKIT_TOOL_PROFILE = "hot";
 checkOk(toolProfile() === "hot" && visibleTools().length === 20 && visibleTools().some((t) => t.name === "list_operations") && visibleTools().some((t) => t.name === "describe_operation") && !visibleTools().some((t) => t.name === "chroma_key"), "hot profile narrows tools/list to 20 (18 hot + 2 discovery), chroma_key hidden", `visible=${visibleTools().length}`);
-checkOk(listOperations({}).tools.length === 101 && listOperations({}).visible_tools === 20, "list_operations still reports the FULL 101-tool catalog in hot profile (visible_tools 20)", JSON.stringify({ tools: listOperations({}).tools.length, visible: listOperations({}).visible_tools }));
+checkOk(listOperations({}).tools.length === 102 && listOperations({}).visible_tools === 20, "list_operations still reports the FULL 102-tool catalog in hot profile (visible_tools 20)", JSON.stringify({ tools: listOperations({}).tools.length, visible: listOperations({}).visible_tools }));
 process.env.MEDIAKIT_TOOL_PROFILE = "bogus";
-checkOk(toolProfile() === "full" && visibleTools().length === 101, "an unknown MEDIAKIT_TOOL_PROFILE value falls back to full (101 visible)", `profile=${toolProfile()}`);
+checkOk(toolProfile() === "full" && visibleTools().length === 102, "an unknown MEDIAKIT_TOOL_PROFILE value falls back to full (102 visible)", `profile=${toolProfile()}`);
 delete process.env.MEDIAKIT_TOOL_PROFILE;
 // Machine-readable contract (lượt 149): SPEC.json is generated from
 // the same TOOL_DEFS registry — the committed file must equal a
@@ -277,10 +277,10 @@ const specFresh = await buildSpec();
 checkOk(specOnDisk.spec_version === SPEC_VERSION && specFresh.spec_version === SPEC_VERSION, "SPEC.json carries spec_version 1", `on-disk=${specOnDisk.spec_version} fresh=${specFresh.spec_version}`);
 const pkgJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 checkOk(specOnDisk.mediakit_version === pkgJson.version && specFresh.mediakit_version === pkgJson.version, "SPEC.json mediakit_version matches package.json", `spec=${specOnDisk.mediakit_version} pkg=${pkgJson.version}`);
-checkOk(specOnDisk.tool_count === 101 && specFresh.tool_count === 101 && specOnDisk.tools.length === 101, "SPEC.json lists all 101 tools", `on-disk=${specOnDisk.tool_count} fresh=${specFresh.tool_count}`);
+checkOk(specOnDisk.tool_count === 102 && specFresh.tool_count === 102 && specOnDisk.tools.length === 102, "SPEC.json lists all 102 tools", `on-disk=${specOnDisk.tool_count} fresh=${specFresh.tool_count}`);
 checkOk(specText(specOnDisk) === specText(specFresh), "committed SPEC.json equals a fresh build byte for byte (regenerate with `npm run spec` when it drifts)", `hash on-disk=${specOnDisk.spec_hash?.slice(0, 12)} fresh=${specFresh.spec_hash.slice(0, 12)}`);
 checkOk(specOnDisk.spec_hash === specHash(specOnDisk.tools) && specFresh.spec_hash === specHash(specFresh.tools), "SPEC spec_hash is the sha256 of its own tools array", `hash=${specOnDisk.spec_hash.slice(0, 12)}…`);
-checkOk(specOnDisk.transports.join(",") === "stdio,http" && specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:27 edit:38 text:7 image:9 assemble:18 meta:2" && specOnDisk.families.reduce((n, f) => n + f.count, 0) === 101, "SPEC families split 27/38/7/9/18/2, sum to 101, transports stdio+http", specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" "));
+checkOk(specOnDisk.transports.join(",") === "stdio,http" && specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" ") === "inspect:28 edit:38 text:7 image:9 assemble:18 meta:2" && specOnDisk.families.reduce((n, f) => n + f.count, 0) === 102, "SPEC families split 28/38/7/9/18/2, sum to 102, transports stdio+http", specOnDisk.families.map((f) => `${f.name}:${f.count}`).join(" "));
 checkOk(specOnDisk.tools.every((t) => typeof t.name === "string" && ["inspect", "edit", "text", "image", "assemble", "meta"].includes(t.family) && ["READ", "PLAN", "WRITE", "DESTRUCTIVE"].includes(t.tier) && typeof t.summary === "string" && t.summary.length > 10 && t.summary.length <= 161 && typeof t.description === "string" && t.description.length > t.summary.length && t.inputSchema?.type === "object" && typeof t.inputSchema.properties === "object" && (t.inputSchema.required === undefined || Array.isArray(t.inputSchema.required))), "every SPEC tool entry has a known family/tier, a one-sentence summary, a longer description and an object JSON Schema with properties (required present only when the tool has required params — an all-optional schema has none)", specOnDisk.tools.filter((t) => !(t.inputSchema?.type === "object")).map((t) => t.name).join(","));
 checkOk(JSON.stringify(specOnDisk.tools.map((t) => t.name)) === JSON.stringify(TOOL_DEFS.map((t) => t.name)), "SPEC tool order follows the TOOL_DEFS registry order", `first=${specOnDisk.tools[0].name} last=${specOnDisk.tools.at(-1).name}`);
 checkOk(specOnDisk.tools.find((t) => t.name === "probe")?.inputSchema.properties.input?.type === "string" && specOnDisk.tools.find((t) => t.name === "trim")?.inputSchema.properties.stream_copy?.type === "boolean" && specOnDisk.tools.find((t) => t.name === "patch_manifest")?.tier === "DESTRUCTIVE", "SPEC schemas carry real parameter types (probe.input string, trim.stream_copy boolean) and patch_manifest stays DESTRUCTIVE", "");
@@ -2557,6 +2557,13 @@ if (vidstabAvailable) {
   checkOk(stabJson.proof?.verdict === "improved" && typeof stabJson.proof.jitter_ratio === "number" && stabJson.proof.jitter_ratio <= 0.6 && stabJson.proof.jitter_after < stabJson.proof.jitter_before, "stabilize cuts measured jitter by >40% on the shaky fixture (verdict improved)", `jitter ${stabJson.proof?.jitter_before} -> ${stabJson.proof?.jitter_after} (ratio ${stabJson.proof?.jitter_ratio})`);
   checkOk(near(stabJson.duration_seconds, 10, 0.1) && stabJson.dimensions === "640x360" && stabJson.size_bytes > 0, "stabilize keeps duration/dimensions and reports size_bytes", `${stabJson.duration_seconds}s ${stabJson.dimensions} ${stabJson.size_bytes} B`);
   checkOk(stabJson.proof?.output_motion?.p50_px <= 1 && typeof stabJson.proof?.output_motion?.p90_px === "number" && typeof stabJson.proof?.output_motion?.spike_frames === "number", "stabilize reports the output's own motion tail (p50 <= 1px, p90 + spike count visible, not hidden)", JSON.stringify(stabJson.proof?.output_motion));
+  // Sharpness in the proof (lượt 188): the shaky fixture is
+  // ultra-sharp grid texture (mean ~23.4), and vidstab resampling
+  // softens it to ~15.2 (ratio 0.65, measured standalone) — so the
+  // proof must show the softening instead of hiding it. Bounds are
+  // loose on purpose: the exact ratio moves with x264 threading.
+  checkOk(typeof stabJson.proof?.sharpness_before?.mean === "number" && stabJson.proof.sharpness_before.mean > 20 && typeof stabJson.proof?.sharpness_after?.mean === "number" && stabJson.proof.sharpness_after.mean > 10 && typeof stabJson.proof?.sharpness_ratio === "number" && stabJson.proof.sharpness_ratio > 0.5 && stabJson.proof.sharpness_ratio < 0.8, "stabilize proof reports sharpness before/after + ratio (ultra-sharp fixture softens to ~0.65x)", JSON.stringify({ before: stabJson.proof?.sharpness_before, after: stabJson.proof?.sharpness_after, ratio: stabJson.proof?.sharpness_ratio }));
+  checkOk(Array.isArray(stabJson.proof?.notes) && stabJson.proof.notes.some((n) => /softened the picture/.test(n)), "stabilize proof flags the softening in the notes when the ratio is below 0.75", JSON.stringify(stabJson.proof?.notes));
   const { stdout: stabProbeOut } = await execFileAsync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,codec_name", "-of", "json", path.join(root, "outputs/mcp-stabilize.mp4")]);
   const stabStreams = JSON.parse(stabProbeOut).streams ?? [];
   checkOk(stabStreams.some((s) => s.codec_type === "video" && s.codec_name === "h264") && stabStreams.some((s) => s.codec_type === "audio" && s.codec_name === "aac"), "stabilize copies the audio stream untouched (aac) and encodes h264", JSON.stringify(stabStreams));
@@ -2579,6 +2586,7 @@ if (vidstabAvailable) {
   const stabDry = await runCli(["stabilize", path.join(root, "test/shaky-source.mp4"), "-o", path.join(root, "outputs/mcp-stabilize-dry.mp4"), "--dry-run"], {});
   const stabDryJson = JSON.parse(stabDry.out);
   checkOk(stabDry.code === 0 && Array.isArray(stabDryJson.commands) && stabDryJson.commands.length === 2 && /vidstabdetect/.test(stabDryJson.commands[0]) && /vidstabtransform/.test(stabDryJson.commands[1]) && !existsSync(path.join(root, "outputs/mcp-stabilize-dry.mp4")), "CLI stabilize --dry-run prints both exact commands (detect then transform) and writes no file", stabDry.out.slice(0, 300));
+  checkOk(typeof stabDryJson.proof?.sharpness_before?.mean === "number" && stabDryJson.proof.sharpness_after === null && stabDryJson.proof.sharpness_ratio === null, "stabilize --dry-run measures sharpness_before on the input (exact) and reports sharpness_after/ratio null", JSON.stringify(stabDryJson.proof));
 } else {
   const stabRefused = await callExpectThrow("stabilize", { input: path.join(root, "test/shaky-source.mp4"), output: path.join(root, "outputs/mcp-stabilize.mp4") });
   checkOk(/vidstab/.test(stabRefused), "stabilize refuses clearly when this ffmpeg build has no vidstab", stabRefused.slice(0, 200));
@@ -2587,6 +2595,73 @@ const stabBadSmooth = await runCli(["stabilize", path.join(root, "test/shaky-sou
 checkOk(stabBadSmooth.code !== 0 && /smoothing/.test(stabBadSmooth.out), "stabilize refuses smoothing > 1000", stabBadSmooth.out.slice(0, 200));
 const stabBadCrop = await runCli(["stabilize", path.join(root, "test/shaky-source.mp4"), "-o", path.join(root, "outputs/mcp-stabilize-bad.mp4"), "--crop", "sideways"], {});
 checkOk(stabBadCrop.code !== 0 && /crop/.test(stabBadCrop.out), "stabilize refuses an unknown crop mode", stabBadCrop.out.slice(0, 200));
+
+// sharpness (lượt 188): Laplacian-mean curve over evenly sampled
+// frames, one ffmpeg pass via select. Pure ladder first, then MCP
+// runs. Calibration (ffmpeg 8.1.2, probe width 320): sharp testsrc
+// source.mp4 mean 4.00, boxblur=2 2.81, boxblur=8 0.97; the
+// sharpness-source fixture's sharp half 2.85 vs blurred half 0.48;
+// the shaky fixture 23.41. The verdict ladder sits between
+// measured rungs (3.0 between 2.81 and 4.00, 1.5 between 0.97 and
+// 2.81), so no assert pins a verdict at a boundary.
+checkOk(
+  sharpnessVerdict(4.0) === "sharp" && sharpnessVerdict(3.0) === "sharp" &&
+  sharpnessVerdict(2.81) === "soft" && sharpnessVerdict(1.5) === "soft" &&
+  sharpnessVerdict(0.97) === "blurry" && sharpnessVerdict(null) === null,
+  "sharpnessVerdict: sharp >= 3, soft 1.5-3, blurry < 1.5, null in -> null out",
+  "4.0 sharp / 2.81 soft / 0.97 blurry",
+);
+const sharpRes = await client.callTool({
+  name: "sharpness",
+  arguments: { input: path.join(root, "test/source.mp4") },
+});
+const sharpJson = JSON.parse(sharpRes.content[0].text);
+console.log("sharpness source:", JSON.stringify({ mean: sharpJson.mean, p10: sharpJson.p10, p90: sharpJson.p90, verdict: sharpJson.verdict }));
+checkOk(sharpJson.verdict === "sharp" && near(sharpJson.mean, 4.0, 0.5) && sharpJson.sample_count === 10 && sharpJson.curve.length === 10 && sharpJson.p10 <= sharpJson.mean && sharpJson.mean <= sharpJson.p90 && sharpJson.curve.every((c, i, a) => i === 0 || c.timestamp > a[i - 1].timestamp), "sharpness on the sharp testsrc: verdict sharp, mean ~4.0, 10 samples with increasing timestamps, p10 <= mean <= p90", JSON.stringify({ mean: sharpJson.mean, verdict: sharpJson.verdict, n: sharpJson.sample_count }));
+const sharpBlurRes = await client.callTool({
+  name: "sharpness",
+  arguments: { input: path.join(root, "test/sharpness-blur.mp4") },
+});
+const sharpBlurJson = JSON.parse(sharpBlurRes.content[0].text);
+checkOk(sharpBlurJson.verdict === "blurry" && near(sharpBlurJson.mean, 0.97, 0.3) && sharpBlurJson.blurry_samples === 0, "sharpness on the boxblur=8 fixture: verdict blurry, mean ~0.97, blurry_samples 0 — the file is UNIFORMLY soft, and blurry_samples is relative (below half the file's own p90), so nothing inside it is relatively softer", JSON.stringify({ mean: sharpBlurJson.mean, verdict: sharpBlurJson.verdict, blurry: sharpBlurJson.blurry_samples }));
+const sharpMixedRes = await client.callTool({
+  name: "sharpness",
+  arguments: { input: path.join(root, "test/sharpness-source.mp4") },
+});
+const sharpMixedJson = JSON.parse(sharpMixedRes.content[0].text);
+console.log("sharpness mixed:", JSON.stringify({ mean: sharpMixedJson.mean, blurry: sharpMixedJson.blurry_samples, verdict: sharpMixedJson.verdict }));
+checkOk(sharpMixedJson.verdict === "soft" && near(sharpMixedJson.mean, 1.66, 0.25) && sharpMixedJson.blurry_samples === 5 && near(sharpMixedJson.curve[0].value, 2.85, 0.4) && near(sharpMixedJson.curve[9].value, 0.48, 0.25), "sharpness on the half-sharp/half-blur fixture: verdict soft, mean ~1.66, exactly the 5 blurred samples flagged (first ~2.85, last ~0.48)", JSON.stringify({ mean: sharpMixedJson.mean, blurry: sharpMixedJson.blurry_samples, first: sharpMixedJson.curve[0].value, last: sharpMixedJson.curve[9].value }));
+const sharpCli = await runCli(["sharpness", path.join(root, "test/source.mp4"), "--samples", "2"], {});
+const sharpCliCountJson = JSON.parse(sharpCli.out);
+checkOk(sharpCli.code === 0 && sharpCliCountJson.sample_count === 2 && sharpCliCountJson.curve.length === 2, "CLI sharpness --samples 2 samples exactly 2 frames", sharpCli.out.slice(0, 200));
+const sharpBadSamples = await runCli(["sharpness", path.join(root, "test/source.mp4"), "--samples", "100"], {});
+checkOk(sharpBadSamples.code !== 0 && /samples/.test(sharpBadSamples.out), "sharpness refuses samples > 60", sharpBadSamples.out.slice(0, 200));
+const sharpAudioText = await callExpectThrow("sharpness", { input: path.join(root, "test/mix-voice.mp3") });
+checkOk(/video input/.test(sharpAudioText), "sharpness refuses an audio-only input", sharpAudioText.slice(0, 200));
+// sharpness in batch + manifest (probe-only like hook): no file is
+// written, the curve + stats come back in the row's / step's result.
+await rm(path.join(root, "outputs/mcp-batch-sharp-in"), { recursive: true, force: true });
+await rm(path.join(root, "outputs/mcp-batch-sharp-out"), { recursive: true, force: true });
+await mkdir(path.join(root, "outputs/mcp-batch-sharp-in"), { recursive: true });
+await copyFile(path.join(root, "test/source.mp4"), path.join(root, "outputs/mcp-batch-sharp-in/source.mp4"));
+await copyFile(path.join(root, "test/sharpness-blur.mp4"), path.join(root, "outputs/mcp-batch-sharp-in/sharpness-blur.mp4"));
+const sharpBatchRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "sharpness", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-sharp-in"), output_dir: path.join(root, "outputs/mcp-batch-sharp-out") },
+});
+const sharpBatchJson = JSON.parse(sharpBatchRes.content[0].text);
+const sharpBatchRow = (name) => sharpBatchJson.results.find((r) => r.input.endsWith(`/${name}`));
+checkOk(sharpBatchJson.succeeded === 2 && sharpBatchJson.failed === 0 && sharpBatchJson.output_suffix === null && sharpBatchJson.results.every((r) => r.status === "ok" && r.output === null), "batch sharpness succeeds on both files with no output file (output null, suffix null)", JSON.stringify(sharpBatchJson.results.map((r) => r.output)));
+checkOk(near(sharpBatchRow("source.mp4").result.mean, 4.0, 0.5) && near(sharpBatchRow("sharpness-blur.mp4").result.mean, 0.97, 0.3), "batch sharpness rows carry the curve stats (source ~4.0 sharp, blur ~0.97 blurry)", JSON.stringify(sharpBatchJson.results.map((r) => r.result?.mean)));
+await rm(path.join(root, "outputs/mcp-manifest-sharpness.mp4"), { force: true });
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const sharpManifestRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-sharpness.json") },
+});
+const sharpManifestJson = JSON.parse(sharpManifestRes.content[0].text);
+checkOk(sharpManifestJson.steps_run === 2 && sharpManifestJson.steps.every((s) => s.status === "ok") && sharpManifestJson.steps[0].tool === "sharpness" && near(sharpManifestJson.steps[0].result.mean, 4.0, 0.5) && near(sharpManifestJson.final.duration_seconds, 5, 0.05), "manifest sharpness step records the ~4.0 mean, then trim cuts it (final 5s)", JSON.stringify(sharpManifestJson.steps.map((s) => s.result?.mean ?? s.result?.duration_seconds)));
+checkOk(sharpManifestJson.steps[0].output === sharpManifestJson.input, "manifest sharpness step passes the chain file through (its output is the input it analyzed)", sharpManifestJson.steps[0].output);
 
 // segment: HLS VOD playlist + .ts segments. The fixture source.mp4
 // has keyframes every 8.333s, so a copy with segment_time 2 gives 2
@@ -3618,7 +3693,7 @@ checkOk(dedupCliJson.frame_count === 1 && dedupCliJson.dedup?.dropped === 19, "C
 // list_operations / describe_operation over MCP (lượt 147).
 const listOpsRes = await client.callTool({ name: "list_operations", arguments: {} });
 const listOpsJson = JSON.parse(listOpsRes.content[0].text);
-checkOk(listOpsJson.total_tools === 101 && listOpsJson.tools?.length === 101 && listOpsJson.families?.find((f) => f.name === "edit")?.count === 38 && listOpsJson.tools?.every((t) => typeof t.summary === "string"), "MCP list_operations lists 101 tools with families (edit 38) and summaries", `total=${listOpsJson.total_tools}`);
+checkOk(listOpsJson.total_tools === 102 && listOpsJson.tools?.length === 102 && listOpsJson.families?.find((f) => f.name === "edit")?.count === 38 && listOpsJson.tools?.every((t) => typeof t.summary === "string"), "MCP list_operations lists 102 tools with families (edit 38) and summaries", `total=${listOpsJson.total_tools}`);
 const listOpsEditRes = await client.callTool({ name: "list_operations", arguments: { family: "image" } });
 const listOpsEditJson = JSON.parse(listOpsEditRes.content[0].text);
 checkOk(listOpsEditJson.tools?.length === 9 && listOpsEditJson.tools?.every((t) => t.family === "image"), "MCP list_operations family=image returns the 9 image tools", `got ${listOpsEditJson.tools?.length}`);
@@ -4787,6 +4862,20 @@ const hookBatchHist3Json = JSON.parse(hookBatchHist3Res.content[0].text);
 checkOk(hookBatchHist3Json.cached === 3 && hookBatchHist3Json.results.every((r) => r.status === "cached"), "batch hook third run serves all three rows from cache (history unchanged since run 2)", JSON.stringify(hookBatchHist3Json.results.map((r) => r.status)));
 const hookHistBatchDoc3 = JSON.parse(await readFile(hookHistBatchPath, "utf8"));
 checkOk(hookHistBatchDoc3.records.length === 3, "batch history file still has exactly 3 records after the duplicate runs", `records=${hookHistBatchDoc3.records.length}`);
+// Regression (lượt 188): a deleted history file must never be served
+// the stale "recorded" result — the cache key hashes a missing file
+// to null, the same key as the run that created it, so without the
+// post-run history check the re-run serves rows 1-2 "cached" and only
+// row 3 records (measured run2: totals [1,2,1], 1-record file).
+await rm(hookHistBatchPath, { force: true });
+const hookBatchHist4Res = await client.callTool({
+  name: "batch",
+  arguments: { operation: "hook", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-hook-in"), output_dir: path.join(root, "outputs/mcp-batch-hook-out"), args: { duration: 10, history_file: hookHistBatchPath, record: true }, jobs: 2 },
+});
+const hookBatchHist4Json = JSON.parse(hookBatchHist4Res.content[0].text);
+checkOk(hookBatchHist4Json.succeeded === 3 && hookBatchHist4Json.cached === 0 && hookBatchHist4Json.results.every((r) => r.status === "ok" && r.result.history.recorded === true), "batch hook after rm history re-runs all three rows (no stale cached 'recorded')", JSON.stringify(hookBatchHist4Json.results.map((r) => [r.status, r.result?.history?.records_total])));
+const hookHistBatchDoc4 = JSON.parse(await readFile(hookHistBatchPath, "utf8"));
+checkOk(hookHistBatchDoc4.records.length === 3 && new Set(hookHistBatchDoc4.records.map((r) => r.source_sha256)).size === 3, "batch history file is back to exactly 3 records after the rm + re-run", JSON.stringify(hookHistBatchDoc4.records.map((r) => `${r.source}:${r.start}-${r.end}`)));
 // Manifest: the hook step records through the manifest-relative path,
 // and the history file is hashed into the step cache key.
 await rm(path.join(root, "outputs/mcp-manifest-hook-history.mp4"), { force: true });
@@ -4811,6 +4900,18 @@ const hookManifestHist3Res = await client.callTool({
 });
 const hookManifestHist3Json = JSON.parse(hookManifestHist3Res.content[0].text);
 checkOk(hookManifestHist3Json.cache_hits === 2 && hookManifestHist3Json.steps.every((s) => s.status === "cached"), "manifest hook third run serves both steps from cache (history unchanged)", JSON.stringify(hookManifestHist3Json.steps.map((s) => s.status)));
+// Regression (lượt 188): same stale-cache hole in the manifest step
+// cache — the step was served "cached" while its history file did
+// not exist at all (run2 crashed on the readFile below with ENOENT).
+await rm(path.join(root, "outputs/hook-history-manifest.json"), { force: true });
+const hookManifestHist4Res = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-hook-history.json") },
+});
+const hookManifestHist4Json = JSON.parse(hookManifestHist4Res.content[0].text);
+checkOk(hookManifestHist4Json.steps[0].status === "ok" && hookManifestHist4Json.steps[0].result.history.recorded === true, "manifest hook after rm history re-runs the step (not served 'cached' with a missing file)", JSON.stringify(hookManifestHist4Json.steps.map((s) => s.status)));
+const hookHistManifestDoc4 = JSON.parse(await readFile(path.join(root, "outputs/hook-history-manifest.json"), "utf8"));
+checkOk(hookHistManifestDoc4.records.length === 1 && hookHistManifestDoc4.records[0].start === 15 && hookHistManifestDoc4.records[0].end === 25, "manifest history file is back to the one recorded window [15,25) after the rm + re-run", JSON.stringify(hookHistManifestDoc4.records));
 
 
 // bpm: tempo from a spectral-flux onset function + autocorrelation /
@@ -9497,7 +9598,7 @@ const metaNestedJson = JSON.parse(metaNested.contents[0].text);
 checkOk(metaNestedJson.relative_path === "test/nested/deep-clip.mp4" && near(metaNestedJson.duration_seconds, 10, 0.05), "videos://{+filename}/metadata reaches a nested path (reserved expansion)", JSON.stringify(metaNestedJson).slice(0, 160));
 const infoRes = await client.readResource({ uri: "videos://workspace/info" });
 const infoJson = JSON.parse(infoRes.contents[0].text);
-checkOk(infoJson.root === root && infoJson.tools_total === 101 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 101 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
+checkOk(infoJson.root === root && infoJson.tools_total === 102 && infoJson.tools_available >= 48 && typeof infoJson.ffmpeg_version === "string" && infoJson.media_files === listJson.total_files, "videos://workspace/info reports root, 102 tools, ffmpeg version, media count matching the list", JSON.stringify(infoJson).slice(0, 300));
 const escText = await readResourceExpectError(client, "videos://../package.json/metadata");
 checkOk(/escapes the workspace root/.test(escText), "videos://../package.json/metadata is refused as a workspace escape", escText.slice(0, 200));
 const notMediaText = await readResourceExpectError(client, "videos://package.json/metadata");
@@ -11908,7 +12009,10 @@ checkOk(bounceTopHigh !== null && Math.abs(bounceTopHigh - 293) <= 3, "bounce ap
 checkOk(bounceTopClamped !== null && Math.abs(bounceTopClamped - 109) <= 3, "bounce apex 0.5 + radius 0.4 clamps the apex so the ball still rises (top row 109)", `got ${bounceTopClamped}`);
 // Easing + spring (turn 111): fx.ease is the full easings.net set
 // (30 named curves + 5 legacy short names, all 0 -> 0 and 1 -> 1),
-// fx.spring is a damped harmonic oscillator (mass/stiffness/damping).
+// plus smootherstep (lượt 188, quintic 6t^5-15t^4+10t^3 from the
+// podcli camera-pan idea — zero slope at both ends, so a pan starts
+// and lands with no jerk), fx.spring is a damped harmonic oscillator
+// (mass/stiffness/damping).
 // The slide-in template takes an `ease` param (default easeOutCubic,
 // the old hard-coded curve); the spring-in template draws a card
 // that springs in with a physical overshoot. Pinned values below
@@ -11924,9 +12028,15 @@ const easePins = [
   ["easeInCirc", 0.5, 0.133975],
   ["easeOutBack", 0.5, 1.087698],
   ["easeInElastic", 0.5, -0.015625],
+  ["smootherstep", 0.25, 0.103516],
 ];
-checkOk(easePins.every(([name, k, want]) => near(fxLib.ease[name](k), want, 1e-6)), "fx.ease pins 9 hand-computed easings.net values (bounce/sine/expo/quad/quart/quint/circ/back/elastic)", JSON.stringify(easePins.map(([n, k]) => [n, fxLib.ease[n](k)])));
-checkOk(Object.keys(fxLib.ease).length === 35 && Object.values(fxLib.ease).every((fn) => typeof fn === "function" && near(fn(0), 0, 1e-9) && near(fn(1), 1, 1e-9)), "fx.ease has 35 curves and every one maps 0 -> 0 and 1 -> 1", `keys=${Object.keys(fxLib.ease).length}`);
+checkOk(easePins.every(([name, k, want]) => near(fxLib.ease[name](k), want, 1e-6)), "fx.ease pins 10 hand-computed values (bounce/sine/expo/quad/quart/quint/circ/back/elastic + smootherstep)", JSON.stringify(easePins.map(([n, k]) => [n, fxLib.ease[n](k)])));
+checkOk(Object.keys(fxLib.ease).length === 36 && Object.values(fxLib.ease).every((fn) => typeof fn === "function" && near(fn(0), 0, 1e-9) && near(fn(1), 1, 1e-9)), "fx.ease has 36 curves and every one maps 0 -> 0 and 1 -> 1", `keys=${Object.keys(fxLib.ease).length}`);
+// smootherstep (lượt 188): symmetric around the midpoint, flat at
+// both ends (the derivative is 30t^2(1-t)^2, zero at 0 and 1) —
+// that is the whole point vs easeInOutQuint, which still has
+// non-zero slope at the ends and lands with a visible jerk.
+checkOk(near(fxLib.ease.smootherstep(0.5), 0.5, 1e-12) && near(fxLib.ease.smootherstep(0.75), 1 - 0.103515625, 1e-9) && fxLib.ease.smootherstep(0.05) < 0.002 && fxLib.ease.smootherstep(0.95) > 0.998, "smootherstep is symmetric (0.75 = 1 - 0.25 value) and flat at both ends (0.05 < 0.002, 0.95 > 0.998)", `ss(0.05)=${fxLib.ease.smootherstep(0.05)} ss(0.95)=${fxLib.ease.smootherstep(0.95)}`);
 checkOk([0, 0.25, 0.5, 0.75, 1].every((k) => fxLib.ease.in(k) === fxLib.ease.easeInCubic(k) && fxLib.ease.out(k) === fxLib.ease.easeOutCubic(k) && fxLib.ease.inOut(k) === fxLib.ease.easeInOutQuad(k) && fxLib.ease.outBack(k) === fxLib.ease.easeOutBack(k)), "legacy ease names are exact aliases (in=easeInCubic, out=easeOutCubic, inOut=easeInOutQuad, outBack=easeOutBack)", "sampled k=0..1");
 checkOk(fxLib.spring(-0.1, 0) === 0 && fxLib.spring(0, 0) === 0 && near(fxLib.spring(3, 0), 1, 0.005), "fx.spring is 0 before/at t0 and settled at 1 by 3s", `spring(3,0)=${fxLib.spring(3, 0)}`);
 let springPeak = 0;
@@ -11944,7 +12054,7 @@ checkOk(springThrowCount === 3, "fx.spring rejects non-positive mass/stiffness a
 // template cannot draw (or rejects one it can).
 const sceneTemplatesDoc = JSON.parse(await readFile(path.join(root, "skills/shorts-video/scene-templates.json"), "utf8"));
 const slideInEnum = sceneTemplatesDoc.templates.find((t) => t.id === "slide-in")?.params?.ease?.enum ?? [];
-checkOk(slideInEnum.length === Object.keys(fxLib.ease).length && slideInEnum.every((n) => typeof fxLib.ease[n] === "function") && Object.keys(fxLib.ease).every((n) => slideInEnum.includes(n)), "slide-in ease enum lists exactly the 35 fx.ease names (registry and code cannot drift)", `enum=${slideInEnum.length} ease keys=${Object.keys(fxLib.ease).length}`);
+checkOk(slideInEnum.length === Object.keys(fxLib.ease).length && slideInEnum.every((n) => typeof fxLib.ease[n] === "function") && Object.keys(fxLib.ease).every((n) => slideInEnum.includes(n)), "slide-in ease enum lists exactly the 36 fx.ease names (registry and code cannot drift)", `enum=${slideInEnum.length} ease keys=${Object.keys(fxLib.ease).length}`);
 // Camera shares fx.ease (turn 120): cam.shot({ease}) accepts every
 // fx.ease name, not just the 4 legacy short names the camera used
 // to keep in its own table. The legacy names are exact aliases in
@@ -11954,7 +12064,7 @@ checkOk(slideInEnum.length === Object.keys(fxLib.ease).length && slideInEnum.eve
 // with zoom 1->2 sits at cx 0.346875 / z 1.765625 mid-shot on
 // easeOutBounce, and at 0.4 / 1.5 on linear or on the inOut
 // fallback (easeInOutQuad(0.5)=0.5).
-checkOk(Object.keys(camLib.EASE).length === Object.keys(fxLib.ease).length && Object.keys(camLib.EASE).every((n) => camLib.EASE[n] === fxLib.ease[n]), "camera EASE is exactly the fx.ease table (35 curves, same functions)", `keys=${Object.keys(camLib.EASE).length}`);
+checkOk(Object.keys(camLib.EASE).length === Object.keys(fxLib.ease).length && Object.keys(camLib.EASE).every((n) => camLib.EASE[n] === fxLib.ease[n]), "camera EASE is exactly the fx.ease table (36 curves, same functions)", `keys=${Object.keys(camLib.EASE).length}`);
 const camBounce = camLib.shot({ t0: 0, t1: 2, from: [0.5, 0.5], to: [0.3, 0.5], zoom: [1, 2], ease: "easeOutBounce" });
 const camBounceTr = camLib.at([camBounce], 1);
 checkOk(near(camBounceTr.cx, 0.346875, 1e-6) && near(camBounceTr.z, 1.765625, 1e-6), "cam.shot easeOutBounce moves the camera on the bounce curve (mid-shot cx 0.346875, z 1.765625)", JSON.stringify(camBounceTr));
@@ -11967,6 +12077,13 @@ checkOk(near(camUnknownTr.cx, 0.4, 1e-9) && near(camUnknownTr.z, 1.5, 1e-9), "ca
 const camLegacy = camLib.shot({ t0: 0, t1: 2, from: [0.5, 0.5], to: [0.3, 0.5], zoom: [1, 2], ease: "in" });
 const camLegacyTr = camLib.at([camLegacy], 1);
 checkOk(near(camLegacyTr.cx, 0.475, 1e-9) && near(camLegacyTr.z, 1.125, 1e-9), "cam.shot legacy ease 'in' is still easeInCubic (mid-shot cx 0.475, z 1.125)", JSON.stringify(camLegacyTr));
+// smootherstep through the camera (lượt 188): at t=0.5 of a 2s
+// shot k=0.25, smootherstep(0.25)=0.103515625, so the camera has
+// barely left its start (cx 0.479296875, z 1.103515625) — a pan
+// that starts with no jerk, unlike linear/inOut at the same time.
+const camSmooth = camLib.shot({ t0: 0, t1: 2, from: [0.5, 0.5], to: [0.3, 0.5], zoom: [1, 2], ease: "smootherstep" });
+const camSmoothTr = camLib.at([camSmooth], 0.5);
+checkOk(near(camSmoothTr.cx, 0.479296875, 1e-9) && near(camSmoothTr.z, 1.103515625, 1e-9), "cam.shot smootherstep eases the pan (t=0.5: cx 0.479296875, z 1.103515625)", JSON.stringify(camSmoothTr));
 // Pixel proof the templates move the way the curves say: on a
 // 540x960 canvas the slide-in card at t=0.35 is 425px wide with the
 // default easeOutCubic, 372px with easeOutBounce, 243px with linear;
@@ -12786,7 +12903,7 @@ checkOk(explainSynth("REVISION_MISMATCH", "revision mismatch").kind === "fix-arg
 // the tier table, the MCP annotations, and the measured estimate.
 const safetyRes = await client.callTool({ name: "safety", arguments: {} });
 const safetyJson = JSON.parse(safetyRes.content[0].text);
-checkOk(safetyJson.total_tools === 101 && safetyJson.counts.READ === 30 && safetyJson.counts.PLAN === 5 && safetyJson.counts.WRITE === 64 && safetyJson.counts.DESTRUCTIVE === 2, "safety counts the tiers: 30 READ / 5 PLAN / 64 WRITE / 2 DESTRUCTIVE of 101 tools", JSON.stringify(safetyJson.counts));
+checkOk(safetyJson.total_tools === 102 && safetyJson.counts.READ === 31 && safetyJson.counts.PLAN === 5 && safetyJson.counts.WRITE === 64 && safetyJson.counts.DESTRUCTIVE === 2, "safety counts the tiers: 31 READ / 5 PLAN / 64 WRITE / 2 DESTRUCTIVE of 102 tools", JSON.stringify(safetyJson.counts));
 checkOk(JSON.stringify(safetyJson.tiers.DESTRUCTIVE.tools) === JSON.stringify(["patch_manifest", "edit_session"]), "DESTRUCTIVE is a closed set of two guarded in-place writers: patch_manifest + edit_session", JSON.stringify(safetyJson.tiers.DESTRUCTIVE.tools));
 const tierOf = {};
 for (const [tier, v] of Object.entries(safetyJson.tiers)) for (const n of v.tools) tierOf[n] = tier;
@@ -12952,7 +13069,7 @@ await checkBitrate("extract_audio", "extract_audio", { input: richSrc, output: p
 await checkBitrate("convert", "convert", { input: richSrc, output: path.join(root, "outputs/mcp-bitrate-convert.mp4"), video_codec: "libx264", audio_codec: "aac" }, path.join(root, "outputs/mcp-bitrate-convert.mp4"));
 await checkBitrate("pip mix", "pip", { input: richSrc, pip: path.join(root, "test/source2.mp4"), output: path.join(root, "outputs/mcp-bitrate-pip.mp4"), audio: "mix" }, path.join(root, "outputs/mcp-bitrate-pip.mp4"));
 
-// HTTP mode (turn 53): the same 101 tools over REST + JSON-RPC on an
+// HTTP mode (turn 53): the same 102 tools over REST + JSON-RPC on an
 // ephemeral loopback port — no network, no real server process. The
 // probe call goes through the HTTP dispatch, not the stdio client,
 // so a divergence between the two transports fails here.
@@ -13012,11 +13129,11 @@ async function readSse(url, { maxMs = 120000 } = {}) {
   }
   return { status: res.status, contentType, events, timedOut };
 }
-checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 101, "GET /mcp reports name/version/transport and 101 tools", JSON.stringify(httpMeta.json));
+checkOk(httpMeta.status === 200 && httpMeta.json?.name === "mediakit-for-agents" && httpMeta.json?.version === "0.1.0" && httpMeta.json?.transport === "http" && httpMeta.json?.tools === 102, "GET /mcp reports name/version/transport and 102 tools", JSON.stringify(httpMeta.json));
 const httpRoot = await httpCall("GET", "/");
 checkOk(httpRoot.status === 200 && httpRoot.json?.name === "mediakit-for-agents", "GET / returns the same metadata as GET /mcp", JSON.stringify(httpRoot.json));
 const httpTools = await httpCall("GET", "/mcp/tools");
-checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 101 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 101 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
+checkOk(httpTools.status === 200 && httpTools.json?.tools?.length === 102 && httpTools.json.tools.every((t) => t.inputSchema?.type === "object" && typeof t.description === "string"), "GET /mcp/tools lists 102 tools, each with a JSON inputSchema object", `count=${httpTools.json?.tools?.length}`);
 // Progressive discovery over HTTP (lượt 147): hot profile narrows
 // tools/list on the wire too — listTools() reads the env per call,
 // so flipping it here changes the same in-process server, and the
@@ -13030,7 +13147,7 @@ const httpRpcHot = await httpCall("POST", "/", { jsonrpc: "2.0", id: 7, method: 
 checkOk(httpRpcHot.status === 200 && httpRpcHot.json?.result?.tools?.length === 20, "JSON-RPC tools/list in hot profile also returns 20 tools", `count=${httpRpcHot.json?.result?.tools?.length}`);
 delete process.env.MEDIAKIT_TOOL_PROFILE;
 const httpToolsFull = await httpCall("GET", "/mcp/tools");
-checkOk(httpToolsFull.json?.tools?.length === 101, "clearing MEDIAKIT_TOOL_PROFILE restores the full 101-tool list", `count=${httpToolsFull.json?.tools?.length}`);
+checkOk(httpToolsFull.json?.tools?.length === 102, "clearing MEDIAKIT_TOOL_PROFILE restores the full 102-tool list", `count=${httpToolsFull.json?.tools?.length}`);
 const httpProbeSchema = httpTools.json?.tools?.find((t) => t.name === "probe");
 checkOk(httpProbeSchema?.inputSchema?.properties?.input?.type === "string" && (httpProbeSchema.inputSchema.required ?? []).includes("input"), "probe's HTTP inputSchema requires a string input (zod -> JSON schema conversion is faithful)", JSON.stringify(httpProbeSchema?.inputSchema).slice(0, 200));
 const httpProbe = await httpCall("POST", "/mcp/tools/probe/invoke", { arguments: { input: path.join(root, "test/source.mp4") } });
@@ -13138,7 +13255,7 @@ checkOk(httpRpcInit.status === 200 && typeof httpRpcInit.json?.result?.protocolV
 const httpRpcPing = await httpCall("POST", "/", { jsonrpc: "2.0", id: 2, method: "ping" });
 checkOk(httpRpcPing.status === 200 && JSON.stringify(httpRpcPing.json?.result) === "{}", "JSON-RPC ping returns an empty result", JSON.stringify(httpRpcPing.json));
 const httpRpcList = await httpCall("POST", "/", { jsonrpc: "2.0", id: 3, method: "tools/list" });
-checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 101, "JSON-RPC tools/list returns the same 101 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
+checkOk(httpRpcList.status === 200 && httpRpcList.json?.result?.tools?.length === 102, "JSON-RPC tools/list returns the same 102 tools as stdio", `count=${httpRpcList.json?.result?.tools?.length}`);
 const httpRpcCall = await httpCall("POST", "/", { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "probe", arguments: { input: path.join(root, "test/source.mp4") } } });
 const httpRpcCallBody = JSON.parse(httpRpcCall.json?.result?.content?.[0]?.text ?? "{}");
 checkOk(httpRpcCall.status === 200 && near(httpRpcCallBody.duration_seconds, 10, 0.1) && httpRpcCallBody.video?.width === 1280, "JSON-RPC tools/call probe returns the same 10s/1280 result as stdio", JSON.stringify(httpRpcCallBody).slice(0, 200));

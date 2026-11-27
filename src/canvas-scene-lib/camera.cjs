@@ -23,7 +23,7 @@
 //   ... draw HUD / subtitles in screen space ...
 
 // The easing table is shared with fx.cjs (lượt 120): cam.shot({ease})
-// accepts every fx.ease name (the full easings.net set, 35 curves)
+// accepts every fx.ease name (the full easings.net set + smootherstep, 36 curves)
 // plus the 4 legacy short names, which fx.ease already defines as
 // exact aliases (in=easeInCubic, out=easeOutCubic,
 // inOut=easeInOutQuad, outBack=easeOutBack) — old scenes do not move.

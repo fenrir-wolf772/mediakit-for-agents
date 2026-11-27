@@ -1,0 +1,1 @@
+{"version": 1, "input": "source.mp4", "output": "../outputs/mcp-manifest-sharpness.mp4", "steps": [{"tool": "sharpness", "args": {}}, {"tool": "trim", "args": {"start": 0, "end": 5}}]}

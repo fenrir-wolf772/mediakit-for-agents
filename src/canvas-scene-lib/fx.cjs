@@ -73,6 +73,13 @@ const ease = {
   easeInBounce: k => 1 - easeOutBounceFn(1 - k),
   easeOutBounce: easeOutBounceFn,
   easeInOutBounce: k => k < 0.5 ? (1 - easeOutBounceFn(1 - 2 * k)) / 2 : (1 + easeOutBounceFn(2 * k - 1)) / 2,
+  // Quintic smootherstep (Ken Perlin): 6t^5 - 15t^4 + 10t^3 — zero
+  // slope at BOTH ends, so a pan starts and lands with no jerk
+  // (podcli's build_cam_expr uses it for camera pans; idea only,
+  // the formula is standard math). Sits outside the easings.net
+  // families: it is the 36th curve, and cam.shot({ease}) accepts it
+  // like every other fx.ease name.
+  smootherstep: k => k * k * k * (k * (k * 6 - 15) + 10),
 };
 
 // progress 0..1 of [t0,t1], clamped; eased with ease.out by default

@@ -1930,6 +1930,103 @@ async function pickSharpestFrame(inPath, winStart, winEnd, samples, tmpDir) {
   return best;
 }
 
+// ---------------------------------------------------------------- sharpness
+// How sharp a video is, as a curve over time: N frames sampled
+// evenly across the file, each scored by the same Laplacian mean
+// `measureSharpness` uses for stills (3x3 kernel via `convolution`
+// + `signalstats` YAVG, probe width 320px). One ffmpeg pass — the
+// `select` filter picks the frame indices, so a 10-sample curve
+// costs one decode, not ten. The image path and this path agree
+// within ~0.15 on the same timestamps (calibrated lượt 188: the
+// residual is PNG round-trip + seek-vs-index frame alignment).
+// Calibrated at 320px (lượt 188, ffmpeg 8.1.2): sharp testsrc
+// source.mp4 mean 4.00, boxblur=2 2.81, boxblur=8 0.97; the
+// sharpness-source fixture's sharp half 2.85 vs blurred half 0.48;
+// the ultra-sharp grid fixture 23.41. Two honest limits, stated
+// in the tool output too: (1) the absolute scale is
+// content-dependent — a grid texture scores 23 while a soft
+// interview scores far lower — so the verdict ladder below is a
+// rough guide calibrated on testsrc-like content, and the reliable
+// readings are WITHIN one file (blurry_samples vs the file's own
+// p90) and BEFORE/AFTER one render of the same content; (2) a
+// flat-colour frame scores ~0 with no edges at all, so a cartoon
+// with long flat stretches reads softer than it looks.
+const SHARPNESS_PROBE_WIDTH = 320;
+const SHARPNESS_BLURRY_FRACTION = 0.5;
+
+// Pure verdict ladder on the curve mean, calibrated on testsrc-like
+// content (see above): sharp testsrc 4.00, boxblur=2 2.81 (soft),
+// boxblur=8 0.97 (blurry). The boundaries sit between measured
+// rungs with margin — 3.0 between 2.81 and 4.00, 1.5 between 0.97
+// and 2.81 — so a verdict never flips on encoder noise.
+export function sharpnessVerdict(mean) {
+  if (mean == null || !Number.isFinite(mean)) return null;
+  if (mean >= 3) return "sharp";
+  if (mean >= 1.5) return "soft";
+  return "blurry";
+}
+
+function sharpnessPercentile(sorted, p) {
+  return +sorted[Math.min(sorted.length - 1, Math.floor(p * (sorted.length - 1)))].toFixed(4);
+}
+
+// One-pass curve: null when the input has no video stream, when
+// fps/duration are unknown, or when the decode yields no values
+// (callers decide whether null is a loud failure or a soft one —
+// the tool fails loudly, stabilize treats it as unavailable proof).
+export async function measureSharpnessCurve(inPath, samples = 10) {
+  const meta = await probe(inPath);
+  if (!meta.video || meta.video.fps == null || meta.duration_seconds == null) return null;
+  const fps = meta.video.fps;
+  const total = Math.max(1, Math.round(meta.duration_seconds * fps));
+  const n = Math.min(samples, total);
+  const idx = [];
+  for (let j = 0; j < n; j++) idx.push(Math.min(total - 1, Math.floor(((j + 0.5) * total) / n)));
+  const sel = idx.map((i) => `eq(n\\,${i})`).join("+");
+  let stderr;
+  try {
+    ({ stderr } = await run(FFMPEG, [
+      "-hide_banner", "-nostats", "-i", inPath,
+      "-vf", `select='${sel}',scale=${SHARPNESS_PROBE_WIDTH}:-2,format=gray,convolution=${LAPLACIAN_KERNEL},signalstats,metadata=print:key=lavfi.signalstats.YAVG`,
+      "-vsync", "0", "-f", "null", "-",
+    ]));
+  } catch {
+    return null;
+  }
+  const vals = [...stderr.matchAll(/lavfi\.signalstats\.YAVG=([0-9.]+)/g)].map((m) => +m[1]);
+  if (!vals.length) return null;
+  const curve = vals.map((v, j) => ({ timestamp: +(idx[j] / fps).toFixed(3), value: +v.toFixed(4) }));
+  const sorted = [...vals].sort((a, b) => a - b);
+  const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+  return {
+    samples: curve,
+    mean: +mean.toFixed(4),
+    p10: sharpnessPercentile(sorted, 0.1),
+    p90: sharpnessPercentile(sorted, 0.9),
+    min: +sorted[0].toFixed(4),
+    max: +sorted[sorted.length - 1].toFixed(4),
+  };
+}
+
+export async function sharpness({ input, samples = 10 }) {
+  const inPath = await requireInput(input);
+  const n = num(samples, "samples", { min: 2, max: 60, integer: true });
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("sharpness needs a video input", "INVALID_ARG");
+  const curve = await measureSharpnessCurve(inPath, n);
+  if (!curve) throw new MediaKitError(`could not measure sharpness of ${inPath}`, "MEASURE_FAILED");
+  const blurryThreshold = +(curve.p90 * SHARPNESS_BLURRY_FRACTION).toFixed(4);
+  const blurrySamples = curve.samples.filter((s) => s.value < blurryThreshold).length;
+  return {
+    operation: "sharpness", input: inPath, duration_seconds: meta.duration_seconds,
+    sample_count: curve.samples.length, probe_width: SHARPNESS_PROBE_WIDTH,
+    curve: curve.samples, mean: curve.mean, p10: curve.p10, p90: curve.p90, min: curve.min, max: curve.max,
+    blurry_threshold: blurryThreshold, blurry_samples: blurrySamples,
+    verdict: sharpnessVerdict(curve.mean),
+    note: "Laplacian mean at 320px probe width (same measure as frames/thumbnail --sharpest). The absolute verdict is a rough ladder calibrated on testsrc-like content (sharp >= 3, soft 1.5-3, blurry < 1.5) and the scale is content-dependent — compare two renders of the SAME content, or read blurry_samples (samples below half the file's own p90) for softness inside one take.",
+  };
+}
+
 // ---------------------------------------------------------------- extract_frame
 
 export async function extractFrame({ input, output, timestamp = 0 }) {
@@ -10679,6 +10776,11 @@ export async function stabilize({
     if (["mp4", "mov", "m4v"].includes(ext)) transformArgs.push("-movflags", "+faststart");
     transformArgs.push(outPath);
     const jitterBefore = await measureJitter(inPath);
+    // Sharpness is the second proof axis (lượt 188): vidstab
+    // resampling blurs hard edges, so the proof reports whether the
+    // steadier picture also got softer — measured on the input here
+    // (read-only, so exact in dry-run too), on the output below.
+    const sharpnessBefore = await measureSharpnessCurve(inPath, 8);
     let refBefore = null;
     if (refPath) {
       try {
@@ -10702,11 +10804,13 @@ export async function stabilize({
           available: jitterBefore != null || (refBefore?.available ?? false),
           jitter_before: jitterBefore, jitter_after: null, jitter_ratio: null,
           output_motion: null,
+          sharpness_before: sharpnessBefore ? { mean: sharpnessBefore.mean, p10: sharpnessBefore.p10 } : null,
+          sharpness_after: null, sharpness_ratio: null,
           reference: refBefore?.available
             ? { psnr_y_db_before: refBefore.psnr_y_db ?? null, psnr_y_db_after: null, ssim_mean_before: refBefore.ssim_mean, ssim_mean_after: null }
             : null,
           verdict: null,
-          notes: ["Dry run: no file written. jitter_after / output_motion / reference-after are measured on the real output, so they report null here."],
+          notes: ["Dry run: no file written. jitter_after / output_motion / sharpness_after / reference-after are measured on the real output, so they report null here."],
         },
         commands: [formatCommand(detectArgs), formatCommand(transformArgs)],
         note: "Dry run: no file written. Two commands, in order: detect the camera path, then apply the smoothed path.",
@@ -10718,6 +10822,9 @@ export async function stabilize({
     const out = await probe(outPath);
     const jitterAfter = await measureJitter(outPath);
     const outputMotion = await measureStabOutputMotion(outPath);
+    const sharpnessAfter = await measureSharpnessCurve(outPath, 8);
+    const sharpnessRatio = sharpnessBefore && sharpnessAfter && sharpnessBefore.mean > 0
+      ? +(sharpnessAfter.mean / sharpnessBefore.mean).toFixed(3) : null;
     let refAfter = null;
     if (refPath) {
       try {
@@ -10732,6 +10839,11 @@ export async function stabilize({
     if (outputMotion == null) notes.push("output_motion could not be measured (vidstabdetect re-run failed)");
     if (outputMotion && outputMotion.spike_frames > 0) {
       notes.push(`${outputMotion.spike_frames}/${outputMotion.frames} output frames still move >=10px between neighbours — vidstab block-matching misses on ultra-sharp synthetic texture; on natural handheld footage this tail is smaller. See output_motion.p90_px.`);
+    }
+    if (sharpnessBefore == null || sharpnessAfter == null) {
+      notes.push("sharpness could not be measured on the input or the output (frame-decode failed) — the jitter verdict above still stands");
+    } else if (sharpnessRatio != null && sharpnessRatio < 0.75) {
+      notes.push(`stabilize softened the picture: sharpness mean ${sharpnessBefore.mean} -> ${sharpnessAfter.mean} (ratio ${sharpnessRatio}) — vidstab resampling blurs hard edges; on natural handheld footage the drop is usually smaller.`);
     }
     if (refPath && !(refBefore?.available) && !(refAfter?.available)) {
       notes.push("reference proof unavailable (ssim filter missing or clip too short) — verdict runs on jitter only");
@@ -10754,6 +10866,9 @@ export async function stabilize({
         jitter_after: jitterAfter,
         jitter_ratio: jitterBefore != null && jitterAfter != null && jitterBefore > 0 ? +(jitterAfter / jitterBefore).toFixed(3) : null,
         output_motion: outputMotion,
+        sharpness_before: sharpnessBefore ? { mean: sharpnessBefore.mean, p10: sharpnessBefore.p10 } : null,
+        sharpness_after: sharpnessAfter ? { mean: sharpnessAfter.mean, p10: sharpnessAfter.p10 } : null,
+        sharpness_ratio: sharpnessRatio,
         reference: refBefore?.available || refAfter?.available
           ? {
               psnr_y_db_before: refBefore?.available ? refBefore.psnr_y_db ?? null : null,
@@ -13382,6 +13497,7 @@ const TOOL_REQUIREMENTS = {
   interpolate: { filters: ["minterpolate"], encoders: ["libx264"] },
   denoise: { filters: ["hqdn3d", "nlmeans"], encoders: ["libx264"] },
   stabilize: { filters: ["vidstabdetect", "vidstabtransform"], encoders: ["libx264"] },
+  sharpness: { filters: ["select", "scale", "convolution", "signalstats"] },
   segment: {},
   convert: { encoders: ["libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4"] },
   normalize: { filters: ["scale", "fps", "format", "loudnorm"], encoders: ["libx264", "aac"] },
@@ -17489,6 +17605,24 @@ async function hashSidecar(p) {
   try { return await hashFile(p); } catch { return null; }
 }
 
+// The history file a recording hook run writes into, or null: only
+// `hook` with record:true has a recording side effect — every other
+// probe-only op is pure, so its cached result is safe as stored.
+// A recording run's cached result is only reusable while the history
+// file still holds the POST-run bytes: a deleted history file hashes
+// to null, the same key as the run that created it, so without the
+// post-run check the next run is served "recorded" without recording
+// anything (measured lượt 188: batch totals [1,2,1] and a 1-record
+// file after rm + re-run; manifest step served "cached" while its
+// history file did not exist at all). The cache entry therefore also
+// stores history_sha256 (see the batch + manifest store sites); a hit
+// without it — written before this fix — is never served for a
+// recording run.
+function recordingHistoryFile(tool, args) {
+  if (tool === "hook" && args?.record === true && typeof args.history_file === "string" && args.history_file.trim()) return args.history_file;
+  return null;
+}
+
 export const BATCH_OPERATIONS = {
   loudness: {
     args: ["target_lufs", "format", "compressor", "compressor_threshold", "compressor_ratio"],
@@ -17717,6 +17851,17 @@ export const BATCH_OPERATIONS = {
     probeOnly: true,
     args: ["fps", "threshold", "min_span_seconds", "top", "thumbnail_count"],
     run: (input, output, a) => findHighlights({ input, fps: a.fps ?? 2, threshold: a.threshold ?? 0.15, minSpanSeconds: a.min_span_seconds ?? 2, top: a.top ?? 5, thumbnailCount: a.thumbnail_count ?? 3 }),
+  },
+  // sharpness in batch/manifest is probe-only like hook: the curve +
+  // stats come back in the row's `result` (batch) or the step's
+  // result (manifest) and the cache stores that result — no file is
+  // written. A manifest step records the sharpness at that point in
+  // the chain, so a later stabilize/denoise step can prove it did
+  // not soften the picture.
+  sharpness: {
+    probeOnly: true,
+    args: ["samples"],
+    run: (input, output, a) => sharpness({ input, samples: a.samples ?? 10 }),
   },
   // slideshow in batch is a SET operation, not a per-file one: the
   // whole matched set becomes ONE slideshow (batch() branches on it
@@ -18127,11 +18272,19 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
           // A probe-only hit has no output file to verify: the key
           // already covers the input bytes + operation + args, so a
           // hit can only come from an identical input — the stored
-          // result IS the cache.
+          // result IS the cache. EXCEPT a recording run (see
+          // recordingHistoryFile): its result is only reusable while
+          // the history file still holds the post-run bytes, so a
+          // hit without a matching history_sha256 falls through
+          // and re-runs instead of being served stale.
           if (probeOnly && hit.result !== undefined) {
-            results[i] = { input: item.input, output: null, status: "cached", result: hit.result };
-            await appendJsonlRow({ index: i, ...results[i] });
-            continue;
+            const histFile = recordingHistoryFile(operation, args);
+            const historyOk = !histFile || (hit.history_sha256 !== undefined && (await hashSidecar(histFile)) === hit.history_sha256);
+            if (historyOk) {
+              results[i] = { input: item.input, output: null, status: "cached", result: hit.result };
+              await appendJsonlRow({ index: i, ...results[i] });
+              continue;
+            }
           }
           try {
             const st = await stat(hit.output);
@@ -18168,9 +18321,15 @@ export async function batch({ operation, pattern, inputDir, outputDir, args = {}
         invalidArgStreak = 0;
         if (cache) {
           // A probe-only result is stored bare — there is no output
-          // file whose size + sha256 could verify it.
+          // file whose size + sha256 could verify it. A recording
+          // run also stores the history file's post-run hash, so a
+          // later hit can prove the file still holds the record
+          // (see recordingHistoryFile).
           if (probeOnly) {
-            cacheData.entries[item.cacheKey] = { result: r };
+            const entry = { result: r };
+            const histFile = recordingHistoryFile(operation, args);
+            if (histFile) entry.history_sha256 = await hashSidecar(histFile);
+            cacheData.entries[item.cacheKey] = entry;
           } else {
             try {
               const st = await stat(item.output);
@@ -18766,8 +18925,15 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
           // Probe-only entries store no file: the key covers the
           // input bytes + tool + args, so a matching key IS the
           // verification — there is nothing on disk to re-check.
+          // EXCEPT a recording step (see recordingHistoryFile):
+          // its result is only reusable while the history file
+          // still holds the post-run bytes.
           if (s.spec.probeOnly) {
-            if (entry.result !== undefined) hit = entry;
+            if (entry.result !== undefined) {
+              const histFile = recordingHistoryFile(s.tool, s.resolved);
+              const historyOk = !histFile || (entry.history_sha256 !== undefined && (await hashSidecar(histFile)) === entry.history_sha256);
+              if (historyOk) hit = entry;
+            }
           } else {
             try {
               const st = await stat(cacheFile);
@@ -18798,7 +18964,10 @@ export async function manifest({ manifestPath, output = null, cache = true, dryR
         if (cache) {
           if (s.spec.probeOnly) {
             try {
-              cacheIndex[key] = { result: r };
+              const entry = { result: r };
+              const histFile = recordingHistoryFile(s.tool, s.resolved);
+              if (histFile) entry.history_sha256 = await hashSidecar(histFile);
+              cacheIndex[key] = entry;
               await saveCacheIndex();
             } catch { /* cache write is best-effort; the step itself is done */ }
           } else {

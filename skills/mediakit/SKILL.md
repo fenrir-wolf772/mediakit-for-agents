@@ -315,7 +315,17 @@ each interval/window instead of the interval start — Laplacian mean
 measured on disk, each frame reports its score — use it when the
 sheet must show the cleanest frame, e.g. a cover frame out of a shaky
 pan (flat-colour footage scores ~0 everywhere and keeps the first
-candidate, which is correct when nothing is sharper). `thumbnail
+candidate, which is correct when nothing is sharper). `sharpness` is
+the same measure as a curve over the whole file (10 evenly sampled
+frames by default): mean/`p10`/`p90` plus a verdict ladder (sharp ≥ 3,
+soft 1.5–3, blurry < 1.5) and `blurry_samples` — samples below half
+the file's own `p90`, i.e. the parts soft *relative* to the file's
+sharpest part, which is how you catch focus drift inside one take.
+The absolute scale is content-dependent (a grid texture scores 23,
+testsrc 4.0), so compare two renders of the *same* content instead of
+trusting the verdict — `stabilize` already does this in its proof
+(sharpness mean/`p10` before and after, ratio flagged below 0.75).
+`thumbnail
 --timestamps-list 1,6,0:30` names every tile time explicitly instead
 of even spacing (sets the tile count; cannot combine with the delay
 percents) — use it when you already know the moments that matter, e.g.
@@ -1737,7 +1747,7 @@ exactly the unguarded pattern brookcs3/m3u8-mcp-server's
 verify) — MediaKit's `download` exists so the agent never has to.
 
 ### 52. Test a tool over HTTP before wiring up an MCP client — same tools, curl instead of stdio
-`mediakit mcp --http [--port 3000]` serves the same 101 tools over
+`mediakit mcp --http [--port 3000]` serves the same 102 tools over
 HTTP on `127.0.0.1`: `GET /mcp` (metadata), `GET /mcp/tools`
 (every tool + JSON input schema), `POST /mcp/tools/{name}/invoke`
 (`{"arguments": {...}}`), and `POST /` for JSON-RPC 2.0
@@ -2135,7 +2145,7 @@ one tier — `mediakit safety` lists them, and the MCP `tools/list`
 carries the same tiers as standard annotations
 (`readOnlyHint` / `destructiveHint` / `idempotentHint` /
 `openWorldHint`), so a client can gate on them instead of trusting
-prose. READ (30 tools) only probes and writes nothing; PLAN (5)
+prose. READ (31 tools) only probes and writes nothing; PLAN (5)
 answers a question by transient work and leaves no artifact —
 `determinism` renders to a hidden work dir that is removed,
 `verify_cuts` renders a draft to temp (plus caller-requested
@@ -2259,7 +2269,7 @@ Off by default; the verify stays probe-only without it.
 
 ### 58h. Browse the catalog before you dump it — progressive discovery
 
-101 tools is too many schemas to pay for in every turn. Don't start
+102 tools is too many schemas to pay for in every turn. Don't start
 from `tools/list` — start from `list_operations`: one compact line
 per tool (name, family, tier, one-sentence summary), optionally
 narrowed with `family` (`inspect`, `edit`, `text`, `image`,

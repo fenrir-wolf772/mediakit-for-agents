@@ -532,7 +532,7 @@ const COMMANDS = {
   },
   stabilize: {
     usage: "mediakit stabilize <input> -o <output> [--smoothing 15] [--shakiness 5] [--accuracy 15] [--stepsize 6] [--min-contrast 0.25] [--tripod] [--optalgo 0] [--optzoom 1] [--zoom 0] [--crop keep|black] [--interpol bilinear] [--crf 23] [--reference <stable.mp4>] [--dry-run]",
-    desc: "Remove handheld camera shake in two vidstab passes (detect the camera path, apply the smoothed path). Audio is copied, MP4 gets +faststart. Reports jitter before/after plus the output's own inter-frame motion (p50/p90/spike frames) so the improvement is measured; --reference adds PSNR-Y/SSIM vs a stable take. --dry-run prints both exact ffmpeg commands and writes no file.",
+    desc: "Remove handheld camera shake in two vidstab passes (detect the camera path, apply the smoothed path). Audio is copied, MP4 gets +faststart. Reports jitter before/after plus the output's own inter-frame motion (p50/p90/spike frames) and sharpness mean/p10 before/after, so the improvement — and any softening — is measured; --reference adds PSNR-Y/SSIM vs a stable take. --dry-run prints both exact ffmpeg commands and writes no file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--smoothing", "Low-pass window half-width in frames, 0-1000 (default 15)"],
@@ -550,6 +550,14 @@ const COMMANDS = {
       ["--reference", "Stable take of the same scene for PSNR/SSIM proof (optional)"],
       ["--dry-run", "Print both exact ffmpeg commands and write no file"],
       ["-o, --output", "Output file (required)"],
+    ],
+  },
+  sharpness: {
+    usage: "mediakit sharpness <input> [--samples 10]",
+    desc: "Measure how sharp a video is (probe-only, writes no file): sample N frames evenly across the file and score each by the mean of the Laplacian at 320px probe width. Returns the curve, mean/p10/p90/min/max, a verdict ladder (sharp >= 3, soft 1.5-3, blurry < 1.5) and blurry_samples — samples below half the file's own p90. The absolute scale is content-dependent: compare two renders of the same content, or read blurry_samples for softness inside one take.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--samples", "Frames sampled evenly across the file, 2-60 (default 10)"],
     ],
   },
   segment: {
@@ -1325,7 +1333,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 101 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 102 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -2040,6 +2048,12 @@ async function main() {
           crf: numOpt(opts, "crf") ?? 23,
           reference: opts.reference ?? null,
           dryRun: opts.dry_run === true,
+        });
+        break;
+      case "sharpness":
+        result = await core.sharpness({
+          input: needInput(),
+          samples: numOpt(opts, "samples") ?? 10,
         });
         break;
       case "segment":

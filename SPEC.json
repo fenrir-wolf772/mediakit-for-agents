@@ -1,7 +1,7 @@
 {
   "spec_version": 1,
   "mediakit_version": "0.1.0",
-  "tool_count": 101,
+  "tool_count": 102,
   "transports": [
     "stdio",
     "http"
@@ -10,7 +10,7 @@
     {
       "name": "inspect",
       "description": "Measure a file and answer a question — probe, QC, tempo, hooks, chapters.",
-      "count": 27
+      "count": 28
     },
     {
       "name": "edit",
@@ -2179,7 +2179,7 @@
       "family": "edit",
       "tier": "WRITE",
       "summary": "Remove handheld camera shake in two vidstab passes: detect measures the camera path, transform applies the smoothed path (smoothing 0-1000, default 15 —…",
-      "description": "Remove handheld camera shake in two vidstab passes: detect measures the camera path, transform applies the smoothed path (smoothing 0-1000, default 15 — frames*2+1 in the low-pass; shakiness 1-10, accuracy 1-15, stepsize, min_contrast, tripod mode, optzoom 0-2, zoom -100..100, crop keep/black, interpol no/linear/bilinear/bicubic). Audio is copied untouched, MP4 output gets +faststart. The result proves the improvement instead of assuming it: jitter (mean |frame minus previous frame|, center crop) before and after, plus a re-detection of the output's own inter-frame motion (p50/p90/max px, spike_frames = frames still moving >=10px). With reference set to a stable take of the same scene it also reports PSNR-Y and SSIM mean before/after — but the verdict runs on jitter, because PSNR is framing-sensitive (optzoom rescales, black borders cap it). Honest limit, measured on the synthetic fixture: on ultra-sharp synthetic texture vidstab block-matching misses on ~10% of frames (single frames land ~12px off while neighbours align — see output_motion.p90_px); on natural handheld footage the tail is smaller. Set dry_run=true to print both exact ffmpeg commands and write no file (jitter_before is measured on the input, so it is exact; jitter_after/output_motion report null — measured on the real output).",
+      "description": "Remove handheld camera shake in two vidstab passes: detect measures the camera path, transform applies the smoothed path (smoothing 0-1000, default 15 — frames*2+1 in the low-pass; shakiness 1-10, accuracy 1-15, stepsize, min_contrast, tripod mode, optzoom 0-2, zoom -100..100, crop keep/black, interpol no/linear/bilinear/bicubic). Audio is copied untouched, MP4 output gets +faststart. The result proves the improvement instead of assuming it: jitter (mean |frame minus previous frame|, center crop) before and after, plus a re-detection of the output's own inter-frame motion (p50/p90/max px, spike_frames = frames still moving >=10px), plus sharpness mean/p10 before and after (Laplacian mean at 320px — vidstab resampling blurs hard edges, so a ratio below 0.75 is flagged in the notes; measured 0.65 on the ultra-sharp synthetic fixture, smaller on natural footage). With reference set to a stable take of the same scene it also reports PSNR-Y and SSIM mean before/after — but the verdict runs on jitter, because PSNR is framing-sensitive (optzoom rescales, black borders cap it). Honest limit, measured on the synthetic fixture: on ultra-sharp synthetic texture vidstab block-matching misses on ~10% of frames (single frames land ~12px off while neighbours align — see output_motion.p90_px); on natural handheld footage the tail is smaller. Set dry_run=true to print both exact ffmpeg commands and write no file (jitter_before and sharpness_before are measured on the input, so they are exact; jitter_after/output_motion/sharpness_after report null — measured on the real output).",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2291,6 +2291,35 @@
         "required": [
           "input",
           "output"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "sharpness",
+      "family": "inspect",
+      "tier": "READ",
+      "summary": "Measure how sharp a video is (probe-only, writes no file): sample N frames evenly across the file (default 10) and score each by the mean of the Laplacian at…",
+      "description": "Measure how sharp a video is (probe-only, writes no file): sample N frames evenly across the file (default 10) and score each by the mean of the Laplacian at 320px probe width (the same measure behind frames/thumbnail --sharpest, one ffmpeg pass via select). Returns the curve (timestamp + value per sample), mean/p10/p90/min/max, a verdict ladder (sharp >= 3, soft 1.5-3, blurry < 1.5) and blurry_samples — samples below half the file's own p90, i.e. the parts that are soft RELATIVE to the file's sharpest part. The ladder is calibrated on synthetic testsrc-like content (sharp testsrc 4.0, boxblur=2 2.8, boxblur=8 1.0) and the absolute scale is content-dependent — a grid-texture clip scores 23 while a soft interview scores far lower — so compare two renders of the SAME content (before/after a stabilize, denoise or encode) instead of trusting the absolute verdict, and read blurry_samples for focus drift inside one take (the fixture's sharp first half scores 2.9, its blurred second half 0.5). Also available as a probe-only batch operation and manifest step.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Path to the file (relative or absolute)"
+          },
+          "samples": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 60,
+            "default": 10,
+            "description": "Frames sampled evenly across the file, 2-60 (default 10)"
+          }
+        },
+        "required": [
+          "input"
         ],
         "additionalProperties": false,
         "$schema": "http://json-schema.org/draft-07/schema#"
@@ -4970,7 +4999,7 @@
       "family": "assemble",
       "tier": "WRITE",
       "summary": "Apply ONE operation to many files matching a glob under a folder, in one call: loudness, resize, reframe, compress, convert, normalize, extract_audio, reverse,…",
-      "description": "Apply ONE operation to many files matching a glob under a folder, in one call: loudness, resize, reframe, compress, convert, normalize, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, trim, silence, chroma_key, cut_words, remove_retakes, smart_cut, clean_voice, slideshow, hook, bpm, beat_grid, tempo_drift, audio_levels, search_words, measure_pace or highlights — the same args for every file. Outputs are named <stem>-<operation>.<ext> under the output directory, mirroring the input tree. Returns one row per file (input order) with status ok/error/cached/skipped plus counts, so a failure in one file never hides the rest. Unchanged files are skipped via a content-hash cache (.mediakit-batch-cache.json in the output dir, verified against the output's size + sha256); jobs runs up to 8 files at once under one shared timeout_seconds budget; dry_run lists the planned outputs and writes nothing. cut_words, remove_retakes, smart_cut and search_words find each clip's words file by convention (<words_dir>/<stem>.words.json, default the input's own folder) — a clip with no words file fails its own row only. clean_voice writes .wav always (48 kHz mono float), whatever the input was, and a take whose plan needs clearvoice/sr fails its own row (pass steps without them to clean anyway). slideshow is the exception: a SET operation — the whole matched set of images (2-32) becomes ONE slideshow video (output_name, default slideshow.mp4) instead of one output per file, and the per-file cache does not apply. hook, bpm, beat_grid, tempo_drift, audio_levels, search_words, measure_pace and highlights are the probe-only exceptions: they write no file (output is null, output_suffix is null) — the measurement comes back in each row's result, and the cache stores that result instead of a file. Exit codes follow harken's scheme: the summary carries exit_code — 0 when every row is done/cached/skipped, 1 when any row failed — and the CLI exits with that code (2 for input errors: unknown operation, bad pattern/args, no matches), printing 'batch complete: X done, Y cached, Z skipped, W failed (of N)' to stderr. batch-manifest.jsonl streams one JSON line per finished row (completion order, index = the row's position in input order) as rows complete, so a batch killed mid-run still leaves a partial record; it is fresh-truncated each run so it always matches that run's batch-manifest.json.",
+      "description": "Apply ONE operation to many files matching a glob under a folder, in one call: loudness, resize, reframe, compress, convert, normalize, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, trim, silence, chroma_key, cut_words, remove_retakes, smart_cut, clean_voice, slideshow, hook, bpm, beat_grid, tempo_drift, audio_levels, search_words, measure_pace, highlights or sharpness — the same args for every file. Outputs are named <stem>-<operation>.<ext> under the output directory, mirroring the input tree. Returns one row per file (input order) with status ok/error/cached/skipped plus counts, so a failure in one file never hides the rest. Unchanged files are skipped via a content-hash cache (.mediakit-batch-cache.json in the output dir, verified against the output's size + sha256); jobs runs up to 8 files at once under one shared timeout_seconds budget; dry_run lists the planned outputs and writes nothing. cut_words, remove_retakes, smart_cut and search_words find each clip's words file by convention (<words_dir>/<stem>.words.json, default the input's own folder) — a clip with no words file fails its own row only. clean_voice writes .wav always (48 kHz mono float), whatever the input was, and a take whose plan needs clearvoice/sr fails its own row (pass steps without them to clean anyway). slideshow is the exception: a SET operation — the whole matched set of images (2-32) becomes ONE slideshow video (output_name, default slideshow.mp4) instead of one output per file, and the per-file cache does not apply. hook, bpm, beat_grid, tempo_drift, audio_levels, search_words, measure_pace, highlights and sharpness are the probe-only exceptions: they write no file (output is null, output_suffix is null) — the measurement comes back in each row's result, and the cache stores that result instead of a file. Exit codes follow harken's scheme: the summary carries exit_code — 0 when every row is done/cached/skipped, 1 when any row failed — and the CLI exits with that code (2 for input errors: unknown operation, bad pattern/args, no matches), printing 'batch complete: X done, Y cached, Z skipped, W failed (of N)' to stderr. batch-manifest.jsonl streams one JSON line per finished row (completion order, index = the row's position in input order) as rows complete, so a batch killed mid-run still leaves a partial record; it is fresh-truncated each run so it always matches that run's batch-manifest.json.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -5006,7 +5035,8 @@
               "audio_levels",
               "search_words",
               "measure_pace",
-              "highlights"
+              "highlights",
+              "sharpness"
             ],
             "description": "The operation to apply to every matched file"
           },
@@ -5088,7 +5118,7 @@
       "family": "assemble",
       "tier": "WRITE",
       "summary": "Run a whole edit pipeline from ONE declarative JSON manifest file: {version: 1, input, output, steps: [{tool, args}], qa?} — paths in the manifest are relative…",
-      "description": "Run a whole edit pipeline from ONE declarative JSON manifest file: {version: 1, input, output, steps: [{tool, args}], qa?} — paths in the manifest are relative to the manifest file. Steps run in order, each feeding the next (slideshow as step 1 only — it builds a video from images in args, so the manifest input should be the first slide image; download as step 1 only — it fetches from a URL in args, and when it is step 1 the manifest input may be omitted entirely; then trim, resize, reframe, compress, convert, normalize, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, silence, denoise, interpolate, burn_captions, overlay, chroma_key, cut_words, remove_retakes, smart_cut; hook, bpm, beat_grid, tempo_drift, audio_levels, search_words, measure_pace and highlights are the probe-only steps — they analyze the chain file at that point and pass it through unchanged, so their results record WHY the next trim cuts where it does); the whole plan is validated before anything renders, so a typo fails in seconds. Each step is cached by content hash (input bytes + tool + args + sidecar-file bytes, verified against the cached output's size + sha256; a probe-only step stores only its result, there is no file to verify) — re-running an unchanged manifest re-encodes nothing, and editing step 3 only re-runs from step 3. Set qa to a platform (or 'any') to run qa_report on the final file. dry_run prints the plan and writes nothing — the approve-before-render gate. A step failure aborts the run and keeps the intermediates for inspection.",
+      "description": "Run a whole edit pipeline from ONE declarative JSON manifest file: {version: 1, input, output, steps: [{tool, args}], qa?} — paths in the manifest are relative to the manifest file. Steps run in order, each feeding the next (slideshow as step 1 only — it builds a video from images in args, so the manifest input should be the first slide image; download as step 1 only — it fetches from a URL in args, and when it is step 1 the manifest input may be omitted entirely; then trim, resize, reframe, compress, convert, normalize, extract_audio, reverse, rotate, boomerang, make_loopable, freeze, grade, fit, silence, denoise, interpolate, burn_captions, overlay, chroma_key, cut_words, remove_retakes, smart_cut; hook, bpm, beat_grid, tempo_drift, audio_levels, search_words, measure_pace, highlights and sharpness are the probe-only steps — they analyze the chain file at that point and pass it through unchanged, so their results record WHY the next trim cuts where it does); the whole plan is validated before anything renders, so a typo fails in seconds. Each step is cached by content hash (input bytes + tool + args + sidecar-file bytes, verified against the cached output's size + sha256; a probe-only step stores only its result, there is no file to verify) — re-running an unchanged manifest re-encodes nothing, and editing step 3 only re-runs from step 3. Set qa to a platform (or 'any') to run qa_report on the final file. dry_run prints the plan and writes nothing — the approve-before-render gate. A step failure aborts the run and keeps the intermediates for inspection.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -6537,7 +6567,7 @@
       "family": "meta",
       "tier": "READ",
       "summary": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the…",
-      "description": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 101 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+      "description": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 102 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -6832,5 +6862,5 @@
       }
     }
   ],
-  "spec_hash": "da7f4444b6413345ef4417e31eccf749aab9bbe21aaa2aca6a9520e43b240238"
+  "spec_hash": "afc84363db76cfbb4bcdb52b101c2fe5f4c59b9d22fd70ec0fc7da26b3b6a36c"
 }
