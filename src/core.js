@@ -13576,6 +13576,7 @@ const TOOL_REQUIREMENTS = {
   cut_words: { filters: ["trim", "atrim", "concat", "setpts", "asetpts", "afade", "aresample", "aformat", "asetnsamples", "astats", "ametadata"], encoders: ["libx264", "aac"] },
   remove_retakes: { filters: ["trim", "atrim", "concat", "setpts", "asetpts", "afade"], encoders: ["libx264", "aac"] },
   smart_cut: { filters: ["trim", "atrim", "concat", "setpts", "asetpts", "afade"], encoders: ["libx264", "aac"] },
+  apply_hook: { filters: ["trim", "atrim", "concat", "setpts", "asetpts", "afade"], encoders: ["libx264", "aac"] },
   cropdetect: { filters: ["cropdetect"] },
   package: {},
   publish_kit: {},
@@ -16585,6 +16586,226 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
     suggested_trim: `mediakit trim ${inPath} -o hook.mp4 --start ${trim.start} --end ${trim.end}`,
     history,
     warnings,
+  };
+}
+
+// ---------------------------------------------------------------- apply_hook
+// Opening hook repeat/move (nmbrthirteen/podcli `opening_hook.py`,
+// lượt 190): a hook is a short spoken passage from inside a clip,
+// played first. `findHook` only FINDS the window; this RENDERS the
+// reorder. repeat plays the passage again where it belongs; move
+// lifts it out of the body so it plays exactly once, at the front.
+// The body is the clip's whole range [0, total] as one span —
+// podcli's `order_with_hook` with the body as a single segment. A
+// move keeps the total duration (the passage moves to the front, the
+// body closes ranks behind it); a repeat adds the window length.
+// Pure part first, so tests can check the order without rendering.
+export const HOOK_APPLY_MIN_SECONDS = 1;
+export const HOOK_APPLY_MAX_SECONDS = 20;
+export const HOOK_MOVE_MIN_REMNANT_SECONDS = 0.1;
+export const HOOK_EDGE_TOLERANCE_SECONDS = 0.01;
+
+export function orderHookRanges(total, start, end, mode = "repeat") {
+  const t = num(total, "total", { min: 0 });
+  const s = num(start, "start", { min: 0 });
+  const e = num(end, "end", { min: 0 });
+  if (mode !== "repeat" && mode !== "move") {
+    throw new MediaKitError(`hook mode must be "repeat" or "move", got: ${mode}`, "INVALID_ARG");
+  }
+  if (!(e > s)) throw new MediaKitError(`hook end must be greater than hook start (got ${s}-${e}s)`, "INVALID_ARG");
+  const length = e - s;
+  if (length < HOOK_APPLY_MIN_SECONDS || length > HOOK_APPLY_MAX_SECONDS) {
+    throw new MediaKitError(`hook runs ${length.toFixed(1)}s. It must run between ${HOOK_APPLY_MIN_SECONDS} and ${HOOK_APPLY_MAX_SECONDS} seconds.`, "INVALID_ARG");
+  }
+  if (s < -HOOK_EDGE_TOLERANCE_SECONDS || e > t + HOOK_EDGE_TOLERANCE_SECONDS) {
+    throw new MediaKitError(`hook ${s.toFixed(2)}-${e.toFixed(2)}s is not inside the clip (0-${t.toFixed(2)}s). Pick a passage the clip already plays.`, "INVALID_ARG");
+  }
+  const cs = Math.max(0, Math.min(s, t));
+  const ce = Math.max(0, Math.min(e, t));
+  const head = { start: +cs.toFixed(3), end: +ce.toFixed(3) };
+  if (mode === "repeat") {
+    return [{ ...head }, { start: 0, end: +t.toFixed(3) }];
+  }
+  const rest = [];
+  for (const [a, b] of [[0, cs], [ce, t]]) {
+    if (b - a >= HOOK_MOVE_MIN_REMNANT_SECONDS) rest.push({ start: +a.toFixed(3), end: +b.toFixed(3) });
+  }
+  if (!rest.length) {
+    throw new MediaKitError("A move hook cannot take the whole clip. Use repeat, or widen the clip.", "INVALID_ARG");
+  }
+  return [head, ...rest];
+}
+
+// Snap a hook edge that cuts through a word so the whole word plays
+// (podcli `snap_hook_to_words`): widen, never narrow — a word the
+// hook starts inside moves the start to the word's start, a word the
+// hook ends inside moves the end to the word's end.
+export function snapHookToWords(hook, words) {
+  if (!hook || typeof hook !== "object") throw new MediaKitError("snapHookToWords needs a hook {start, end}", "INVALID_ARG");
+  let { start, end } = hook;
+  if (!Number.isFinite(start) || !Number.isFinite(end) || !(end > start)) {
+    throw new MediaKitError("snapHookToWords needs a hook with end > start", "INVALID_ARG");
+  }
+  for (const w of words ?? []) {
+    if (typeof w?.start !== "number" || typeof w?.end !== "number") continue;
+    if (w.start < start && start < w.end) start = w.start;
+    if (w.start < end && end < w.end) end = w.end;
+  }
+  return { ...hook, start: +start.toFixed(3), end: +end.toFixed(3) };
+}
+
+// The assemble hook slot, analysed (podcli repeat/move, lượt 190):
+// the hook passage is a window inside the hook shot; the body is
+// every other shot. This finds the body shots that play the same
+// source passage again — the overlap a `move` would lift out. It
+// NEVER rewrites the shot list: the film is voice-locked (shots
+// must cover the voice exactly), so lifting Ns out of the body
+// shortens the film by Ns and the voice has to be shortened by the
+// same amount first. Plan + diagnose report the overlap and the
+// exact number; the director applies it (trim the body shots, then
+// re-time the voice) instead of the render silently drifting from
+// the voice. Transition handles are not counted: a handle may still
+// show up to one transition of the passage.
+export function analyzeHookMove(shots, hook) {
+  if (!hook || typeof hook !== "object" || typeof hook.shot !== "string") {
+    throw new MediaKitError("analyzeHookMove needs a hook {shot, start_seconds, end_seconds, mode}", "INVALID_ARG");
+  }
+  if (!Array.isArray(shots)) throw new MediaKitError("analyzeHookMove needs a shots array", "INVALID_ARG");
+  const mode = hook.mode ?? "repeat";
+  if (mode !== "repeat" && mode !== "move") throw new MediaKitError(`hook mode must be "repeat" or "move", got: ${mode}`, "INVALID_ARG");
+  const hookShot = shots.find((s) => s.id === hook.shot);
+  if (!hookShot) throw new MediaKitError(`analyzeHookMove: hook points at unknown shot "${hook.shot}"`, "INVALID_ARG");
+  const base = { mode, shot: hook.shot, applicable: false, passage: null, overlaps: [], removed_seconds: 0 };
+  if (hookShot.kind !== "video" || typeof hookShot.source !== "string" || !Number.isFinite(hookShot.start)) {
+    return { ...base, reason: `hook shot ${hookShot.id} is ${hookShot.kind ?? "unknown"}, not video — a move has no source time to lift` };
+  }
+  const hookEnd = hook.end_seconds ?? hookShot.duration;
+  if (!Number.isFinite(hookEnd)) return { ...base, reason: `hook shot ${hookShot.id} has no duration to place the passage in` };
+  const pStart = hookShot.start + (hook.start_seconds ?? 0);
+  const pEnd = hookShot.start + hookEnd;
+  const passage = { source: hookShot.source, start_seconds: +pStart.toFixed(3), end_seconds: +pEnd.toFixed(3) };
+  const overlaps = [];
+  for (const s of shots) {
+    if (s.id === hookShot.id || s.kind !== "video" || s.source !== hookShot.source) continue;
+    if (!Number.isFinite(s.start) || !Number.isFinite(s.duration)) continue;
+    const oStart = Math.max(s.start, pStart);
+    const oEnd = Math.min(s.start + s.duration, pEnd);
+    const overlap = oEnd - oStart;
+    if (overlap <= HOOK_EDGE_TOLERANCE_SECONDS) continue;
+    const touchesStart = oStart <= s.start + HOOK_EDGE_TOLERANCE_SECONDS;
+    const touchesEnd = oEnd >= s.start + s.duration - HOOK_EDGE_TOLERANCE_SECONDS;
+    let action;
+    if (touchesStart && touchesEnd) action = "drop";
+    else if (touchesStart) action = "trim_start";
+    else if (touchesEnd) action = "trim_end";
+    else action = "split";
+    const windows = [];
+    if (action === "trim_start") windows.push({ start: +oEnd.toFixed(3), end: +(s.start + s.duration).toFixed(3) });
+    else if (action === "trim_end") windows.push({ start: +s.start.toFixed(3), end: +oStart.toFixed(3) });
+    else if (action === "split") {
+      windows.push({ start: +s.start.toFixed(3), end: +oStart.toFixed(3) }, { start: +oEnd.toFixed(3), end: +(s.start + s.duration).toFixed(3) });
+    }
+    // A move that leaves a sliver (<0.1s) drops it instead — podcli's
+    // remnant rule: a frame or two of encoder padding, not content.
+    // A split that keeps only one side is really a trim of that side.
+    const kept = windows.filter((r) => r.end - r.start >= HOOK_MOVE_MIN_REMNANT_SECONDS);
+    let finalAction = action;
+    if (kept.length === 0) finalAction = "drop";
+    else if (action === "split" && kept.length === 1) {
+      finalAction = kept[0].start <= s.start + HOOK_EDGE_TOLERANCE_SECONDS ? "trim_end" : "trim_start";
+    }
+    overlaps.push({
+      shot: s.id, overlap_seconds: +overlap.toFixed(3),
+      source_start_seconds: +oStart.toFixed(3), source_end_seconds: +oEnd.toFixed(3),
+      action: finalAction, remaining_windows: kept,
+    });
+  }
+  const removed = +overlaps.reduce((a, o) => a + o.overlap_seconds, 0).toFixed(3);
+  return {
+    ...base, applicable: true, passage, overlaps, removed_seconds: removed,
+    reason: overlaps.length ? null : "the hook passage does not repeat in any later shot — a move would change nothing",
+  };
+}
+
+export async function applyHook({ input, start, end, mode = "repeat", wordsFile = null, output = null, dryRun = false }) {
+  const inPath = await requireInput(input);
+  const meta = await probe(inPath);
+  const total = meta.duration_seconds;
+  if (total === null) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
+  if (!meta.video && !meta.audio) throw new MediaKitError("apply_hook needs an input with a video or audio stream", "INVALID_ARG");
+  let hook = { start: num(start, "start", { min: 0 }), end: num(end, "end", { min: 0 }) };
+  let snap = null;
+  let wordsPath = null;
+  if (wordsFile !== null && wordsFile !== undefined) {
+    wordsPath = await requireInput(wordsFile, "words file");
+    let rawWords;
+    try {
+      rawWords = JSON.parse(await readFile(wordsPath, "utf8"));
+    } catch (e) {
+      throw new MediaKitError(`apply_hook could not parse the words file as JSON: ${e.message}`, "INVALID_ARG");
+    }
+    const words = normalizeTranscriptWords(rawWords, "words file", "apply_hook");
+    const snapped = snapHookToWords(hook, words);
+    snap = { start_before: hook.start, end_before: hook.end, start_after: snapped.start, end_after: snapped.end, snapped: snapped.start !== hook.start || snapped.end !== hook.end };
+    hook = snapped;
+  }
+  const ranges = orderHookRanges(total, hook.start, hook.end, mode);
+  const expected = +ranges.reduce((a, r) => a + (r.end - r.start), 0).toFixed(3);
+  const base = {
+    operation: "apply_hook", input: inPath, mode,
+    window: hook, snap,
+    ranges,
+    duration_before: total,
+    duration_after_expected: expected,
+  };
+  if (dryRun === true) return { ...base, dry_run: true };
+  const outPath = await prepareOutput(output, [inPath, ...(wordsPath ? [wordsPath] : [])]);
+  // One filter graph, the same shape cut_words builds: trim each
+  // range (video + audio), then concat — re-encode so ranges from
+  // anywhere in the source join cleanly, with the 12/15ms seam fades
+  // cut_words uses so a butt splice never clicks.
+  const vParts = [];
+  const aParts = [];
+  const vLabels = [];
+  const aLabels = [];
+  ranges.forEach((seg, i) => {
+    if (meta.video) {
+      vParts.push(`[0:v]trim=start=${seg.start}:end=${seg.end},setpts=PTS-STARTPTS[v${i}]`);
+      vLabels.push(`[v${i}]`);
+    }
+    if (meta.audio) {
+      aParts.push(joinFadeAudio(seg, i));
+      aLabels.push(`[a${i}]`);
+    }
+  });
+  const graph = [...vParts, ...aParts];
+  if (meta.video) graph.push(`${vLabels.join("")}concat=n=${ranges.length}:v=1:a=0[vout]`);
+  if (meta.audio) graph.push(`${aLabels.join("")}concat=n=${ranges.length}:v=0:a=1[aout]`);
+  const args = ["-y", "-i", inPath, "-filter_complex", graph.join(";")];
+  if (meta.video) {
+    args.push("-map", "[vout]");
+    if (meta.audio) args.push("-map", "[aout]");
+    args.push("-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", "-preset", "medium");
+    if (meta.audio) args.push("-c:a", "aac", ...audioBitrateArgs("aac"));
+    if (["mp4", "mov", "m4v"].includes(path.extname(outPath).slice(1).toLowerCase())) args.push("-movflags", "+faststart");
+  } else {
+    const ext = path.extname(outPath).slice(1).toLowerCase();
+    const codec = AUDIO_FORMATS[ext];
+    if (!codec) throw new MediaKitError(`audio-only input needs an audio output format (.mp3/.aac/.wav/.ogg/.opus/.flac), got .${ext || "(none)"}`, "INVALID_ARG");
+    args.push("-map", "[aout]", "-c:a", codec, ...audioBitrateArgs(codec));
+  }
+  args.push(outPath);
+  await run(FFMPEG, args);
+  const info = await fileInfo(outPath);
+  const out = await probe(outPath);
+  const measured = out.duration_seconds;
+  const diff = measured === null ? null : +(measured - expected).toFixed(3);
+  return {
+    ...base, output: outPath,
+    duration_after: measured,
+    duration_check: { expected, measured, diff_seconds: diff, within_tolerance: diff !== null && Math.abs(diff) <= 0.2 },
+    ...info,
+    dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
   };
 }
 
@@ -22165,10 +22386,15 @@ async function validateAssembleManifest(doc, manifestAbs) {
   // tool and later edits all mean the same segment. The window is
   // echoed with its film-time position; a hook that does not open
   // the film warns (validate), and diagnose flags it again.
+  // mode (podcli repeat/move, lượt 190): repeat (default) plays the
+  // passage again where it belongs in the body; move lifts it out —
+  // analysed by analyzeHookMove into plan.hook_move, never applied
+  // here, because the film is voice-locked and lifting Ns out of
+  // the body shortens it by Ns (see analyzeHookMove).
   let hook = null;
   if (doc.hook !== undefined && doc.hook !== null) {
     if (!doc.hook || typeof doc.hook !== "object" || Array.isArray(doc.hook)) {
-      throw new MediaKitError("assemble hook must be an object {shot, start?, end?}", "INVALID_ARG");
+      throw new MediaKitError("assemble hook must be an object {shot, start?, end?, mode?}", "INVALID_ARG");
     }
     if (typeof doc.hook.shot !== "string" || !doc.hook.shot.trim()) {
       throw new MediaKitError("assemble hook needs a shot id", "INVALID_ARG");
@@ -22176,6 +22402,13 @@ async function validateAssembleManifest(doc, manifestAbs) {
     const hookShot = shots.find((s) => s.id === doc.hook.shot.trim());
     if (!hookShot) {
       throw new MediaKitError(`assemble hook points at unknown shot "${doc.hook.shot.trim()}" (shots: ${shots.map((s) => s.id).join(", ")})`, "INVALID_ARG");
+    }
+    let hookMode = "repeat";
+    if (doc.hook.mode !== undefined && doc.hook.mode !== null) {
+      if (doc.hook.mode !== "repeat" && doc.hook.mode !== "move") {
+        throw new MediaKitError(`assemble hook.mode must be "repeat" or "move", got: ${doc.hook.mode}`, "INVALID_ARG");
+      }
+      hookMode = doc.hook.mode;
     }
     const hookStart = parseTime(doc.hook.start ?? doc.hook.start_seconds ?? 0, "hook.start");
     const hookEnd = parseTime(doc.hook.end ?? doc.hook.end_seconds ?? hookShot.duration, "hook.end");
@@ -22195,6 +22428,7 @@ async function validateAssembleManifest(doc, manifestAbs) {
       shot: hookShot.id,
       start_seconds: +hookStart.toFixed(3),
       end_seconds: +hookEnd.toFixed(3),
+      mode: hookMode,
       film_start_seconds: +(filmStartFrames / fps).toFixed(3),
       film_end_seconds: +(filmEndFrames / fps).toFixed(3),
     };
@@ -22205,6 +22439,7 @@ async function validateAssembleManifest(doc, manifestAbs) {
       warnings.push(`hook slot points at shot ${hookShot.id}, not the first shot (${shots[0].id}) — the hook should open the film`);
     }
   }
+  const hookMove = hook ? analyzeHookMove(shots, hook) : null;
   const manifestHash = await hashFile(manifestAbs);
   const voiceHash = await hashFile(voicePath);
   const musicHash = music ? await hashFile(music.path) : null;
@@ -22236,7 +22471,7 @@ async function validateAssembleManifest(doc, manifestAbs) {
     brand: brand ? brand.id : null, brand_applied: brandApplied, brand_overrides: brandOverrides,
     voice: { path: voicePath, lead, tail, duration_seconds: voiceDuration },
     total_seconds: totalSeconds, total_frames: totalFrames,
-    music, sfx, captions, shots, chapters, hook, warnings, fingerprint,
+    music, sfx, captions, shots, chapters, hook, hook_move: hookMove, warnings, fingerprint,
     fingerprint_parts: { manifest: manifestHash, voice: voiceHash, music: musicHash, sfx: sfxHashes, captions: captionsHash, assets: assetHashes, brand: brandResolved ? stableStringify(brandResolved) : null },
   };
 }
@@ -22277,7 +22512,7 @@ export function summarizeProject(plan) {
   const sfx = (plan.sfx ?? []).map((e) => ({ file: path.basename(e.file), at_seconds: e.at_seconds, volume: e.volume }));
   const captions = plan.captions ? { file: path.basename(plan.captions.path), cue_count: plan.captions.cue_count } : null;
   const chapters = (plan.chapters ?? []).map((c) => ({ title: c.title, at_seconds: c.at_seconds }));
-  const hook = plan.hook ? { shot: plan.hook.shot, start_seconds: plan.hook.start_seconds, end_seconds: plan.hook.end_seconds } : null;
+  const hook = plan.hook ? { shot: plan.hook.shot, start_seconds: plan.hook.start_seconds, end_seconds: plan.hook.end_seconds, mode: plan.hook.mode ?? "repeat" } : null;
   const parts = [
     `${shots.length} shot${shots.length === 1 ? "" : "s"}`,
     `${plan.total_seconds}s`,
@@ -23568,6 +23803,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       captions: plan.captions,
       chapters: chaptersPlan,
       hook: plan.hook,
+      hook_move: plan.hook_move,
       joins: joins.map((j) => ({ into_shot: plan.shots[j.index]?.id ?? null, type: j.type, duration_seconds: +j.durationSeconds.toFixed(3), frames: j.frames, offset_seconds: +j.offsetSeconds.toFixed(3) })),
     };
     if (planFile != null) {
@@ -25300,6 +25536,26 @@ export async function diagnoseFilm({ manifestPath, styleFile = null, stamp = fal
       }
     } else if (roles.some((r) => r.role === "hook")) {
       add("hook_slot", "info", "a shot carries role \"hook\" but no film-level hook window is set — add hook {shot, start?, end?} to pin the exact opening segment");
+    }
+    // Hook repeat/move (podcli, lượt 190): the hook passage is a
+    // window inside the hook shot; when a later body shot plays the
+    // same source passage again, repeat (default) plays it twice and
+    // move lifts it out. The plan never rewrites the shots — the
+    // film is voice-locked — so this check names the overlap and the
+    // exact seconds the voice would have to lose for a move.
+    if (plan.hook && plan.hook_move) {
+      const hm = plan.hook_move;
+      if (!hm.applicable) {
+        add("hook_move", "info", `hook mode "${hm.mode}" has nothing to lift: ${hm.reason}`, { mode: hm.mode });
+      } else if (!hm.overlaps.length) {
+        add("hook_move", "info", `hook mode "${hm.mode}": ${hm.reason}`, { mode: hm.mode });
+      } else if (hm.mode === "repeat") {
+        const list = hm.overlaps.map((o) => `${o.shot} ${o.overlap_seconds}s (${o.action})`).join(", ");
+        add("hook_move", "warn", `hook passage repeats in the body (${list}) — set hook.mode="move" to lift it out, then shorten the voice by ${hm.removed_seconds}s so the shots still cover it`, { mode: "repeat", removed_seconds: hm.removed_seconds, overlaps: hm.overlaps });
+      } else {
+        const list = hm.overlaps.map((o) => `${o.shot} ${o.overlap_seconds}s (${o.action})`).join(", ");
+        add("hook_move", "info", `hook mode "move" would lift ${hm.removed_seconds}s from the body (${list}) — trim those shots and shorten the voice by ${hm.removed_seconds}s before rendering`, { mode: "move", removed_seconds: hm.removed_seconds, overlaps: hm.overlaps });
+      }
     }
 
     // Style pace (Takes measure_pace / check_edit, lượt 133): a film

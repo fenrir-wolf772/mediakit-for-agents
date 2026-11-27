@@ -1,7 +1,7 @@
 {
   "spec_version": 1,
   "mediakit_version": "0.1.0",
-  "tool_count": 102,
+  "tool_count": 103,
   "transports": [
     "stdio",
     "http"
@@ -15,7 +15,7 @@
     {
       "name": "edit",
       "description": "Change one clip: cut, transform, grade, mix or convert it.",
-      "count": 38
+      "count": 39
     },
     {
       "name": "text",
@@ -5962,6 +5962,64 @@
       }
     },
     {
+      "name": "apply_hook",
+      "family": "edit",
+      "tier": "WRITE",
+      "summary": "Play a hook passage first, then the clip (podcli's opening_hook, rendered): repeat (default) plays the window at the front AND again where it belongs — output…",
+      "description": "Play a hook passage first, then the clip (podcli's opening_hook, rendered): repeat (default) plays the window at the front AND again where it belongs — output is longer by the window; move lifts the window out of the body so it plays exactly once, at the front — output keeps the input duration. The window is 1-20s inside the clip; a move that would take the whole clip is refused, and a body remnant under 0.1s is dropped. One re-encode pass (trim each range, then concat, libx264 + AAC 192k + faststart on MP4, the same shape cut_words builds, with 12/15ms seam fades). words_file (a transcribe words.json) snaps both edges outward to whole words first. Returns the playback ranges, duration_before/after with a duration_check against the expected length, and the output probe. Set dry_run=true to see the ranges without writing a file.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Path to the file (relative or absolute)"
+          },
+          "start": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Hook window start in seconds (inside the clip)"
+          },
+          "end": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Hook window end in seconds (inside the clip, 1-20s after start)"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "repeat",
+              "move"
+            ],
+            "default": "repeat",
+            "description": "repeat: play the window at the front and again in the body; move: lift it out of the body (default repeat)"
+          },
+          "words_file": {
+            "type": "string",
+            "description": "Optional transcribe words.json — snap both window edges outward to whole words before the reorder"
+          },
+          "output": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Output file path"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "default": false,
+            "description": "Show the playback ranges without writing a file"
+          }
+        },
+        "required": [
+          "input",
+          "start",
+          "end",
+          "output"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
       "name": "bpm",
       "family": "inspect",
       "tier": "READ",
@@ -6567,7 +6625,7 @@
       "family": "meta",
       "tier": "READ",
       "summary": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the…",
-      "description": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 102 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+      "description": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 103 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -6862,5 +6920,5 @@
       }
     }
   ],
-  "spec_hash": "aacdbe7a06c4abf71ddeba175c9e7904756c4ad214b207ac2d7b61ae99ac15ae"
+  "spec_hash": "6734a5f7123fbd8a8acc3c48ffa02a494d3c6a0e94d89f44df537a4258768eea"
 }

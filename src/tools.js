@@ -2325,6 +2325,44 @@ export const TOOL_DEFS = [
   },
 
 
+  // Play a hook passage first (podcli's opening_hook, lượt 190):
+  // `hook` finds the best window; this renders the reorder. repeat
+  // (default) plays the passage at the front AND again where it
+  // belongs in the body — the output is longer by the window.
+  // move lifts the passage out of the body so it plays exactly once,
+  // at the front — the output keeps the input's duration. The body
+  // is the clip's whole range; a move that would take the whole clip
+  // is refused. One re-encode pass (trim each range, then concat,
+  // libx264 + AAC 192k + faststart on MP4, the same shape cut_words
+  // builds, with its 12/15ms seam fades so a butt splice never
+  // clicks). words_file (a transcribe words.json) snaps both edges
+  // outward to whole words before the reorder. Set dry_run to see
+  // the playback ranges without writing a file.
+  {
+    name: "apply_hook",
+    tier: "WRITE",
+    description: "Play a hook passage first, then the clip (podcli's opening_hook, rendered): repeat (default) plays the window at the front AND again where it belongs — output is longer by the window; move lifts the window out of the body so it plays exactly once, at the front — output keeps the input duration. The window is 1-20s inside the clip; a move that would take the whole clip is refused, and a body remnant under 0.1s is dropped. One re-encode pass (trim each range, then concat, libx264 + AAC 192k + faststart on MP4, the same shape cut_words builds, with 12/15ms seam fades). words_file (a transcribe words.json) snaps both edges outward to whole words first. Returns the playback ranges, duration_before/after with a duration_check against the expected length, and the output probe. Set dry_run=true to see the ranges without writing a file.",
+    schema: {
+    input: pathSchema,
+    start: z.number().min(0).describe("Hook window start in seconds (inside the clip)"),
+    end: z.number().min(0).describe("Hook window end in seconds (inside the clip, 1-20s after start)"),
+    mode: z.enum(["repeat", "move"]).default("repeat").describe("repeat: play the window at the front and again in the body; move: lift it out of the body (default repeat)"),
+    words_file: z.string().optional().describe("Optional transcribe words.json — snap both window edges outward to whole words before the reorder"),
+    output: pathSchema.describe("Output file path"),
+    dry_run: z.boolean().default(false).describe("Show the playback ranges without writing a file"),
+  },
+    handler: async (a) => safe(() => core.applyHook({
+    input: a.input,
+    start: a.start,
+    end: a.end,
+    mode: a.mode ?? "repeat",
+    wordsFile: a.words_file ?? null,
+    output: a.output ?? null,
+    dryRun: a.dry_run ?? false,
+  })),
+  },
+
+
   // Measure the musical tempo of a clip (probe-only, writes no file):
   // spectral-flux onset function -> autocorrelation + comb filterbank
   // period search (aubio's tempo pipeline, re-implemented in pure
@@ -2718,7 +2756,7 @@ export const TOOL_DEFS = [
   {
     name: "list_operations",
     tier: "READ",
-    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 102 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 103 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
     schema: {
     family: z.enum(["inspect", "edit", "text", "image", "assemble", "meta"]).optional().describe("Narrow to one family; omit for the whole catalog"),
   },
@@ -2890,7 +2928,7 @@ export function listSafetyTiers() {
 }
 
 // ---------------------------------------------------------------- progressive discovery
-// The catalog is 102 tools and tools/list dumps the full JSON schema
+// The catalog is 103 tools and tools/list dumps the full JSON schema
 // of every one on every turn — kinocut's answer is progressive
 // discovery: a compact list first, full schema only for the tools
 // actually used (lượt 147, idea: KyaniteLabs/kinocut
@@ -2924,7 +2962,7 @@ export const TOOL_FAMILY_OF = {
   determinism: "inspect", verify: "inspect", verify_cuts: "inspect", diagnose: "inspect",
   transitions: "inspect", estimate_conversion: "inspect", doctor: "inspect",
   qa_report: "inspect", audit: "inspect", safety: "inspect", receipt: "inspect",
-  // edit (38)
+  // edit (39)
   trim: "edit", crop: "edit", resize: "edit", extract_audio: "edit", extract_frame: "edit",
   loudness: "edit", concat: "edit", grade: "edit", make_loopable: "edit", freeze: "edit",
   fastforward: "edit", reverse: "edit", rotate: "edit", boomerang: "edit",
@@ -2932,7 +2970,7 @@ export const TOOL_FAMILY_OF = {
   segment: "edit", convert: "edit", normalize: "edit", compress: "edit", silence: "edit",
   cut_words: "edit", remove_retakes: "edit", smart_cut: "edit", clean_voice: "edit",
   mix: "edit", overlay: "edit", pip: "edit", magnify: "edit", broll: "edit", fit: "edit",
-  reframe: "edit", mux: "edit", burn_captions: "edit", download: "edit",
+  reframe: "edit", mux: "edit", burn_captions: "edit", download: "edit", apply_hook: "edit",
   // text (7)
   transcribe: "text", convert_captions: "text", generate_srt: "text", chunk_captions: "text",
   titlecard: "text", intro: "text", align_voice: "text",

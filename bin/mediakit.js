@@ -981,6 +981,19 @@ const COMMANDS = {
       ["--no-snap-quiet", "Keep the raw window end instead of snapping the trim to the nearest quiet moment"],
     ],
   },
+  "apply-hook": {
+    usage: "mediakit apply-hook <input> --start <s> --end <s> [--mode repeat|move] [--words-file <words.json>] -o <output.mp4> [--dry-run]",
+    desc: "Play a hook passage first, then the clip (podcli's opening_hook, rendered): repeat (default) plays the window at the front AND again where it belongs — output is longer by the window; move lifts the window out of the body so it plays exactly once, at the front — output keeps the input duration. The window is 1-20s inside the clip; a move that would take the whole clip is refused, and a body remnant under 0.1s is dropped. One re-encode pass (trim each range, then concat, libx264 + AAC 192k + faststart on MP4, the same shape cut_words builds, with 12/15ms seam fades). --words-file (a transcribe words.json) snaps both edges outward to whole words first. --dry-run shows the playback ranges without writing a file.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--start", "Hook window start in seconds (inside the clip)"],
+      ["--end", "Hook window end in seconds (inside the clip, 1-20s after start)"],
+      ["--mode", "repeat (default) or move"],
+      ["--words-file", "Transcribe words.json — snap both window edges outward to whole words first"],
+      ["--output", "Output file path"],
+      ["--dry-run", "Show the playback ranges without writing a file"],
+    ],
+  },
   bpm: {
     usage: "mediakit bpm <input> [--min-bpm 40] [--max-bpm 240]",
     desc: "Measure the musical tempo of a clip in BPM: spectral-flux onset function, autocorrelation + comb period search with a 120 BPM prior and an onset-recall tie-break (aubio tempo, re-implemented in pure Node). Returns bpm, beat period, confidence, a reliable flag, onset recall and the first 16 beat times — the grid a beat-snapping cut snaps to. A tone or speech reports reliable: false instead of a confident wrong number. Probe-only, writes no file.",
@@ -1333,7 +1346,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 102 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 103 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -2469,6 +2482,21 @@ async function main() {
           snapWindowSeconds: numOpt(opts, "snap_window") ?? 5,
         });
         break;
+      case "apply-hook": {
+        if (opts.start === undefined) fail("missing required option: --start <s>");
+        if (opts.end === undefined) fail("missing required option: --end <s>");
+        if (opts.mode !== undefined && opts.mode !== "repeat" && opts.mode !== "move") fail(`--mode must be repeat or move, got: ${opts.mode}`);
+        result = await core.applyHook({
+          input: needInput(),
+          start: numOpt(opts, "start"),
+          end: numOpt(opts, "end"),
+          mode: opts.mode ?? "repeat",
+          wordsFile: opts.words_file ?? null,
+          output: needOutput(opts),
+          dryRun: opts.dry_run === true,
+        });
+        break;
+      }
       case "bpm":
         result = await core.detectBpm({
           input: needInput(),

@@ -2,7 +2,7 @@
 /**
  * mediakit-for-agents — MCP over HTTP (REST + JSON-RPC).
  *
- * The same 102 tools as the stdio server (src/tools.js is the single
+ * The same 103 tools as the stdio server (src/tools.js is the single
  * source of truth), reachable with curl instead of an MCP client —
  * for hand-testing, for agents that can only speak HTTP, and for
  * debugging a tool call without launching a client:

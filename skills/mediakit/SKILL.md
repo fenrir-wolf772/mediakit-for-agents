@@ -1030,7 +1030,16 @@ opens the film-level hook slot, or a non-face-safe template sits under
 a center text layer (its motion crosses the text; a top layer is
 clear of the cards, and the bounce apex check covers the top band).
 A template in the wrong position without a role is not warned — a
-spring-in card closing a film is a choice, not a mistake. Probe-only by default — it writes
+spring-in card closing a film is a choice, not a mistake. It also
+checks hook repeat/move (podcli's opening-hook modes): the plan
+carries `hook_move` — which later body shots replay the hook passage
+(same source file, overlapping source time), the action per shot
+(`trim_start`/`trim_end`/`split`/`drop`) and the seconds a move
+would lift — and diagnose warns when `mode` is `repeat` (default)
+and the passage repeats, or reports what a `move` would lift. The
+plan never rewrites the shots: the film is voice-locked, so lifting
+Ns out shortens it by Ns — shorten the voice by the same amount
+first, then trim the body shots. Probe-only by default — it writes
 nothing unless `--stamp` is given. A broken manifest returns verdict
 `fail` with `format_error` instead of throwing, so fix the manifest and
 re-run diagnose in a loop — a `warn` verdict is still renderable, a
@@ -1752,7 +1761,7 @@ exactly the unguarded pattern brookcs3/m3u8-mcp-server's
 verify) — MediaKit's `download` exists so the agent never has to.
 
 ### 52. Test a tool over HTTP before wiring up an MCP client — same tools, curl instead of stdio
-`mediakit mcp --http [--port 3000]` serves the same 102 tools over
+`mediakit mcp --http [--port 3000]` serves the same 103 tools over
 HTTP on `127.0.0.1`: `GET /mcp` (metadata), `GET /mcp/tools`
 (every tool + JSON input schema), `POST /mcp/tools/{name}/invoke`
 (`{"arguments": {...}}`), and `POST /` for JSON-RPC 2.0
@@ -2158,7 +2167,7 @@ review strips when `strips: true`), `estimate_conversion`
 sample-encodes to temp, `job` only reads/cancels job state,
 `propose_edit` validates options with the patch_manifest helpers
 and writes nothing; WRITE
-(64) produces a file the caller asked for and never overwrites its
+(65) produces a file the caller asked for and never overwrites its
 own input; DESTRUCTIVE (2 — `patch_manifest`, guarded by
 `expected_revision` plus a `.bak` backup, and the `edit_session`
 commit, guarded by a base sha256 + revision stale check plus a
@@ -2274,7 +2283,7 @@ Off by default; the verify stays probe-only without it.
 
 ### 58h. Browse the catalog before you dump it — progressive discovery
 
-102 tools is too many schemas to pay for in every turn. Don't start
+103 tools is too many schemas to pay for in every turn. Don't start
 from `tools/list` — start from `list_operations`: one compact line
 per tool (name, family, tier, one-sentence summary), optionally
 narrowed with `family` (`inspect`, `edit`, `text`, `image`,
