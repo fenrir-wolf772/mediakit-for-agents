@@ -624,7 +624,10 @@ split by a short pause joins its neighbour instead of flashing for a
 frame; a merge only happens when the result still fits the limits and
 never across a sentence end; calibrated on 9 real transcripts (10 of
 134 cues merged at 0.5s, no sentence crossed); the result counts
-`merged_cues`.
+`merged_cues`. `maxWords` is a soft cap: the stranded-word repair
+moves a stranded word to the next cue without re-checking it, so a
+repaired cue can hold 7 words — that trade-off is pinned by test (a
+cue never ends on a stranded word wins over the 6-word cap).
 
 When `MEDIAKIT_WORKDIR` is set, every user-supplied input/output path
 must stay inside that directory — `..` traversal and symlink escapes

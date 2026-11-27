@@ -15,7 +15,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
-import { acquireEditLease, analyzeSeamSamples, applyContentBaseline, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, projectSummary, proposeEdit, releaseEditLease, renewEditLease, resolveQcPolicy, restoreEditSessionCheckpoint, resumeEditSession, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, snapKeepSegmentsToPauses, spectralFluxOnset, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
+import { acquireEditLease, analyzeSeamSamples, applyContentBaseline, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, ffmpegThreads, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookOverlapSeconds, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, projectSummary, proposeEdit, releaseEditLease, renewEditLease, resolveQcPolicy, restoreEditSessionCheckpoint, resumeEditSession, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, snapKeepSegmentsToPauses, spectralFluxOnset, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
@@ -81,6 +81,19 @@ async function countFrames(file) {
     const { stdout } = await execFileAsync("ffprobe", ["-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", file]);
     const n = parseInt(stdout.trim(), 10);
     return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+// Independent decoded-frame digest: ffmpeg framemd5 hashes every
+// decoded frame (not the container bytes, so encoder threading
+// differences in the bitstream do not matter) — the right way to
+// ask "did the two renders draw the same frames".
+async function framemd5(file) {
+  try {
+    const { stdout } = await execFileAsync("ffmpeg", ["-v", "error", "-i", file, "-f", "framemd5", "-"]);
+    return createHash("md5").update(stdout).digest("hex");
   } catch {
     return null;
   }
@@ -2133,6 +2146,37 @@ console.log("zoom_pan pan-chain PSNR: f45 vs red =", zcpF45, "| f75 vs blue =", 
 checkOk(zcpF45 !== null && zcpF45 > 40, "zoom_pan pan chain frame 45 holds the left window (red)", `PSNR ${zcpF45}`);
 checkOk(zcpF75 !== null && zcpF75 > 40, "zoom_pan pan chain frame 75 holds the right window (blue) after the pan", `PSNR ${zcpF75}`);
 checkOk(zcpF120 !== null && zcpF120 > 40, "zoom_pan pan chain frame 120 is the full frame again (after zoom-out)", `PSNR ${zcpF120}`);
+// Lượt 185: pagecast's `-threads 1` guardrail, verified on ffmpeg
+// 8.1.2 — time-based expressions are honored under default threads,
+// so the guardrail is NOT needed on this build; MEDIAKIT_FFMPEG_
+// THREADS is only an escape hatch for a future build that does drop
+// them. The same zoompan chain render must be framemd5-identical
+// with the env unset and with =1 (and ffprobe must still work with
+// the env set — the flag is ffmpeg-only, never passed to ffprobe).
+const threadsSaved = process.env.MEDIAKIT_FFMPEG_THREADS;
+delete process.env.MEDIAKIT_FFMPEG_THREADS;
+const threadsDefault = ffmpegThreads();
+process.env.MEDIAKIT_FFMPEG_THREADS = "1";
+const threadsOne = ffmpegThreads();
+process.env.MEDIAKIT_FFMPEG_THREADS = "0";
+const threadsZero = ffmpegThreads();
+process.env.MEDIAKIT_FFMPEG_THREADS = "100";
+const threadsHuge = ffmpegThreads();
+process.env.MEDIAKIT_FFMPEG_THREADS = "abc";
+const threadsBad = ffmpegThreads();
+process.env.MEDIAKIT_FFMPEG_THREADS = "2.5";
+const threadsFrac = ffmpegThreads();
+if (threadsSaved === undefined) delete process.env.MEDIAKIT_FFMPEG_THREADS; else process.env.MEDIAKIT_FFMPEG_THREADS = threadsSaved;
+checkOk(threadsDefault === null && threadsOne === 1 && threadsZero === 1 && threadsHuge === 64 && threadsBad === null && threadsFrac === null, "ffmpegThreads: unset -> default, 1 -> 1, 0 clamps to 1, 100 clamps to 64, junk/fraction -> default", JSON.stringify({ threadsDefault, threadsOne, threadsZero, threadsHuge, threadsBad, threadsFrac }));
+const threadsOutDefault = path.join(root, "outputs/mcp-zoomchain-threads-default.mp4");
+const threadsOutOne = path.join(root, "outputs/mcp-zoomchain-threads-1.mp4");
+await runCliJson(["zoom-pan", path.join(root, "test/zoomchain-source.mp4"), "--events-file", path.join(root, "test/zoomchain-events.json"), "-o", threadsOutDefault]);
+await runCliJson(["zoom-pan", path.join(root, "test/zoomchain-source.mp4"), "--events-file", path.join(root, "test/zoomchain-events.json"), "-o", threadsOutOne], { MEDIAKIT_FFMPEG_THREADS: "1" });
+const threadsMd5Default = await framemd5(threadsOutDefault);
+const threadsMd5One = await framemd5(threadsOutOne);
+checkOk(threadsMd5Default !== null && threadsMd5Default === threadsMd5One, "zoompan chain render is framemd5-identical under default threads and -threads 1 (time-based expressions honored either way)", `${threadsMd5Default} vs ${threadsMd5One}`);
+const threadsProbe = await runCliJson(["probe", path.join(root, "test/zoomchain-source.mp4")], { MEDIAKIT_FFMPEG_THREADS: "1" });
+checkOk(near(threadsProbe.duration_seconds, 6, 0.15) && threadsProbe.video?.width === 1280, "probe still works with MEDIAKIT_FFMPEG_THREADS=1 (the flag never reaches ffprobe)", JSON.stringify({ duration_seconds: threadsProbe.duration_seconds }));
 // Chain dry-run: exact command, chains echoed, nothing written.
 const zoomChainDryRes = await client.callTool({
   name: "zoom_pan",
@@ -12199,12 +12243,23 @@ const idemJobsDir = process.env.MEDIAKIT_JOBS_DIR;
 const idemCountDirs = async () => (await readdir(idemJobsDir, { withFileTypes: true })).filter((e) => e.isDirectory() && e.name.startsWith("job-")).length;
 const idemSeedJob = async (id, fields) => {
   await mkdir(path.join(idemJobsDir, id), { recursive: true });
+  // Seeded fixtures are NOT real starts: their created_at is pinned
+  // 120s in the past (the estimate-fixture pattern) so the admission
+  // gate's 60s starts-per-minute window never counts them. With a
+  // fresh created_at, the 5 seeds + the 6 real starts around them hit
+  // 11 >= 10 and the gate refuses the NEXT real start — that is
+  // exactly how CI L184 failed (both runs): the HTTP async assemble
+  // after this block got JOB_ADMISSION_LIMIT, no job_id, and the
+  // 5-minute poll loop then waited on job_id=undefined. The attach
+  // logic never reads created_at, so backdating the seeds changes
+  // nothing they test.
+  const seededAt = new Date(Date.now() - 120_000).toISOString();
   await writeFile(path.join(idemJobsDir, id, "job.json"), JSON.stringify({
     job_id: id, operation: "assemble", status: "running",
     manifest: "fake", output_dir: "fake", mode: "render", force: true,
     approval: "forced", title: "idempotency fixture", total_seconds: 4, total_frames: 120,
     pid: null, progress: { stage: null, percent: 0, detail: null }, progress_history: [],
-    created_at: new Date().toISOString(), updated_at: new Date().toISOString(), result: null, error: null,
+    created_at: seededAt, updated_at: seededAt, result: null, error: null,
     idempotency_key: null, args_fingerprint: null, ...fields,
   }, null, 2));
 };
@@ -12259,6 +12314,15 @@ await idemSeedJob(idemCliJobId, { status: "running", idempotency_key: "luot184-c
 const idemCliJson = await runCliJson(["assemble", idemStage.manifestPath, "--mode", "render", "-o", idemOut, "--force", "--async", "--idempotency-key", "luot184-cli-key"]);
 checkOk(idemCliJson.job_id === idemCliJobId && idemCliJson.deduped === true && idemCliJson.attach_reason === "idempotency_key", "CLI assemble --async --idempotency-key attaches to the running job (option registered, same dedup path)", JSON.stringify({ job_id: idemCliJson.job_id, deduped: idemCliJson.deduped }));
 await idemCancel(idemCliJobId);
+// Regression pin for the CI L184 failure: the 5 seeded fixtures
+// above must NOT count as job starts in the admission gate's 60s
+// window (their created_at is backdated 120s for exactly this
+// reason). With fresh timestamps they + the 6 real starts around
+// them hit 11 >= 10 and the gate refused the HTTP async assemble
+// that follows this block. admitted must be true here, while the
+// gate still counts the real starts.
+const idemGate = JSON.parse((await client.callTool({ name: "job", arguments: { action: "admission" } })).content[0].text);
+checkOk(idemGate.admitted === true && idemGate.starts_last_minute <= 6, "admission gate stays open after the idempotency fixtures (seeds do not count as starts)", JSON.stringify({ admitted: idemGate.admitted, starts_last_minute: idemGate.starts_last_minute, active_jobs: idemGate.active_jobs }));
 
 // Lượt 122: estimate_remaining — pure estimator, deterministic
 // (nowMs pinned, so no wall-clock flake). Terminal/queued shapes

@@ -36,6 +36,31 @@ export function ffmpegTimeoutMs() {
   return Math.min(3_600_000, Math.max(60_000, Math.floor(n)));
 }
 
+// ffmpeg thread count (lượt 185 — pagecast's `-threads 1`
+// guardrail, verified on ffmpeg 8.1.2 before shipping): env
+// MEDIAKIT_FFMPEG_THREADS, integer 1–64. Unset/empty/invalid →
+// null (ffmpeg default). Measured 2026-11-27, report-luot185/:
+// time-based expressions are honored under default threads on this
+// build — crop x='(iw-ow)*t/10' pans identically (R 250.6→126.5→
+// 2.4, framemd5 identical), crop w='if(between(t,...))' stays
+// init-only under BOTH settings (threads do not fix it), and the
+// zoompan chain filter is framemd5 byte-identical default vs
+// -threads 1 — so the guardrail is NOT needed here. The knob stays
+// as an escape hatch for a future ffmpeg build that does drop
+// time-based expressions under multithreading. Read on every call,
+// like the timeout.
+export function ffmpegThreads() {
+  const raw = process.env.MEDIAKIT_FFMPEG_THREADS;
+  if (raw === undefined || raw === "") return null;
+  const n = Number(raw);
+  if (!Number.isInteger(n)) return null;
+  return Math.min(64, Math.max(1, n));
+}
+function withFfmpegThreads(args) {
+  const n = ffmpegThreads();
+  return n === null ? args : ["-threads", String(n), ...args];
+}
+
 // Adaptive ffmpeg timeout (lượt 182 — yolo-ffmpeg-mcp's idea that a
 // timeout should scale with duration × resolution × complexity, but
 // with coefficients CALIBRATED on this machine instead of their
@@ -359,7 +384,9 @@ function runCapture(cmd, args, { timeoutMs = ffmpegTimeoutMs() } = {}) {
 
 function run(cmd, args, { timeoutMs = ffmpegTimeoutMs() } = {}) {
   return new Promise((resolve, reject) => {
-    execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+    // -threads is an ffmpeg-only knob (ffprobe rejects it): inject
+    // only for the ffmpeg binary, never for ffprobe/ASR helpers.
+    execFile(cmd, cmd === FFMPEG ? withFfmpegThreads(args) : args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
         const detail = (stderr || "").trim().split("\n").slice(-5).join(" | ");
         reject(new MediaKitError(`${cmd} failed: ${err.message}${detail ? ` — ${detail}` : ""}`, "FFMPEG_FAILED"));
@@ -479,7 +506,7 @@ export async function runFfmpegWithProgress(args, { totalSeconds = null, onProgr
   if (typeof last !== "string" || last.startsWith("-")) {
     throw new MediaKitError("runFfmpegWithProgress needs the output file as the last argument", "INVALID_ARG");
   }
-  const progressArgs = [...args.slice(0, -1), "-progress", "pipe:1", "-nostats", last];
+  const progressArgs = [...withFfmpegThreads(args.slice(0, -1)), "-progress", "pipe:1", "-nostats", last];
   return new Promise((resolve, reject) => {
     const child = spawn(FFMPEG, progressArgs, { stdio: ["ignore", "pipe", "pipe"] });
     let stdoutBuf = "";
@@ -13693,6 +13720,11 @@ export async function doctor({ smoke = false } = {}) {
     decoded_work_limits: DECODED_WORK_LIMITS,
     job_admission_limits: jobAdmissionLimits(),
     ffmpeg_timeout_ms: ffmpegTimeoutMs(),
+    // null = ffmpeg default (the measured finding, lượt 185: time-
+    // based expressions are honored under default threads on ffmpeg
+    // 8.1.2, so -threads 1 is not forced; env MEDIAKIT_FFMPEG_THREADS
+    // 1–64 only overrides it when set).
+    ffmpeg_threads: ffmpegThreads(),
     audit,
     jobs_dir: jobsDir,
     voice_venv: voiceVenv,
