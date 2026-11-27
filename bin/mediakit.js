@@ -530,6 +530,28 @@ const COMMANDS = {
       ["-o, --output", "Output file (required)"],
     ],
   },
+  stabilize: {
+    usage: "mediakit stabilize <input> -o <output> [--smoothing 15] [--shakiness 5] [--accuracy 15] [--stepsize 6] [--min-contrast 0.25] [--tripod] [--optalgo 0] [--optzoom 1] [--zoom 0] [--crop keep|black] [--interpol bilinear] [--crf 23] [--reference <stable.mp4>] [--dry-run]",
+    desc: "Remove handheld camera shake in two vidstab passes (detect the camera path, apply the smoothed path). Audio is copied, MP4 gets +faststart. Reports jitter before/after plus the output's own inter-frame motion (p50/p90/spike frames) so the improvement is measured; --reference adds PSNR-Y/SSIM vs a stable take. --dry-run prints both exact ffmpeg commands and writes no file.",
+    args: [{ name: "input", required: true }],
+    options: [
+      ["--smoothing", "Low-pass window half-width in frames, 0-1000 (default 15)"],
+      ["--shakiness", "How shaky the footage is, 1-10 (default 5)"],
+      ["--accuracy", "Detection accuracy, 1-15 (default 15)"],
+      ["--stepsize", "Search stepsize in pixels, 1-32 (default 6)"],
+      ["--min-contrast", "Minimum field contrast, 0-1 (default 0.25)"],
+      ["--tripod", "Virtual tripod mode: lock to the first frame"],
+      ["--optalgo", "Path optimization: 0 global (default) | 1 gaussian | 2 average"],
+      ["--optzoom", "Optimal zoom: 0 none | 1 static (default) | 2 dynamic"],
+      ["--zoom", "Extra zoom percent, -100..100 (default 0)"],
+      ["--crop", "Border mode: keep (default) | black"],
+      ["--interpol", "Interpolation: no | linear | bilinear (default) | bicubic"],
+      ["--crf", "Quality 0-51, lower is better (default 23)"],
+      ["--reference", "Stable take of the same scene for PSNR/SSIM proof (optional)"],
+      ["--dry-run", "Print both exact ffmpeg commands and write no file"],
+      ["-o, --output", "Output file (required)"],
+    ],
+  },
   segment: {
     usage: "mediakit segment <input> -o <directory> [--segment-time 6] [--playlist index.m3u8] [--segment-prefix seg] [--reencode] [--crf 23] [--dry-run]",
     desc: "Cut a video into an HLS VOD playlist (index.m3u8 + .ts segments) in a directory. Stream-copy by default (fast, lossless) — but segments can only start on keyframes, so actual lengths follow the source GOP; --reencode re-encodes to libx264/aac with forced keyframes for exact segment boundaries. Reports the segment count and durations parsed back from the playlist on disk. --dry-run prints the exact ffmpeg command and writes no file (no directory is created).",
@@ -1303,7 +1325,7 @@ const COMMANDS = {
   },
   mcp: {
     usage: "mediakit mcp [--http [--port <n>] [--host <ip>]]",
-    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 100 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
+    desc: "Start the MCP server on stdio (for Claude Code / Cursor / Codex), or with --http the same 101 tools over HTTP (REST + JSON-RPC on 127.0.0.1:3000 by default, for curl testing).",
     args: [],
     options: [
       ["--http", "Serve MCP over HTTP instead of stdio"],
@@ -1998,6 +2020,25 @@ async function main() {
           filter: opts.filter ?? "hqdn3d",
           strength: numOpt(opts, "strength") ?? 0.5,
           crf: numOpt(opts, "crf") ?? 23,
+          dryRun: opts.dry_run === true,
+        });
+        break;
+      case "stabilize":
+        result = await core.stabilize({
+          input: needInput(), output: needOutput(opts),
+          smoothing: numOpt(opts, "smoothing") ?? 15,
+          shakiness: numOpt(opts, "shakiness") ?? 5,
+          accuracy: numOpt(opts, "accuracy") ?? 15,
+          stepsize: numOpt(opts, "stepsize") ?? 6,
+          minContrast: numOpt(opts, "min_contrast") ?? 0.25,
+          tripod: opts.tripod === true,
+          optalgo: numOpt(opts, "optalgo") ?? 0,
+          optzoom: numOpt(opts, "optzoom") ?? 1,
+          zoom: numOpt(opts, "zoom") ?? 0,
+          crop: opts.crop ?? "keep",
+          interpol: opts.interpol ?? "bilinear",
+          crf: numOpt(opts, "crf") ?? 23,
+          reference: opts.reference ?? null,
           dryRun: opts.dry_run === true,
         });
         break;

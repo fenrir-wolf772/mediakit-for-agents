@@ -10524,6 +10524,255 @@ export async function denoise({ input, output, filter = "hqdn3d", strength = 0.5
   };
 }
 
+// ---------------------------------------------------------------- stabilize
+// Two-pass handheld-shake removal with vidstab (demilp/ffmpeg-mcp's
+// stabilize idea + hlpsxc/video-quality-mcp's reference-vs-distorted
+// proof pattern, lượt 186). Pass 1 (vidstabdetect) measures the camera
+// path into a .trf file in a fresh temp dir — never CWD (the
+// video-quality-mcp anti-pattern: stats files in CWD race and litter
+// the workspace). Pass 2 (vidstabtransform) applies the smoothed path.
+// Proof is jitter-first, not PSNR-first: PSNR/SSIM against a stable
+// reference is framing-sensitive (optzoom rescales the frame, black
+// borders cap PSNR — measured: nozoom PSNR-Y only 12.3 -> 14.0 dB
+// while the picture is visibly steadier), so the verdict runs on
+// jitter = mean |frame - previous frame| (raw YAVG, center 80% crop,
+// no binarizing threshold — the binarized motion fraction counts
+// encode noise as motion). Calibrated on the shaky fixture
+// (test/shaky-source.mp4, sine + noise shake +/-13px, 10s 640x360):
+// jitter 35.79 -> 12.22 (-66%, ratio 0.341) at default settings,
+// median inter-frame motion 6.4px -> 0px.
+// Honest limit, measured not assumed: on ultra-sharp synthetic
+// texture (flat blocks + straight edges + 32px grid) vidstab's block
+// matching misses on ~10% of frames — single frames land ~12-14px
+// off while their neighbours are aligned (p90 of output motion
+// 12-15px vs p50 0px). The proof reports that tail as
+// output_motion.p90_px + spike_frames instead of hiding it; on
+// natural handheld footage (soft edges, motion blur, non-periodic
+// texture) the tail is smaller. Detection itself is sound: the .trf
+// median magnitudes match the fixture's ground-truth shake to <1px.
+async function measureJitter(file) {
+  try {
+    const { stderr } = await run(FFMPEG, [
+      "-hide_banner", "-nostats", "-i", file,
+      "-vf", "crop=iw*0.8:ih*0.8,scale=320:-2,format=gray,tblend=all_mode=difference,signalstats,metadata=print:key=lavfi.signalstats.YAVG",
+      "-f", "null", "-",
+    ]);
+    const vals = [...stderr.matchAll(/lavfi\.signalstats\.YAVG=([0-9.]+)/g)].map((m) => +m[1]);
+    if (!vals.length) return null;
+    return +(vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(2);
+  } catch {
+    return null;
+  }
+}
+
+// Pure: parse a vidstab .trf file into per-frame median-motion
+// percentiles. Each "Frame N (List M [(LM dx dy ...)])" line carries
+// the local motions; the median (not the mean) is robust to the
+// alias matches (e.g. (-36,30) on a 32px grid) that pollute the mean.
+// A frame counts as a spike when its median motion is >= 10px.
+export function parseStabTrfMotion(text) {
+  const med = (a) => {
+    const s = [...a].sort((x, y) => x - y);
+    return s[Math.floor(s.length / 2)];
+  };
+  const mags = [];
+  for (const line of String(text ?? "").split("\n")) {
+    const m = line.match(/^Frame \d+ \(List \d+ \[(.*)\]\)$/);
+    if (!m) continue;
+    const lms = [...m[1].matchAll(/\(LM (-?\d+) (-?\d+) /g)].map((x) => [+x[1], +x[2]]);
+    if (!lms.length) continue;
+    mags.push(Math.hypot(med(lms.map((v) => v[0])), med(lms.map((v) => v[1]))));
+  }
+  if (!mags.length) return null;
+  const s = [...mags].sort((a, b) => a - b);
+  const q = (p) => +s[Math.min(s.length - 1, Math.floor(p * (s.length - 1)))].toFixed(2);
+  return {
+    frames: mags.length,
+    p50_px: q(0.5),
+    p90_px: q(0.9),
+    max_px: +s[s.length - 1].toFixed(2),
+    spike_frames: mags.filter((v) => v >= 10).length,
+  };
+}
+
+async function measureStabOutputMotion(file) {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-stab-measure-"));
+  try {
+    const trfPath = path.join(tmpDir, "transforms.trf");
+    await run(FFMPEG, [
+      "-hide_banner", "-nostats", "-y", "-i", file,
+      "-vf", `vidstabdetect=result=${trfPath}:shakiness=5:accuracy=15:stepsize=6:mincontrast=0.25`,
+      "-an", "-f", "null", "-",
+    ]);
+    return parseStabTrfMotion(await readFile(trfPath, "utf8"));
+  } catch {
+    return null;
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+// Pure verdict: jitter is the primary signal (framing-proof); PSNR
+// vs a stable reference is the fallback when jitter is unavailable.
+// Thresholds calibrated on the shaky fixture (jitter ratio 0.43,
+// PSNR-Y +1.7 dB nozoom): improved needs a clear drop, worse needs
+// a clear regression, anything in between is unchanged.
+export function stabilizeVerdict({ jitterBefore, jitterAfter, psnrBeforeDb, psnrAfterDb }) {
+  if (jitterBefore != null && jitterAfter != null && jitterBefore > 0) {
+    const ratio = jitterAfter / jitterBefore;
+    if (ratio <= 0.6) return "improved";
+    if (ratio >= 1.25) return "worse";
+    return "unchanged";
+  }
+  if (psnrBeforeDb != null && psnrAfterDb != null) {
+    const delta = psnrAfterDb - psnrBeforeDb;
+    if (delta >= 1) return "improved";
+    if (delta <= -1) return "worse";
+    return "unchanged";
+  }
+  return null;
+}
+
+const STABILIZE_CROPS = { keep: 0, black: 1 };
+const STABILIZE_INTERPOLS = { no: 0, linear: 1, bilinear: 2, bicubic: 3 };
+
+export async function stabilize({
+  input, output,
+  smoothing = 15, shakiness = 5, accuracy = 15, stepsize = 6,
+  minContrast = 0.25, tripod = false,
+  optalgo = 0, optzoom = 1, zoom = 0, crop = "keep", interpol = "bilinear",
+  crf = 23, reference = null, dryRun = false,
+}) {
+  const inPath = await requireInput(input);
+  const outPath = await prepareOutput(output, [inPath]);
+  const c = num(crf, "crf", { min: 0, max: 51, integer: true });
+  const sm = num(smoothing, "smoothing", { min: 0, max: 1000, integer: true });
+  const sh = num(shakiness, "shakiness", { min: 1, max: 10, integer: true });
+  const ac = num(accuracy, "accuracy", { min: 1, max: 15, integer: true });
+  const st = num(stepsize, "stepsize", { min: 1, max: 32, integer: true });
+  const mc = num(minContrast, "min_contrast", { min: 0, max: 1 });
+  const oa = num(optalgo, "optalgo", { min: 0, max: 2, integer: true });
+  const oz = num(optzoom, "optzoom", { min: 0, max: 2, integer: true });
+  const zm = num(zoom, "zoom", { min: -100, max: 100 });
+  if (!(crop in STABILIZE_CROPS)) {
+    throw new MediaKitError(`unknown stabilize crop: ${crop} (supported: ${Object.keys(STABILIZE_CROPS).join(", ")})`, "INVALID_ARG");
+  }
+  if (!(interpol in STABILIZE_INTERPOLS)) {
+    throw new MediaKitError(`unknown stabilize interpol: ${interpol} (supported: ${Object.keys(STABILIZE_INTERPOLS).join(", ")})`, "INVALID_ARG");
+  }
+  const meta = await probe(inPath);
+  if (!meta.video) throw new MediaKitError("stabilize needs a video input", "INVALID_ARG");
+  const refPath = reference == null ? null : await requireInput(reference);
+  if (refPath) {
+    const refMeta = await probe(refPath);
+    if (!refMeta.video) throw new MediaKitError("stabilize --reference needs a video file", "INVALID_ARG");
+  }
+  const ext = path.extname(outPath).slice(1).toLowerCase();
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mediakit-stab-"));
+  const trfPath = path.join(tmpDir, "transforms.trf");
+  try {
+    const detectFilter = `vidstabdetect=result=${trfPath}:shakiness=${sh}:accuracy=${ac}:stepsize=${st}:mincontrast=${mc}:tripod=${tripod ? 1 : 0}`;
+    const transformFilter = `vidstabtransform=input=${trfPath}:smoothing=${sm}:optalgo=${oa}:optzoom=${oz}:zoom=${zm}:crop=${STABILIZE_CROPS[crop]}:interpol=${STABILIZE_INTERPOLS[interpol]}:tripod=${tripod ? 1 : 0}`;
+    const detectArgs = ["-hide_banner", "-nostats", "-y", "-i", inPath, "-vf", detectFilter, "-an", "-f", "null", "-"];
+    const transformArgs = ["-y", "-i", inPath, "-vf", transformFilter, "-c:v", "libx264", "-crf", String(c), "-preset", "medium"];
+    if (meta.audio) transformArgs.push("-c:a", "copy");
+    if (["mp4", "mov", "m4v"].includes(ext)) transformArgs.push("-movflags", "+faststart");
+    transformArgs.push(outPath);
+    const jitterBefore = await measureJitter(inPath);
+    let refBefore = null;
+    if (refPath) {
+      try {
+        refBefore = await measureQualityProof({ source: refPath, compressed: inPath, duration: meta.duration_seconds });
+      } catch {
+        refBefore = { available: false, reason: "reference proof failed on the input" };
+      }
+    }
+    if (dryRun) {
+      // jitter_before / reference-before are measured on the input
+      // (read-only), so they are exact; after-values report null —
+      // measured on the real output.
+      return {
+        operation: "stabilize", dry_run: true, input: inPath, output: outPath,
+        smoothing: sm, shakiness: sh, accuracy: ac, stepsize: st, min_contrast: mc, tripod: !!tripod,
+        optalgo: oa, optzoom: oz, zoom: zm, crop, interpol, crf: c,
+        duration_seconds: null,
+        dimensions: meta.video ? `${meta.video.display_width}x${meta.video.display_height}` : null,
+        size_bytes: null,
+        proof: {
+          available: jitterBefore != null || (refBefore?.available ?? false),
+          jitter_before: jitterBefore, jitter_after: null, jitter_ratio: null,
+          output_motion: null,
+          reference: refBefore?.available
+            ? { psnr_y_db_before: refBefore.psnr_y_db ?? null, psnr_y_db_after: null, ssim_mean_before: refBefore.ssim_mean, ssim_mean_after: null }
+            : null,
+          verdict: null,
+          notes: ["Dry run: no file written. jitter_after / output_motion / reference-after are measured on the real output, so they report null here."],
+        },
+        commands: [formatCommand(detectArgs), formatCommand(transformArgs)],
+        note: "Dry run: no file written. Two commands, in order: detect the camera path, then apply the smoothed path.",
+      };
+    }
+    await run(FFMPEG, detectArgs);
+    await run(FFMPEG, transformArgs);
+    const info = await fileInfo(outPath);
+    const out = await probe(outPath);
+    const jitterAfter = await measureJitter(outPath);
+    const outputMotion = await measureStabOutputMotion(outPath);
+    let refAfter = null;
+    if (refPath) {
+      try {
+        refAfter = await measureQualityProof({ source: refPath, compressed: outPath, duration: out.duration_seconds });
+      } catch {
+        refAfter = { available: false, reason: "reference proof failed on the output" };
+      }
+    }
+    const notes = [];
+    if (jitterBefore == null) notes.push("jitter_before could not be measured (frame-diff decode failed) — verdict falls back to PSNR when a reference is given");
+    if (jitterAfter == null) notes.push("jitter_after could not be measured (frame-diff decode failed)");
+    if (outputMotion == null) notes.push("output_motion could not be measured (vidstabdetect re-run failed)");
+    if (outputMotion && outputMotion.spike_frames > 0) {
+      notes.push(`${outputMotion.spike_frames}/${outputMotion.frames} output frames still move >=10px between neighbours — vidstab block-matching misses on ultra-sharp synthetic texture; on natural handheld footage this tail is smaller. See output_motion.p90_px.`);
+    }
+    if (refPath && !(refBefore?.available) && !(refAfter?.available)) {
+      notes.push("reference proof unavailable (ssim filter missing or clip too short) — verdict runs on jitter only");
+    }
+    const verdict = stabilizeVerdict({
+      jitterBefore, jitterAfter,
+      psnrBeforeDb: refBefore?.available ? refBefore.psnr_y_db ?? null : null,
+      psnrAfterDb: refAfter?.available ? refAfter.psnr_y_db ?? null : null,
+    });
+    return {
+      operation: "stabilize", input: inPath, output: outPath,
+      smoothing: sm, shakiness: sh, accuracy: ac, stepsize: st, min_contrast: mc, tripod: !!tripod,
+      optalgo: oa, optzoom: oz, zoom: zm, crop, interpol, crf: c,
+      duration_seconds: out.duration_seconds,
+      dimensions: out.video ? `${out.video.width}x${out.video.height}` : null,
+      size_bytes: info.size_bytes,
+      proof: {
+        available: jitterBefore != null || jitterAfter != null || (refBefore?.available ?? false) || (refAfter?.available ?? false),
+        jitter_before: jitterBefore,
+        jitter_after: jitterAfter,
+        jitter_ratio: jitterBefore != null && jitterAfter != null && jitterBefore > 0 ? +(jitterAfter / jitterBefore).toFixed(3) : null,
+        output_motion: outputMotion,
+        reference: refBefore?.available || refAfter?.available
+          ? {
+              psnr_y_db_before: refBefore?.available ? refBefore.psnr_y_db ?? null : null,
+              psnr_y_db_after: refAfter?.available ? refAfter.psnr_y_db ?? null : null,
+              psnr_delta_db: refBefore?.available && refAfter?.available && refBefore.psnr_y_db != null && refAfter.psnr_y_db != null
+                ? +(refAfter.psnr_y_db - refBefore.psnr_y_db).toFixed(2) : null,
+              ssim_mean_before: refBefore?.available ? refBefore.ssim_mean : null,
+              ssim_mean_after: refAfter?.available ? refAfter.ssim_mean : null,
+            }
+          : null,
+        verdict,
+        notes,
+      },
+    };
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 // ---------------------------------------------------------------- segment
 // Cut a video into an HLS VOD playlist: index.m3u8 + .ts segments in
 // an output directory, ready to serve statically or preview in a
@@ -13075,6 +13324,8 @@ const DOCTOR_FILTERS = [
   "reverse", "areverse",
   "transpose", "hflip", "vflip",
   "minterpolate", "hqdn3d", "nlmeans",
+  // stabilize: two-pass vidstab (lượt 186).
+  "vidstabdetect", "vidstabtransform",
   "chromakey", "zoompan",
   "afade",
   "tblend", "signalstats",
@@ -13130,6 +13381,7 @@ const TOOL_REQUIREMENTS = {
   fastforward: { filters: ["split", "asplit", "trim", "atrim", "setpts", "asetpts", "atempo", "concat", "fps", "format", "drawtext"], encoders: ["libx264", "aac"] },
   interpolate: { filters: ["minterpolate"], encoders: ["libx264"] },
   denoise: { filters: ["hqdn3d", "nlmeans"], encoders: ["libx264"] },
+  stabilize: { filters: ["vidstabdetect", "vidstabtransform"], encoders: ["libx264"] },
   segment: {},
   convert: { encoders: ["libx264", "libx265", "libvpx-vp9", "libaom-av1", "mpeg4"] },
   normalize: { filters: ["scale", "fps", "format", "loudnorm"], encoders: ["libx264", "aac"] },

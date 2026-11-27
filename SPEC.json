@@ -1,7 +1,7 @@
 {
   "spec_version": 1,
   "mediakit_version": "0.1.0",
-  "tool_count": 100,
+  "tool_count": 101,
   "transports": [
     "stdio",
     "http"
@@ -15,7 +15,7 @@
     {
       "name": "edit",
       "description": "Change one clip: cut, transform, grade, mix or convert it.",
-      "count": 37
+      "count": 38
     },
     {
       "name": "text",
@@ -2164,6 +2164,128 @@
             "type": "boolean",
             "default": false,
             "description": "Print the exact ffmpeg command and write no file"
+          }
+        },
+        "required": [
+          "input",
+          "output"
+        ],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "stabilize",
+      "family": "edit",
+      "tier": "WRITE",
+      "summary": "Remove handheld camera shake in two vidstab passes: detect measures the camera path, transform applies the smoothed path (smoothing 0-1000, default 15 —…",
+      "description": "Remove handheld camera shake in two vidstab passes: detect measures the camera path, transform applies the smoothed path (smoothing 0-1000, default 15 — frames*2+1 in the low-pass; shakiness 1-10, accuracy 1-15, stepsize, min_contrast, tripod mode, optzoom 0-2, zoom -100..100, crop keep/black, interpol no/linear/bilinear/bicubic). Audio is copied untouched, MP4 output gets +faststart. The result proves the improvement instead of assuming it: jitter (mean |frame minus previous frame|, center crop) before and after, plus a re-detection of the output's own inter-frame motion (p50/p90/max px, spike_frames = frames still moving >=10px). With reference set to a stable take of the same scene it also reports PSNR-Y and SSIM mean before/after — but the verdict runs on jitter, because PSNR is framing-sensitive (optzoom rescales, black borders cap it). Honest limit, measured on the synthetic fixture: on ultra-sharp synthetic texture vidstab block-matching misses on ~10% of frames (single frames land ~12px off while neighbours align — see output_motion.p90_px); on natural handheld footage the tail is smaller. Set dry_run=true to print both exact ffmpeg commands and write no file (jitter_before is measured on the input, so it is exact; jitter_after/output_motion report null — measured on the real output).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Path to the file (relative or absolute)"
+          },
+          "output": {
+            "$ref": "#/properties/input"
+          },
+          "smoothing": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000,
+            "default": 15,
+            "description": "Low-pass window half-width in frames for the camera path (default 15)"
+          },
+          "shakiness": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10,
+            "default": 5,
+            "description": "How shaky the footage is, 1-10 (default 5)"
+          },
+          "accuracy": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 15,
+            "default": 15,
+            "description": "Detection accuracy 1-15 (default 15)"
+          },
+          "stepsize": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 32,
+            "default": 6,
+            "description": "Search stepsize in pixels (default 6)"
+          },
+          "min_contrast": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0.25,
+            "description": "Minimum field contrast 0-1, below it a field is discarded (default 0.25)"
+          },
+          "tripod": {
+            "type": "boolean",
+            "default": false,
+            "description": "Virtual tripod mode: lock to the first frame instead of smoothing the path (default false)"
+          },
+          "optalgo": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2,
+            "default": 0,
+            "description": "Camera-path optimization: 0 global (default), 1 gaussian, 2 simple average"
+          },
+          "optzoom": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2,
+            "default": 1,
+            "description": "Optimal zoom: 0 none (black borders may show), 1 static (default), 2 dynamic"
+          },
+          "zoom": {
+            "type": "number",
+            "minimum": -100,
+            "maximum": 100,
+            "default": 0,
+            "description": "Extra zoom percent, >0 in / <0 out (default 0)"
+          },
+          "crop": {
+            "type": "string",
+            "enum": [
+              "keep",
+              "black"
+            ],
+            "default": "keep",
+            "description": "Border mode when the transform reveals empty edges: keep (default) or black"
+          },
+          "interpol": {
+            "type": "string",
+            "enum": [
+              "no",
+              "linear",
+              "bilinear",
+              "bicubic"
+            ],
+            "default": "bilinear",
+            "description": "Pixel interpolation for the transform (default bilinear; bicubic is sharper but flickers more on hard edges)"
+          },
+          "crf": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 51,
+            "default": 23
+          },
+          "reference": {
+            "$ref": "#/properties/input",
+            "description": "Optional stable take of the same scene — reports PSNR-Y and SSIM mean before/after as extra proof"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "default": false,
+            "description": "Print both exact ffmpeg commands and write no file"
           }
         },
         "required": [
@@ -6415,7 +6537,7 @@
       "family": "meta",
       "tier": "READ",
       "summary": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the…",
-      "description": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 100 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+      "description": "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 101 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -6710,5 +6832,5 @@
       }
     }
   ],
-  "spec_hash": "a5c5ea10a38823df4bdd1b5e74a95be975c6006eb35ed2270103d8eb97397afc"
+  "spec_hash": "da7f4444b6413345ef4417e31eccf749aab9bbe21aaa2aca6a9520e43b240238"
 }

@@ -914,6 +914,49 @@ export const TOOL_DEFS = [
 
 
   {
+    name: "stabilize",
+    tier: "WRITE",
+    description: "Remove handheld camera shake in two vidstab passes: detect measures the camera path, transform applies the smoothed path (smoothing 0-1000, default 15 — frames*2+1 in the low-pass; shakiness 1-10, accuracy 1-15, stepsize, min_contrast, tripod mode, optzoom 0-2, zoom -100..100, crop keep/black, interpol no/linear/bilinear/bicubic). Audio is copied untouched, MP4 output gets +faststart. The result proves the improvement instead of assuming it: jitter (mean |frame minus previous frame|, center crop) before and after, plus a re-detection of the output's own inter-frame motion (p50/p90/max px, spike_frames = frames still moving >=10px). With reference set to a stable take of the same scene it also reports PSNR-Y and SSIM mean before/after — but the verdict runs on jitter, because PSNR is framing-sensitive (optzoom rescales, black borders cap it). Honest limit, measured on the synthetic fixture: on ultra-sharp synthetic texture vidstab block-matching misses on ~10% of frames (single frames land ~12px off while neighbours align — see output_motion.p90_px); on natural handheld footage the tail is smaller. Set dry_run=true to print both exact ffmpeg commands and write no file (jitter_before is measured on the input, so it is exact; jitter_after/output_motion report null — measured on the real output).",
+    schema: {
+    input: pathSchema,
+    output: pathSchema,
+    smoothing: z.number().int().min(0).max(1000).default(15).describe("Low-pass window half-width in frames for the camera path (default 15)"),
+    shakiness: z.number().int().min(1).max(10).default(5).describe("How shaky the footage is, 1-10 (default 5)"),
+    accuracy: z.number().int().min(1).max(15).default(15).describe("Detection accuracy 1-15 (default 15)"),
+    stepsize: z.number().int().min(1).max(32).default(6).describe("Search stepsize in pixels (default 6)"),
+    min_contrast: z.number().min(0).max(1).default(0.25).describe("Minimum field contrast 0-1, below it a field is discarded (default 0.25)"),
+    tripod: z.boolean().default(false).describe("Virtual tripod mode: lock to the first frame instead of smoothing the path (default false)"),
+    optalgo: z.number().int().min(0).max(2).default(0).describe("Camera-path optimization: 0 global (default), 1 gaussian, 2 simple average"),
+    optzoom: z.number().int().min(0).max(2).default(1).describe("Optimal zoom: 0 none (black borders may show), 1 static (default), 2 dynamic"),
+    zoom: z.number().min(-100).max(100).default(0).describe("Extra zoom percent, >0 in / <0 out (default 0)"),
+    crop: z.enum(["keep", "black"]).default("keep").describe("Border mode when the transform reveals empty edges: keep (default) or black"),
+    interpol: z.enum(["no", "linear", "bilinear", "bicubic"]).default("bilinear").describe("Pixel interpolation for the transform (default bilinear; bicubic is sharper but flickers more on hard edges)"),
+    crf: z.number().int().min(0).max(51).default(23),
+    reference: pathSchema.optional().describe("Optional stable take of the same scene — reports PSNR-Y and SSIM mean before/after as extra proof"),
+    dry_run: z.boolean().default(false).describe("Print both exact ffmpeg commands and write no file"),
+  },
+    handler: async (a) => safe(() => core.stabilize({
+    input: a.input,
+    output: a.output,
+    smoothing: a.smoothing,
+    shakiness: a.shakiness,
+    accuracy: a.accuracy,
+    stepsize: a.stepsize,
+    minContrast: a.min_contrast,
+    tripod: a.tripod,
+    optalgo: a.optalgo,
+    optzoom: a.optzoom,
+    zoom: a.zoom,
+    crop: a.crop,
+    interpol: a.interpol,
+    crf: a.crf,
+    reference: a.reference,
+    dryRun: a.dry_run,
+  })),
+  },
+
+
+  {
     name: "segment",
     tier: "WRITE",
     description: "Cut a video into an HLS VOD playlist: index.m3u8 plus .ts segments in an output directory, ready to serve statically or preview in a player. Stream-copy is the default (fast, lossless) but segments can only start on keyframes, so actual segment lengths follow the source GOP — a sparse-GOP source gives fewer, longer segments than requested; use reencode=true to re-encode to libx264/aac with forced keyframes so segments land exactly on the requested grid. Copy mode refuses non-H.264 video or non-AAC/MP3 audio up front. The result parses the playlist back from disk and stats every segment file, so the count and durations are measured, not assumed. Set dry_run=true to print the exact ffmpeg command and write no file — no directory is created and no stale segments are deleted (segment_count/durations report null — measured on the real output).",
@@ -2660,7 +2703,7 @@ export const TOOL_DEFS = [
   {
     name: "list_operations",
     tier: "READ",
-    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 100 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
+    description: "Browse the tool catalog without paying for every input schema: one compact line per tool (name, family, safety tier, one-sentence summary) — the progressive-discovery entry point (KyaniteLabs/kinocut's list_operations idea). tools/list dumps the full JSON schema of all 101 tools every turn; call this first instead, then describe_operation for the full schema of only the tools you actually need. Pass family to narrow to one family (inspect, edit, text, image, assemble, meta). Always lists the FULL catalog, even when MEDIAKIT_TOOL_PROFILE=hot hides tools from tools/list.",
     schema: {
     family: z.enum(["inspect", "edit", "text", "image", "assemble", "meta"]).optional().describe("Narrow to one family; omit for the whole catalog"),
   },
@@ -2832,7 +2875,7 @@ export function listSafetyTiers() {
 }
 
 // ---------------------------------------------------------------- progressive discovery
-// The catalog is 100 tools and tools/list dumps the full JSON schema
+// The catalog is 101 tools and tools/list dumps the full JSON schema
 // of every one on every turn — kinocut's answer is progressive
 // discovery: a compact list first, full schema only for the tools
 // actually used (lượt 147, idea: KyaniteLabs/kinocut
@@ -2865,11 +2908,11 @@ export const TOOL_FAMILY_OF = {
   determinism: "inspect", verify: "inspect", verify_cuts: "inspect", diagnose: "inspect",
   transitions: "inspect", estimate_conversion: "inspect", doctor: "inspect",
   qa_report: "inspect", audit: "inspect", safety: "inspect", receipt: "inspect",
-  // edit (37)
+  // edit (38)
   trim: "edit", crop: "edit", resize: "edit", extract_audio: "edit", extract_frame: "edit",
   loudness: "edit", concat: "edit", grade: "edit", make_loopable: "edit", freeze: "edit",
   fastforward: "edit", reverse: "edit", rotate: "edit", boomerang: "edit",
-  chroma_key: "edit", zoom_pan: "edit", interpolate: "edit", denoise: "edit",
+  chroma_key: "edit", zoom_pan: "edit", interpolate: "edit", denoise: "edit", stabilize: "edit",
   segment: "edit", convert: "edit", normalize: "edit", compress: "edit", silence: "edit",
   cut_words: "edit", remove_retakes: "edit", smart_cut: "edit", clean_voice: "edit",
   mix: "edit", overlay: "edit", pip: "edit", magnify: "edit", broll: "edit", fit: "edit",

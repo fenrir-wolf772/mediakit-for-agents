@@ -1737,7 +1737,7 @@ exactly the unguarded pattern brookcs3/m3u8-mcp-server's
 verify) — MediaKit's `download` exists so the agent never has to.
 
 ### 52. Test a tool over HTTP before wiring up an MCP client — same tools, curl instead of stdio
-`mediakit mcp --http [--port 3000]` serves the same 100 tools over
+`mediakit mcp --http [--port 3000]` serves the same 101 tools over
 HTTP on `127.0.0.1`: `GET /mcp` (metadata), `GET /mcp/tools`
 (every tool + JSON input schema), `POST /mcp/tools/{name}/invoke`
 (`{"arguments": {...}}`), and `POST /` for JSON-RPC 2.0
@@ -2143,7 +2143,7 @@ review strips when `strips: true`), `estimate_conversion`
 sample-encodes to temp, `job` only reads/cancels job state,
 `propose_edit` validates options with the patch_manifest helpers
 and writes nothing; WRITE
-(63) produces a file the caller asked for and never overwrites its
+(64) produces a file the caller asked for and never overwrites its
 own input; DESTRUCTIVE (2 — `patch_manifest`, guarded by
 `expected_revision` plus a `.bak` backup, and the `edit_session`
 commit, guarded by a base sha256 + revision stale check plus a
@@ -2259,7 +2259,7 @@ Off by default; the verify stays probe-only without it.
 
 ### 58h. Browse the catalog before you dump it — progressive discovery
 
-100 tools is too many schemas to pay for in every turn. Don't start
+101 tools is too many schemas to pay for in every turn. Don't start
 from `tools/list` — start from `list_operations`: one compact line
 per tool (name, family, tier, one-sentence summary), optionally
 narrowed with `family` (`inspect`, `edit`, `text`, `image`,
