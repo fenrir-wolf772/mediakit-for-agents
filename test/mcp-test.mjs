@@ -2600,11 +2600,17 @@ if (vidstabAvailable) {
   checkOk(stabJson.proof?.output_motion?.p50_px <= 1 && typeof stabJson.proof?.output_motion?.p90_px === "number" && typeof stabJson.proof?.output_motion?.spike_frames === "number", "stabilize reports the output's own motion tail (p50 <= 1px, p90 + spike count visible, not hidden)", JSON.stringify(stabJson.proof?.output_motion));
   // Sharpness in the proof (lượt 188): the shaky fixture is
   // ultra-sharp grid texture (mean ~23.4), and vidstab resampling
-  // softens it to ~15.2 (ratio 0.65, measured standalone) — so the
-  // proof must show the softening instead of hiding it. Bounds are
-  // loose on purpose: the exact ratio moves with x264 threading.
-  checkOk(typeof stabJson.proof?.sharpness_before?.mean === "number" && stabJson.proof.sharpness_before.mean > 20 && typeof stabJson.proof?.sharpness_after?.mean === "number" && stabJson.proof.sharpness_after.mean > 10 && typeof stabJson.proof?.sharpness_ratio === "number" && stabJson.proof.sharpness_ratio > 0.5 && stabJson.proof.sharpness_ratio < 0.8, "stabilize proof reports sharpness before/after + ratio (ultra-sharp fixture softens to ~0.65x)", JSON.stringify({ before: stabJson.proof?.sharpness_before, after: stabJson.proof?.sharpness_after, ratio: stabJson.proof?.sharpness_ratio }));
-  checkOk(Array.isArray(stabJson.proof?.notes) && stabJson.proof.notes.some((n) => /softened the picture/.test(n)), "stabilize proof flags the softening in the notes when the ratio is below 0.75", JSON.stringify(stabJson.proof?.notes));
+  // softens it — locally to ~15.2 (ratio 0.65), on the GitHub runner
+  // to ~19.8 (ratio 0.83, CI run 45993611305) — so the proof must
+  // show the softening instead of hiding it. Bounds are loose on
+  // purpose: the exact ratio moves with ffmpeg build + x264
+  // threading, so the test asserts softening happened (ratio < 1)
+  // and the picture survived (ratio > 0.5), never a local-only value.
+  checkOk(typeof stabJson.proof?.sharpness_before?.mean === "number" && stabJson.proof.sharpness_before.mean > 20 && typeof stabJson.proof?.sharpness_after?.mean === "number" && stabJson.proof.sharpness_after.mean > 10 && typeof stabJson.proof?.sharpness_ratio === "number" && stabJson.proof.sharpness_ratio > 0.5 && stabJson.proof.sharpness_ratio < 1, "stabilize proof reports sharpness before/after + ratio (ultra-sharp fixture softens: local ~0.65x, CI runner ~0.83x)", JSON.stringify({ before: stabJson.proof?.sharpness_before, after: stabJson.proof?.sharpness_after, ratio: stabJson.proof?.sharpness_ratio }));
+  // The note fires only when ratio < 0.75 (core.js) — on the CI
+  // runner (ratio 0.83) it must NOT fire, so assert the flag matches
+  // the condition exactly instead of assuming the local ratio.
+  checkOk(Array.isArray(stabJson.proof?.notes) && ((stabJson.proof.sharpness_ratio < 0.75) === stabJson.proof.notes.some((n) => /softened the picture/.test(n))), "stabilize proof flags the softening in the notes exactly when the ratio is below 0.75", JSON.stringify({ ratio: stabJson.proof?.sharpness_ratio, notes: stabJson.proof?.notes }));
   const { stdout: stabProbeOut } = await execFileAsync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type,codec_name", "-of", "json", path.join(root, "outputs/mcp-stabilize.mp4")]);
   const stabStreams = JSON.parse(stabProbeOut).streams ?? [];
   checkOk(stabStreams.some((s) => s.codec_type === "video" && s.codec_name === "h264") && stabStreams.some((s) => s.codec_type === "audio" && s.codec_name === "aac"), "stabilize copies the audio stream untouched (aac) and encodes h264", JSON.stringify(stabStreams));
