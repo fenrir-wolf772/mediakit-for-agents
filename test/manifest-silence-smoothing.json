@@ -1,0 +1,1 @@
+{"input":"silence-blip.wav","output":"../outputs/mcp-manifest-silence-smoothing.wav","steps":[{"args":{"margin":0,"min_cut":0.4,"min_duration":0.05,"min_keep":0.5},"tool":"silence"}],"version":1}

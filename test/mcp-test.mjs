@@ -15,7 +15,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
-import { acquireEditLease, acquireDirLock, analyzeHookMove, analyzeSeamSamples, applyContentBaseline, applyHook, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, clearProbeCache, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, ffmpegThreads, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findHighlights, findHook, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookMotionCalibration, hookOverlapSeconds, hookSliceForTrack, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, isCheckpointLockStale, isPidAlive, listSceneTemplates, localTempoCurve, meanAbsDiffGray, orderHookRanges, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStabTrfMotion, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, peakEnergyWindow, pickFarthestThumbnails, planCleanVoice, planSmartCuts, probeEncoderCached, probeEncoderDetail, probeAudioEncoderDetail, checkOutputDirWritable, checkCaptionFont, probeFailureReason, encoderProbeCacheStats, clearEncoderProbeCache, projectSummary, proposeEdit, probe, probeCacheStats, readCheckpointLockOwner, releaseEditLease, renewEditLease, resolveQcPolicy, resolveSilenceProfile, listSilenceProfiles, restoreEditSessionCheckpoint, resumeEditSession, robustZMotionScore, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, sentenceBoundaries, sharpnessVerdict, snapHookToWords, snapKeepSegmentsToPauses, snapRangeToSentences, spectralFluxOnset, stabilizeVerdict, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
+import { acquireEditLease, acquireDirLock, analyzeHookMove, analyzeSeamSamples, applyContentBaseline, applyHook, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, clearProbeCache, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, ffmpegThreads, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findHighlights, findHook, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookMotionCalibration, hookOverlapSeconds, hookSliceForTrack, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, isCheckpointLockStale, isPidAlive, listSceneTemplates, localTempoCurve, meanAbsDiffGray, orderHookRanges, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStabTrfMotion, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, peakEnergyWindow, pickFarthestThumbnails, planCleanVoice, planSmartCuts, probeEncoderCached, probeEncoderDetail, probeAudioEncoderDetail, checkOutputDirWritable, checkCaptionFont, probeFailureReason, encoderProbeCacheStats, clearEncoderProbeCache, projectSummary, proposeEdit, probe, probeCacheStats, readCheckpointLockOwner, releaseEditLease, renewEditLease, resolveQcPolicy, resolveSilenceProfile, listSilenceProfiles, restoreEditSessionCheckpoint, resumeEditSession, robustZMotionScore, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, sentenceBoundaries, sharpnessVerdict, snapHookToWords, snapKeepSegmentsToPauses, snapRangeToSentences, smoothKeepSegments, spectralFluxOnset, stabilizeVerdict, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
@@ -3234,6 +3234,104 @@ checkOk(profNone.profile === null && profNone.threshold_db === -40 && profNone.m
 let profBad = null;
 try { resolveSilenceProfile("nope"); } catch (e) { profBad = e.message; }
 checkOk(typeof profBad === "string" && /unknown silence profile "nope"/.test(profBad) && /podcast, vlog, screencast/.test(profBad), "resolveSilenceProfile refuses an unknown profile by name", String(profBad));
+
+// Silence smoothing (lượt 199, idea: auto-editor editutil.nim
+// `smoothing`): min_keep drops short keep fragments, min_cut fills
+// short cut gaps, iterated to a fixed point with a 2-cycle guard.
+// Pure first, then the measured behaviour on a real fixture.
+const smCycle = smoothKeepSegments([{ start: 0, end: 0.3 }], 0.3, { minKeep: 0.5, minCut: 0.4 });
+checkOk(smCycle.oscillated === true && smCycle.iterations === 2 && JSON.stringify(smCycle.segments) === '[{"start":0,"end":0.3,"duration":0.3}]' && smCycle.removed_keeps === 1 && smCycle.filled_cuts === 1, "smoothKeepSegments: a lone run shorter than both thresholds flips once, the 2-cycle guard exits, and the keep survives", JSON.stringify(smCycle));
+const smDrop = smoothKeepSegments([{ start: 0, end: 2 }, { start: 2.5, end: 2.8 }, { start: 4, end: 6 }], 6, { minKeep: 0.5, minCut: 0 });
+checkOk(JSON.stringify(smDrop.segments) === '[{"start":0,"end":2,"duration":2},{"start":4,"end":6,"duration":2}]' && smDrop.removed_keeps === 1 && smDrop.filled_cuts === 0 && smDrop.oscillated === false, "smoothKeepSegments: a 0.3s keep under min_keep 0.5 is dropped", JSON.stringify(smDrop.segments));
+const smFill = smoothKeepSegments([{ start: 0, end: 2 }, { start: 2.2, end: 4 }], 4, { minKeep: 0, minCut: 0.4 });
+checkOk(JSON.stringify(smFill.segments) === '[{"start":0,"end":4,"duration":4}]' && smFill.filled_cuts === 1 && smFill.removed_keeps === 0, "smoothKeepSegments: a 0.2s cut under min_cut 0.4 is filled", JSON.stringify(smFill.segments));
+const smOff = smoothKeepSegments([{ start: 0, end: 2 }, { start: 2.5, end: 2.8 }], 6, {});
+checkOk(JSON.stringify(smOff.segments) === '[{"start":0,"end":2,"duration":2},{"start":2.5,"end":2.8,"duration":0.3}]' && smOff.iterations === 0 && smOff.removed_keeps === 0 && smOff.filled_cuts === 0, "smoothKeepSegments: min 0 = off, segments unchanged, 0 iterations", JSON.stringify(smOff));
+const smExact = smoothKeepSegments([{ start: 0, end: 0.5 }, { start: 1, end: 2 }], 2, { minKeep: 0.5 });
+checkOk(smExact.segments.length === 2 && smExact.removed_keeps === 0, "smoothKeepSegments: a keep exactly min_keep long survives (strict <)", JSON.stringify(smExact.segments));
+const smEdge = smoothKeepSegments([{ start: 0.2, end: 2 }], 2, { minCut: 0.4 });
+checkOk(JSON.stringify(smEdge.segments) === '[{"start":0,"end":2,"duration":2}]' && smEdge.filled_cuts === 1, "smoothKeepSegments: a short leading cut is filled to the file edge", JSON.stringify(smEdge.segments));
+let smNaN = null;
+try { smoothKeepSegments([{ start: 0, end: 1 }], 1, { minKeep: NaN }); } catch (e) { smNaN = e.message; }
+checkOk(typeof smNaN === "string" && /min_keep must be a number/.test(smNaN), "smoothKeepSegments refuses NaN min_keep", String(smNaN));
+let smBig = null;
+try { smoothKeepSegments([{ start: 0, end: 1 }], 1, { minCut: 61 }); } catch (e) { smBig = e.message; }
+checkOk(typeof smBig === "string" && /min_cut must be <= 60/.test(smBig), "smoothKeepSegments refuses min_cut over 60", String(smBig));
+
+// MCP on the blip fixture (test/silence-blip.wav, 8s: tone [0,2),
+// a 0.3s blip [2.5,2.8), tone [4,6) + [6.2,8); silences [2,2.5),
+// [2.8,4), [6,6.2) — the 0.2s gap needs min_duration 0.05 to be seen).
+const blipBaseRes = await client.callTool({
+  name: "silence",
+  arguments: { input: path.join(root, "test/silence-blip.wav"), min_duration: 0.05, margin: 0, detect_only: true },
+});
+const blipBaseJson = JSON.parse(blipBaseRes.content[0].text);
+checkOk(blipBaseJson.kept_segments?.length === 4 && near(blipBaseJson.removed_seconds, 1.9, 0.05) && blipBaseJson.min_keep === 0 && blipBaseJson.min_cut === 0 && blipBaseJson.smoothing?.iterations === 0 && blipBaseJson.smoothing?.removed_keeps === 0 && blipBaseJson.smoothing?.filled_cuts === 0, "silence detect-only on the blip fixture: 4 keeps, 1.9s removed, smoothing off by default", JSON.stringify({ keeps: blipBaseJson.kept_segments, smoothing: blipBaseJson.smoothing }));
+const blipKeepRes = await client.callTool({
+  name: "silence",
+  arguments: { input: path.join(root, "test/silence-blip.wav"), output: path.join(root, "outputs/mcp-silence-blip-keep.wav"), min_duration: 0.05, margin: 0, min_keep: 0.5, detect_only: true },
+});
+const blipKeepJson = JSON.parse(blipKeepRes.content[0].text);
+checkOk(blipKeepJson.kept_segments?.length === 3 && near(blipKeepJson.removed_seconds, 2.2, 0.05) && blipKeepJson.smoothing?.segments_before === 4 && blipKeepJson.smoothing?.segments_after === 3 && blipKeepJson.smoothing?.removed_keeps === 1 && blipKeepJson.smoothing?.filled_cuts === 0, "silence detect-only min_keep 0.5 drops the 0.3s blip (4 keeps -> 3)", JSON.stringify(blipKeepJson.smoothing));
+const blipKeepCutRes = await client.callTool({
+  name: "silence",
+  arguments: { input: path.join(root, "test/silence-blip.wav"), output: path.join(root, "outputs/mcp-silence-blip-keep.wav"), min_duration: 0.05, margin: 0, min_keep: 0.5 },
+});
+const blipKeepCutJson = JSON.parse(blipKeepCutRes.content[0].text);
+checkOk(near(blipKeepCutJson.duration_after, 5.8, 0.05) && blipKeepCutJson.kept_segments?.length === 3 && blipKeepCutJson.smoothing?.removed_keeps === 1, "silence min_keep 0.5 cuts 8s to 5.8s on disk", `got ${blipKeepCutJson.duration_after}`);
+const blipCutRes = await client.callTool({
+  name: "silence",
+  arguments: { input: path.join(root, "test/silence-blip.wav"), output: path.join(root, "outputs/mcp-silence-blip-cut.wav"), min_duration: 0.05, margin: 0, min_cut: 0.4, detect_only: true },
+});
+const blipCutJson = JSON.parse(blipCutRes.content[0].text);
+checkOk(blipCutJson.kept_segments?.length === 3 && near(blipCutJson.removed_seconds, 1.7, 0.05) && blipCutJson.smoothing?.filled_cuts === 1 && blipCutJson.smoothing?.removed_keeps === 0 && JSON.stringify(blipCutJson.kept_segments?.[2]) === '{"start":4,"end":8,"duration":4}', "silence detect-only min_cut 0.4 fills the 0.2s gap ([4,6) + [6.2,8) become [4,8))", JSON.stringify(blipCutJson.kept_segments));
+const blipBothRes = await client.callTool({
+  name: "silence",
+  arguments: { input: path.join(root, "test/silence-blip.wav"), output: path.join(root, "outputs/mcp-silence-blip-both.wav"), min_duration: 0.05, margin: 0, min_keep: 0.5, min_cut: 0.4 },
+});
+const blipBothJson = JSON.parse(blipBothRes.content[0].text);
+checkOk(near(blipBothJson.duration_after, 6.0, 0.05) && blipBothJson.kept_segments?.length === 2 && blipBothJson.smoothing?.removed_keeps === 1 && blipBothJson.smoothing?.filled_cuts === 1, "silence min_keep 0.5 + min_cut 0.4 cuts 8s to 6.0s on disk", `got ${blipBothJson.duration_after}`);
+const blipDryRes = await client.callTool({
+  name: "silence",
+  arguments: { input: path.join(root, "test/silence-blip.wav"), output: path.join(root, "outputs/mcp-silence-blip-dry.wav"), min_duration: 0.05, margin: 0, min_keep: 0.5, dry_run: true },
+});
+const blipDryJson = JSON.parse(blipDryRes.content[0].text);
+checkOk(blipDryJson.dry_run === true && blipDryJson.smoothing?.removed_keeps === 1 && blipDryJson.kept_segments?.length === 3 && !existsSync(path.join(root, "outputs/mcp-silence-blip-dry.wav")), "silence dry-run reflects smoothing in the plan and writes no file", JSON.stringify(blipDryJson.smoothing));
+const blipBadRes = await client.callTool({
+  name: "silence",
+  arguments: { input: path.join(root, "test/silence-blip.wav"), min_keep: 61, detect_only: true },
+});
+checkOk(/less than or equal to 60/.test(blipBadRes.content[0].text), "silence MCP refuses min_keep 61", blipBadRes.content[0].text.slice(0, 200));
+// CLI: both knobs together, plus the two validation refusals.
+const blipCli = await runCliJson(["silence", path.join(root, "test/silence-blip.wav"), "-o", path.join(root, "outputs/mcp-silence-blip-cli.wav"), "--min-duration", "0.05", "--margin", "0", "--min-keep", "0.5", "--min-cut", "0.4"]);
+checkOk(near(blipCli.duration_after, 6.0, 0.05) && blipCli.smoothing?.removed_keeps === 1 && blipCli.smoothing?.filled_cuts === 1, "CLI silence --min-keep 0.5 --min-cut 0.4 cuts 8s to 6.0s", JSON.stringify({ after: blipCli.duration_after, smoothing: blipCli.smoothing }));
+const blipCliBad = await runCliExpectError(["silence", path.join(root, "test/silence-blip.wav"), "-o", path.join(root, "outputs/mcp-silence-blip-bad.wav"), "--min-keep", "61"]);
+checkOk(blipCliBad !== null && /min_keep must be <= 60/.test(blipCliBad), "CLI silence --min-keep 61 is refused", (blipCliBad ?? "").slice(0, 200));
+const blipCliNaN = await runCliExpectError(["silence", path.join(root, "test/silence-blip.wav"), "-o", path.join(root, "outputs/mcp-silence-blip-bad.wav"), "--min-keep", "NaN"]);
+checkOk(blipCliNaN !== null && /min_keep must be a number/.test(blipCliNaN), "CLI silence --min-keep NaN is refused", (blipCliNaN ?? "").slice(0, 200));
+// Batch: min_keep flows through the batch args list (the manifest
+// step table spreads the same BATCH_OPERATIONS entry, so this also
+// covers the manifest path — verified by the manifest run below).
+await rm(path.join(root, "outputs/mcp-batch-silence-smoothing-in"), { recursive: true, force: true });
+await rm(path.join(root, "outputs/mcp-batch-silence-smoothing-out"), { recursive: true, force: true });
+await mkdir(path.join(root, "outputs/mcp-batch-silence-smoothing-in"), { recursive: true });
+await copyFile(path.join(root, "test/silence-blip.wav"), path.join(root, "outputs/mcp-batch-silence-smoothing-in/silence-blip.wav"));
+const silenceSmoothBatchRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "silence", pattern: "*.wav", input_dir: path.join(root, "outputs/mcp-batch-silence-smoothing-in"), output_dir: path.join(root, "outputs/mcp-batch-silence-smoothing-out"), args: { min_duration: 0.05, margin: 0, min_keep: 0.5 } },
+});
+const silenceSmoothBatchJson = JSON.parse(silenceSmoothBatchRes.content[0].text);
+checkOk(silenceSmoothBatchJson.succeeded === 1 && silenceSmoothBatchJson.failed === 0 && silenceSmoothBatchJson.results[0]?.status === "ok" && silenceSmoothBatchJson.results[0]?.result?.smoothing?.removed_keeps === 1 && near(silenceSmoothBatchJson.results[0]?.result?.duration_after, 5.8, 0.05), "batch silence --min-keep 0.5 drops the blip on every file", JSON.stringify(silenceSmoothBatchJson.results.map((r) => r.result?.duration_after)));
+// Manifest: the silence step takes min_keep/min_cut through the
+// shared args list (test/manifest-silence-smoothing.json).
+await rm(path.join(root, "outputs/mcp-manifest-silence-smoothing.wav"), { force: true });
+await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
+const smManifestRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: path.join(root, "test/manifest-silence-smoothing.json") },
+});
+const smManifestJson = JSON.parse(smManifestRes.content[0].text);
+checkOk(smManifestJson.steps_run === 1 && smManifestJson.steps[0]?.status === "ok" && near(smManifestJson.final?.duration_seconds, 6.0, 0.05) && smManifestJson.steps[0]?.result?.smoothing?.removed_keeps === 1 && smManifestJson.steps[0]?.result?.smoothing?.filled_cuts === 1, "manifest silence step with min_keep 0.5 + min_cut 0.4 runs smoothing and lands at 6.0s", JSON.stringify({ steps: smManifestJson.steps_run, final: smManifestJson.final?.duration_seconds, smoothing: smManifestJson.steps[0]?.result?.smoothing }));
 
 // Dir-lock (lượt 196, capcut-mcp guardrail #2): one mkdir-based lock
 // for every read-modify-write file, with a pid-liveness stale rule

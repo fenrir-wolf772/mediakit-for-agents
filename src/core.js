@@ -12237,6 +12237,67 @@ export async function detectSilence(input, { thresholdDb = -40, minDuration = 0.
   return { input: inPath, threshold_db: threshold, min_duration: minDur, duration_seconds: duration, silences };
 }
 
+/**
+ * Smooth keep segments (idea: WyattBlue/auto-editor `editutil.nim`
+ * `smoothing` — no code copied, re-implemented on run-lengths): a
+ * keep run shorter than minKeep is dropped, a cut run shorter than
+ * minCut is filled, iterating to a fixed point. Both transforms are
+ * computed from the same snapshot each pass, so a lone run shorter
+ * than BOTH thresholds flips forever (all-true -> all-false ->
+ * all-true) — the loop exits when the new state equals the state two
+ * passes back (their 2-cycle guard). A leading/trailing cut run
+ * counts too: filling it extends the edge keep to the file boundary.
+ * minKeep/minCut 0 = off. Pure. Segments are [{start, end,
+ * duration?}] sorted, within [0, duration]; returns {segments,
+ * removed_keeps, filled_cuts, iterations, oscillated}.
+ */
+export function smoothKeepSegments(segments, duration, { minKeep = 0, minCut = 0 } = {}) {
+  const mk = num(minKeep, "min_keep", { min: 0, max: 60 });
+  const mc = num(minCut, "min_cut", { min: 0, max: 60 });
+  const dur = num(duration, "duration", { min: 0 });
+  const norm = (segs) => segs.map((s) => ({
+    start: +s.start.toFixed(3), end: +s.end.toFixed(3), duration: +(s.end - s.start).toFixed(3),
+  }));
+  let current = norm(segments ?? []);
+  const out = { segments: current, removed_keeps: 0, filled_cuts: 0, iterations: 0, oscillated: false };
+  if (mk === 0 && mc === 0) return out;
+  const key = (segs) => JSON.stringify(segs.map((s) => [s.start, s.end]));
+  const history = [key(current)];
+  let settled = false;
+  for (let i = 0; i < 100; i++) {
+    // Runs covering [0, dur] from the snapshot: true = keep.
+    const runs = [];
+    let cursor = 0;
+    for (const s of current) {
+      if (s.start > cursor) runs.push({ start: cursor, end: s.start, keep: false });
+      runs.push({ start: s.start, end: s.end, keep: true });
+      cursor = Math.max(cursor, s.end);
+    }
+    if (cursor < dur) runs.push({ start: cursor, end: dur, keep: false });
+    const next = [];
+    for (const r of runs) {
+      const len = r.end - r.start;
+      let keep = r.keep;
+      if (r.keep && len < mk) { keep = false; out.removed_keeps++; }
+      else if (!r.keep && len < mc) { keep = true; out.filled_cuts++; }
+      const last = next[next.length - 1];
+      if (last && last.keep === keep) last.end = r.end;
+      else next.push({ start: r.start, end: r.end, keep });
+    }
+    const nextKeeps = norm(next.filter((r) => r.keep));
+    out.iterations++;
+    if (key(nextKeeps) === key(current)) { current = nextKeeps; settled = true; break; }
+    if (history.length >= 2 && key(nextKeeps) === history[history.length - 2]) {
+      current = nextKeeps; out.oscillated = true; settled = true; break;
+    }
+    history.push(key(nextKeeps));
+    current = nextKeeps;
+  }
+  if (!settled) out.oscillated = true; // longer cycle than 2: gave up after 100 passes
+  out.segments = current;
+  return out;
+}
+
 /** Complement of the silence intervals, expanded by margin, merged. */
 function keptSegments(duration, silences, margin) {
   const kept = [];
@@ -12279,16 +12340,25 @@ function joinFadeAudio(seg, i) {
   return `${chain}[a${i}]`;
 }
 
-export async function silence({ input, output = null, profile = null, thresholdDb = null, minDuration = null, margin = null, detectOnly = false, dryRun = false }) {
+export async function silence({ input, output = null, profile = null, thresholdDb = null, minDuration = null, margin = null, minKeep = 0, minCut = 0, detectOnly = false, dryRun = false }) {
   const inPath = await requireInput(input);
   const resolved = resolveSilenceProfile(profile, { thresholdDb, minDuration, margin });
   const m = num(resolved.margin, "margin", { min: 0, max: 5 });
   const det = await detectSilence(inPath, { thresholdDb: resolved.threshold_db, minDuration: resolved.min_duration });
   const duration = det.duration_seconds;
   if (duration === null) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
-  const kept = keptSegments(duration, det.silences, m);
-  if (kept.length === 0) {
+  const keptBefore = keptSegments(duration, det.silences, m);
+  if (keptBefore.length === 0) {
     throw new MediaKitError("input is entirely silent — nothing to keep", "INVALID_ARG");
+  }
+  // Smoothing (idea: auto-editor editutil.nim `smoothing`, lượt 197):
+  // drop keep fragments shorter than min_keep, fill cut gaps shorter
+  // than min_cut, after margin, before the join. 0 = off for both,
+  // so the old behaviour is byte-identical when they are not passed.
+  const sm = smoothKeepSegments(keptBefore, duration, { minKeep, minCut });
+  const kept = sm.segments;
+  if (kept.length === 0) {
+    throw new MediaKitError(`silence smoothing removed every kept segment (${sm.removed_keeps} keep(s) shorter than min_keep ${num(minKeep, "min_keep", { min: 0, max: 60 })}s) — lower min_keep or check the input`, "INVALID_ARG");
   }
   const keptTotal = kept.reduce((s, k) => s + k.duration, 0);
   const removed = +(duration - keptTotal).toFixed(3);
@@ -12302,6 +12372,13 @@ export async function silence({ input, output = null, profile = null, thresholdD
     },
     overrides: resolved.overrides,
     threshold_db: det.threshold_db, min_duration: det.min_duration, margin: m,
+    min_keep: num(minKeep, "min_keep", { min: 0, max: 60 }),
+    min_cut: num(minCut, "min_cut", { min: 0, max: 60 }),
+    smoothing: {
+      segments_before: keptBefore.length, segments_after: kept.length,
+      removed_keeps: sm.removed_keeps, filled_cuts: sm.filled_cuts,
+      iterations: sm.iterations, oscillated: sm.oscillated,
+    },
     duration_before: duration,
     silences: det.silences,
     kept_segments: kept,
@@ -18640,8 +18717,8 @@ export const BATCH_OPERATIONS = {
     run: (input, output, a) => trim({ input, output, start: a.start ?? 0, duration: a.duration ?? null, end: a.end ?? null, streamCopy: a.stream_copy ?? false, snapToKeyframe: a.snap_to_keyframe ?? false, snapToBeat: a.snap_to_beat ?? false, snapBeatMethod: a.snap_beat_method ?? "grid", smartCut: a.smart_cut ?? false, edgeBuffer: a.edge_buffer ?? 0, checkFrames: a.check_frames ?? true }),
   },
   silence: {
-    args: ["profile", "threshold_db", "min_duration", "margin"],
-    run: (input, output, a) => silence({ input, output, profile: a.profile ?? null, thresholdDb: a.threshold_db ?? null, minDuration: a.min_duration ?? null, margin: a.margin ?? null, detectOnly: false }),
+    args: ["profile", "threshold_db", "min_duration", "margin", "min_keep", "min_cut"],
+    run: (input, output, a) => silence({ input, output, profile: a.profile ?? null, thresholdDb: a.threshold_db ?? null, minDuration: a.min_duration ?? null, margin: a.margin ?? null, minKeep: a.min_keep ?? 0, minCut: a.min_cut ?? 0, detectOnly: false }),
   },
   chroma_key: {
     args: ["color", "similarity", "blend", "background", "crf"],

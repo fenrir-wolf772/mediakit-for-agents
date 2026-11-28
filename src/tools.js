@@ -1106,7 +1106,7 @@ export const TOOL_DEFS = [
   {
     name: "silence",
     tier: "WRITE",
-    description: "Remove silent stretches from speech/video. Detects silence with silencedetect, keeps the speech plus a margin of silence on each side (so words are never clipped), then cuts and re-joins — every kept segment gets a 12ms fade out + 15ms fade in at the join, so a cut mid-tone has no click. Set detect_only=true to just report the silence/kept segments without writing a file. Returns removed_seconds and the kept segment list — verify those before trusting the cut. Set dry_run=true to print the exact ffmpeg command that would run and write no file (the silencedetect measurement still runs, read-only; duration_after/size report null — measured on the real output; with nothing worth cutting the command is a stream-copy). profile picks a named preset instead of three numbers (podcast: -40 dB / 0.5s / 0.2s — the old defaults; vlog: -38 dB / 0.4s / 0.25s for noisy field audio; screencast: -45 dB / 1.0s / 0.3s, only long dead air goes); an explicit threshold_db/min_duration/margin overrides just that field of the profile, and the result reports profile, profile_values and overrides. Read the full list from the presets://silence resource.",
+    description: "Remove silent stretches from speech/video. Detects silence with silencedetect, keeps the speech plus a margin of silence on each side (so words are never clipped), then cuts and re-joins — every kept segment gets a 12ms fade out + 15ms fade in at the join, so a cut mid-tone has no click. Set detect_only=true to just report the silence/kept segments without writing a file. Returns removed_seconds and the kept segment list — verify those before trusting the cut. Set dry_run=true to print the exact ffmpeg command that would run and write no file (the silencedetect measurement still runs, read-only; duration_after/size report null — measured on the real output; with nothing worth cutting the command is a stream-copy). profile picks a named preset instead of three numbers (podcast: -40 dB / 0.5s / 0.2s — the old defaults; vlog: -38 dB / 0.4s / 0.25s for noisy field audio; screencast: -45 dB / 1.0s / 0.3s, only long dead air goes); an explicit threshold_db/min_duration/margin overrides just that field of the profile, and the result reports profile, profile_values and overrides. Smoothing (idea: auto-editor editutil.nim): min_keep drops keep fragments shorter than that many seconds and min_cut fills cut gaps shorter than that many seconds, applied after margin and iterated to a fixed point (a lone run shorter than both thresholds would flip forever, so the loop exits on the 2-cycle guard and reports oscillated=true); both default 0 = off, and the result reports the smoothing counts in `smoothing` (segments_before/after, removed_keeps, filled_cuts, iterations, oscillated). Read the full list from the presets://silence resource.",
     schema: {
     input: pathSchema,
     output: pathSchema.optional().describe("Output file path (not needed with detect_only=true; dry_run=true still needs it to print the command)"),
@@ -1114,6 +1114,8 @@ export const TOOL_DEFS = [
     threshold_db: z.number().min(-90).max(0).optional().describe("Silence threshold in dB (more negative = stricter; default -40, or the profile's value)"),
     min_duration: z.number().min(0.05).max(60).optional().describe("Minimum silence length in seconds to cut (default 0.5, or the profile's value)"),
     margin: z.number().min(0).max(5).optional().describe("Seconds of silence kept around each speech segment (default 0.2, or the profile's value)"),
+    min_keep: z.number().min(0).max(60).default(0).describe("Drop keep fragments shorter than this many seconds (default 0 = off; e.g. 0.5 kills a 0.3s noise blip between two silences)"),
+    min_cut: z.number().min(0).max(60).default(0).describe("Fill cut gaps shorter than this many seconds (default 0 = off; e.g. 0.4 bridges a 0.2s pause so the take is not chopped)"),
     detect_only: z.boolean().default(false).describe("Report silence/kept segments without writing output"),
     dry_run: z.boolean().default(false).describe("Print the exact ffmpeg command and write no file"),
   },
@@ -1124,6 +1126,8 @@ export const TOOL_DEFS = [
     thresholdDb: a.threshold_db ?? null,
     minDuration: a.min_duration ?? null,
     margin: a.margin ?? null,
+    minKeep: a.min_keep,
+    minCut: a.min_cut,
     detectOnly: a.detect_only,
     dryRun: a.dry_run,
   })),

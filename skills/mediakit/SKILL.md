@@ -188,6 +188,14 @@ explicit number overrides just that field of the profile — the result
 reports `profile`, `profile_values` and `overrides`, so the run is
 reproducible from the report alone. Read the full list from the
 `presets://silence` resource before guessing values.
+Smoothing (idea: auto-editor `editutil.nim`): `min_keep` drops keep
+fragments shorter than that many seconds and `min_cut` fills cut gaps
+shorter than that many seconds — a 0.3s noise blip between two silences
+is dropped instead of surviving as a choppy fragment, and a 0.2s pause
+is bridged instead of chopping the take. Both default 0 = off, applied
+after margin, iterated to a fixed point; the result reports the counts
+in `smoothing` (`segments_before`/`segments_after`, `removed_keeps`,
+`filled_cuts`, `iterations`, `oscillated`).
 
 ### 6. Loudness: −14 LUFS is the default for a reason
 YouTube, Spotify, and TikTok all normalize to around −14 LUFS. Normalizing
