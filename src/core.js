@@ -13868,6 +13868,27 @@ export async function probeEncoderDetail(encoder) {
   }
 }
 
+// Audio twin of probeEncoderDetail (lượt 197, for assemble
+// --mode preflight): the render mixes to AAC 192k, and presence in
+// `ffmpeg -encoders` proves nothing — the only honest test is a
+// probe encode, the same 0.2s lavfi shape as the video probe.
+// Returns the same { working, reason } shape so callers treat both
+// encoders alike.
+export async function probeAudioEncoderDetail(encoder) {
+  const args = ["-hide_banner", "-nostats", "-f", "lavfi", "-i", "anoisesrc=duration=0.2:sample_rate=48000", "-c:a", encoder, "-frames:a", "2", "-f", "null", "-"];
+  try {
+    await new Promise((resolve, reject) => {
+      execFile(FFMPEG, withFfmpegThreads(args), { timeout: 10_000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+        if (err) reject(Object.assign(err, { stderr }));
+        else resolve({ stdout, stderr });
+      });
+    });
+    return { working: true, reason: null };
+  } catch (err) {
+    return { working: false, reason: probeFailureReason(err?.stderr ?? "") };
+  }
+}
+
 // Most informative line of a probe failure, cleaned for display.
 // Pure — unit-tested directly on captured stderr text. Rules: strip
 // "[tag @ 0x...] " prefixes (nested too) and pointer addresses;
@@ -24304,6 +24325,225 @@ async function assembleCheckpointStatus({ plan, checkpointFile, base }) {
   };
 }
 
+// --mode preflight helpers (lượt 197, CutVoke's
+// `project.preflight` / `readyToRender` gate): the render-readiness
+// checks validate() cannot do — validate proves the timeline math
+// and probes every media file, but a render still dies late when
+// the drawtext font is gone, the encoder is broken, the output dir
+// is not writable, or the approval/checkpoint state is stale. Every
+// check here is read-only: no writes, no revision, no approval.
+
+// Can this directory receive the render output? Walks up to the
+// nearest existing ancestor and checks write access there — a
+// not-yet-created output dir is fine when its parent is writable.
+export async function checkOutputDirWritable(dir) {
+  const abs = path.resolve(dir);
+  let current = abs;
+  for (;;) {
+    try {
+      const st = await stat(current);
+      if (!st.isDirectory()) return { writable: false, checked_path: current, detail: `${current} exists but is not a directory` };
+      try {
+        await access(current, fsConstants.W_OK);
+        return { writable: true, checked_path: current, detail: current === abs ? `${abs} is writable` : `${abs} does not exist yet, but its parent ${current} is writable` };
+      } catch {
+        return { writable: false, checked_path: current, detail: `${current} is not writable` };
+      }
+    } catch {
+      const parent = path.dirname(current);
+      if (parent === current) return { writable: false, checked_path: current, detail: `no existing ancestor of ${abs} is reachable` };
+      current = parent;
+    }
+  }
+}
+
+// What font will libass draw the burned captions with? fontconfig
+// resolves the default ASS font "Arial" — on this box to Liberation
+// Sans (verified: `fc-match Arial` -> LiberationSans-Regular.ttf).
+// A missing fc-match binary cannot prove the font, so it warns
+// instead of failing: libass may still resolve on its own.
+export async function checkCaptionFont() {
+  let out;
+  try {
+    out = await new Promise((resolve, reject) => {
+      execFile("fc-match", ["--format=%{file}", "Arial"], { timeout: 10_000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+        if (err) reject(Object.assign(err, { stderr }));
+        else resolve(stdout);
+      });
+    });
+  } catch {
+    return { ok: null, detail: "fc-match is not available, so the caption font cannot be verified — libass may still resolve Arial on its own" };
+  }
+  // --format=%{file} prints the full path alone; the bare `fc-match
+  // Arial` form prints "LiberationSans-Regular.ttf: ..." (basename
+  // + colon + family), which is not a path and must not be trusted.
+  const first = String(out ?? "").trim();
+  if (!/\.(ttf|otf)$/i.test(first)) return { ok: false, detail: `fc-match Arial resolved to ${JSON.stringify(first || "(empty)")} — not a font file` };
+  try {
+    await access(first, fsConstants.R_OK);
+    return { ok: true, detail: `fc-match Arial resolves to ${first}` };
+  } catch {
+    return { ok: false, detail: `fc-match Arial resolves to ${first}, but that file is not readable` };
+  }
+}
+
+// `assemble --mode preflight`: the gate before export. validate()
+// already ran (a bad manifest throws before this is reached), so
+// this answers only "will the render start and finish?" — fonts
+// the render needs, both encoders by probe encode, the plan
+// blockers (an SFX tail past the film end, an unmeasurable music
+// bed), non-ready templates in use, output-dir writability,
+// checkpoint resume state and approval freshness. Read-only:
+// writes nothing, creates no revision and no approval.
+// ready_to_render is true when no check fails; warnings (a
+// preview template, a missing approval, a stale checkpoint) are
+// reported but do not block — they are the director's fix list,
+// not a render defect.
+async function assemblePreflight({ plan, base, outputDir = null, checkpointFile = null }) {
+  const checks = [];
+  const errors = [];
+  const warnings = [];
+  const push = (name, status, detail) => {
+    checks.push({ name, status, detail });
+    if (status === "fail") errors.push(detail);
+    else if (status === "warn") warnings.push(detail);
+  };
+  push("manifest", "pass", `film validates: ${plan.shots.length} shots, ${plan.total_seconds}s / ${plan.total_frames} frames at ${plan.fps}fps`);
+  // Fonts the render will actually open. Text layers draw through
+  // drawtext with TITLECARD_FONT; captions burn through libass and
+  // its default font. A film with neither needs no font check.
+  const hasText = plan.shots.some((s) => s.textLayers?.length);
+  if (hasText) {
+    try {
+      await access(TITLECARD_FONT, fsConstants.R_OK);
+      push("fonts", "pass", `drawtext font present: ${TITLECARD_FONT}`);
+    } catch {
+      push("fonts", "fail", `drawtext font missing: ${TITLECARD_FONT} — every text layer would fail the render`);
+    }
+  } else {
+    checks.push({ name: "fonts", status: "skipped", detail: "no text layers, so the render opens no drawtext font" });
+  }
+  if (plan.captions) {
+    const cap = await checkCaptionFont();
+    if (cap.ok === true) push("caption_font", "pass", cap.detail);
+    else if (cap.ok === false) push("caption_font", "fail", cap.detail);
+    else push("caption_font", "warn", cap.detail);
+  } else {
+    checks.push({ name: "caption_font", status: "skipped", detail: "no captions, so the render opens no libass font" });
+  }
+  // Encoders by probe encode, not by listing: the render encodes
+  // libx264 video + AAC audio, and a listed-but-broken encoder
+  // fails mid-render.
+  const vEnc = await probeEncoderCached("libx264");
+  const aEnc = await probeAudioEncoderDetail("aac");
+  if (vEnc.working && aEnc.working) {
+    push("encoders", "pass", "libx264 + aac probe encodes pass");
+  } else {
+    const bad = [!vEnc.working ? `libx264${vEnc.reason ? ` (${vEnc.reason})` : ""}` : null, !aEnc.working ? `aac${aEnc.reason ? ` (${aEnc.reason})` : ""}` : null].filter(Boolean).join(", ");
+    push("encoders", "fail", `probe encode failed for ${bad} — the render cannot encode`);
+  }
+  // Plan blockers (same rule as --mode plan, same +0.05s threshold
+  // as diagnose's sfx_tail check): an SFX tail past the film end
+  // is clipped silently by the render, so it blocks here instead.
+  let musicPlan = null;
+  if (plan.music) {
+    const musicMeta = await probe(plan.music.path);
+    const musicDur = musicMeta.duration_seconds;
+    musicPlan = { path: plan.music.path, ...(Number.isFinite(musicDur) ? { duration_seconds: +musicDur.toFixed(3) } : {}) };
+  }
+  const sfxPlan = [];
+  for (const s of plan.sfx) {
+    const sfxMeta = await probe(s.file);
+    const sfxDur = sfxMeta.duration_seconds;
+    sfxPlan.push({ file: s.file, at_seconds: s.at_seconds, ...(Number.isFinite(sfxDur) ? { duration_seconds: +sfxDur.toFixed(3) } : {}) });
+  }
+  const blockers = computePlanBlockers({ totalSeconds: plan.total_seconds, music: musicPlan, sfx: sfxPlan });
+  if (blockers.length === 0) {
+    push("plan_blockers", "pass", "no export blockers: music loops cleanly, every SFX tail fits the film");
+  } else {
+    for (const b of blockers) push("plan_blockers", "fail", `${b.code}: ${b.detail}`);
+  }
+  // Templates in use that are not `ready`: they render, but no
+  // shipped film has verified their cuts end-to-end.
+  const usedTemplates = new Map();
+  for (const s of plan.shots) {
+    if (s.template) usedTemplates.set(s.template, s.id);
+    for (const v of s.variants ?? []) if (v.template) usedTemplates.set(v.template, s.id);
+  }
+  if (usedTemplates.size === 0) {
+    checks.push({ name: "templates", status: "skipped", detail: "no scene template in use" });
+  } else {
+    const catalog = await listSceneTemplates({ readiness: "all" });
+    const readinessById = new Map(catalog.templates.map((t) => [t.id, t.readiness]));
+    const notReady = [...usedTemplates.entries()].filter((([id]) => readinessById.get(id) !== "ready"));
+    if (notReady.length === 0) {
+      push("templates", "pass", `every template in use is ready: ${[...usedTemplates.keys()].join(", ")}`);
+    } else {
+      for (const [id, shotId] of notReady) push("templates", "warn", `template "${id}" (shot ${shotId}) is ${readinessById.get(id) ?? "unknown"} — it renders, but no shipped film has verified its cuts`);
+    }
+  }
+  // Output dir: only when one is named. Preflight must not create
+  // it (that is a write), so the check is writability of the
+  // nearest existing ancestor.
+  if (typeof outputDir === "string" && outputDir.trim()) {
+    const w = await checkOutputDirWritable(outputDir);
+    if (w.writable) push("output_dir", "pass", w.detail);
+    else push("output_dir", "fail", w.detail);
+  } else {
+    checks.push({ name: "output_dir", status: "skipped", detail: "no output directory named — pass -o to check writability before the render" });
+  }
+  // Checkpoint resume state, only when a ledger is named: a fresh
+  // film has none (that is fine), a resumable one skips done shots,
+  // a changed film rebuilds the stale ones.
+  let checkpoint = null;
+  if (typeof checkpointFile === "string" && checkpointFile.trim()) {
+    const status = await assembleCheckpointStatus({ plan, checkpointFile, base });
+    checkpoint = { file: status.checkpoint_file, state: status.checkpoint, resumable: status.resumable, counts: status.counts };
+    if (status.checkpoint === "no_checkpoint") {
+      push("checkpoint", "pass", "no checkpoint yet — the render starts fresh");
+    } else if (status.checkpoint === "checkpoint_invalid") {
+      push("checkpoint", "warn", "checkpoint file is not a readable assemble checkpoint — the render starts a fresh ledger");
+    } else if (status.resumable) {
+      push("checkpoint", "pass", `checkpoint resumable: ${status.counts.done}/${status.counts.done + status.counts.stale + status.counts.missing + status.counts.pending} shots verified in the cache`);
+    } else {
+      push("checkpoint", "warn", `checkpoint not resumable (${status.film_changed ? "film changed since the ledger was written; " : ""}done ${status.counts.done}, stale ${status.counts.stale}, missing ${status.counts.missing}, pending ${status.counts.pending}) — stale shots rebuild`);
+    }
+  } else {
+    checks.push({ name: "checkpoint", status: "skipped", detail: "no checkpoint file named — pass --checkpoint-file to check resume state" });
+  }
+  // Approval freshness: the render refuses without a matching
+  // approval (unless --force), so a stale or missing approval is
+  // the director's next step — a warning, not a render defect.
+  let approval = null;
+  const approvalPath = assembleApprovalPath(plan);
+  let approvalDoc = null;
+  try {
+    approvalDoc = JSON.parse(await readFile(approvalPath, "utf8"));
+  } catch { /* no approval file yet */ }
+  if (!approvalDoc || typeof approvalDoc !== "object") {
+    approval = { present: false, fresh: false };
+    push("approval", "warn", "no approval yet — preview, show it to the user, then approve (or render with --force)");
+  } else if (approvalDoc.fingerprint === plan.fingerprint) {
+    approval = { present: true, fresh: true, approved_at: approvalDoc.approved_at ?? null };
+    push("approval", "pass", `approval present and fresh (approved ${approvalDoc.approved_at ?? "at an unknown time"})`);
+  } else {
+    const changed = diffFingerprintParts(approvalDoc.fingerprint_parts ?? null, plan.fingerprint_parts);
+    approval = { present: true, fresh: false, changed_parts: changed };
+    push("approval", "warn", `approval is stale — the film changed since it was approved (${changed.length ? changed.join(", ") : "unknown parts"}); re-preview and re-approve before render`);
+  }
+  return {
+    ...base,
+    mode: "preflight",
+    ready_to_render: errors.length === 0,
+    errors,
+    warnings,
+    checks,
+    approval,
+    checkpoint,
+    note: "preflight is a read-only gate before export — it writes nothing, creates no revision and no approval. Fix every error, then preview + approve + render.",
+  };
+}
+
 export async function assemble({ manifestPath, mode = "validate", outputDir = null, previewSeconds = 20, force = false, onProgress = null, jobId = null, jobDir = null, planFile = null, fromPlan = null, checkpointFile = null }) {
   const manifestAbs = await requireInput(manifestPath, "manifest");
   let raw;
@@ -24371,6 +24611,11 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       throw new MediaKitError("assemble --mode status needs --checkpoint-file <path> — the ledger a preview/render wrote", "INVALID_ARG");
     }
     return assembleCheckpointStatus({ plan, checkpointFile, base });
+  }
+  if (mode === "preflight") {
+    // Render-readiness gate (lượt 197): read-only, no output dir
+    // required — -o only adds the writability check when given.
+    return assemblePreflight({ plan, base, outputDir, checkpointFile });
   }
   if (mode === "validate") {
     return {
@@ -24485,7 +24730,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
     return planResult;
   }
   if (!["preview", "approve", "render"].includes(mode)) {
-    throw new MediaKitError(`assemble mode must be validate, plan, preview, approve or render, got: ${mode}`, "INVALID_ARG");
+    throw new MediaKitError(`assemble mode must be validate, plan, preflight, preview, approve, render or status, got: ${mode}`, "INVALID_ARG");
   }
   if (typeof outputDir !== "string" || !outputDir.trim()) {
     throw new MediaKitError(`assemble --mode ${mode} needs an output directory`, "INVALID_ARG");

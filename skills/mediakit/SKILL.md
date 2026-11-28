@@ -1,6 +1,10 @@
 ---
 name: mediakit
 description: Professional media tools for video and audio — probe, cut, reframe, caption, mix, assemble and QC with ffmpeg, instead of guessing or writing one-off shell commands.
+version: 0.1.0
+license: MIT
+platforms: [Linux, macOS, Windows]
+compatibility: "Node 18+, ffmpeg + ffprobe on PATH (verified against ffmpeg 8.1.2)"
 ---
 
 # MediaKit — agent skill
@@ -711,7 +715,15 @@ fps. It only ever lowers fps: asking for 60 on a 30fps source (or on a
 result reports `fps` measured on disk, so verify the cap landed.
 When `doctor` reports a tool `available: false`, read its `fix` field —
 one sentence with the install command for a full ffmpeg build — instead
-of working around the missing capability.
+of working around the missing capability. `doctor --smoke` proves
+single tools can render; to prove the whole director pipeline a real
+project walks, run `npm run selfcheck` (`scripts/selfcheck.mjs`, ~45s):
+it scaffolds a project, then runs diagnose → plan → preview → approve
+→ render → verify → verify-cuts → check, measuring the final.mp4 on
+disk at every step (duration, dimensions, frames, LUFS, receipt,
+platform check). A green selfcheck means the lifecycle delivers on
+this machine; a red step names the step and keeps its temp dir so the
+broken state can be inspected.
 
 ### 28. Resize by preset name, and never upscale by accident
 When the target is a standard size, say it by name: `resize --preset
@@ -1417,6 +1429,27 @@ checkpoint — one-shot undo, refused while a session is live. A second
 it over and discards the old draft. Commit honours a held edit lease
 exactly like `patch_manifest`: pass that lease's `lease_id`.
 
+### 40c. A hand-run CLI chain keeps its intermediates in /tmp — and cleans them only after the final export verifies
+When you run a chain of CLI calls by hand (trim → reframe → loudness,
+each a separate `mediakit` call, no manifest), put every intermediate
+in a temp directory (`mktemp -d` / `os.tmpdir()`), never next to the
+source or the final output — a half-finished chain must not leave
+`clip-trimmed.mp4`, `clip-vertical.mp4` littering the project, and a
+stale intermediate with a plausible name is exactly the file the
+next step will silently pick up. Delete the temp directory only
+after the final export verifies: `probe` the duration/dimensions,
+`check` it against the target platform, and — for a film —
+`verify` it against its receipt. A failed verify means the temp dir
+stays: the broken step's file is the evidence, not trash. This rule
+is for hand-run CLI chains ONLY. A `manifest` run and an `assemble`
+render deliberately keep their intermediates under the output dir
+when a step fails (§40: "the error names the directory, so inspect
+the broken step's file instead of guessing"), and `determinism`
+keeps its per-run outputs on a failed run too — do not "clean up"
+those paths, and do not move a manifest chain's intermediates to
+/tmp: the cache keys on input bytes + sidecar bytes, and the
+receipt names the paths it verified.
+
 ### 41. One style id for the whole video — don't retype hex values
 Pick the style once (`clean-bold`, `minimal-line` or `warm-story`,
 locked in `skills/shorts-video/styles.json`) and pass
@@ -1638,8 +1671,14 @@ the same block. A short film behaves exactly as before (all
 floors); a long film's passes get real headroom instead of dying
 on the flat 300s cap. `MEDIAKIT_FFMPEG_TIMEOUT_MS` only ever
 raises the cap further, for contention on a busy machine, which
-the estimate cannot predict. The four modes are a pipeline, in order: `validate`
-(writes nothing), `preview` (first N seconds at half size —
+the estimate cannot predict. The modes are a pipeline, in order: `validate`
+(writes nothing), `plan` (the director's storyboard disclosure —
+writes nothing, no approval), `preflight` (the render-readiness
+gate before export: fonts the render opens, libx264 + aac probe
+encodes, plan blockers, non-ready templates, output-dir
+writability, checkpoint resume state, approval freshness — writes
+nothing, creates no revision and no approval; `ready_to_render`
+is true when no check fails), `preview` (first N seconds at half size —
 show it to the user), `approve` (records the fingerprint of the
 exact manifest + voice + assets + captions the preview showed),
 `render` (needs a matching approval; `force:true` bypasses it

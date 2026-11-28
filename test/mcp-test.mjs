@@ -15,7 +15,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
-import { acquireEditLease, acquireDirLock, analyzeHookMove, analyzeSeamSamples, applyContentBaseline, applyHook, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, clearProbeCache, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, ffmpegThreads, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findHighlights, findHook, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookMotionCalibration, hookOverlapSeconds, hookSliceForTrack, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, isCheckpointLockStale, isPidAlive, listSceneTemplates, localTempoCurve, meanAbsDiffGray, orderHookRanges, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStabTrfMotion, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, peakEnergyWindow, pickFarthestThumbnails, planCleanVoice, planSmartCuts, probeEncoderCached, probeEncoderDetail, probeFailureReason, encoderProbeCacheStats, clearEncoderProbeCache, projectSummary, proposeEdit, probe, probeCacheStats, readCheckpointLockOwner, releaseEditLease, renewEditLease, resolveQcPolicy, resolveSilenceProfile, listSilenceProfiles, restoreEditSessionCheckpoint, resumeEditSession, robustZMotionScore, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, sentenceBoundaries, sharpnessVerdict, snapHookToWords, snapKeepSegmentsToPauses, snapRangeToSentences, spectralFluxOnset, stabilizeVerdict, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
+import { acquireEditLease, acquireDirLock, analyzeHookMove, analyzeSeamSamples, applyContentBaseline, applyHook, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, clearProbeCache, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, ffmpegThreads, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findHighlights, findHook, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookMotionCalibration, hookOverlapSeconds, hookSliceForTrack, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, isCheckpointLockStale, isPidAlive, listSceneTemplates, localTempoCurve, meanAbsDiffGray, orderHookRanges, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStabTrfMotion, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, peakEnergyWindow, pickFarthestThumbnails, planCleanVoice, planSmartCuts, probeEncoderCached, probeEncoderDetail, probeAudioEncoderDetail, checkOutputDirWritable, checkCaptionFont, probeFailureReason, encoderProbeCacheStats, clearEncoderProbeCache, projectSummary, proposeEdit, probe, probeCacheStats, readCheckpointLockOwner, releaseEditLease, renewEditLease, resolveQcPolicy, resolveSilenceProfile, listSilenceProfiles, restoreEditSessionCheckpoint, resumeEditSession, robustZMotionScore, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, sentenceBoundaries, sharpnessVerdict, snapHookToWords, snapKeepSegmentsToPauses, snapRangeToSentences, spectralFluxOnset, stabilizeVerdict, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
@@ -2920,6 +2920,20 @@ checkOk(smokeGuards?.ok === true && smokeGuards?.sandbox_enabled === false && sm
 checkOk(["space-in-name", "unicode-name", "dotdot-stays-inside", "nested-subdir"].every((n) => smokeGuards.cases.find((c) => c.name === n)?.ok === true), "doctor smoke path-guards: space/unicode/dotdot/nested paths render", JSON.stringify(smokeGuards?.cases));
 checkOk(smokeGuards.cases.find((c) => c.name === "output-overwrites-input")?.ok === true && smokeGuards.cases.find((c) => c.name === "output-overwrites-input")?.expected_code === "OUTPUT_OVERWRITES_INPUT", "doctor smoke path-guards: output overwriting its input is refused", JSON.stringify(smokeGuards?.cases));
 checkOk(["input-outside-workdir", "output-outside-workdir", "symlink-escapes-workdir"].every((n) => { const c = smokeGuards.cases.find((x) => x.name === n); return c?.ok === true && typeof c?.skipped === "string" && c?.expected_code === "SANDBOX_ESCAPE"; }), "doctor smoke path-guards: sandbox cases skipped honestly without a workdir", JSON.stringify(smokeGuards?.cases));
+// Lượt 197: scripts/selfcheck.mjs — one command proving the whole
+// director lifecycle (init -> diagnose -> plan -> preview -> approve
+// -> render -> verify -> verify-cuts -> check) on this machine.
+// Runs the real script as a subprocess (~45s): a green suite must
+// mean the pipeline a real project walks actually delivers.
+const selfcheckHelp = await execFileAsync(process.execPath, [path.join(root, "scripts/selfcheck.mjs"), "--help"]);
+checkOk(selfcheckHelp.stdout.includes("usage: node scripts/selfcheck.mjs"), "selfcheck --help prints usage and exits 0", selfcheckHelp.stdout.split("\n")[0] ?? "");
+const selfcheckOut = await execFileAsync(process.execPath, [path.join(root, "scripts/selfcheck.mjs"), "--json"], { maxBuffer: 16 * 1024 * 1024 });
+const selfcheckJson = JSON.parse(selfcheckOut.stdout);
+const selfcheckNames = (selfcheckJson.steps ?? []).map((s) => s.name).join(",");
+checkOk(selfcheckJson.ok === true && selfcheckNames === "doctor,init_project,diagnose,plan,preflight,preview,approve,render,verify,verify-cuts,check" && selfcheckJson.steps.every((s) => s.ok === true && typeof s.seconds === "number" && s.seconds >= 0), "selfcheck runs all 11 lifecycle steps ok with timings", selfcheckNames);
+checkOk(Math.abs((selfcheckJson.final?.duration_seconds ?? 0) - 4) < 0.25 && selfcheckJson.final?.dimensions === "1080x1920" && selfcheckJson.final?.frames === 120 && Math.abs((selfcheckJson.final?.loudness_lufs ?? 0) - (-14)) <= 1, "selfcheck final.mp4 measured on disk: ~4s 1080x1920, 120 frames, -14 LUFS", JSON.stringify(selfcheckJson.final));
+checkOk(selfcheckJson.kept === false && !existsSync(selfcheckJson.dir), "selfcheck removes its temp dir on success", `kept=${selfcheckJson.kept} dir=${selfcheckJson.dir}`);
+checkOk(typeof selfcheckJson.seconds === "number" && selfcheckJson.seconds > 0 && selfcheckJson.seconds < 300, "selfcheck reports total seconds within budget", `seconds=${selfcheckJson.seconds}`);
 
 // Audit log / operation envelope (lượt 55): every tool call above
 // was recorded into the hermetic audit file — the log must prove it
@@ -11095,6 +11109,78 @@ checkOk(/short by 15 frames/.test(planGapText ?? ""), "assemble plan refuses sho
 checkOk(!existsSync(path.join(planStage.dir, "assemble-film-transitions.assemble-approval.json")), "assemble plan writes no approval file (a plan is a disclosure, not an approval)", planStage.dir);
 const planCli = await runCliJson(["assemble", planStage.manifestPath, "--mode", "plan"]);
 checkOk(planCli.mode === "plan" && planCli.timeline?.length === 4 && planCli.joins?.length === 3 && planCli.audio?.music?.loops === 2, "CLI assemble --mode plan returns the same disclosure", JSON.stringify({ mode: planCli.mode, shots: planCli.timeline?.length, joins: planCli.joins?.length }));
+// Lượt 197: assemble --mode preflight — the render-readiness gate
+// before export (CutVoke's project.preflight / readyToRender idea):
+// fonts the render opens, libx264 + aac probe encodes, plan
+// blockers, non-ready templates, output-dir writability, checkpoint
+// resume state, approval freshness. Read-only: writes nothing,
+// creates no revision and no approval. Fixture: align-voice-film
+// (3 rings shots, 9s voice, no text/captions) staged once, then
+// rewritten per case in the same stage dir.
+const pfAac = await probeAudioEncoderDetail("aac");
+checkOk(pfAac.working === true && pfAac.reason === null, "probeAudioEncoderDetail aac: probe encode passes (the render's audio encoder is really usable)", JSON.stringify(pfAac));
+const pfBogusEnc = await probeAudioEncoderDetail("bogus-enc-xyz");
+checkOk(pfBogusEnc.working === false && typeof pfBogusEnc.reason === "string" && pfBogusEnc.reason.length > 0, "probeAudioEncoderDetail bogus encoder: probe encode fails with a reason, not a crash", JSON.stringify(pfBogusEnc));
+const pfCapFont = await checkCaptionFont();
+checkOk(pfCapFont.ok === true && /LiberationSans-Regular\.ttf/.test(pfCapFont.detail ?? ""), "checkCaptionFont: fc-match Arial resolves to the Liberation Sans file libass will draw with", JSON.stringify(pfCapFont));
+const pfStage = await stageAssembleManifest("align-voice-film.json");
+const pfWritable = await checkOutputDirWritable(pfStage.dir);
+checkOk(pfWritable.writable === true && pfWritable.checked_path === pfStage.dir, "checkOutputDirWritable: an existing writable dir passes on itself", JSON.stringify(pfWritable));
+const pfNested = await checkOutputDirWritable(path.join(pfStage.dir, "not-yet", "out"));
+checkOk(pfNested.writable === true && pfNested.checked_path === pfStage.dir, "checkOutputDirWritable: a not-yet-created dir passes on its writable parent", JSON.stringify(pfNested));
+const pfFileAsDir = await checkOutputDirWritable(path.join(pfStage.manifestPath, "out"));
+checkOk(pfFileAsDir.writable === false && /not a directory/.test(pfFileAsDir.detail ?? ""), "checkOutputDirWritable: a path under a FILE fails (not a directory)", JSON.stringify(pfFileAsDir));
+// NOTE: a chmod-500 denial is NOT asserted here — the suite runs
+// as root (uid 0), where access(W_OK) always succeeds, so a
+// permission-denied case cannot be measured honestly on this box.
+const pfRes = await client.callTool({ name: "assemble", arguments: { manifest_path: pfStage.manifestPath, mode: "preflight" } });
+const pfJson = JSON.parse(pfRes.content[0].text);
+const pfByName = Object.fromEntries((pfJson.checks ?? []).map((c) => [c.name, c]));
+checkOk(pfRes.isError !== true && pfJson.mode === "preflight" && pfJson.ready_to_render === true && pfJson.errors?.length === 0 && pfJson.warnings?.length === 1 && pfJson.approval?.present === false && pfJson.approval?.fresh === false && pfJson.checkpoint === null, "assemble preflight on the healthy film: ready true, no errors, one warning (no approval yet)", JSON.stringify({ ready: pfJson.ready_to_render, errors: pfJson.errors, warnings: pfJson.warnings }));
+checkOk(pfByName.manifest?.status === "pass" && pfByName.encoders?.status === "pass" && pfByName.plan_blockers?.status === "pass" && pfByName.templates?.status === "pass" && /rings/.test(pfByName.templates?.detail ?? "") && pfByName.fonts?.status === "skipped" && pfByName.caption_font?.status === "skipped" && pfByName.output_dir?.status === "skipped" && pfByName.checkpoint?.status === "skipped" && pfByName.approval?.status === "warn", "assemble preflight checks: manifest/encoders/blockers/templates pass, fonts+caption_font+output_dir+checkpoint skipped (nothing to check), approval warns", JSON.stringify(pfJson.checks?.map((c) => `${c.name}:${c.status}`)));
+const pfOutRes = await client.callTool({ name: "assemble", arguments: { manifest_path: pfStage.manifestPath, mode: "preflight", output_dir: path.join(pfStage.dir, "out") } });
+const pfOutJson = JSON.parse(pfOutRes.content[0].text);
+checkOk(pfOutJson.ready_to_render === true && Object.fromEntries((pfOutJson.checks ?? []).map((c) => [c.name, c.status])).output_dir === "pass" && !existsSync(path.join(pfStage.dir, "out")), "assemble preflight -o a not-yet-created dir: output_dir passes AND the dir is not created (preflight writes nothing)", JSON.stringify({ ready: pfOutJson.ready_to_render }));
+const pfNoCkptRes = await client.callTool({ name: "assemble", arguments: { manifest_path: pfStage.manifestPath, mode: "preflight", checkpoint_file: path.join(pfStage.dir, "nope.ckpt.json") } });
+const pfNoCkptJson = JSON.parse(pfNoCkptRes.content[0].text);
+checkOk(pfNoCkptJson.checkpoint?.state === "no_checkpoint" && pfNoCkptJson.checkpoint?.resumable === false && Object.fromEntries((pfNoCkptJson.checks ?? []).map((c) => [c.name, c.status])).checkpoint === "pass", "assemble preflight with a missing checkpoint file: checkpoint passes as no_checkpoint (fresh render)", JSON.stringify(pfNoCkptJson.checkpoint));
+await writeFile(path.join(pfStage.dir, "bad.ckpt.json"), "not json at all", "utf8");
+const pfBadCkptRes = await client.callTool({ name: "assemble", arguments: { manifest_path: pfStage.manifestPath, mode: "preflight", checkpoint_file: path.join(pfStage.dir, "bad.ckpt.json") } });
+const pfBadCkptJson = JSON.parse(pfBadCkptRes.content[0].text);
+checkOk(pfBadCkptJson.checkpoint?.state === "checkpoint_invalid" && Object.fromEntries((pfBadCkptJson.checks ?? []).map((c) => [c.name, c.status])).checkpoint === "warn", "assemble preflight with a corrupt checkpoint file: checkpoint warns (fresh ledger), it does not crash the gate", JSON.stringify(pfBadCkptJson.checkpoint));
+// Text layer + captions: the font checks must run and pass.
+const pfTextDoc = JSON.parse(await readFile(pfStage.manifestPath, "utf8"));
+pfTextDoc.shots[0].text = [{ text: "HELLO", position: "top" }];
+await writeFile(path.join(pfStage.dir, "caps.srt"), "1\n00:00:00,000 --> 00:00:02,000\nHello world\n\n2\n00:00:03,000 --> 00:00:05,000\nSecond cue\n", "utf8");
+pfTextDoc.captions = path.join(pfStage.dir, "caps.srt");
+const pfTextPath = path.join(pfStage.dir, "film-text.json");
+await writeFile(pfTextPath, JSON.stringify(pfTextDoc), "utf8");
+const pfTextRes = await client.callTool({ name: "assemble", arguments: { manifest_path: pfTextPath, mode: "preflight" } });
+const pfTextJson = JSON.parse(pfTextRes.content[0].text);
+const pfTextByName = Object.fromEntries((pfTextJson.checks ?? []).map((c) => [c.name, c]));
+checkOk(pfTextJson.ready_to_render === true && pfTextByName.fonts?.status === "pass" && /DejaVuSans-Bold/.test(pfTextByName.fonts?.detail ?? "") && pfTextByName.caption_font?.status === "pass" && /LiberationSans-Regular/.test(pfTextByName.caption_font?.detail ?? ""), "assemble preflight on a film with a text layer + captions: fonts pass (DejaVuSans-Bold) and caption_font passes (Liberation Sans)", JSON.stringify({ fonts: pfTextByName.fonts?.detail, caption: pfTextByName.caption_font?.detail }));
+// SFX tail past the film end: the gate must block, not warn.
+const pfSfxDoc = JSON.parse(await readFile(pfStage.manifestPath, "utf8"));
+pfSfxDoc.sfx = [{ file: path.join(root, "test", "mix-voice.mp3"), at: 8.5 }];
+const pfSfxPath = path.join(pfStage.dir, "film-sfx.json");
+await writeFile(pfSfxPath, JSON.stringify(pfSfxDoc), "utf8");
+const pfSfxRes = await client.callTool({ name: "assemble", arguments: { manifest_path: pfSfxPath, mode: "preflight" } });
+const pfSfxJson = JSON.parse(pfSfxRes.content[0].text);
+checkOk(pfSfxJson.ready_to_render === false && pfSfxJson.errors?.length === 1 && /^sfx_overruns_film/.test(pfSfxJson.errors[0] ?? "") && /17\.5/.test(pfSfxJson.errors[0] ?? "") && Object.fromEntries((pfSfxJson.checks ?? []).map((c) => [c.name, c.status])).plan_blockers === "fail", "assemble preflight blocks a 9s SFX at 8.5s in a 9s film: ready false, sfx_overruns_film ending 17.5s", JSON.stringify(pfSfxJson.errors));
+// A preview-readiness template: renders, but the gate warns.
+const pfTplDoc = JSON.parse(await readFile(pfStage.manifestPath, "utf8"));
+pfTplDoc.shots[0].template = "title-card";
+const pfTplPath = path.join(pfStage.dir, "film-tpl.json");
+await writeFile(pfTplPath, JSON.stringify(pfTplDoc), "utf8");
+const pfTplRes = await client.callTool({ name: "assemble", arguments: { manifest_path: pfTplPath, mode: "preflight" } });
+const pfTplJson = JSON.parse(pfTplRes.content[0].text);
+const pfTplByName = Object.fromEntries((pfTplJson.checks ?? []).map((c) => [c.name, c]));
+checkOk(pfTplJson.ready_to_render === true && pfTplJson.warnings?.length === 2 && pfTplByName.templates?.status === "warn" && /title-card.*preview/.test(pfTplByName.templates?.detail ?? ""), "assemble preflight with a preview template: ready stays true, templates warns (title-card is preview, not ready)", JSON.stringify({ warnings: pfTplJson.warnings?.length, detail: pfTplByName.templates?.detail }));
+const pfCli = await runCliJson(["assemble", pfStage.manifestPath, "--mode", "preflight"]);
+checkOk(pfCli.mode === "preflight" && pfCli.ready_to_render === true && Array.isArray(pfCli.checks) && pfCli.checks.length === 9, "CLI assemble --mode preflight returns the same gate (9 checks)", JSON.stringify({ mode: pfCli.mode, ready: pfCli.ready_to_render, checks: pfCli.checks?.length }));
+const pfBadModeText = await callExpectThrow("assemble", { manifest_path: pfStage.manifestPath, mode: "bogus" });
+checkOk(/preflight/.test(pfBadModeText ?? ""), "assemble rejects an unknown mode and its enum names preflight", (pfBadModeText ?? "").slice(0, 200));
+checkOk(!existsSync(path.join(pfStage.dir, "align-voice-film.assemble-approval.json")), "assemble preflight writes no approval file (a gate is not an approval)", pfStage.dir);
 // Hook repeat/move in assemble (lượt 190, podcli): the plan analyses
 // the hook passage against the body — it never rewrites the shots.
 // Fixture test/assemble-hook-move.json: voice 9s + lead 0.5 + tail

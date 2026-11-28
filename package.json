@@ -9,7 +9,7 @@
     "zod": "^3.25.0",
     "zod-to-json-schema": "^3.25.2"
   },
-  "description": "Professional media tools for coding agents: an MCP server + CLI wrapping ffmpeg — trim, crop, resize, captions, loudness, thumbnails, and more.",
+  "description": "Professional media tools for coding agents: an MCP server + CLI wrapping ffmpeg \u2014 trim, crop, resize, captions, loudness, thumbnails, and more.",
   "engines": {
     "node": ">=18"
   },
@@ -44,7 +44,8 @@
     "start": "node bin/mediakit.js mcp",
     "test": "node test/mcp-test.mjs",
     "mutation-smoke": "node scripts/mutation-smoke.mjs",
-    "mutation-ratchet": "node scripts/mutation-smoke.mjs --ratchet"
+    "mutation-ratchet": "node scripts/mutation-smoke.mjs --ratchet",
+    "selfcheck": "node scripts/selfcheck.mjs"
   },
   "type": "module",
   "version": "0.1.0"
