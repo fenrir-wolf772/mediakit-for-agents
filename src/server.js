@@ -111,5 +111,15 @@ server.resource(
   async (uri) => resourceResult(uri, await core.workspaceInfo()),
 );
 
+// Named presets (idea: mcp-video-studio's MCP presets resource,
+// lượt 192): the silence profiles as data, so a client reads the
+// values before calling silence --profile instead of guessing them.
+server.resource(
+  "silence-presets",
+  "presets://silence",
+  { description: "Named silence profiles for the silence tool (podcast / vlog / screencast): threshold_db, min_duration and margin per profile, with what each is for.", mimeType: "application/json" },
+  async (uri) => resourceResult(uri, { profiles: core.listSilenceProfiles() }),
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);

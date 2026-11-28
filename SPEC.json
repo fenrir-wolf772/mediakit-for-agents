@@ -2663,7 +2663,7 @@
       "family": "edit",
       "tier": "WRITE",
       "summary": "Remove silent stretches from speech/video.",
-      "description": "Remove silent stretches from speech/video. Detects silence with silencedetect, keeps the speech plus a margin of silence on each side (so words are never clipped), then cuts and re-joins — every kept segment gets a 12ms fade out + 15ms fade in at the join, so a cut mid-tone has no click. Set detect_only=true to just report the silence/kept segments without writing a file. Returns removed_seconds and the kept segment list — verify those before trusting the cut. Set dry_run=true to print the exact ffmpeg command that would run and write no file (the silencedetect measurement still runs, read-only; duration_after/size report null — measured on the real output; with nothing worth cutting the command is a stream-copy).",
+      "description": "Remove silent stretches from speech/video. Detects silence with silencedetect, keeps the speech plus a margin of silence on each side (so words are never clipped), then cuts and re-joins — every kept segment gets a 12ms fade out + 15ms fade in at the join, so a cut mid-tone has no click. Set detect_only=true to just report the silence/kept segments without writing a file. Returns removed_seconds and the kept segment list — verify those before trusting the cut. Set dry_run=true to print the exact ffmpeg command that would run and write no file (the silencedetect measurement still runs, read-only; duration_after/size report null — measured on the real output; with nothing worth cutting the command is a stream-copy). profile picks a named preset instead of three numbers (podcast: -40 dB / 0.5s / 0.2s — the old defaults; vlog: -38 dB / 0.4s / 0.25s for noisy field audio; screencast: -45 dB / 1.0s / 0.3s, only long dead air goes); an explicit threshold_db/min_duration/margin overrides just that field of the profile, and the result reports profile, profile_values and overrides. Read the full list from the presets://silence resource.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2676,26 +2676,32 @@
             "$ref": "#/properties/input",
             "description": "Output file path (not needed with detect_only=true; dry_run=true still needs it to print the command)"
           },
+          "profile": {
+            "type": "string",
+            "enum": [
+              "podcast",
+              "vlog",
+              "screencast"
+            ],
+            "description": "Named preset for the three numbers below (podcast = the old defaults) — an explicit number overrides just that field of the profile"
+          },
           "threshold_db": {
             "type": "number",
             "minimum": -90,
             "maximum": 0,
-            "default": -40,
-            "description": "Silence threshold in dB (more negative = stricter)"
+            "description": "Silence threshold in dB (more negative = stricter; default -40, or the profile's value)"
           },
           "min_duration": {
             "type": "number",
             "minimum": 0.05,
             "maximum": 60,
-            "default": 0.5,
-            "description": "Minimum silence length in seconds to cut"
+            "description": "Minimum silence length in seconds to cut (default 0.5, or the profile's value)"
           },
           "margin": {
             "type": "number",
             "minimum": 0,
             "maximum": 5,
-            "default": 0.2,
-            "description": "Seconds of silence kept around each speech segment"
+            "description": "Seconds of silence kept around each speech segment (default 0.2, or the profile's value)"
           },
           "detect_only": {
             "type": "boolean",
@@ -6953,5 +6959,5 @@
       }
     }
   ],
-  "spec_hash": "399aae136e027dc9d7c8816949fa09abbccca02eeedd0693d46f09461ab70683"
+  "spec_hash": "f6d498ade46bdc9f5cd218a423cf2e1602f3dfe353377b994f127e5fa792e255"
 }

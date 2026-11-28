@@ -613,13 +613,14 @@ const COMMANDS = {
     ],
   },
   silence: {
-    usage: "mediakit silence <input> -o <output> [--threshold-db <n>] [--min-duration <s>] [--margin <s>] [--detect-only] [--dry-run]",
-    desc: "Remove silent stretches, keeping a margin of silence around speech. --detect-only reports segments without writing. --dry-run prints the exact ffmpeg command and writes no file (needs -o, like a real run; with nothing worth cutting the command is a stream-copy).",
+    usage: "mediakit silence <input> -o <output> [--profile podcast|vlog|screencast] [--threshold-db <n>] [--min-duration <s>] [--margin <s>] [--detect-only] [--dry-run]",
+    desc: "Remove silent stretches, keeping a margin of silence around speech. --profile picks a named preset (podcast: -40 dB / 0.5s / 0.2s, the old defaults; vlog: -38 / 0.4 / 0.25; screencast: -45 / 1.0 / 0.3); an explicit number overrides just that field of the profile. --detect-only reports segments without writing. --dry-run prints the exact ffmpeg command and writes no file (needs -o, like a real run; with nothing worth cutting the command is a stream-copy).",
     args: [{ name: "input", required: true }],
     options: [
-      ["--threshold-db", "Silence threshold in dB (default -40, more negative = stricter)"],
-      ["--min-duration", "Minimum silence length to cut, seconds (default 0.5)"],
-      ["--margin", "Silence kept around each speech segment, seconds (default 0.2)"],
+      ["--profile", "Named preset: podcast, vlog, or screencast (see presets://silence)"],
+      ["--threshold-db", "Silence threshold in dB (default -40, or the profile's value; more negative = stricter)"],
+      ["--min-duration", "Minimum silence length to cut, seconds (default 0.5, or the profile's value)"],
+      ["--margin", "Silence kept around each speech segment, seconds (default 0.2, or the profile's value)"],
       ["--detect-only", "Report silence/kept segments, write no file"],
       ["--dry-run", "Print the exact ffmpeg command and write no file"],
       ["-o, --output", "Output file (required unless --detect-only)"],
@@ -2092,9 +2093,10 @@ async function main() {
         result = await core.silence({
           input: needInput(),
           output: detectOnly ? null : needOutput(opts),
-          thresholdDb: numOpt(opts, "threshold_db") ?? -40,
-          minDuration: numOpt(opts, "min_duration") ?? 0.5,
-          margin: numOpt(opts, "margin") ?? 0.2,
+          profile: opts.profile ?? null,
+          thresholdDb: numOpt(opts, "threshold_db") ?? null,
+          minDuration: numOpt(opts, "min_duration") ?? null,
+          margin: numOpt(opts, "margin") ?? null,
           detectOnly,
           dryRun: opts.dry_run === true,
         });

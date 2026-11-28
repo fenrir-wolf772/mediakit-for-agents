@@ -7,7 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "node:url";
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { appendFile, copyFile, mkdir, readFile, readdir, readlink, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, mkdir, readFile, readdir, readlink, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { createCanvas } from "canvas";
@@ -15,7 +15,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
-import { acquireEditLease, analyzeHookMove, analyzeSeamSamples, applyContentBaseline, applyHook, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, clearProbeCache, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, ffmpegThreads, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findHighlights, findHook, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookMotionCalibration, hookOverlapSeconds, hookSliceForTrack, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, orderHookRanges, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStabTrfMotion, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, peakEnergyWindow, pickFarthestThumbnails, planCleanVoice, planSmartCuts, probeEncoderCached, probeEncoderDetail, probeFailureReason, encoderProbeCacheStats, clearEncoderProbeCache, projectSummary, proposeEdit, probe, probeCacheStats, releaseEditLease, renewEditLease, resolveQcPolicy, restoreEditSessionCheckpoint, resumeEditSession, robustZMotionScore, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, sentenceBoundaries, sharpnessVerdict, snapHookToWords, snapKeepSegmentsToPauses, snapRangeToSentences, spectralFluxOnset, stabilizeVerdict, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
+import { acquireEditLease, acquireDirLock, analyzeHookMove, analyzeSeamSamples, applyContentBaseline, applyHook, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, clearProbeCache, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, ffmpegThreads, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findHighlights, findHook, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookMotionCalibration, hookOverlapSeconds, hookSliceForTrack, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, isCheckpointLockStale, isPidAlive, listSceneTemplates, localTempoCurve, meanAbsDiffGray, orderHookRanges, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStabTrfMotion, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, peakEnergyWindow, pickFarthestThumbnails, planCleanVoice, planSmartCuts, probeEncoderCached, probeEncoderDetail, probeFailureReason, encoderProbeCacheStats, clearEncoderProbeCache, projectSummary, proposeEdit, probe, probeCacheStats, readCheckpointLockOwner, releaseEditLease, renewEditLease, resolveQcPolicy, resolveSilenceProfile, listSilenceProfiles, restoreEditSessionCheckpoint, resumeEditSession, robustZMotionScore, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, sentenceBoundaries, sharpnessVerdict, snapHookToWords, snapKeepSegmentsToPauses, snapRangeToSentences, spectralFluxOnset, stabilizeVerdict, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
@@ -3204,6 +3204,105 @@ const silenceCopyDryRes = await client.callTool({
 const silenceCopyDryJson = JSON.parse(silenceCopyDryRes.content[0].text);
 checkOk(silenceCopyDryJson.dry_run === true && silenceCopyDryJson.stream_copy === true && silenceCopyDryJson.commands?.[0]?.includes("-c copy"), "silence dry-run with nothing to cut prints the stream-copy command", JSON.stringify(silenceCopyDryJson.commands));
 checkOk(!existsSync(path.join(root, "outputs/mcp-silence-copy-dry.mp4")), "silence copy dry-run writes no file", "outputs/mcp-silence-copy-dry.mp4");
+
+// Named silence profiles (lượt 195): one name instead of three
+// numbers. Pure resolution first, then the measured behaviour.
+const profList = listSilenceProfiles();
+checkOk(profList.length === 3 && profList.map((p) => p.name).join(",") === "podcast,vlog,screencast" && profList[0].threshold_db === -40 && profList[0].min_duration === 0.5 && profList[0].margin === 0.2 && profList[1].threshold_db === -38 && profList[1].min_duration === 0.4 && profList[1].margin === 0.25 && profList[2].threshold_db === -45 && profList[2].min_duration === 1.0 && profList[2].margin === 0.3, "listSilenceProfiles returns podcast/vlog/screencast with the locked values", JSON.stringify(profList.map((p) => [p.name, p.threshold_db, p.min_duration, p.margin])));
+const profPodcast = resolveSilenceProfile("podcast");
+checkOk(profPodcast.profile === "podcast" && profPodcast.threshold_db === -40 && profPodcast.min_duration === 0.5 && profPodcast.margin === 0.2 && profPodcast.overrides.length === 0, "resolveSilenceProfile podcast is the old defaults with no overrides", JSON.stringify(profPodcast));
+const profScreen = resolveSilenceProfile("screencast");
+checkOk(profScreen.threshold_db === -45 && profScreen.min_duration === 1.0 && profScreen.margin === 0.3, "resolveSilenceProfile screencast is -45 dB / 1.0s / 0.3s", JSON.stringify(profScreen));
+const profVlogOver = resolveSilenceProfile("vlog", { margin: 0.1 });
+checkOk(profVlogOver.threshold_db === -38 && profVlogOver.min_duration === 0.4 && profVlogOver.margin === 0.1 && JSON.stringify(profVlogOver.overrides) === '["margin"]', "resolveSilenceProfile vlog + margin 0.1 overrides just margin", JSON.stringify(profVlogOver));
+const profNone = resolveSilenceProfile(null, {});
+checkOk(profNone.profile === null && profNone.threshold_db === -40 && profNone.min_duration === 0.5 && profNone.margin === 0.2, "resolveSilenceProfile with no profile is the old defaults", JSON.stringify(profNone));
+let profBad = null;
+try { resolveSilenceProfile("nope"); } catch (e) { profBad = e.message; }
+checkOk(typeof profBad === "string" && /unknown silence profile "nope"/.test(profBad) && /podcast, vlog, screencast/.test(profBad), "resolveSilenceProfile refuses an unknown profile by name", String(profBad));
+
+// Dir-lock (lượt 196, capcut-mcp guardrail #2): one mkdir-based lock
+// for every read-modify-write file, with a pid-liveness stale rule
+// for the assemble checkpoint ledger.
+checkOk(isPidAlive(process.pid) === true && isPidAlive(999999999) === false && isPidAlive(0) === false && isPidAlive(-1) === false && isPidAlive("x") === false, "isPidAlive: own pid alive, impossible pid / 0 / -1 / non-integer dead", `own=${isPidAlive(process.pid)} dead=${isPidAlive(999999999)}`);
+const lockTestDir = path.join(root, "outputs", "lock-test");
+await rm(lockTestDir, { recursive: true, force: true });
+await mkdir(lockTestDir, { recursive: true });
+const lockDirA = path.join(lockTestDir, "a.lock");
+const releaseA = await acquireDirLock(lockDirA, { owner: { mode: "test" } });
+const lockOwnerA = JSON.parse(await readFile(path.join(lockDirA, "owner.json"), "utf8"));
+checkOk(lockOwnerA.pid === process.pid && lockOwnerA.mode === "test" && typeof lockOwnerA.started_at === "string", "acquireDirLock writes owner.json with our pid + owner fields", JSON.stringify(lockOwnerA));
+let lockSecondErr = null;
+try { await acquireDirLock(lockDirA, { deadlineMs: 250, lockError: "second lock refused" }); } catch (e) { lockSecondErr = e.message; }
+checkOk(lockSecondErr === "second lock refused", "a second acquire on a live lock waits out its deadline then refuses with the lockError", String(lockSecondErr));
+checkOk((await readCheckpointLockOwner(lockDirA)).pid === process.pid, "readCheckpointLockOwner reads the live holder's pid", JSON.stringify(await readCheckpointLockOwner(lockDirA)));
+checkOk((await isCheckpointLockStale(lockDirA)) === false, "isCheckpointLockStale: a lock owned by a live pid is not stale", "live");
+await releaseA();
+await releaseA();
+checkOk(!existsSync(lockDirA), "releasing the lock removes the lock dir, and releasing twice is safe", "gone");
+// A stale lock (dead owner pid) is stolen, not waited on.
+const lockDirB = path.join(lockTestDir, "b.lock");
+await mkdir(lockDirB);
+await writeFile(path.join(lockDirB, "owner.json"), JSON.stringify({ pid: 999999999, started_at: "2026-01-01T00:00:00.000Z" }), "utf8");
+checkOk((await isCheckpointLockStale(lockDirB)) === true, "isCheckpointLockStale: a lock owned by a dead pid is stale", "dead");
+checkOk((await readCheckpointLockOwner(lockDirB)).pid === 999999999, "readCheckpointLockOwner reads the dead holder's pid too", "999999999");
+const releaseB = await acquireDirLock(lockDirB, { isStale: isCheckpointLockStale, deadlineMs: 5000 });
+checkOk(JSON.parse(await readFile(path.join(lockDirB, "owner.json"), "utf8")).pid === process.pid, "acquireDirLock steals a stale lock and re-records our pid", "stolen");
+await releaseB();
+// No owner file at all: fresh mtime waits, old mtime is stale.
+const lockDirC = path.join(lockTestDir, "c.lock");
+await mkdir(lockDirC);
+checkOk((await isCheckpointLockStale(lockDirC)) === false, "isCheckpointLockStale: ownerless lock with fresh mtime is not stale", "fresh");
+const past = new Date(Date.now() - 60_000);
+await utimes(lockDirC, past, past);
+checkOk((await isCheckpointLockStale(lockDirC)) === true, "isCheckpointLockStale: ownerless lock with 60s-old mtime is stale", "old");
+await rm(lockDirC, { recursive: true, force: true });
+await rm(lockTestDir, { recursive: true, force: true });
+// MCP: screencast cuts only the long pauses on the fixture (1.398s
+// vs the 2.195s the podcast defaults cut — measured by CLI first),
+// and the result reports the profile that ran.
+const silenceScreenRes = await client.callTool({
+  name: "silence",
+  arguments: { input: path.join(root, "test/silence-source.mp4"), output: path.join(root, "outputs/mcp-silence-screencast.mp4"), profile: "screencast", detect_only: true },
+});
+const silenceScreenJson = JSON.parse(silenceScreenRes.content[0].text);
+checkOk(silenceScreenJson.profile === "screencast" && silenceScreenJson.threshold_db === -45 && silenceScreenJson.min_duration === 1.0 && silenceScreenJson.margin === 0.3 && silenceScreenJson.overrides.length === 0 && near(silenceScreenJson.removed_seconds, 1.398, 0.05), "silence profile screencast reports its values and cuts 1.398s", JSON.stringify({ profile: silenceScreenJson.profile, removed: silenceScreenJson.removed_seconds }));
+const silenceVlogRes = await client.callTool({
+  name: "silence",
+  arguments: { input: path.join(root, "test/silence-source.mp4"), output: path.join(root, "outputs/mcp-silence-vlog.mp4"), profile: "vlog", margin: 0.1, detect_only: true },
+});
+const silenceVlogJson = JSON.parse(silenceVlogRes.content[0].text);
+checkOk(silenceVlogJson.profile === "vlog" && silenceVlogJson.threshold_db === -38 && silenceVlogJson.min_duration === 0.4 && silenceVlogJson.margin === 0.1 && JSON.stringify(silenceVlogJson.overrides) === '["margin"]' && near(silenceVlogJson.removed_seconds, 2.596, 0.05), "silence profile vlog + margin override reports the override and cuts 2.596s", JSON.stringify({ profile: silenceVlogJson.profile, removed: silenceVlogJson.removed_seconds, overrides: silenceVlogJson.overrides }));
+const silenceBadRes = await client.callTool({
+  name: "silence",
+  arguments: { input: path.join(root, "test/silence-source.mp4"), profile: "nope", detect_only: true },
+});
+const silenceBadText = silenceBadRes.content[0].text;
+// NOTE: the zod enum in the tool schema rejects "nope" before the
+// handler runs, so the MCP error names the valid values; the core
+// "unknown silence profile" path (tested pure above) is what the CLI
+// hits when a profile bypasses the schema.
+checkOk(/Invalid enum value\. Expected 'podcast' \| 'vlog' \| 'screencast', received 'nope'/.test(silenceBadText), "silence with an unknown profile is refused by the schema, naming the valid profiles", silenceBadText.slice(0, 200));
+// CLI: profile podcast renders exactly the old defaults on disk.
+const silencePodcastCli = await runCliJson(["silence", path.join(root, "test/silence-source.mp4"), "-o", path.join(root, "outputs/mcp-silence-podcast.mp4"), "--profile", "podcast"]);
+checkOk(silencePodcastCli.profile === "podcast" && near(silencePodcastCli.duration_after, 6.867, 0.05) && near(silencePodcastCli.removed_seconds, 2.195, 0.05), "CLI silence --profile podcast cuts 9s to 6.867s like the old defaults", JSON.stringify({ after: silencePodcastCli.duration_after, removed: silencePodcastCli.removed_seconds }));
+// Batch: the profile arg flows through the batch args list (the
+// manifest step table spreads the same BATCH_OPERATIONS entry, so
+// this also covers the manifest path).
+await rm(path.join(root, "outputs/mcp-batch-silence-profile-in"), { recursive: true, force: true });
+await rm(path.join(root, "outputs/mcp-batch-silence-profile-out"), { recursive: true, force: true });
+await mkdir(path.join(root, "outputs/mcp-batch-silence-profile-in"), { recursive: true });
+await copyFile(path.join(root, "test/silence-source.mp4"), path.join(root, "outputs/mcp-batch-silence-profile-in/silence-source.mp4"));
+const silenceBatchRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "silence", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-silence-profile-in"), output_dir: path.join(root, "outputs/mcp-batch-silence-profile-out"), args: { profile: "screencast" } },
+});
+const silenceBatchJson = JSON.parse(silenceBatchRes.content[0].text);
+checkOk(silenceBatchJson.succeeded === 1 && silenceBatchJson.failed === 0 && silenceBatchJson.results[0]?.status === "ok" && silenceBatchJson.results[0]?.result?.profile === "screencast" && near(silenceBatchJson.results[0]?.result?.removed_seconds, 1.398, 0.05), "batch silence --profile screencast runs the profile on every file", JSON.stringify(silenceBatchJson.results.map((r) => r.result?.removed_seconds)));
+// Resource: presets://silence lists the same three profiles.
+const presetsRes = await client.readResource({ uri: "presets://silence" });
+const presetsJson = JSON.parse(presetsRes.contents[0].text);
+checkOk(Array.isArray(presetsJson.profiles) && presetsJson.profiles.length === 3 && presetsJson.profiles.map((p) => p.name).join(",") === "podcast,vlog,screencast" && presetsJson.profiles.every((p) => typeof p.description === "string" && p.description.length > 0), "presets://silence lists the three profiles with descriptions", JSON.stringify(presetsJson.profiles.map((p) => p.name)));
 
 const cropdetectRes = await client.callTool({
   name: "cropdetect",
@@ -10073,7 +10172,7 @@ async function readResourceExpectError(aClient, uri) {
 }
 const resList = await client.listResources();
 const resUris = (resList.resources ?? []).map((r) => r.uri);
-checkOk(resUris.includes("videos://list") && resUris.includes("videos://workspace/info"), "resources/list advertises videos://list and videos://workspace/info", JSON.stringify(resUris));
+checkOk(resUris.includes("videos://list") && resUris.includes("videos://workspace/info") && resUris.includes("presets://silence"), "resources/list advertises videos://list, videos://workspace/info and presets://silence", JSON.stringify(resUris));
 // Templates live under a separate method (resources/templates/list),
 // not in resources/list — the SDK only enumerates template instances
 // there when a list callback exists.
@@ -11316,7 +11415,7 @@ checkOk(ckptNoneJson.checkpoint === "no_checkpoint" && ckptNoneJson.resumable ==
 // first render writes the ledger: 4 shots done, 0 cache hits
 const ckptRenderRes = await client.callTool({ name: "assemble", arguments: { manifest_path: ckptStage.manifestPath, mode: "render", output_dir: ckptOut, force: true, checkpoint_file: ckptPath } }, undefined, { timeout: 300000 });
 const ckptRenderJson = JSON.parse(ckptRenderRes.content[0].text);
-checkOk(ckptRenderJson.checkpoint?.shots_done === 4 && ckptRenderJson.checkpoint?.shots_total === 4 && ckptRenderJson.checkpoint_file === ckptPath && ckptRenderJson.cache_hits === 0, "assemble render with --checkpoint-file records 4/4 shots in the receipt, 0 cache hits on the first render", JSON.stringify(ckptRenderJson.checkpoint));
+checkOk(ckptRenderJson.checkpoint?.shots_done === 4 && ckptRenderJson.checkpoint?.shots_total === 4 && ckptRenderJson.checkpoint_file === ckptPath && ckptRenderJson.cache_hits === 0 && ckptRenderJson.checkpoint?.lock_path === `${ckptPath}.lock` && Number.isInteger(ckptRenderJson.checkpoint?.locked_by_pid) && ckptRenderJson.checkpoint.locked_by_pid > 0, "assemble render with --checkpoint-file records 4/4 shots in the receipt, 0 cache hits on the first render, and the lock path + holder pid", JSON.stringify(ckptRenderJson.checkpoint));
 const ckptDoc = JSON.parse(await readFile(ckptPath, "utf8"));
 checkOk(ckptDoc.tool === "assemble-checkpoint" && ckptDoc.mode === "render" && ckptDoc.shots?.length === 4 && ckptDoc.shots.every((s) => s.status === "done" && /^[0-9a-f]{64}$/.test(s.key ?? "") && /^[0-9a-f]{64}$/.test(s.segment_sha256 ?? "")) && ckptDoc.fingerprint === ckptRenderJson.fingerprint, "checkpoint file on disk holds 4 done shots with keys + segment digests and the film fingerprint", JSON.stringify(ckptDoc.shots?.map((s) => s.id)));
 // status after the render: all done, resumable
@@ -11356,6 +11455,23 @@ checkOk(ckptPreviewStatusJson.checkpoint_mode === "preview" && ckptPreviewStatus
 const ckptResetRes = await client.callTool({ name: "assemble", arguments: { manifest_path: ckptStage.manifestPath, mode: "preview", output_dir: path.join(ckptStage.dir, "out-preview2"), preview_seconds: 10, checkpoint_file: ckptPath } }, undefined, { timeout: 300000 });
 const ckptResetJson = JSON.parse(ckptResetRes.content[0].text);
 checkOk(ckptResetJson.checkpoint?.reset_from_mode === "render" && ckptResetJson.checkpoint?.mode === "preview" && ckptResetJson.checkpoint?.shots_done === 4, "assemble preview handed a render checkpoint resets the ledger and reports reset_from_mode render", JSON.stringify(ckptResetJson.checkpoint));
+// Checkpoint ledger lock (lượt 196): a second render sharing one
+// --checkpoint-file must refuse while the first run holds the lock
+// (pid liveness, not mtime), a stale lock is stolen, and --mode
+// status stays lock-free because it never writes.
+const ckptLockDir = `${ckptPath}.lock`;
+await mkdir(ckptLockDir);
+await writeFile(path.join(ckptLockDir, "owner.json"), JSON.stringify({ pid: process.pid, started_at: new Date().toISOString(), mode: "render" }), "utf8");
+const ckptLockText = await callExpectThrow("assemble", { manifest_path: ckptStage.manifestPath, mode: "preview", output_dir: path.join(ckptStage.dir, "out-preview-lock"), preview_seconds: 10, checkpoint_file: ckptPath });
+checkOk(/locked by another run/.test(ckptLockText ?? "") && new RegExp(`pid ${process.pid}`).test(ckptLockText ?? "") && /different --checkpoint-file/.test(ckptLockText ?? ""), "assemble preview refuses while another live run holds the checkpoint lock, naming the holder pid", ckptLockText ?? "");
+const ckptStatusLockedRes = await client.callTool({ name: "assemble", arguments: { manifest_path: ckptStage.manifestPath, mode: "status", checkpoint_file: ckptPath } });
+const ckptStatusLockedJson = JSON.parse(ckptStatusLockedRes.content[0].text);
+checkOk(ckptStatusLockedJson.checkpoint === "ok" && ckptStatusLockedJson.resumable === true, "assemble status works while the checkpoint lock is held (read-only, no lock needed)", JSON.stringify(ckptStatusLockedJson.counts));
+await writeFile(path.join(ckptLockDir, "owner.json"), JSON.stringify({ pid: 999999999, started_at: "2026-01-01T00:00:00.000Z", mode: "render" }), "utf8");
+const ckptStaleLockRes = await client.callTool({ name: "assemble", arguments: { manifest_path: ckptStage.manifestPath, mode: "preview", output_dir: path.join(ckptStage.dir, "out-preview-lock"), preview_seconds: 10, checkpoint_file: ckptPath } }, undefined, { timeout: 300000 });
+const ckptStaleLockJson = JSON.parse(ckptStaleLockRes.content[0].text);
+checkOk(ckptStaleLockJson.checkpoint?.mode === "preview" && ckptStaleLockJson.checkpoint?.shots_done === 4 && ckptStaleLockJson.checkpoint?.lock_path === `${ckptPath}.lock`, "assemble preview steals a stale checkpoint lock (dead owner pid) and renders, recording the lock path", JSON.stringify(ckptStaleLockJson.checkpoint));
+checkOk(!existsSync(ckptLockDir), "the checkpoint lock dir is gone after the render releases it", "gone");
 const assembleApproveEarlyText = await callExpectThrow("assemble", { manifest_path: assembleStage.manifestPath, mode: "approve", output_dir: assembleOut });
 checkOk(/needs a preview/.test(assembleApproveEarlyText ?? ""), "assemble approve refuses without a preview", assembleApproveEarlyText ?? "");
 const assembleRenderEarlyText = await callExpectThrow("assemble", { manifest_path: assembleStage.manifestPath, mode: "render", output_dir: assembleOut });

@@ -177,6 +177,13 @@ re-cut blind. A cut never clicks: every kept segment gets a 12ms fade out
 + 15ms fade in at the join (`silence` and `cut_words` share the graph),
 so a cut mid-word or mid-tone is smooth — verify it on samples, not by ear
 alone, when the join matters.
+Named profiles pick the three numbers by intent: `podcast` (−40 dB /
+0.5s / 0.2s, the old defaults), `vlog` (−38 / 0.4 / 0.25, noisy field
+audio), `screencast` (−45 / 1.0 / 0.3, only long dead air goes). An
+explicit number overrides just that field of the profile — the result
+reports `profile`, `profile_values` and `overrides`, so the run is
+reproducible from the report alone. Read the full list from the
+`presets://silence` resource before guessing values.
 
 ### 6. Loudness: −14 LUFS is the default for a reason
 YouTube, Spotify, and TikTok all normalize to around −14 LUFS. Normalizing

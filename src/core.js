@@ -12142,6 +12142,63 @@ export async function compress({ input, output, quality = "medium", maxWidth = n
 // each side (so words are never clipped), then the kept segments are
 // cut and re-joined in one filter graph.
 
+// Named silence profiles (idea: mcp-video-studio's named silence
+// profiles + MCP presets resource, lượt 192): one name instead of
+// three numbers, so an agent picks the intent and the thresholds
+// follow. Values are starting points tuned to the recording, not
+// measured truths — each field stays overridable, and the result
+// reports exactly which values ran.
+//   podcast: dense speech, close-mic — the old defaults verbatim
+//     (cut hesitations, keep breaths tight).
+//   vlog: field audio is noisier, so the threshold is looser
+//     (-38) and shorter gaps count (0.4s); a wider margin (0.25s)
+//     protects word attacks over street noise.
+//   screencast: a quiet room — only true dead air counts (-45),
+//     and only long pauses go (1.0s), so the demo's pacing survives.
+export const SILENCE_PROFILES = {
+  podcast: {
+    threshold_db: -40, min_duration: 0.5, margin: 0.2,
+    description: "Close-mic speech: cut hesitations, keep breaths tight.",
+  },
+  vlog: {
+    threshold_db: -38, min_duration: 0.4, margin: 0.25,
+    description: "Noisy field audio: looser threshold, shorter gaps count.",
+  },
+  screencast: {
+    threshold_db: -45, min_duration: 1.0, margin: 0.3,
+    description: "Quiet room: only long true dead air goes, pacing survives.",
+  },
+};
+
+/** The profile registry as data (drives the presets://silence resource). */
+export function listSilenceProfiles() {
+  return Object.entries(SILENCE_PROFILES).map(([name, v]) => ({ name, ...v }));
+}
+
+/**
+ * Resolve a silence profile + per-field overrides into the exact
+ * values that will run. Pure. Explicit numbers win over the profile;
+ * with no profile and no numbers the old defaults apply. An unknown
+ * profile is refused by name (never silently replaced).
+ */
+export function resolveSilenceProfile(profile = null, { thresholdDb = null, minDuration = null, margin = null } = {}) {
+  const base = profile == null
+    ? { threshold_db: -40, min_duration: 0.5, margin: 0.2 }
+    : SILENCE_PROFILES[profile];
+  if (base === undefined) {
+    throw new MediaKitError(
+      `unknown silence profile "${profile}" (known: ${Object.keys(SILENCE_PROFILES).join(", ")})`,
+      "INVALID_ARG",
+    );
+  }
+  const overrides = [];
+  const resolved = { ...base };
+  if (thresholdDb != null) { resolved.threshold_db = thresholdDb; overrides.push("threshold_db"); }
+  if (minDuration != null) { resolved.min_duration = minDuration; overrides.push("min_duration"); }
+  if (margin != null) { resolved.margin = margin; overrides.push("margin"); }
+  return { profile: profile ?? null, ...resolved, overrides };
+}
+
 export async function detectSilence(input, { thresholdDb = -40, minDuration = 0.5 } = {}) {
   const inPath = await requireInput(input);
   const threshold = num(thresholdDb, "threshold_db", { min: -90, max: 0 });
@@ -12222,10 +12279,11 @@ function joinFadeAudio(seg, i) {
   return `${chain}[a${i}]`;
 }
 
-export async function silence({ input, output = null, thresholdDb = -40, minDuration = 0.5, margin = 0.2, detectOnly = false, dryRun = false }) {
+export async function silence({ input, output = null, profile = null, thresholdDb = null, minDuration = null, margin = null, detectOnly = false, dryRun = false }) {
   const inPath = await requireInput(input);
-  const m = num(margin, "margin", { min: 0, max: 5 });
-  const det = await detectSilence(inPath, { thresholdDb, minDuration });
+  const resolved = resolveSilenceProfile(profile, { thresholdDb, minDuration, margin });
+  const m = num(resolved.margin, "margin", { min: 0, max: 5 });
+  const det = await detectSilence(inPath, { thresholdDb: resolved.threshold_db, minDuration: resolved.min_duration });
   const duration = det.duration_seconds;
   if (duration === null) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
   const kept = keptSegments(duration, det.silences, m);
@@ -12236,6 +12294,13 @@ export async function silence({ input, output = null, thresholdDb = -40, minDura
   const removed = +(duration - keptTotal).toFixed(3);
   const base = {
     operation: "silence", input: inPath,
+    profile: resolved.profile,
+    profile_values: resolved.profile == null ? null : {
+      threshold_db: SILENCE_PROFILES[resolved.profile].threshold_db,
+      min_duration: SILENCE_PROFILES[resolved.profile].min_duration,
+      margin: SILENCE_PROFILES[resolved.profile].margin,
+    },
+    overrides: resolved.overrides,
     threshold_db: det.threshold_db, min_duration: det.min_duration, margin: m,
     duration_before: duration,
     silences: det.silences,
@@ -16653,25 +16718,98 @@ async function loadHookHistory(historyFile) {
   return doc;
 }
 
-async function appendHookHistory(historyFile, record) {
-  const abs = await prepareOutput(historyFile, []);
-  const lockDir = `${abs}.lock`;
-  const deadline = Date.now() + 30_000;
+// Is a pid alive right now? signal 0 probes existence without
+// delivering anything: ESRCH means dead, EPERM means alive but not
+// ours. A non-integer pid is never alive.
+export function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e?.code === "EPERM";
+  }
+}
+
+// One dir-lock for every read-modify-write file in the codebase
+// (lượt 196: hook history and the async job-start lock each had
+// their own copy of this loop; the assemble checkpoint ledger is
+// the third — two renders sharing one --checkpoint-file used to
+// read-modify-write the same ledger and silently lose each
+// other's shots, the same class of collision the L192 orphan
+// worker caused). mkdir is the atomic claim; the owner file inside
+// names the holder so a stale lock can be told from a live one.
+// `isStale(lockDir)` decides the steal (default: mtime older than
+// staleMs); `lockError` is the exact message on deadline. Returns
+// a release function that removes ONLY our own lock (owner pid
+// must still be us) and is safe to call twice.
+export async function acquireDirLock(lockDir, { owner = {}, staleMs = 30_000, deadlineMs = 30_000, isStale = null, lockError = null } = {}) {
+  const deadline = Date.now() + deadlineMs;
   for (;;) {
     try {
       await mkdir(lockDir);
-      break;
+      await writeFile(path.join(lockDir, "owner.json"), `${JSON.stringify({ pid: process.pid, started_at: new Date().toISOString(), ...owner }, null, 2)}\n`, "utf8");
+      let released = false;
+      return async () => {
+        if (released) return;
+        released = true;
+        try {
+          const raw = await readFile(path.join(lockDir, "owner.json"), "utf8");
+          if (JSON.parse(raw)?.pid !== process.pid) return;
+        } catch { /* owner unreadable: we created the dir, still remove it */ }
+        await rm(lockDir, { recursive: true, force: true }).catch(() => {});
+      };
     } catch {
       // Lock held: wait a tick, or steal it if the holder crashed
-      // (mtime older than 30s) instead of waiting forever.
+      // instead of waiting forever.
+      let stale = false;
       try {
-        const st = await stat(lockDir);
-        if (Date.now() - st.mtimeMs > 30_000) await rm(lockDir, { recursive: true, force: true });
+        stale = typeof isStale === "function"
+          ? await isStale(lockDir)
+          : Date.now() - (await stat(lockDir)).mtimeMs > staleMs;
       } catch { /* lock vanished between mkdir and stat: retry */ }
-      if (Date.now() > deadline) throw new MediaKitError(`hook history file is locked by another run: ${historyFile}`, "ERROR");
+      if (stale) {
+        await rm(lockDir, { recursive: true, force: true }).catch(() => {});
+        continue;
+      }
+      if (Date.now() > deadline) throw new MediaKitError(lockError ?? `locked by another run: ${lockDir}`, "ERROR");
       await new Promise((r) => setTimeout(r, 50));
     }
   }
+}
+
+// A checkpoint lock is stale when its owner's pid is dead — a render
+// legitimately holds the lock for minutes, so the 30s-mtime rule the
+// other locks use would steal a live render. A lock with no readable
+// owner (crashed between mkdir and the owner write) falls back to
+// the mtime rule.
+export async function isCheckpointLockStale(lockDir) {
+  try {
+    const raw = await readFile(path.join(lockDir, "owner.json"), "utf8");
+    const pid = JSON.parse(raw)?.pid;
+    if (Number.isInteger(pid) && pid > 0) return !isPidAlive(pid);
+  } catch { /* no/invalid owner: fall through to the mtime rule */ }
+  try {
+    return Date.now() - (await stat(lockDir)).mtimeMs > 30_000;
+  } catch {
+    return false;
+  }
+}
+
+// Read the holder of a checkpoint lock for the refusal message
+// (null when unreadable — the message then names only the path).
+export async function readCheckpointLockOwner(lockDir) {
+  try {
+    const doc = JSON.parse(await readFile(path.join(lockDir, "owner.json"), "utf8"));
+    if (Number.isInteger(doc?.pid) && doc.pid > 0) return { pid: doc.pid, started_at: typeof doc.started_at === "string" ? doc.started_at : null, mode: typeof doc.mode === "string" ? doc.mode : null };
+  } catch { /* unreadable owner */ }
+  return null;
+}
+
+async function appendHookHistory(historyFile, record) {
+  const abs = await prepareOutput(historyFile, []);
+  const lockDir = `${abs}.lock`;
+  const release = await acquireDirLock(lockDir, { lockError: `hook history file is locked by another run: ${historyFile}` });
   try {
     const doc = await loadHookHistory(abs);
     const already = doc.records.some((r) => r.source_sha256 === record.source_sha256 && r.start === record.start && r.end === record.end);
@@ -16681,7 +16819,7 @@ async function appendHookHistory(historyFile, record) {
     await rename(partial, abs);
     return doc.records.length;
   } finally {
-    await rm(lockDir, { recursive: true, force: true });
+    await release();
   }
 }
 
@@ -18481,8 +18619,8 @@ export const BATCH_OPERATIONS = {
     run: (input, output, a) => trim({ input, output, start: a.start ?? 0, duration: a.duration ?? null, end: a.end ?? null, streamCopy: a.stream_copy ?? false, snapToKeyframe: a.snap_to_keyframe ?? false, snapToBeat: a.snap_to_beat ?? false, snapBeatMethod: a.snap_beat_method ?? "grid", smartCut: a.smart_cut ?? false, edgeBuffer: a.edge_buffer ?? 0, checkFrames: a.check_frames ?? true }),
   },
   silence: {
-    args: ["threshold_db", "min_duration", "margin"],
-    run: (input, output, a) => silence({ input, output, thresholdDb: a.threshold_db ?? -40, minDuration: a.min_duration ?? 0.5, margin: a.margin ?? 0.2, detectOnly: false }),
+    args: ["profile", "threshold_db", "min_duration", "margin"],
+    run: (input, output, a) => silence({ input, output, profile: a.profile ?? null, thresholdDb: a.threshold_db ?? null, minDuration: a.min_duration ?? null, margin: a.margin ?? null, detectOnly: false }),
   },
   chroma_key: {
     args: ["color", "similarity", "blend", "background", "crf"],
@@ -24461,17 +24599,43 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
   let checkpointDoc = null;
   let checkpointResetFrom = null;
   let checkpointShotsDone = 0;
+  let checkpointLockPath = null;
+  let releaseCheckpointLock = null;
   if (checkpointFile != null) {
     checkpointAbs = await prepareOutput(checkpointFile, [manifestAbs]);
-    const read = await readAssembleCheckpoint(checkpointAbs);
-    if (read.ok && read.doc.mode === mode && JSON.stringify(read.doc.opts) === JSON.stringify(assembleCheckpointOpts(opts))) {
-      checkpointDoc = read.doc;
-    } else {
-      if (read.ok) checkpointResetFrom = read.doc.mode;
-      checkpointDoc = assembleCheckpointBase({ plan, mode, previewSeconds: isPreview ? renderTotalSeconds : null, opts, outputDir: outDirAbs });
+    // Ledger lock (lượt 196, capcut-mcp guardrail #2): the ledger is
+    // read-modify-written after every shot, so a second render with
+    // the same --checkpoint-file must refuse instead of silently
+    // losing the first run's shots. Held for the whole render;
+    // `--force` does NOT break a live lock — only a dead owner's
+    // lock is stolen (pid liveness, not mtime: a render holds the
+    // lock for minutes). Status mode never reaches here: it is
+    // read-only and needs no lock.
+    checkpointLockPath = `${checkpointAbs}.lock`;
+    try {
+      releaseCheckpointLock = await acquireDirLock(checkpointLockPath, {
+        owner: { mode, manifest: manifestAbs },
+        isStale: isCheckpointLockStale,
+        lockError: `assemble checkpoint is locked by another run: ${checkpointAbs}`,
+      });
+    } catch (e) {
+      const holder = await readCheckpointLockOwner(checkpointLockPath);
+      throw new MediaKitError(
+        `assemble checkpoint is locked by another run${holder ? ` (pid ${holder.pid}${holder.started_at ? `, started ${holder.started_at}` : ""}${holder.mode ? `, ${holder.mode}` : ""})` : ""}: ${checkpointAbs} — use a different --checkpoint-file, or wait for the other run to finish`,
+        e?.code ?? "ERROR",
+      );
     }
   }
   try {
+    if (checkpointAbs) {
+      const read = await readAssembleCheckpoint(checkpointAbs);
+      if (read.ok && read.doc.mode === mode && JSON.stringify(read.doc.opts) === JSON.stringify(assembleCheckpointOpts(opts))) {
+        checkpointDoc = read.doc;
+      } else {
+        if (read.ok) checkpointResetFrom = read.doc.mode;
+        checkpointDoc = assembleCheckpointBase({ plan, mode, previewSeconds: isPreview ? renderTotalSeconds : null, opts, outputDir: outDirAbs });
+      }
+    }
     for (const [i, shot] of renderShotsBuilt.entries()) {
       emitProgress("shots", i / renderShotsBuilt.length, shot.id);
       const r = await assembleCachedShot(plan, shot, opts, tmpDir, (frac, detail) => {
@@ -24610,7 +24774,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
         output: finalPath,
         dimensions: `${outW}x${outH}`,
         cache_hits: cacheHits,
-        ...(checkpointAbs ? { checkpoint_file: checkpointAbs, checkpoint: { mode, shots_done: checkpointShotsDone, shots_total: renderShotsBuilt.length, ...(checkpointResetFrom ? { reset_from_mode: checkpointResetFrom } : {}) } } : {}),
+        ...(checkpointAbs ? { checkpoint_file: checkpointAbs, checkpoint: { mode, shots_done: checkpointShotsDone, shots_total: renderShotsBuilt.length, lock_path: checkpointLockPath, locked_by_pid: process.pid, ...(checkpointResetFrom ? { reset_from_mode: checkpointResetFrom } : {}) } } : {}),
         ...(audioLevelsApplied.length ? { audio_levels: audioLevelsApplied } : {}),
         transition_warnings: previewWarnings,
         timeout: timeouts,
@@ -24659,7 +24823,7 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
       mediakit_version: MEDIAKIT_VERSION,
       ffmpeg_version: await ffmpegVersionString(),
       cache_hits: cacheHits,
-      ...(checkpointAbs ? { checkpoint_file: checkpointAbs, checkpoint: { mode, shots_done: checkpointShotsDone, shots_total: renderShotsBuilt.length, ...(checkpointResetFrom ? { reset_from_mode: checkpointResetFrom } : {}) } } : {}),
+      ...(checkpointAbs ? { checkpoint_file: checkpointAbs, checkpoint: { mode, shots_done: checkpointShotsDone, shots_total: renderShotsBuilt.length, lock_path: checkpointLockPath, locked_by_pid: process.pid, ...(checkpointResetFrom ? { reset_from_mode: checkpointResetFrom } : {}) } } : {}),
       chapters: plan.chapters,
       hook: plan.hook,
       shots_run: renderShots.length,
@@ -24705,6 +24869,10 @@ export async function assemble({ manifestPath, mode = "validate", outputDir = nu
     }
     throw e;
   } finally {
+    // The checkpoint lock is released on every path out of the
+    // render (success or failure) — a kill -9 still leaves it, and
+    // the next run steals it once the owner's pid is dead.
+    if (releaseCheckpointLock) await releaseCheckpointLock();
     // The tmp dir is removed on success; on failure it stays, so the
     // broken shot can be inspected (the error names its path).
     if (completed) {
@@ -27243,26 +27411,11 @@ export function findAttachableJob(jobs, { idempotencyKey = null, argsFingerprint
 async function withJobsStartLock(root, fn) {
   const lockDir = path.join(root, ".job-start.lock");
   await mkdir(root, { recursive: true });
-  const deadline = Date.now() + 30_000;
-  for (;;) {
-    try {
-      await mkdir(lockDir);
-      break;
-    } catch {
-      // Lock held: wait a tick, or steal it if the holder crashed
-      // (mtime older than 30s) instead of waiting forever.
-      try {
-        const st = await stat(lockDir);
-        if (Date.now() - st.mtimeMs > 30_000) await rm(lockDir, { recursive: true, force: true });
-      } catch { /* lock vanished between mkdir and stat: retry */ }
-      if (Date.now() > deadline) throw new MediaKitError("async job start is locked by another start (jobs root lock)", "ERROR");
-      await new Promise((r) => setTimeout(r, 50));
-    }
-  }
+  const release = await acquireDirLock(lockDir, { lockError: "async job start is locked by another start (jobs root lock)" });
   try {
     return await fn();
   } finally {
-    try { await rm(lockDir, { recursive: true, force: true }); } catch { /* lock already gone */ }
+    await release();
   }
 }
 
