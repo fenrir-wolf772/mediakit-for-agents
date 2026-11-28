@@ -1904,6 +1904,26 @@ the cached hook result instead of serving stale duplicate flags.
 Keep one history file per series, not per clip: the sha256 is what
 separates sources.
 
+Sentence snap — a hook must hold whole sentences, not half a
+thought. `hook <clip> --words-file words.json --snap-sentences`
+widens every candidate window outward to sentence boundaries after
+the scoring: a sentence ends on final punctuation (. ! ? …) or a
+pause of 0.8s or more (ASR often drops punctuation, and a long pause
+is an utterance boundary even without a full stop). The start moves
+back to the sentence start, the end forward to the sentence end —
+widen, never narrow, the same convention as the word snap
+(`apply_hook --words-file` snaps to whole words first, and
+`--snap-sentences` then widens to whole sentences). Each candidate
+reports the snap in `sentence_snap` (moved seconds per edge,
+`unmoved_edges` when a shift would exceed the 3s cap), and the
+result lists the sentences found. An edge already in a gap between
+sentences is a boundary and stays. The snap runs before history and
+trim, so the recorded window and the suggested trim both use the
+snapped edges; snapped windows may overlap each other slightly —
+they are alternatives, and the overlap is visible in the reported
+edges. `snap_sentences` without a words file is refused; a words
+file with no sentence boundary at all warns and skips the snap.
+
 ### 56. Measure the tempo before cutting on the beat — `bpm` finds the musical grid
 A cut that lands on the beat feels intentional; a cut half a beat
 off feels like a mistake. `bpm <clip>` measures the tempo in BPM
@@ -2114,6 +2134,11 @@ red/green/blue 5s blocks → boundaries at 5.0s and 10.0s, jump
 1.000). Long files sample slower instead of refusing (frame cap
 1200; below 0.5 fps the file is refused as too long). Probe-only,
 writes no file; also a probe-only batch operation and manifest step.
+Sentence snap, like `hook`: pass `--words-file words.json
+--snap-sentences` and every span widens outward to whole sentence
+boundaries — a highlight span is a cut window, and a cut window
+should hold whole sentences; each span reports the snap in
+`sentence_snap`, and the result lists the sentences found.
 Follow-up DONE (lượt 139): the spans feed `hook` scoring through
 their boundaries — each candidate carries `visual` + `visual_beats`
 (0.1 weight), so the best audio window and the best visual beat are

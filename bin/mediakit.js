@@ -930,8 +930,8 @@ const COMMANDS = {
     ],
   },
   highlights: {
-    usage: "mediakit highlights <input> [--fps 2] [--threshold 0.15] [--min-span 2] [--top 5] [--thumbnails 3]",
-    desc: "Find a clip's visual beats with perceptual hashes: sample frames at --fps (default 2), hash each one as an 8x8 average hash, and call a frame a scene boundary when its hash jumps from the previous frame by >= --threshold (normalized Hamming distance, default 0.15). A highlight is the span between two boundaries — spans shorter than --min-span seconds (default 2) merge into a neighbour — and its score is the mean jump inside the span; --top ranks the best spans. --thumbnails returns that many greedy farthest-point frames (the most visually distinct moments, for a poster frame or a hook still). Probe-only, writes no file.",
+    usage: "mediakit highlights <input> [--fps 2] [--threshold 0.15] [--min-span 2] [--top 5] [--thumbnails 3] [--words-file <words.json>] [--snap-sentences]",
+    desc: "Find a clip's visual beats with perceptual hashes: sample frames at --fps (default 2), hash each one as an 8x8 average hash, and call a frame a scene boundary when its hash jumps from the previous frame by >= --threshold (normalized Hamming distance, default 0.15). A highlight is the span between two boundaries — spans shorter than --min-span seconds (default 2) merge into a neighbour — and its score is the mean jump inside the span; --top ranks the best spans. --thumbnails returns that many greedy farthest-point frames (the most visually distinct moments, for a poster frame or a hook still). Probe-only, writes no file. --words-file <words.json> with --snap-sentences widens every span outward to whole sentence boundaries (final punctuation or a 0.8s+ pause), so a highlight opens on a sentence start and closes on a sentence end.",
     args: [{ name: "input", required: true }],
     options: [
       ["--fps", "Sample rate in frames per second, 0.5-5 (default 2; long files sample slower automatically, down to 0.5)"],
@@ -939,6 +939,8 @@ const COMMANDS = {
       ["--min-span", "Spans shorter than this merge into a neighbour, in seconds 0-30 (default 2)"],
       ["--top", "How many top highlights to rank, 1-20 (default 5)"],
       ["--thumbnails", "How many farthest-point thumbnail candidates to return, 0-10 (default 3; 0 = none)"],
+      ["--words-file", "Transcribe words.json — needed for --snap-sentences"],
+      ["--snap-sentences", "Widen every span outward to whole sentence boundaries from --words-file (needs --words-file)"],
     ],
   },
   "audio-levels": {
@@ -966,8 +968,8 @@ const COMMANDS = {
     ],
   },
   hook: {
-    usage: "mediakit hook <input> [--duration 15] [--step 0.5] [--top 3] [--threshold-db -40] [--history-file <path>] [--record] [--history-overlap 0.5] [--snap-window 5] [--no-snap-quiet]",
-    desc: "Find the best hook window in a clip: slide a --duration window across the file and score each candidate on measured audio energy (astats RMS), speech coverage (silencedetect), scene cuts (a window opening on a cut scores higher), real motion (per-frame pixel-diff, same step grid) and visual beats (the highlights perceptual-hash boundaries inside the window — 2+ beats is fully active, 1 beat is half). Score is 0.3*energy + 0.2*speech + 0.2*cut + 0.2*motion + 0.1*visual (audio 0.5 / video 0.5). Returns the ranked top windows with the score breakdown (each carries visual + visual_beats), the highlight_boundaries, the per-step energy curve (each bin also carries motion), pacing from real cuts, a trim object, and a suggested trim command for the winner. The trim end snaps to the nearest quiet moment in the last --snap-window seconds (default 5) — quiet is (energy + motion) / 2, a bin only qualifies at most half as busy as the window mean, and the snap never shortens the hook below max(4s, half the window); --no-snap-quiet keeps the raw window end. Probe-only, writes no file. The director's opening-shot picker. Clip history: --history-file <path> checks every candidate against moments already cut (JSON {version: 1, records: [{source_sha256, start, end, score, recorded_at}]}); a candidate from the same source file overlapping a recorded window by >= --history-overlap (default 0.5) of the shorter window is flagged duplicate with duplicate_of. --record appends the winning window to the history file (only the winner — the alternatives were never cut); a missing history file is an empty history, a corrupt one fails loudly.",
+    usage: "mediakit hook <input> [--duration 15] [--step 0.5] [--top 3] [--threshold-db -40] [--history-file <path>] [--record] [--history-overlap 0.5] [--snap-window 5] [--no-snap-quiet] [--words-file <words.json>] [--snap-sentences]",
+    desc: "Find the best hook window in a clip: slide a --duration window across the file and score each candidate on measured audio energy (astats RMS), speech coverage (silencedetect), scene cuts (a window opening on a cut scores higher), real motion (per-frame pixel-diff, same step grid) and visual beats (the highlights perceptual-hash boundaries inside the window — 2+ beats is fully active, 1 beat is half). Score is 0.3*energy + 0.2*speech + 0.2*cut + 0.2*motion + 0.1*visual (audio 0.5 / video 0.5). Returns the ranked top windows with the score breakdown (each carries visual + visual_beats), the highlight_boundaries, the per-step energy curve (each bin also carries motion), pacing from real cuts, a trim object, and a suggested trim command for the winner. The trim end snaps to the nearest quiet moment in the last --snap-window seconds (default 5) — quiet is (energy + motion) / 2, a bin only qualifies at most half as busy as the window mean, and the snap never shortens the hook below max(4s, half the window); --no-snap-quiet keeps the raw window end. Probe-only, writes no file. The director's opening-shot picker. Clip history: --history-file <path> checks every candidate against moments already cut (JSON {version: 1, records: [{source_sha256, start, end, score, recorded_at}]}); a candidate from the same source file overlapping a recorded window by >= --history-overlap (default 0.5) of the shorter window is flagged duplicate with duplicate_of. --record appends the winning window to the history file (only the winner — the alternatives were never cut); a missing history file is an empty history, a corrupt one fails loudly. --words-file <words.json> with --snap-sentences widens every candidate window outward to whole sentence boundaries (final punctuation or a 0.8s+ pause), so a hook opens on a sentence start and closes on a sentence end; each candidate reports the snap in sentence_snap.",
     args: [{ name: "input", required: true }],
     options: [
       ["--duration", "Hook window length in seconds, 4-20 (default 15)"],
@@ -979,17 +981,20 @@ const COMMANDS = {
       ["--history-overlap", "Overlap fraction of the shorter window that marks a duplicate, 0.05-1 (default 0.5)"],
       ["--snap-window", "Seconds back from the window end to search for a quiet moment to snap the trim to, 1-10 (default 5)"],
       ["--no-snap-quiet", "Keep the raw window end instead of snapping the trim to the nearest quiet moment"],
+      ["--words-file", "Transcribe words.json — needed for --snap-sentences"],
+      ["--snap-sentences", "Widen every candidate window outward to whole sentence boundaries from --words-file (needs --words-file)"],
     ],
   },
   "apply-hook": {
-    usage: "mediakit apply-hook <input> --start <s> --end <s> [--mode repeat|move] [--words-file <words.json>] -o <output.mp4> [--dry-run]",
-    desc: "Play a hook passage first, then the clip (podcli's opening_hook, rendered): repeat (default) plays the window at the front AND again where it belongs — output is longer by the window; move lifts the window out of the body so it plays exactly once, at the front — output keeps the input duration. The window is 1-20s inside the clip; a move that would take the whole clip is refused, and a body remnant under 0.1s is dropped. One re-encode pass (trim each range, then concat, libx264 + AAC 192k + faststart on MP4, the same shape cut_words builds, with 12/15ms seam fades). --words-file (a transcribe words.json) snaps both edges outward to whole words first. --dry-run shows the playback ranges without writing a file.",
+    usage: "mediakit apply-hook <input> --start <s> --end <s> [--mode repeat|move] [--words-file <words.json>] [--snap-sentences] -o <output.mp4> [--dry-run]",
+    desc: "Play a hook passage first, then the clip (podcli's opening_hook, rendered): repeat (default) plays the window at the front AND again where it belongs — output is longer by the window; move lifts the window out of the body so it plays exactly once, at the front — output keeps the input duration. The window is 1-20s inside the clip; a move that would take the whole clip is refused, and a body remnant under 0.1s is dropped. One re-encode pass (trim each range, then concat, libx264 + AAC 192k + faststart on MP4, the same shape cut_words builds, with 12/15ms seam fades). --words-file (a transcribe words.json) snaps both edges outward to whole words first; --snap-sentences then widens to whole sentence boundaries (final punctuation or a 0.8s+ pause). --dry-run shows the playback ranges without writing a file.",
     args: [{ name: "input", required: true }],
     options: [
       ["--start", "Hook window start in seconds (inside the clip)"],
       ["--end", "Hook window end in seconds (inside the clip, 1-20s after start)"],
       ["--mode", "repeat (default) or move"],
       ["--words-file", "Transcribe words.json — snap both window edges outward to whole words first"],
+      ["--snap-sentences", "Widen the window outward to whole sentence boundaries from --words-file, after the word snap (needs --words-file)"],
       ["--output", "Output file path"],
       ["--dry-run", "Show the playback ranges without writing a file"],
     ],
@@ -1059,7 +1064,7 @@ const COMMANDS = {
   },
   batch: {
     usage: "mediakit batch <operation> --pattern <glob> --input-dir <dir> -o <output-dir> [--args-json '{\"target_lufs\": -14}'] [--jobs 1] [--suffix -loudness] [--no-cache] [--stop-on-error] [--timeout 1800] [--max-files 200] [--dry-run]",
-    desc: "Apply one operation (loudness|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|smart-cut|clean-voice|slideshow|hook|audio-levels|search-words|highlights) to every file matching a glob under a folder, with the same args for all. Outputs are <stem>-<operation>.<ext> under the output dir, mirroring the input tree; a batch-manifest.json records every file's result, and batch-manifest.jsonl streams one JSON line per finished row. Exit code: 0 = every row done/cached/skipped, 1 = any row failed, 2 = input error (unknown operation, bad pattern/args, no matches). Unchanged files are skipped via a content-hash cache; --dry-run lists the planned outputs and writes nothing. cut-words, remove-retakes, smart-cut and search-words find each clip's words file as <words-dir>/<stem>.words.json (default: the input's own folder) — a clip with no words file fails its own row only. clean-voice writes .wav always (48 kHz mono float), whatever the input was, and a take whose plan needs clearvoice/sr fails its own row (pass --args-json '{\"steps\": \"declip,dehum\"}' to clean anyway). slideshow is a set operation: the whole matched set of images (2-32) becomes ONE slideshow video (--args-json '{\"output_name\": \"reel.mp4\"}'), and the per-file cache does not apply. hook, audio-levels, search-words and highlights are probe-only: they write no file (output null in each row) — the measurement comes back in the row's result, and the cache stores that result.",
+    desc: "Apply one operation (loudness|resize|reframe|compress|convert|extract-audio|reverse|rotate|boomerang|make-loopable|freeze|grade|fit|trim|silence|chroma-key|cut-words|remove-retakes|smart-cut|clean-voice|slideshow|hook|audio-levels|search-words|highlights) to every file matching a glob under a folder, with the same args for all. Outputs are <stem>-<operation>.<ext> under the output dir, mirroring the input tree; a batch-manifest.json records every file's result, and batch-manifest.jsonl streams one JSON line per finished row. Exit code: 0 = every row done/cached/skipped, 1 = any row failed, 2 = input error (unknown operation, bad pattern/args, no matches). Unchanged files are skipped via a content-hash cache; --dry-run lists the planned outputs and writes nothing. cut-words, remove-retakes, smart-cut, search-words, hook and highlights find each clip's words file as <words-dir>/<stem>.words.json (default: the input's own folder) — a clip with no words file fails its own row only; hook/highlights only read the words file when snap_sentences is on. clean-voice writes .wav always (48 kHz mono float), whatever the input was, and a take whose plan needs clearvoice/sr fails its own row (pass --args-json '{\"steps\": \"declip,dehum\"}' to clean anyway). slideshow is a set operation: the whole matched set of images (2-32) becomes ONE slideshow video (--args-json '{\"output_name\": \"reel.mp4\"}'), and the per-file cache does not apply. hook, audio-levels, search-words and highlights are probe-only: they write no file (output null in each row) — the measurement comes back in the row's result, and the cache stores that result.",
     args: [{ name: "operation", required: true }],
     options: [
       ["--pattern", "Glob under --input-dir: **/*.mp4 (any depth), sub/*.mp4 (one folder), or bare *.mp4 (basename at any depth) (required)"],
@@ -2443,6 +2448,8 @@ async function main() {
           minSpanSeconds: numOpt(opts, "min_span") ?? 2,
           top: numOpt(opts, "top") ?? 5,
           thumbnailCount: numOpt(opts, "thumbnails") ?? 3,
+          wordsFile: opts.words_file ?? null,
+          snapSentences: opts.snap_sentences === true,
         });
         break;
       case "keyframes":
@@ -2480,6 +2487,8 @@ async function main() {
           historyOverlap: numOpt(opts, "history_overlap") ?? 0.5,
           snapQuiet: opts.snap_quiet !== false,
           snapWindowSeconds: numOpt(opts, "snap_window") ?? 5,
+          wordsFile: opts.words_file ?? null,
+          snapSentences: opts.snap_sentences === true,
         });
         break;
       case "apply-hook": {
@@ -2494,6 +2503,7 @@ async function main() {
           wordsFile: opts.words_file ?? null,
           output: needOutput(opts),
           dryRun: opts.dry_run === true,
+          snapSentences: opts.snap_sentences === true,
         });
         break;
       }

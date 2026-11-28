@@ -16093,19 +16093,50 @@ async function sampleHighlightFrames({ input, fps = HIGHLIGHTS_DEFAULT_FPS, thre
   }
 }
 
-export async function findHighlights({ input, fps = HIGHLIGHTS_DEFAULT_FPS, threshold = HIGHLIGHTS_DEFAULT_THRESHOLD, minSpanSeconds = HIGHLIGHTS_DEFAULT_MIN_SPAN_SECONDS, top = HIGHLIGHTS_DEFAULT_TOP, thumbnailCount = HIGHLIGHTS_DEFAULT_THUMBNAIL_COUNT }) {
+export async function findHighlights({ input, fps = HIGHLIGHTS_DEFAULT_FPS, threshold = HIGHLIGHTS_DEFAULT_THRESHOLD, minSpanSeconds = HIGHLIGHTS_DEFAULT_MIN_SPAN_SECONDS, top = HIGHLIGHTS_DEFAULT_TOP, thumbnailCount = HIGHLIGHTS_DEFAULT_THUMBNAIL_COUNT, wordsFile = null, snapSentences = false }) {
   if (typeof minSpanSeconds !== "number" || !Number.isFinite(minSpanSeconds) || minSpanSeconds < 0 || minSpanSeconds > 30) throw new MediaKitError(`highlights min_span_seconds must be 0-30, got: ${minSpanSeconds}`, "INVALID_ARG");
   if (!Number.isInteger(top) || top < 1 || top > 20) throw new MediaKitError(`highlights top must be 1-20, got: ${top}`, "INVALID_ARG");
   if (!Number.isInteger(thumbnailCount) || thumbnailCount < 0 || thumbnailCount > 10) throw new MediaKitError(`highlights thumbnail_count must be 0-10, got: ${thumbnailCount}`, "INVALID_ARG");
+  if (snapSentences !== true && snapSentences !== false) throw new MediaKitError(`snap_sentences must be true or false, got: ${snapSentences}`, "INVALID_ARG");
+  let wordsPathAbs = null;
+  let words = null;
+  if (wordsFile !== null && wordsFile !== undefined) {
+    wordsPathAbs = await requireInput(wordsFile, "words file");
+    let rawWords;
+    try {
+      rawWords = JSON.parse(await readFile(wordsPathAbs, "utf8"));
+    } catch (e) {
+      throw new MediaKitError(`highlights could not parse the words file as JSON: ${e.message}`, "INVALID_ARG");
+    }
+    words = normalizeTranscriptWords(rawWords, "words file", "highlights");
+  }
+  if (snapSentences && !wordsPathAbs) throw new MediaKitError("highlights --snap-sentences needs --words-file: there are no sentences to snap to", "INVALID_ARG");
   const { frames, boundaries, effFps, duration } = await sampleHighlightFrames({ input, fps, threshold });
   const inPath = await requireInput(input);
   const spans = findHighlightSpans({ boundaries: boundaries.map((b) => b.at_seconds), duration, minSpanSeconds });
+  const sentences = words ? sentenceBoundaries(words) : null;
   const highlights = spans.map((s) => {
     const inside = frames.filter((f) => f.timestamp > s.start && f.timestamp < s.end);
     const jumps = inside.map((f) => f.jump);
     const meanJump = jumps.length === 0 ? 0 : +(jumps.reduce((a, b) => a + b, 0) / jumps.length).toFixed(3);
     const peakJump = jumps.length === 0 ? 0 : Math.max(...jumps);
-    return { start: s.start, end: s.end, duration: +(s.end - s.start).toFixed(3), score: meanJump, mean_jump: meanJump, peak_jump: peakJump };
+    const h = { start: s.start, end: s.end, duration: +(s.end - s.start).toFixed(3), score: meanJump, mean_jump: meanJump, peak_jump: peakJump };
+    // Sentence snap (lượt 192): a highlight span is a cut window,
+    // and a cut window should hold whole sentences. The spans tile
+    // the file, so widening may make neighbours overlap slightly —
+    // the snap detail says exactly how far each edge moved.
+    if (snapSentences) {
+      if (sentences.count === 0) {
+        h.sentence_snap = { snapped: false, moved_start_seconds: 0, moved_end_seconds: 0, unmoved_edges: ["start", "end"], sentences_found: 0 };
+      } else {
+        const snapped = snapRangeToSentences(h, words);
+        h.sentence_snap = { snapped: snapped.snapped, moved_start_seconds: snapped.moved_start_seconds, moved_end_seconds: snapped.moved_end_seconds, unmoved_edges: snapped.unmoved_edges, sentences_found: snapped.sentence_count };
+        h.start = snapped.start;
+        h.end = snapped.end;
+        h.duration = +(snapped.end - snapped.start).toFixed(3);
+      }
+    }
+    return h;
   });
   const topHighlights = [...highlights]
     .sort((a, b) => b.score - a.score || b.duration - a.duration || a.start - b.start)
@@ -16117,6 +16148,8 @@ export async function findHighlights({ input, fps = HIGHLIGHTS_DEFAULT_FPS, thre
     sample_fps: +effFps.toFixed(3),
     frames_sampled: frames.length,
     threshold,
+    words_file: wordsPathAbs,
+    sentences: sentences ? { count: sentences.count, starts: sentences.starts, ends: sentences.ends } : null,
     boundaries,
     highlights,
     top_highlights: topHighlights,
@@ -16422,7 +16455,7 @@ export function hookVisualScore(boundaries, start, end) {
   return { visual: Math.min(1, beats / 2), visual_beats: beats };
 }
 
-export async function findHook({ input, duration = 15, step = 0.5, top = 3, thresholdDb = -40, historyFile = null, record = false, historyOverlap = 0.5, snapQuiet = true, snapWindowSeconds = HOOK_SNAP_WINDOW_DEFAULT_SECONDS }) {
+export async function findHook({ input, duration = 15, step = 0.5, top = 3, thresholdDb = -40, historyFile = null, record = false, historyOverlap = 0.5, snapQuiet = true, snapWindowSeconds = HOOK_SNAP_WINDOW_DEFAULT_SECONDS, wordsFile = null, snapSentences = false }) {
   const inPath = await requireInput(input);
   const hookDur = num(duration, "duration", { min: 4, max: 20 });
   const stepSec = num(step, "step", { min: 0.25, max: 2 });
@@ -16431,9 +16464,26 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
   const overlapThreshold = num(historyOverlap, "history_overlap", { min: 0.05, max: 1 });
   const snapWindow = num(snapWindowSeconds, "snap_window_seconds", { min: 1, max: 10 });
   if (snapQuiet !== true && snapQuiet !== false) throw new MediaKitError(`snap_quiet must be true or false, got: ${snapQuiet}`, "INVALID_ARG");
+  if (snapSentences !== true && snapSentences !== false) throw new MediaKitError(`snap_sentences must be true or false, got: ${snapSentences}`, "INVALID_ARG");
   if (record !== false && record !== true) throw new MediaKitError(`record must be true or false, got: ${record}`, "INVALID_ARG");
   const historyAbs = historyFile === null || historyFile === undefined ? null : path.resolve(String(historyFile));
   if (record && !historyAbs) throw new MediaKitError("hook --record needs --history-file: there is nowhere to record the window", "INVALID_ARG");
+  // Sentence snap needs the transcript: load it before the four
+  // ffmpeg passes, so a bad words file fails fast instead of after
+  // 30s of scoring.
+  let wordsPathAbs = null;
+  let words = null;
+  if (wordsFile !== null && wordsFile !== undefined) {
+    wordsPathAbs = await requireInput(wordsFile, "words file");
+    let rawWords;
+    try {
+      rawWords = JSON.parse(await readFile(wordsPathAbs, "utf8"));
+    } catch (e) {
+      throw new MediaKitError(`hook could not parse the words file as JSON: ${e.message}`, "INVALID_ARG");
+    }
+    words = normalizeTranscriptWords(rawWords, "words file", "hook");
+  }
+  if (snapSentences && !wordsPathAbs) throw new MediaKitError("hook --snap-sentences needs --words-file: there are no sentences to snap to", "INVALID_ARG");
   if (historyAbs) await assertInsideWorkdir(historyAbs, "history file");
   const meta = await probe(inPath);
   const total = meta.duration_seconds;
@@ -16554,6 +16604,32 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
     const overlaps = candidates.some((p) => Math.min(p.end, w.end) - Math.max(p.start, w.start) >= effDur / 2);
     if (!overlaps) candidates.push(w);
   }
+  // Sentence snap (lượt 192): the score ranks the raw windows, then
+  // each candidate widens to whole sentences — a hook must open on a
+  // sentence start and close on a sentence end, never mid-thought.
+  // The snap runs before history/trim, so the recorded window and
+  // the suggested trim both use the snapped edges. Snapped windows
+  // may overlap each other slightly; they are alternatives, and the
+  // overlap is visible in the reported edges.
+  let sentences = null;
+  if (words) {
+    sentences = sentenceBoundaries(words);
+    if (snapSentences) {
+      if (sentences.count === 0) {
+        warnings.push("words file has no sentence boundary (no final punctuation, no pause >= 0.8s) — sentence snap skipped");
+        for (const w of candidates) {
+          w.sentence_snap = { snapped: false, moved_start_seconds: 0, moved_end_seconds: 0, unmoved_edges: ["start", "end"], sentences_found: 0 };
+        }
+      } else {
+        for (const w of candidates) {
+          const s = snapRangeToSentences(w, words);
+          w.sentence_snap = { snapped: s.snapped, moved_start_seconds: s.moved_start_seconds, moved_end_seconds: s.moved_end_seconds, unmoved_edges: s.unmoved_edges, sentences_found: s.sentence_count };
+          w.start = s.start;
+          w.end = s.end;
+        }
+      }
+    }
+  }
   const best = candidates[0];
   const cutsPerMinute = meta.video ? +(cuts.length / (total / 60)).toFixed(1) : null;
   const pacing = cutsPerMinute === null ? null : cutsPerMinute < 6 ? "slow" : cutsPerMinute <= 20 ? "medium" : "fast-cut";
@@ -16629,6 +16705,8 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
     cuts_per_minute: cutsPerMinute,
     pacing,
     highlight_boundaries: highlightBoundaries,
+    words_file: wordsPathAbs,
+    sentences: sentences ? { count: sentences.count, starts: sentences.starts, ends: sentences.ends } : null,
     candidates,
     hook: best,
     trim,
@@ -16683,6 +16761,89 @@ export function orderHookRanges(total, start, end, mode = "repeat") {
     throw new MediaKitError("A move hook cannot take the whole clip. Use repeat, or widen the clip.", "INVALID_ARG");
   }
   return [head, ...rest];
+}
+
+// Sentence boundaries from word timings (the hook/highlights
+// sentence snap, lượt 192): a sentence ends where the speaker
+// ends one — a word carrying sentence-final punctuation (. ! ?
+// … and the CJK equivalents, trailing quotes stripped), OR where
+// the gap to the next word reaches the utterance gap (ASR often
+// drops punctuation, and a long pause is an utterance boundary
+// even without a full stop). Every word belongs to exactly one
+// sentence; the last one may be unterminated and still counts.
+export const SENTENCE_UTTERANCE_GAP_SECONDS = 0.8;
+export const HOOK_SENTENCE_MAX_SHIFT_SECONDS = 3;
+
+export function sentenceBoundaries(words, { utteranceGapSeconds = SENTENCE_UTTERANCE_GAP_SECONDS } = {}) {
+  if (!Array.isArray(words)) throw new MediaKitError("sentenceBoundaries needs a words array", "INVALID_ARG");
+  const gap = num(utteranceGapSeconds, "utterance_gap_seconds", { min: 0, max: 30 });
+  const sorted = [...words]
+    .filter((w) => typeof w?.start === "number" && typeof w?.end === "number" && typeof w?.word === "string")
+    .sort((a, b) => a.start - b.start);
+  const sentences = [];
+  let cur = null;
+  for (let i = 0; i < sorted.length; i++) {
+    const w = sorted[i];
+    if (!cur) cur = { start: w.start, end: w.end, words: 1 };
+    else { cur.end = w.end; cur.words++; }
+    const stripped = w.word.replace(/["'”’)\]]+$/, "");
+    const punctuated = /[.!?…。！？]$/.test(stripped);
+    const next = sorted[i + 1];
+    const gapEnds = next !== undefined && next.start - w.end >= gap;
+    if (punctuated || gapEnds || next === undefined) {
+      sentences.push({ start: +cur.start.toFixed(3), end: +cur.end.toFixed(3), words: cur.words });
+      cur = null;
+    }
+  }
+  return {
+    sentences,
+    count: sentences.length,
+    starts: sentences.map((s) => s.start),
+    ends: sentences.map((s) => s.end),
+  };
+}
+
+// Snap a range's edges outward to sentence boundaries — the
+// sentence-level version of snapHookToWords (podcli's
+// snap_hook_to_words snaps to whole words; a hook that starts
+// mid-sentence still opens on half a thought). Widen, never
+// narrow: a start inside a sentence moves back to that
+// sentence's start, an end inside one moves forward to its end;
+// an edge already in a gap between sentences is a boundary and
+// stays. Each edge moves at most maxShiftSeconds — a window
+// opening 8s into a 20s sentence must not balloon by 8s; that
+// edge stays and is listed in unmoved_edges instead.
+export function snapRangeToSentences(range, words, { maxShiftSeconds = HOOK_SENTENCE_MAX_SHIFT_SECONDS } = {}) {
+  if (!range || typeof range !== "object") throw new MediaKitError("snapRangeToSentences needs a range {start, end}", "INVALID_ARG");
+  let { start, end } = range;
+  if (!Number.isFinite(start) || !Number.isFinite(end) || !(end > start)) {
+    throw new MediaKitError("snapRangeToSentences needs a range with end > start", "INVALID_ARG");
+  }
+  const maxShift = num(maxShiftSeconds, "max_shift_seconds", { min: 0, max: 30 });
+  const { sentences } = sentenceBoundaries(words ?? []);
+  let newStart = start;
+  let newEnd = end;
+  const unmovedEdges = [];
+  const containingStart = sentences.find((s) => s.start < start && start < s.end);
+  if (containingStart) {
+    if (start - containingStart.start <= maxShift) newStart = containingStart.start;
+    else unmovedEdges.push("start");
+  }
+  const containingEnd = sentences.find((s) => s.start < end && end < s.end);
+  if (containingEnd) {
+    if (containingEnd.end - end <= maxShift) newEnd = containingEnd.end;
+    else unmovedEdges.push("end");
+  }
+  return {
+    ...range,
+    start: +newStart.toFixed(3),
+    end: +newEnd.toFixed(3),
+    snapped: newStart !== start || newEnd !== end,
+    moved_start_seconds: +(start - newStart).toFixed(3),
+    moved_end_seconds: +(newEnd - end).toFixed(3),
+    sentence_count: sentences.length,
+    unmoved_edges: unmovedEdges,
+  };
 }
 
 // Snap a hook edge that cuts through a word so the whole word plays
@@ -16776,12 +16937,14 @@ export function analyzeHookMove(shots, hook) {
   };
 }
 
-export async function applyHook({ input, start, end, mode = "repeat", wordsFile = null, output = null, dryRun = false }) {
+export async function applyHook({ input, start, end, mode = "repeat", wordsFile = null, output = null, dryRun = false, snapSentences = false }) {
   const inPath = await requireInput(input);
   const meta = await probe(inPath);
   const total = meta.duration_seconds;
   if (total === null) throw new MediaKitError("could not read input duration", "PROBE_FAILED");
   if (!meta.video && !meta.audio) throw new MediaKitError("apply_hook needs an input with a video or audio stream", "INVALID_ARG");
+  if (snapSentences !== true && snapSentences !== false) throw new MediaKitError(`snap_sentences must be true or false, got: ${snapSentences}`, "INVALID_ARG");
+  if (snapSentences && (wordsFile === null || wordsFile === undefined)) throw new MediaKitError("apply_hook --snap-sentences needs --words-file: there are no sentences to snap to", "INVALID_ARG");
   let hook = { start: num(start, "start", { min: 0 }), end: num(end, "end", { min: 0 }) };
   let snap = null;
   let wordsPath = null;
@@ -16797,6 +16960,23 @@ export async function applyHook({ input, start, end, mode = "repeat", wordsFile 
     const snapped = snapHookToWords(hook, words);
     snap = { start_before: hook.start, end_before: hook.end, start_after: snapped.start, end_after: snapped.end, snapped: snapped.start !== hook.start || snapped.end !== hook.end };
     hook = snapped;
+    // Sentence snap (lượt 192): after whole words, widen to whole
+    // sentences — the hook must open on a sentence start and close
+    // on a sentence end.
+    if (snapSentences) {
+      const s = snapRangeToSentences(hook, words);
+      snap = {
+        ...snap,
+        sentence_snapped: s.snapped,
+        sentence_start_after: s.start,
+        sentence_end_after: s.end,
+        sentence_moved_start_seconds: s.moved_start_seconds,
+        sentence_moved_end_seconds: s.moved_end_seconds,
+        sentence_unmoved_edges: s.unmoved_edges,
+        sentence_count: s.sentence_count,
+      };
+      hook = { start: s.start, end: s.end };
+    }
   }
   const ranges = orderHookRanges(total, hook.start, hook.end, mode);
   const expected = +ranges.reduce((a, r) => a + (r.end - r.start), 0).toFixed(3);
@@ -18114,12 +18294,18 @@ export const BATCH_OPERATIONS = {
   // output_suffix null.
   hook: {
     probeOnly: true,
-    args: ["duration", "step", "top", "threshold_db", "history_file", "record", "history_overlap", "snap_window_seconds", "snap_quiet"],
-    run: (input, output, a) => findHook({ input, duration: a.duration ?? 15, step: a.step ?? 0.5, top: a.top ?? 3, thresholdDb: a.threshold_db ?? -40, historyFile: a.history_file ?? null, record: a.record ?? false, historyOverlap: a.history_overlap ?? 0.5, snapQuiet: a.snap_quiet ?? true, snapWindowSeconds: a.snap_window_seconds ?? 5 }),
+    args: ["duration", "step", "top", "threshold_db", "history_file", "record", "history_overlap", "snap_window_seconds", "snap_quiet", "words_dir", "snap_sentences"],
+    run: (input, output, a) => findHook({ input, duration: a.duration ?? 15, step: a.step ?? 0.5, top: a.top ?? 3, thresholdDb: a.threshold_db ?? -40, historyFile: a.history_file ?? null, record: a.record ?? false, historyOverlap: a.history_overlap ?? 0.5, snapQuiet: a.snap_quiet ?? true, snapWindowSeconds: a.snap_window_seconds ?? 5, wordsFile: a.snap_sentences ? cutWordsFileFor(input, a.words_dir) : null, snapSentences: a.snap_sentences ?? false }),
     // The history file is a sidecar like cut_words' words file: hash
     // its bytes into the cache key, so a recorded window invalidates
-    // the cached duplicate flags instead of serving stale ones.
-    extraHash: async (input, a) => hashSidecar(a.history_file),
+    // the cached duplicate flags instead of serving stale ones. The
+    // words file joins it when sentence snap is on — editing the
+    // transcript must re-run the snap, not re-serve old edges.
+    extraHash: async (input, a) => {
+      const historyHash = await hashSidecar(a.history_file);
+      const wordsHash = a.snap_sentences ? await hashSidecar(cutWordsFileFor(input, a.words_dir)) : null;
+      return createHash("sha256").update(JSON.stringify([historyHash, wordsHash])).digest("hex");
+    },
   },
   // bpm / beat_grid in batch are probe-only like hook: no file is
   // written, the measurement comes back in the row's `result`, and
@@ -18193,8 +18379,12 @@ export const BATCH_OPERATIONS = {
   // on a real scene change instead of a guessed timestamp.
   highlights: {
     probeOnly: true,
-    args: ["fps", "threshold", "min_span_seconds", "top", "thumbnail_count"],
-    run: (input, output, a) => findHighlights({ input, fps: a.fps ?? 2, threshold: a.threshold ?? 0.15, minSpanSeconds: a.min_span_seconds ?? 2, top: a.top ?? 5, thumbnailCount: a.thumbnail_count ?? 3 }),
+    args: ["fps", "threshold", "min_span_seconds", "top", "thumbnail_count", "words_dir", "snap_sentences"],
+    run: (input, output, a) => findHighlights({ input, fps: a.fps ?? 2, threshold: a.threshold ?? 0.15, minSpanSeconds: a.min_span_seconds ?? 2, top: a.top ?? 5, thumbnailCount: a.thumbnail_count ?? 3, wordsFile: a.snap_sentences ? cutWordsFileFor(input, a.words_dir) : null, snapSentences: a.snap_sentences ?? false }),
+    // Sentence snap reads the per-clip words file, so its bytes
+    // belong in the cache key — editing the transcript must re-run
+    // the snap, not re-serve old span edges.
+    extraHash: async (input, a) => (a.snap_sentences ? hashSidecar(cutWordsFileFor(input, a.words_dir)) : null),
   },
   // sharpness in batch/manifest is probe-only like hook: the curve +
   // stats come back in the row's `result` (batch) or the step's
@@ -18872,6 +19062,22 @@ export const MANIFEST_STEPS = {
       padBefore: a.pad_before ?? 0.5, padAfter: a.pad_after ?? 0.5,
       maxMatches: a.max_matches ?? 10, contextWords: a.context_words ?? 5,
     }),
+  },
+  // Same override for hook: one words file for the one input (the
+  // batch shape takes words_dir instead). probeOnly must be repeated
+  // here, like search_words above. words_file resolves relative to
+  // the manifest and hashes into the cache key via MANIFEST_FILE_ARGS.
+  hook: {
+    probeOnly: true,
+    args: ["duration", "step", "top", "threshold_db", "history_file", "record", "history_overlap", "snap_window_seconds", "snap_quiet", "words_file", "snap_sentences"],
+    run: (input, output, a) => findHook({ input, duration: a.duration ?? 15, step: a.step ?? 0.5, top: a.top ?? 3, thresholdDb: a.threshold_db ?? -40, historyFile: a.history_file ?? null, record: a.record ?? false, historyOverlap: a.history_overlap ?? 0.5, snapQuiet: a.snap_quiet ?? true, snapWindowSeconds: a.snap_window_seconds ?? 5, wordsFile: a.words_file ?? null, snapSentences: a.snap_sentences ?? false }),
+  },
+  // Same override for highlights: one words file for the one input.
+  // probeOnly must be repeated here, like search_words above.
+  highlights: {
+    probeOnly: true,
+    args: ["fps", "threshold", "min_span_seconds", "top", "thumbnail_count", "words_file", "snap_sentences"],
+    run: (input, output, a) => findHighlights({ input, fps: a.fps ?? 2, threshold: a.threshold ?? 0.15, minSpanSeconds: a.min_span_seconds ?? 2, top: a.top ?? 5, thumbnailCount: a.thumbnail_count ?? 3, wordsFile: a.words_file ?? null, snapSentences: a.snap_sentences ?? false }),
   },
   // download is manifest-only, not a batch operation: batch maps one
   // operation over files matching a glob, and a download's input is

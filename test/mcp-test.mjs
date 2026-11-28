@@ -15,7 +15,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
-import { acquireEditLease, analyzeHookMove, analyzeSeamSamples, applyContentBaseline, applyHook, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, clearProbeCache, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, ffmpegThreads, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookMotionCalibration, hookOverlapSeconds, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, orderHookRanges, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStabTrfMotion, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, projectSummary, proposeEdit, probe, probeCacheStats, releaseEditLease, renewEditLease, resolveQcPolicy, restoreEditSessionCheckpoint, resumeEditSession, robustZMotionScore, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, sharpnessVerdict, snapHookToWords, snapKeepSegmentsToPauses, spectralFluxOnset, stabilizeVerdict, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
+import { acquireEditLease, analyzeHookMove, analyzeSeamSamples, applyContentBaseline, applyHook, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, clearProbeCache, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, ffmpegThreads, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookMotionCalibration, hookOverlapSeconds, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, orderHookRanges, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStabTrfMotion, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, projectSummary, proposeEdit, probe, probeCacheStats, releaseEditLease, renewEditLease, resolveQcPolicy, restoreEditSessionCheckpoint, resumeEditSession, robustZMotionScore, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, sentenceBoundaries, sharpnessVerdict, snapHookToWords, snapKeepSegmentsToPauses, snapRangeToSentences, spectralFluxOnset, stabilizeVerdict, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
@@ -4416,6 +4416,27 @@ const hlBadThreshold = await callExpectThrow("highlights", { input: path.join(ro
 checkOk(/threshold/i.test(hlBadThreshold), "highlights with threshold 2 fails validation", hlBadThreshold.slice(0, 200));
 const hlCli = await runCliJson(["highlights", path.join(root, "test/highlights-source.mp4")]);
 checkOk(hlCli.boundaries.length === 2 && hlCli.boundaries[0].at_seconds === 5 && hlCli.boundaries[1].at_seconds === 10 && hlCli.highlights.length === 3 && hlCli.thumbnails[0].timestamp === 5, "CLI highlights reports the same boundaries, spans and thumbnail seed", JSON.stringify({ b: hlCli.boundaries, t: hlCli.thumbnails }));
+// highlights sentence snap (lượt 192): the 3x5s spans are
+// [0,5] [5,10] [10,15]; three sentences [2.5,7] [7.5,12.5]
+// [13,14.8] widen them to [0,7] [2.5,12.5] [7.5,15] — every edge
+// moves 2.0-2.5s, inside the 3s cap (a shift over the cap stays
+// put — the pure tests pin that rule). The first span's start stays
+// 0 and the last span's end stays 15: an edge already in a gap
+// between sentences is a boundary.
+const hlSentenceWordsPath = path.join(root, "outputs/mcp-highlights-sentence-words.json");
+await writeFile(hlSentenceWordsPath, JSON.stringify({ words: [
+  { word: "Red", start: 2.5, end: 2.9 }, { word: "fills", start: 3.0, end: 3.4 }, { word: "the", start: 3.5, end: 3.8 }, { word: "frame", start: 3.9, end: 4.4 }, { word: "and", start: 4.5, end: 4.8 }, { word: "holds", start: 4.9, end: 5.4 }, { word: "it", start: 5.5, end: 5.8 }, { word: "still", start: 5.9, end: 6.2 }, { word: "for", start: 6.3, end: 6.5 }, { word: "a", start: 6.6, end: 6.7 }, { word: "while.", start: 6.8, end: 7.0 },
+  { word: "Then", start: 7.5, end: 7.9 }, { word: "green", start: 8.0, end: 8.5 }, { word: "takes", start: 8.6, end: 9.0 }, { word: "over", start: 9.1, end: 9.5 }, { word: "fast", start: 9.6, end: 10.0 }, { word: "blue", start: 10.1, end: 10.6 }, { word: "waits", start: 10.7, end: 11.2 }, { word: "and", start: 11.3, end: 11.6 }, { word: "stays.", start: 11.7, end: 12.5 },
+  { word: "Last", start: 13.0, end: 13.4 }, { word: "comes", start: 13.5, end: 14.0 }, { word: "the", start: 14.1, end: 14.3 }, { word: "fade.", start: 14.4, end: 14.8 },
+] }), "utf8");
+const hlSentenceRes = await client.callTool({
+  name: "highlights",
+  arguments: { input: path.join(root, "test/highlights-source.mp4"), words_file: hlSentenceWordsPath, snap_sentences: true },
+});
+const hlSentenceJson = JSON.parse(hlSentenceRes.content[0].text);
+checkOk(hlSentenceJson.highlights.length === 3 && hlSentenceJson.highlights[0].start === 0 && hlSentenceJson.highlights[0].end === 7 && hlSentenceJson.highlights[1].start === 2.5 && hlSentenceJson.highlights[1].end === 12.5 && hlSentenceJson.highlights[2].start === 7.5 && hlSentenceJson.highlights[2].end === 15 && hlSentenceJson.highlights.every((h) => h.sentence_snap?.snapped === true) && hlSentenceJson.sentences?.count === 3, "highlights --snap-sentences widens the three 5s spans to whole sentences [0,7] [2.5,12.5] [7.5,15]", JSON.stringify(hlSentenceJson.highlights.map((h) => [h.start, h.end])));
+const hlSentenceNoWords = await callExpectThrow("highlights", { input: path.join(root, "test/highlights-source.mp4"), snap_sentences: true });
+checkOk(/snap-sentences needs.*words-file/.test(hlSentenceNoWords ?? ""), "highlights snap_sentences without words_file is refused", (hlSentenceNoWords ?? "").slice(0, 160));
 
 // align_voice (lượt 138, idea: agent-storyboard timing.mjs): pure
 // estimator + dialogue key first, then the tool on the fixtures —
@@ -4725,6 +4746,27 @@ for (const [bad, why] of [
 }
 checkOk(JSON.stringify(snapHookToWords({ start: 16.2, end: 19.8 }, [{ start: 16, end: 16.5 }, { start: 19.5, end: 20 }])) === JSON.stringify({ start: 16, end: 20 }), "snapHookToWords widens both edges to whole words", "");
 checkOk(JSON.stringify(snapHookToWords({ start: 16, end: 20 }, [{ start: 16, end: 16.5 }, { start: 19.5, end: 20 }])) === JSON.stringify({ start: 16, end: 20 }), "snapHookToWords leaves clean edges unchanged", "");
+// Sentence boundaries + range snap (lượt 192): pure text math, no
+// ffmpeg. A sentence ends on final punctuation OR a 0.8s+ pause
+// (ASR drops punctuation); the range widens to whole sentences,
+// never narrows, and an edge that would move more than 3s stays.
+const sbWords = [
+  { word: "The", start: 14.0, end: 14.4 }, { word: "red", start: 14.5, end: 14.9 }, { word: "room", start: 15.0, end: 15.4 }, { word: "is", start: 15.5, end: 15.8 }, { word: "quiet.", start: 15.9, end: 16.4 },
+  { word: "Now", start: 17.0, end: 17.4 }, { word: "the", start: 17.5, end: 17.8 }, { word: "blue", start: 17.9, end: 18.4 }, { word: "light", start: 18.5, end: 19.0 }, { word: "is", start: 19.1, end: 19.4 }, { word: "loud.", start: 19.5, end: 20.2 },
+  { word: "It", start: 21.0, end: 21.3 }, { word: "stays", start: 21.4, end: 21.9 }, { word: "bright", start: 22.0, end: 22.6 }, { word: "all", start: 22.7, end: 23.0 }, { word: "night.", start: 23.1, end: 23.8 },
+  { word: "Then", start: 24.0, end: 24.4 }, { word: "silence", start: 24.5, end: 25.1 }, { word: "falls.", start: 25.2, end: 25.8 },
+];
+const sb = sentenceBoundaries(sbWords);
+checkOk(sb.count === 4 && JSON.stringify(sb.starts) === JSON.stringify([14, 17, 21, 24]) && JSON.stringify(sb.ends) === JSON.stringify([16.4, 20.2, 23.8, 25.8]), "sentenceBoundaries splits on final punctuation: 4 sentences [14,16.4] [17,20.2] [21,23.8] [24,25.8]", JSON.stringify(sb));
+checkOk(sentenceBoundaries([{ word: "one", start: 0, end: 0.5 }, { word: "two", start: 1.8, end: 2.2 }, { word: "three", start: 2.5, end: 3 }]).count === 2, "sentenceBoundaries splits on a 1.3s pause with no punctuation at all", "");
+checkOk(sentenceBoundaries([{ word: "Really", start: 0, end: 0.5 }, { word: "wow!", start: 0.6, end: 1 }, { word: "yes?", start: 1.1, end: 1.5 }, { word: "hmm", start: 1.6, end: 2 }]).count === 3, "sentenceBoundaries treats ! and ? as sentence ends, and the unterminated tail still counts", "");
+checkOk(sentenceBoundaries([]).count === 0, "sentenceBoundaries on empty words reports 0 sentences", "");
+const srs = snapRangeToSentences({ start: 15, end: 25 }, sbWords);
+checkOk(srs.start === 14 && srs.end === 25.8 && srs.snapped === true && srs.moved_start_seconds === 1 && srs.moved_end_seconds === 0.8 && srs.sentence_count === 4 && srs.unmoved_edges.length === 0, "snapRangeToSentences widens [15,25] to whole sentences [14,25.8]", JSON.stringify(srs));
+checkOk(JSON.stringify(snapRangeToSentences({ start: 16.4, end: 17 }, sbWords)) === JSON.stringify({ start: 16.4, end: 17, snapped: false, moved_start_seconds: 0, moved_end_seconds: 0, sentence_count: 4, unmoved_edges: [] }), "snapRangeToSentences leaves edges already in a gap unchanged", "");
+const srsCapped = snapRangeToSentences({ start: 15, end: 25 }, [{ word: "A", start: 0, end: 5 }, { word: "very", start: 5.1, end: 10 }, { word: "long", start: 10.1, end: 15 }, { word: "sentence.", start: 15.1, end: 20 }]);
+checkOk(srsCapped.start === 15 && srsCapped.end === 25 && srsCapped.snapped === false && JSON.stringify(srsCapped.unmoved_edges) === JSON.stringify(["start"]), "snapRangeToSentences refuses a start shift over the 3s cap (15s into a 20s sentence) and reports it unmoved", JSON.stringify(srsCapped));
+checkOk(snapRangeToSentences({ start: 15, end: 25 }, []).snapped === false, "snapRangeToSentences with no words leaves the range unchanged", "");
 // hook robust-z motion (lượt 191, podcli `_robust_z`): pure math, no
 // ffmpeg. Calibration on known arrays + the z mapping + the scale
 // floor that keeps grain from ever reading as motion.
@@ -4776,6 +4818,17 @@ await writeFile(hookWordsPath, JSON.stringify({ words: [{ word: "hello", start: 
 const hookApplySnapRes = await client.callTool({ name: "apply_hook", arguments: { input: path.join(root, "test/hook-source.mp4"), start: 16.2, end: 19.8, mode: "repeat", words_file: hookWordsPath, output: path.join(root, "outputs/mcp-apply-hook-snap.mp4") } });
 const hookApplySnapJson = JSON.parse(hookApplySnapRes.content[0].text);
 checkOk(hookApplySnapJson.snap?.snapped === true && hookApplySnapJson.snap?.start_after === 15.5 && hookApplySnapJson.snap?.end_after === 20.5 && hookApplySnapJson.window?.start === 15.5 && hookApplySnapJson.window?.end === 20.5, "apply_hook --words-file snaps the window outward to whole words [15.5,20.5]", JSON.stringify(hookApplySnapJson.snap));
+// apply_hook sentence snap (lượt 192): the same words, punctuated
+// into one sentence [14.8,20.5] — after the word snap [15.5,20.5]
+// the sentence snap widens the start to the sentence start 14.8
+// while the end already sits on the sentence end.
+const hookApplySentenceWordsPath = path.join(root, "outputs/mcp-apply-hook-sentence-words.json");
+await writeFile(hookApplySentenceWordsPath, JSON.stringify({ words: [{ word: "Say", start: 14.8, end: 15.2 }, { word: "hello", start: 15.5, end: 16.5 }, { word: "world.", start: 19.5, end: 20.5 }, { word: "again", start: 21, end: 21.5 }] }), "utf8");
+const hookApplySentenceRes = await client.callTool({ name: "apply_hook", arguments: { input: path.join(root, "test/hook-source.mp4"), start: 16.2, end: 19.8, mode: "repeat", words_file: hookApplySentenceWordsPath, snap_sentences: true, output: path.join(root, "outputs/mcp-apply-hook-sentence.mp4") } });
+const hookApplySentenceJson = JSON.parse(hookApplySentenceRes.content[0].text);
+checkOk(hookApplySentenceJson.snap?.sentence_snapped === true && hookApplySentenceJson.snap?.sentence_start_after === 14.8 && hookApplySentenceJson.snap?.sentence_end_after === 20.5 && hookApplySentenceJson.window?.start === 14.8 && hookApplySentenceJson.window?.end === 20.5 && hookApplySentenceJson.snap?.sentence_moved_start_seconds === 0.7 && hookApplySentenceJson.snap?.sentence_moved_end_seconds === 0, "apply_hook --snap-sentences widens the word-snapped window to the whole sentence [14.8,20.5]", JSON.stringify(hookApplySentenceJson.snap));
+const hookApplySentenceNoWords = await callExpectThrow("apply_hook", { input: path.join(root, "test/hook-source.mp4"), start: 16, end: 20, mode: "repeat", snap_sentences: true, output: path.join(root, "outputs/mcp-apply-hook-sentence-nowords.mp4") });
+checkOk(/snap-sentences needs.*words-file/.test(hookApplySentenceNoWords ?? ""), "apply_hook snap_sentences without words_file is refused", (hookApplySentenceNoWords ?? "").slice(0, 160));
 const hookApplyWholeText = await callExpectThrow("apply_hook", { input: path.join(root, "test/source.mp4"), start: 0, end: 10, mode: "move", output: path.join(root, "outputs/mcp-apply-hook-whole.mp4") });
 checkOk(/cannot take the whole clip/.test(hookApplyWholeText ?? ""), "apply_hook move of the whole 10s clip is refused", (hookApplyWholeText ?? "").slice(0, 160));
 const hookApplyShortText = await callExpectThrow("apply_hook", { input: path.join(root, "test/hook-source.mp4"), start: 5, end: 5.5, mode: "repeat", output: path.join(root, "outputs/mcp-apply-hook-short.mp4") });
@@ -4896,6 +4949,22 @@ const hookNoSnapRes = await client.callTool({
 });
 const hookNoSnapJson = JSON.parse(hookNoSnapRes.content[0].text);
 checkOk(hookNoSnapJson.trim.snapped === false && hookNoSnapJson.trim.end === 24.5 && /snap disabled/.test(hookNoSnapJson.trim.reason ?? ""), "hook snap_quiet:false keeps the raw window end (24.5)", JSON.stringify(hookNoSnapJson.trim));
+// hook sentence snap (lượt 192): the raw winner is [14.5,24.5);
+// four sentences in the words file widen it to [14,25.8] — start
+// 14.5 sits inside [14,16.4], end 24.5 inside [24,25.8] — while
+// the trim still ends at 22, where the silence starts.
+const hookSentenceWordsPath = path.join(root, "outputs/mcp-hook-sentence-words.json");
+await writeFile(hookSentenceWordsPath, JSON.stringify({ words: sbWords }), "utf8");
+const hookSentenceRes = await client.callTool({
+  name: "hook",
+  arguments: { input: path.join(root, "test/hook-snap-source.mp4"), duration: 10, step: 0.5, top: 3, words_file: hookSentenceWordsPath, snap_sentences: true },
+});
+const hookSentenceJson = JSON.parse(hookSentenceRes.content[0].text);
+checkOk(hookSentenceJson.hook.start === 14 && hookSentenceJson.hook.end === 25.8 && hookSentenceJson.hook.sentence_snap?.snapped === true && hookSentenceJson.hook.sentence_snap?.moved_start_seconds === 0.5 && hookSentenceJson.hook.sentence_snap?.moved_end_seconds === 1.3 && hookSentenceJson.hook.sentence_snap?.sentences_found === 4 && hookSentenceJson.sentences?.count === 4 && hookSentenceJson.trim.start === 14 && hookSentenceJson.trim.end === 22, "hook --snap-sentences widens the winner [14.5,24.5] to whole sentences [14,25.8] and still trims at 22", JSON.stringify({ hook: hookSentenceJson.hook, trim: hookSentenceJson.trim }));
+const hookSentenceNoWords = await callExpectThrow("hook", { input: path.join(root, "test/hook-snap-source.mp4"), duration: 10, snap_sentences: true });
+checkOk(/snap-sentences needs.*words-file/.test(hookSentenceNoWords ?? ""), "hook snap_sentences without words_file is refused", (hookSentenceNoWords ?? "").slice(0, 160));
+const hookSentenceCli = await runCliJson(["hook", path.join(root, "test/hook-snap-source.mp4"), "--duration", "10", "--step", "0.5", "--top", "1", "--words-file", hookSentenceWordsPath, "--snap-sentences"]);
+checkOk(hookSentenceCli.hook.start === 14 && hookSentenceCli.hook.end === 25.8 && hookSentenceCli.sentences?.count === 4, "CLI hook --words-file --snap-sentences reports the same snapped winner [14,25.8]", JSON.stringify(hookSentenceCli.hook));
 
 
 // hook in batch + manifest (lượt 69): hook is the first probe-only
@@ -4931,6 +5000,28 @@ const hookBatchDryRes = await client.callTool({
 });
 const hookBatchDryJson = JSON.parse(hookBatchDryRes.content[0].text);
 checkOk(hookBatchDryJson.dry_run === true && hookBatchDryJson.results.every((r) => r.status === "planned" && r.output === null), "batch hook dry-run plans with null outputs and writes nothing", JSON.stringify(hookBatchDryJson.results.map((r) => r.output)));
+// batch hook sentence snap (lượt 192): the words file comes from
+// the batch convention <words_dir>/<stem>.words.json — here the
+// input's own folder — and the cache key hashes its bytes, so an
+// edited transcript re-runs the snap instead of re-serving old
+// edges. A clip with no words file fails its own row only.
+await rm(path.join(root, "outputs/mcp-batch-hook-snap-in"), { recursive: true, force: true });
+await rm(path.join(root, "outputs/mcp-batch-hook-snap-out"), { recursive: true, force: true });
+await mkdir(path.join(root, "outputs/mcp-batch-hook-snap-in"), { recursive: true });
+await copyFile(path.join(root, "test/hook-snap-source.mp4"), path.join(root, "outputs/mcp-batch-hook-snap-in/hook-snap-source.mp4"));
+await writeFile(path.join(root, "outputs/mcp-batch-hook-snap-in/hook-snap-source.words.json"), JSON.stringify({ words: sbWords }), "utf8");
+const hookBatchSnapRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "hook", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-hook-snap-in"), output_dir: path.join(root, "outputs/mcp-batch-hook-snap-out"), args: { duration: 10, snap_sentences: true }, jobs: 1 },
+});
+const hookBatchSnapJson = JSON.parse(hookBatchSnapRes.content[0].text);
+checkOk(hookBatchSnapJson.succeeded === 1 && hookBatchSnapJson.failed === 0 && hookBatchSnapJson.results[0].result.hook.start === 14 && hookBatchSnapJson.results[0].result.hook.end === 25.8 && hookBatchSnapJson.results[0].result.trim.end === 22, "batch hook snap_sentences reads <stem>.words.json and snaps the winner to [14,25.8]", JSON.stringify(hookBatchSnapJson.results[0].result?.hook));
+const hookBatchSnapNoWordsRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "hook", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-hook-in"), output_dir: path.join(root, "outputs/mcp-batch-hook-snap-out"), args: { duration: 10, snap_sentences: true }, jobs: 1 },
+});
+const hookBatchSnapNoWordsJson = JSON.parse(hookBatchSnapNoWordsRes.content[0].text);
+checkOk(hookBatchSnapNoWordsJson.failed === 3 && hookBatchSnapNoWordsJson.results.every((r) => r.status === "error" && /words file not found/i.test(r.error ?? "")), "batch hook snap_sentences with no words file fails each row (no silent un-snapped result)", JSON.stringify(hookBatchSnapNoWordsJson.results.map((r) => r.error)));
 await rm(path.join(root, "outputs/mcp-manifest-hook.mp4"), { force: true });
 await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
 const hookManifestRes = await client.callTool({
@@ -5013,6 +5104,25 @@ const hookManifestSnapDryRes = await client.callTool({
 });
 const hookManifestSnapDryJson = JSON.parse(hookManifestSnapDryRes.content[0].text);
 checkOk(hookManifestSnapDryJson.dry_run === true && hookManifestSnapDryJson.steps[0].tool === "hook" && hookManifestSnapDryJson.steps[0].status === "planned", "manifest dry-run accepts a hook step with snap_window_seconds + snap_quiet", JSON.stringify(hookManifestSnapDryJson.steps.map((s) => s.tool)));
+// manifest hook + highlights sentence snap (lượt 192): one words
+// file per manifest, resolved relative to the manifest file and
+// hashed into the step cache key via MANIFEST_FILE_ARGS.
+const hookManifestSentencePath = path.join(root, "outputs", "manifest-hook-sentence.json");
+await writeFile(hookManifestSentencePath, JSON.stringify({ version: 1, input: path.join(root, "test/hook-snap-source.mp4"), output: path.join(root, "outputs/mcp-manifest-hook-sentence.mp4"), steps: [{ tool: "hook", args: { duration: 10, words_file: "mcp-hook-sentence-words.json", snap_sentences: true } }] }), "utf8");
+const hookManifestSentenceRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: hookManifestSentencePath },
+});
+const hookManifestSentenceJson = JSON.parse(hookManifestSentenceRes.content[0].text);
+checkOk(hookManifestSentenceJson.steps_run === 1 && hookManifestSentenceJson.steps[0].status === "ok" && hookManifestSentenceJson.steps[0].result.hook.start === 14 && hookManifestSentenceJson.steps[0].result.hook.end === 25.8 && hookManifestSentenceJson.steps[0].result.sentences?.count === 4, "manifest hook step with words_file + snap_sentences snaps the winner to [14,25.8]", JSON.stringify(hookManifestSentenceJson.steps[0].result?.hook));
+const hlManifestSentencePath = path.join(root, "outputs", "manifest-hl-sentence.json");
+await writeFile(hlManifestSentencePath, JSON.stringify({ version: 1, input: path.join(root, "test/highlights-source.mp4"), output: path.join(root, "outputs/mcp-manifest-hl-sentence.mp4"), steps: [{ tool: "highlights", args: { words_file: "mcp-highlights-sentence-words.json", snap_sentences: true } }] }), "utf8");
+const hlManifestSentenceRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: hlManifestSentencePath },
+});
+const hlManifestSentenceJson = JSON.parse(hlManifestSentenceRes.content[0].text);
+checkOk(hlManifestSentenceJson.steps_run === 1 && hlManifestSentenceJson.steps[0].status === "ok" && hlManifestSentenceJson.steps[0].result.highlights[0].end === 7 && hlManifestSentenceJson.steps[0].result.highlights[1].start === 2.5 && hlManifestSentenceJson.steps[0].result.highlights[1].end === 12.5 && hlManifestSentenceJson.steps[0].result.highlights[2].start === 7.5, "manifest highlights step with words_file + snap_sentences widens the spans to whole sentences", JSON.stringify(hlManifestSentenceJson.steps[0].result?.highlights?.map((h) => [h.start, h.end])));
 
 // hook clip history in batch + manifest: the same history file is
 // shared across files, the cache key hashes its bytes (so a recorded
