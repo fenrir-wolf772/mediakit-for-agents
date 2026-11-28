@@ -16093,7 +16093,7 @@ async function sampleHighlightFrames({ input, fps = HIGHLIGHTS_DEFAULT_FPS, thre
   }
 }
 
-export async function findHighlights({ input, fps = HIGHLIGHTS_DEFAULT_FPS, threshold = HIGHLIGHTS_DEFAULT_THRESHOLD, minSpanSeconds = HIGHLIGHTS_DEFAULT_MIN_SPAN_SECONDS, top = HIGHLIGHTS_DEFAULT_TOP, thumbnailCount = HIGHLIGHTS_DEFAULT_THUMBNAIL_COUNT, wordsFile = null, snapSentences = false }) {
+export async function findHighlights({ input, fps = HIGHLIGHTS_DEFAULT_FPS, threshold = HIGHLIGHTS_DEFAULT_THRESHOLD, minSpanSeconds = HIGHLIGHTS_DEFAULT_MIN_SPAN_SECONDS, top = HIGHLIGHTS_DEFAULT_TOP, thumbnailCount = HIGHLIGHTS_DEFAULT_THUMBNAIL_COUNT, wordsFile = null, snapSentences = false, energyPeak = false }) {
   if (typeof minSpanSeconds !== "number" || !Number.isFinite(minSpanSeconds) || minSpanSeconds < 0 || minSpanSeconds > 30) throw new MediaKitError(`highlights min_span_seconds must be 0-30, got: ${minSpanSeconds}`, "INVALID_ARG");
   if (!Number.isInteger(top) || top < 1 || top > 20) throw new MediaKitError(`highlights top must be 1-20, got: ${top}`, "INVALID_ARG");
   if (!Number.isInteger(thumbnailCount) || thumbnailCount < 0 || thumbnailCount > 10) throw new MediaKitError(`highlights thumbnail_count must be 0-10, got: ${thumbnailCount}`, "INVALID_ARG");
@@ -16111,9 +16111,33 @@ export async function findHighlights({ input, fps = HIGHLIGHTS_DEFAULT_FPS, thre
     words = normalizeTranscriptWords(rawWords, "words file", "highlights");
   }
   if (snapSentences && !wordsPathAbs) throw new MediaKitError("highlights --snap-sentences needs --words-file: there are no sentences to snap to", "INVALID_ARG");
+  if (energyPeak !== true && energyPeak !== false) throw new MediaKitError(`energy_peak must be true or false, got: ${energyPeak}`, "INVALID_ARG");
   const { frames, boundaries, effFps, duration } = await sampleHighlightFrames({ input, fps, threshold });
   const inPath = await requireInput(input);
   const spans = findHighlightSpans({ boundaries: boundaries.map((b) => b.at_seconds), duration, minSpanSeconds });
+  // Energy peak window (sonic-match peak_window, lượt 193): the
+  // loudest mean-energy window on the audio curve — opt-in, one
+  // extra astats pass, normalized the same way findHook normalizes
+  // its curve (against the file's own loudest bin, floor -60 dB).
+  // It never re-ranks the spans: each span reports
+  // contains_energy_peak so the director can see whether the
+  // loudest audio moment falls inside a visual highlight.
+  // highlights does not measure speech coverage, so the speech
+  // retry does not apply here (hasSpeech false).
+  let energyPeakWindow = null;
+  const hlWarnings = [];
+  if (energyPeak) {
+    const hlMeta = await probe(inPath);
+    if (!hlMeta.audio) {
+      hlWarnings.push("energy peak unavailable — no audio stream, so there is no energy curve to peak on");
+    } else {
+      const energyBins = await energyCurveDb(inPath, 0.5);
+      const maxDb = energyBins.length ? Math.max(...energyBins.map((b) => b.energy_db)) : null;
+      const energySpan = maxDb === null ? 0 : maxDb - HOOK_ENERGY_FLOOR_DB;
+      const normBins = energyBins.map((b) => ({ t: b.t, energy: energySpan <= 0 ? 0 : +Math.min(1, Math.max(0, (b.energy_db - HOOK_ENERGY_FLOOR_DB) / energySpan)).toFixed(3) }));
+      energyPeakWindow = peakEnergyWindow(normBins, duration, { hasSpeech: false });
+    }
+  }
   const sentences = words ? sentenceBoundaries(words) : null;
   const highlights = spans.map((s) => {
     const inside = frames.filter((f) => f.timestamp > s.start && f.timestamp < s.end);
@@ -16136,6 +16160,9 @@ export async function findHighlights({ input, fps = HIGHLIGHTS_DEFAULT_FPS, thre
         h.duration = +(snapped.end - snapped.start).toFixed(3);
       }
     }
+    if (energyPeakWindow) {
+      h.contains_energy_peak = energyPeakWindow.start < h.end && energyPeakWindow.end > h.start;
+    }
     return h;
   });
   const topHighlights = [...highlights]
@@ -16154,6 +16181,8 @@ export async function findHighlights({ input, fps = HIGHLIGHTS_DEFAULT_FPS, thre
     highlights,
     top_highlights: topHighlights,
     thumbnails: pickFarthestThumbnails(frames, thumbnailCount),
+    energy_peak_window: energyPeakWindow,
+    warnings: hlWarnings,
   };
 }
 
@@ -16246,6 +16275,25 @@ const HOOK_MOTION_REFERENCE_FRACTION = 0.06;
 const HOOK_MOTION_ROBUST_SCALE_FLOOR = 0.005;
 const HOOK_MOTION_ROBUST_Z_DIVISOR = 3;
 const HOOK_SNAP_WINDOW_DEFAULT_SECONDS = 5;
+// Energy peak window (sonic-match-mcp's peak_window, `audio.py:116`,
+// lượt 193): the sliding-window width over the energy curve, and
+// the speech rule — a speech clip whose loudest window opens before
+// 1s is re-searched from 25% of the file in. "Has speech" is
+// speech_coverage > 0.25, the same threshold sonic-match uses for
+// instrumental_only (`tools.py:181`). BGM hook slice
+// (sonic-match `hook_slice`, `rank.py:116`): the 12-20s cut inside
+// one track — start ~28% in when the track runs hot, ~12% when it
+// runs cool, 0 for a loopable cool track.
+const HOOK_ENERGY_PEAK_WIDTH_MIN_SECONDS = 3;
+const HOOK_ENERGY_PEAK_WIDTH_MAX_SECONDS = 6;
+const HOOK_ENERGY_PEAK_SPEECH_EARLY_SECONDS = 1;
+const HOOK_ENERGY_PEAK_SPEECH_RETRY_FRACTION = 0.25;
+const HOOK_ENERGY_PEAK_SPEECH_COVERAGE_THRESHOLD = 0.25;
+const HOOK_SLICE_MIN_SECONDS = 12;
+const HOOK_SLICE_MAX_SECONDS = 20;
+const HOOK_SLICE_HIGH_ENERGY_THRESHOLD = 0.5;
+const HOOK_SLICE_HIGH_ENERGY_START_FRACTION = 0.28;
+const HOOK_SLICE_LOW_ENERGY_START_FRACTION = 0.12;
 
 // Robust-z motion (nmbrthirteen/podcli `saliency.py: _robust_z`,
 // lượt 191): each motion channel is normalized against the file's
@@ -16305,6 +16353,106 @@ export function findQuietSnap({ bins, start, end, snapWindowSeconds = HOOK_SNAP_
     return { end, snapped: false, quietScore: +best.quiet.toFixed(3), reason: `snapping to ${best.t}s would cut the hook below ${minDur}s` };
   }
   return { end: best.t, snapped: true, quietScore: +best.quiet.toFixed(3), reason: null };
+}
+
+// Loudest mean-energy window on a normalized energy curve (pure:
+// no ffmpeg, unit-tested directly). Sonic-match's peak_window
+// (`audio.py:116-139`): slide a window of width
+// min(6, max(3, duration*0.35)) over the curve and keep the window
+// with the highest MEAN energy — a peak, not a single loud bin, so
+// one clap does not win over a sustained loud passage. Earliest
+// wins a tie, so two runs rank the same way. Bins are [{t, energy}]
+// with energy 0-1 on the hook step grid; the window end is clamped
+// to the file duration, and a file shorter than the window is one
+// window (the whole file). Speech retry (sonic-match `local.py`):
+// a speech clip whose peak opens before 1s is re-searched from 25%
+// in — the opening second of a talking take is usually a breath or
+// a room tone, not the hook — and the first attempt is reported in
+// first_peak_start so the director can see the retry happened.
+// No bins (no audio) returns null; that is "no curve", not an
+// error — the caller reports it as a warning.
+export function peakEnergyWindow(bins, durationSeconds, { hasSpeech = false } = {}) {
+  if (!Array.isArray(bins)) throw new MediaKitError("peakEnergyWindow needs an energy bins array", "INVALID_ARG");
+  const duration = num(durationSeconds, "duration_seconds", { min: 0.01 });
+  if (hasSpeech !== true && hasSpeech !== false) throw new MediaKitError(`peakEnergyWindow hasSpeech must be true or false, got: ${hasSpeech}`, "INVALID_ARG");
+  for (const b of bins) {
+    if (!b || typeof b !== "object" || !Number.isFinite(b.t) || !Number.isFinite(b.energy)) {
+      throw new MediaKitError("peakEnergyWindow bins need {t, energy} numbers", "INVALID_ARG");
+    }
+  }
+  if (!bins.length) return null;
+  const width = Math.min(HOOK_ENERGY_PEAK_WIDTH_MAX_SECONDS, Math.max(HOOK_ENERGY_PEAK_WIDTH_MIN_SECONDS, duration * 0.35));
+  if (width >= duration) {
+    const mean = bins.reduce((a, b) => a + b.energy, 0) / bins.length;
+    return { start: 0, end: +duration.toFixed(3), width_seconds: +width.toFixed(3), mean_energy: +mean.toFixed(3), retried: false, first_peak_start: null };
+  }
+  const search = (fromSeconds) => {
+    let best = null;
+    for (const b of bins) {
+      const s = b.t;
+      if (s < fromSeconds - 1e-9) continue;
+      if (s + width > duration + 1e-9) continue;
+      const inside = bins.filter((x) => x.t >= s - 1e-9 && x.t < s + width - 1e-9);
+      if (!inside.length) continue;
+      const mean = inside.reduce((a, x) => a + x.energy, 0) / inside.length;
+      // Compare RAW means: the stored mean_energy is rounded to
+      // 3dp, and comparing against it would let a later window
+      // that is lower by <0.0005 displace the earlier winner.
+      if (best === null || mean > best.mean + 1e-9) {
+        best = { start: +s.toFixed(3), end: +Math.min(s + width, duration).toFixed(3), mean };
+      }
+    }
+    return best;
+  };
+  const first = search(0);
+  if (!first) return null;
+  const firstOut = { start: first.start, end: first.end, mean_energy: +first.mean.toFixed(3) };
+  if (hasSpeech && first.start < HOOK_ENERGY_PEAK_SPEECH_EARLY_SECONDS) {
+    const retried = search(duration * HOOK_ENERGY_PEAK_SPEECH_RETRY_FRACTION);
+    if (retried) return { start: retried.start, end: retried.end, mean_energy: +retried.mean.toFixed(3), width_seconds: +width.toFixed(3), retried: true, first_peak_start: first.start };
+  }
+  return { ...firstOut, width_seconds: +width.toFixed(3), retried: false, first_peak_start: null };
+}
+
+// The 12-20s slice inside ONE music track (pure: no ffmpeg,
+// unit-tested directly). Sonic-match's hook_slice (`rank.py:116`):
+// want min(20, max(12, videoDuration)) seconds of the track; a
+// track shorter than that is used whole; a long track starts near
+// its drop — ~28% in when its mean energy is hot (>= 0.5), ~12%
+// when cool — and a loopable cool track starts at 0, where its loop
+// point sits. The start is pulled back when it would push the slice
+// past the track end, so a long-enough track always yields exactly
+// `want` seconds. MediaKit has no BGM track catalog — `mix` takes
+// raw file paths, no duration/energy metadata — so this helper is
+// the slice logic on its own: callers that DO have track metadata
+// (a measured mean energy + a probed duration) use it; `mix` does
+// not call it yet, and looping a bed from 0 stays the default
+// until a caller supplies real track metadata. No sine-bed fallback
+// (sonic-match anti-pattern #3): without a real track there is no
+// slice to compute.
+export function hookSliceForTrack({ trackDurationSeconds, trackEnergyMean, loopable = false, videoDurationSeconds }) {
+  const trackDur = num(trackDurationSeconds, "track_duration_seconds", { min: 0.01 });
+  const videoDur = num(videoDurationSeconds, "video_duration_seconds", { min: 0.01 });
+  const energy = num(trackEnergyMean, "track_energy_mean", { min: 0, max: 1 });
+  if (loopable !== true && loopable !== false) throw new MediaKitError(`hook_slice loopable must be true or false, got: ${loopable}`, "INVALID_ARG");
+  const want = Math.min(HOOK_SLICE_MAX_SECONDS, Math.max(HOOK_SLICE_MIN_SECONDS, videoDur));
+  if (trackDur <= want) {
+    return { start: 0, end: +trackDur.toFixed(3), duration_seconds: +trackDur.toFixed(3), wanted_seconds: +want.toFixed(3), start_fraction: 0, reason: "track is shorter than the wanted slice — the whole track is the hook" };
+  }
+  let fraction;
+  let reason;
+  if (loopable && energy < HOOK_SLICE_HIGH_ENERGY_THRESHOLD) {
+    fraction = 0;
+    reason = "loopable low-energy track — slice starts at 0, where its loop point sits";
+  } else if (energy >= HOOK_SLICE_HIGH_ENERGY_THRESHOLD) {
+    fraction = HOOK_SLICE_HIGH_ENERGY_START_FRACTION;
+    reason = "track energy is high (>= 0.5) — slice starts near the drop (~28% in)";
+  } else {
+    fraction = HOOK_SLICE_LOW_ENERGY_START_FRACTION;
+    reason = "track energy is low — slice starts ~12% in";
+  }
+  const start = Math.min(fraction * trackDur, trackDur - want);
+  return { start: +start.toFixed(3), end: +(start + want).toFixed(3), duration_seconds: +want.toFixed(3), wanted_seconds: +want.toFixed(3), start_fraction: fraction, reason };
 }
 
 async function energyCurveDb(input, step) {
@@ -16455,7 +16603,7 @@ export function hookVisualScore(boundaries, start, end) {
   return { visual: Math.min(1, beats / 2), visual_beats: beats };
 }
 
-export async function findHook({ input, duration = 15, step = 0.5, top = 3, thresholdDb = -40, historyFile = null, record = false, historyOverlap = 0.5, snapQuiet = true, snapWindowSeconds = HOOK_SNAP_WINDOW_DEFAULT_SECONDS, wordsFile = null, snapSentences = false }) {
+export async function findHook({ input, duration = 15, step = 0.5, top = 3, thresholdDb = -40, historyFile = null, record = false, historyOverlap = 0.5, snapQuiet = true, snapWindowSeconds = HOOK_SNAP_WINDOW_DEFAULT_SECONDS, wordsFile = null, snapSentences = false, energyPeak = false }) {
   const inPath = await requireInput(input);
   const hookDur = num(duration, "duration", { min: 4, max: 20 });
   const stepSec = num(step, "step", { min: 0.25, max: 2 });
@@ -16484,6 +16632,7 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
     words = normalizeTranscriptWords(rawWords, "words file", "hook");
   }
   if (snapSentences && !wordsPathAbs) throw new MediaKitError("hook --snap-sentences needs --words-file: there are no sentences to snap to", "INVALID_ARG");
+  if (energyPeak !== true && energyPeak !== false) throw new MediaKitError(`energy_peak must be true or false, got: ${energyPeak}`, "INVALID_ARG");
   if (historyAbs) await assertInsideWorkdir(historyAbs, "history file");
   const meta = await probe(inPath);
   const total = meta.duration_seconds;
@@ -16631,6 +16780,24 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
     }
   }
   const best = candidates[0];
+  const speechCoverage = meta.audio ? +Math.min(1, Math.max(0, speechSeconds / total)).toFixed(3) : null;
+  // Energy peak window (sonic-match peak_window, lượt 193): the
+  // loudest mean-energy window on the same curve — a second,
+  // audio-only opinion next to the five-signal hook. Opt-in only,
+  // and it never re-ranks the hook: a quiet-but-visual hook is
+  // never overruled by a loud-but-dead stretch (sonic-match
+  // anti-pattern #10 — the peak is a complement, not the hook).
+  // The offset says how far the loudest moment sits from the
+  // winning hook: positive = the peak comes later.
+  let energyPeakWindow = null;
+  if (energyPeak) {
+    if (!meta.audio || !curve.length) {
+      warnings.push("energy peak unavailable — no audio stream, so there is no energy curve to peak on");
+    } else {
+      energyPeakWindow = peakEnergyWindow(curve.map((b) => ({ t: b.t, energy: b.energy })), total, { hasSpeech: (speechCoverage ?? 0) > HOOK_ENERGY_PEAK_SPEECH_COVERAGE_THRESHOLD });
+    }
+  }
+  const energyPeakOffsetSeconds = energyPeakWindow && best ? +(energyPeakWindow.start - best.start).toFixed(3) : null;
   const cutsPerMinute = meta.video ? +(cuts.length / (total / 60)).toFixed(1) : null;
   const pacing = cutsPerMinute === null ? null : cutsPerMinute < 6 ? "slow" : cutsPerMinute <= 20 ? "medium" : "fast-cut";
   if (effDur < hookDur) warnings.push(`file is ${total}s, shorter than --duration ${hookDur}s — the whole file is the only window`);
@@ -16699,7 +16866,7 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
     duration_seconds: total,
     hook_duration_seconds: effDur,
     step_seconds: stepSec,
-    speech_coverage: meta.audio ? +Math.min(1, Math.max(0, speechSeconds / total)).toFixed(3) : null,
+    speech_coverage: speechCoverage,
     energy_curve: curve,
     motion_normalization: motionFractions.length ? { method: "max(absolute/0.06, robust-z)", median: motionCal.median, mad: motionCal.mad, scale: motionCal.scale } : null,
     cuts_per_minute: cutsPerMinute,
@@ -16709,6 +16876,8 @@ export async function findHook({ input, duration = 15, step = 0.5, top = 3, thre
     sentences: sentences ? { count: sentences.count, starts: sentences.starts, ends: sentences.ends } : null,
     candidates,
     hook: best,
+    energy_peak_window: energyPeakWindow,
+    energy_peak_offset_seconds: energyPeakOffsetSeconds,
     trim,
     suggested_trim: `mediakit trim ${inPath} -o hook.mp4 --start ${trim.start} --end ${trim.end}`,
     history,
@@ -18294,8 +18463,8 @@ export const BATCH_OPERATIONS = {
   // output_suffix null.
   hook: {
     probeOnly: true,
-    args: ["duration", "step", "top", "threshold_db", "history_file", "record", "history_overlap", "snap_window_seconds", "snap_quiet", "words_dir", "snap_sentences"],
-    run: (input, output, a) => findHook({ input, duration: a.duration ?? 15, step: a.step ?? 0.5, top: a.top ?? 3, thresholdDb: a.threshold_db ?? -40, historyFile: a.history_file ?? null, record: a.record ?? false, historyOverlap: a.history_overlap ?? 0.5, snapQuiet: a.snap_quiet ?? true, snapWindowSeconds: a.snap_window_seconds ?? 5, wordsFile: a.snap_sentences ? cutWordsFileFor(input, a.words_dir) : null, snapSentences: a.snap_sentences ?? false }),
+    args: ["duration", "step", "top", "threshold_db", "history_file", "record", "history_overlap", "snap_window_seconds", "snap_quiet", "words_dir", "snap_sentences", "energy_peak"],
+    run: (input, output, a) => findHook({ input, duration: a.duration ?? 15, step: a.step ?? 0.5, top: a.top ?? 3, thresholdDb: a.threshold_db ?? -40, historyFile: a.history_file ?? null, record: a.record ?? false, historyOverlap: a.history_overlap ?? 0.5, snapQuiet: a.snap_quiet ?? true, snapWindowSeconds: a.snap_window_seconds ?? 5, wordsFile: a.snap_sentences ? cutWordsFileFor(input, a.words_dir) : null, snapSentences: a.snap_sentences ?? false, energyPeak: a.energy_peak ?? false }),
     // The history file is a sidecar like cut_words' words file: hash
     // its bytes into the cache key, so a recorded window invalidates
     // the cached duplicate flags instead of serving stale ones. The
@@ -18379,8 +18548,8 @@ export const BATCH_OPERATIONS = {
   // on a real scene change instead of a guessed timestamp.
   highlights: {
     probeOnly: true,
-    args: ["fps", "threshold", "min_span_seconds", "top", "thumbnail_count", "words_dir", "snap_sentences"],
-    run: (input, output, a) => findHighlights({ input, fps: a.fps ?? 2, threshold: a.threshold ?? 0.15, minSpanSeconds: a.min_span_seconds ?? 2, top: a.top ?? 5, thumbnailCount: a.thumbnail_count ?? 3, wordsFile: a.snap_sentences ? cutWordsFileFor(input, a.words_dir) : null, snapSentences: a.snap_sentences ?? false }),
+    args: ["fps", "threshold", "min_span_seconds", "top", "thumbnail_count", "words_dir", "snap_sentences", "energy_peak"],
+    run: (input, output, a) => findHighlights({ input, fps: a.fps ?? 2, threshold: a.threshold ?? 0.15, minSpanSeconds: a.min_span_seconds ?? 2, top: a.top ?? 5, thumbnailCount: a.thumbnail_count ?? 3, wordsFile: a.snap_sentences ? cutWordsFileFor(input, a.words_dir) : null, snapSentences: a.snap_sentences ?? false, energyPeak: a.energy_peak ?? false }),
     // Sentence snap reads the per-clip words file, so its bytes
     // belong in the cache key — editing the transcript must re-run
     // the snap, not re-serve old span edges.
@@ -19069,15 +19238,15 @@ export const MANIFEST_STEPS = {
   // the manifest and hashes into the cache key via MANIFEST_FILE_ARGS.
   hook: {
     probeOnly: true,
-    args: ["duration", "step", "top", "threshold_db", "history_file", "record", "history_overlap", "snap_window_seconds", "snap_quiet", "words_file", "snap_sentences"],
-    run: (input, output, a) => findHook({ input, duration: a.duration ?? 15, step: a.step ?? 0.5, top: a.top ?? 3, thresholdDb: a.threshold_db ?? -40, historyFile: a.history_file ?? null, record: a.record ?? false, historyOverlap: a.history_overlap ?? 0.5, snapQuiet: a.snap_quiet ?? true, snapWindowSeconds: a.snap_window_seconds ?? 5, wordsFile: a.words_file ?? null, snapSentences: a.snap_sentences ?? false }),
+    args: ["duration", "step", "top", "threshold_db", "history_file", "record", "history_overlap", "snap_window_seconds", "snap_quiet", "words_file", "snap_sentences", "energy_peak"],
+    run: (input, output, a) => findHook({ input, duration: a.duration ?? 15, step: a.step ?? 0.5, top: a.top ?? 3, thresholdDb: a.threshold_db ?? -40, historyFile: a.history_file ?? null, record: a.record ?? false, historyOverlap: a.history_overlap ?? 0.5, snapQuiet: a.snap_quiet ?? true, snapWindowSeconds: a.snap_window_seconds ?? 5, wordsFile: a.words_file ?? null, snapSentences: a.snap_sentences ?? false, energyPeak: a.energy_peak ?? false }),
   },
   // Same override for highlights: one words file for the one input.
   // probeOnly must be repeated here, like search_words above.
   highlights: {
     probeOnly: true,
-    args: ["fps", "threshold", "min_span_seconds", "top", "thumbnail_count", "words_file", "snap_sentences"],
-    run: (input, output, a) => findHighlights({ input, fps: a.fps ?? 2, threshold: a.threshold ?? 0.15, minSpanSeconds: a.min_span_seconds ?? 2, top: a.top ?? 5, thumbnailCount: a.thumbnail_count ?? 3, wordsFile: a.words_file ?? null, snapSentences: a.snap_sentences ?? false }),
+    args: ["fps", "threshold", "min_span_seconds", "top", "thumbnail_count", "words_file", "snap_sentences", "energy_peak"],
+    run: (input, output, a) => findHighlights({ input, fps: a.fps ?? 2, threshold: a.threshold ?? 0.15, minSpanSeconds: a.min_span_seconds ?? 2, top: a.top ?? 5, thumbnailCount: a.thumbnail_count ?? 3, wordsFile: a.words_file ?? null, snapSentences: a.snap_sentences ?? false, energyPeak: a.energy_peak ?? false }),
   },
   // download is manifest-only, not a batch operation: batch maps one
   // operation over files matching a glob, and a download's input is

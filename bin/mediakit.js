@@ -930,8 +930,8 @@ const COMMANDS = {
     ],
   },
   highlights: {
-    usage: "mediakit highlights <input> [--fps 2] [--threshold 0.15] [--min-span 2] [--top 5] [--thumbnails 3] [--words-file <words.json>] [--snap-sentences]",
-    desc: "Find a clip's visual beats with perceptual hashes: sample frames at --fps (default 2), hash each one as an 8x8 average hash, and call a frame a scene boundary when its hash jumps from the previous frame by >= --threshold (normalized Hamming distance, default 0.15). A highlight is the span between two boundaries — spans shorter than --min-span seconds (default 2) merge into a neighbour — and its score is the mean jump inside the span; --top ranks the best spans. --thumbnails returns that many greedy farthest-point frames (the most visually distinct moments, for a poster frame or a hook still). Probe-only, writes no file. --words-file <words.json> with --snap-sentences widens every span outward to whole sentence boundaries (final punctuation or a 0.8s+ pause), so a highlight opens on a sentence start and closes on a sentence end.",
+    usage: "mediakit highlights <input> [--fps 2] [--threshold 0.15] [--min-span 2] [--top 5] [--thumbnails 3] [--words-file <words.json>] [--snap-sentences] [--energy-peak]",
+    desc: "Find a clip's visual beats with perceptual hashes: sample frames at --fps (default 2), hash each one as an 8x8 average hash, and call a frame a scene boundary when its hash jumps from the previous frame by >= --threshold (normalized Hamming distance, default 0.15). A highlight is the span between two boundaries — spans shorter than --min-span seconds (default 2) merge into a neighbour — and its score is the mean jump inside the span; --top ranks the best spans. --thumbnails returns that many greedy farthest-point frames (the most visually distinct moments, for a poster frame or a hook still). Probe-only, writes no file. --words-file <words.json> with --snap-sentences widens every span outward to whole sentence boundaries (final punctuation or a 0.8s+ pause), so a highlight opens on a sentence start and closes on a sentence end. --energy-peak also reports the loudest mean-energy window (sonic-match peak_window) as energy_peak_window, and flags each span that contains it (contains_energy_peak) — an audio-only second opinion that never re-ranks the spans.",
     args: [{ name: "input", required: true }],
     options: [
       ["--fps", "Sample rate in frames per second, 0.5-5 (default 2; long files sample slower automatically, down to 0.5)"],
@@ -941,6 +941,7 @@ const COMMANDS = {
       ["--thumbnails", "How many farthest-point thumbnail candidates to return, 0-10 (default 3; 0 = none)"],
       ["--words-file", "Transcribe words.json — needed for --snap-sentences"],
       ["--snap-sentences", "Widen every span outward to whole sentence boundaries from --words-file (needs --words-file)"],
+      ["--energy-peak", "Also report the loudest mean-energy window (sonic-match peak_window) as energy_peak_window, and flag each span that contains it (contains_energy_peak)"],
     ],
   },
   "audio-levels": {
@@ -968,8 +969,8 @@ const COMMANDS = {
     ],
   },
   hook: {
-    usage: "mediakit hook <input> [--duration 15] [--step 0.5] [--top 3] [--threshold-db -40] [--history-file <path>] [--record] [--history-overlap 0.5] [--snap-window 5] [--no-snap-quiet] [--words-file <words.json>] [--snap-sentences]",
-    desc: "Find the best hook window in a clip: slide a --duration window across the file and score each candidate on measured audio energy (astats RMS), speech coverage (silencedetect), scene cuts (a window opening on a cut scores higher), real motion (per-frame pixel-diff, same step grid) and visual beats (the highlights perceptual-hash boundaries inside the window — 2+ beats is fully active, 1 beat is half). Score is 0.3*energy + 0.2*speech + 0.2*cut + 0.2*motion + 0.1*visual (audio 0.5 / video 0.5). Returns the ranked top windows with the score breakdown (each carries visual + visual_beats), the highlight_boundaries, the per-step energy curve (each bin also carries motion), pacing from real cuts, a trim object, and a suggested trim command for the winner. The trim end snaps to the nearest quiet moment in the last --snap-window seconds (default 5) — quiet is (energy + motion) / 2, a bin only qualifies at most half as busy as the window mean, and the snap never shortens the hook below max(4s, half the window); --no-snap-quiet keeps the raw window end. Probe-only, writes no file. The director's opening-shot picker. Clip history: --history-file <path> checks every candidate against moments already cut (JSON {version: 1, records: [{source_sha256, start, end, score, recorded_at}]}); a candidate from the same source file overlapping a recorded window by >= --history-overlap (default 0.5) of the shorter window is flagged duplicate with duplicate_of. --record appends the winning window to the history file (only the winner — the alternatives were never cut); a missing history file is an empty history, a corrupt one fails loudly. --words-file <words.json> with --snap-sentences widens every candidate window outward to whole sentence boundaries (final punctuation or a 0.8s+ pause), so a hook opens on a sentence start and closes on a sentence end; each candidate reports the snap in sentence_snap.",
+    usage: "mediakit hook <input> [--duration 15] [--step 0.5] [--top 3] [--threshold-db -40] [--history-file <path>] [--record] [--history-overlap 0.5] [--snap-window 5] [--no-snap-quiet] [--words-file <words.json>] [--snap-sentences] [--energy-peak]",
+    desc: "Find the best hook window in a clip: slide a --duration window across the file and score each candidate on measured audio energy (astats RMS), speech coverage (silencedetect), scene cuts (a window opening on a cut scores higher), real motion (per-frame pixel-diff, same step grid) and visual beats (the highlights perceptual-hash boundaries inside the window — 2+ beats is fully active, 1 beat is half). Score is 0.3*energy + 0.2*speech + 0.2*cut + 0.2*motion + 0.1*visual (audio 0.5 / video 0.5). Returns the ranked top windows with the score breakdown (each carries visual + visual_beats), the highlight_boundaries, the per-step energy curve (each bin also carries motion), pacing from real cuts, a trim object, and a suggested trim command for the winner. The trim end snaps to the nearest quiet moment in the last --snap-window seconds (default 5) — quiet is (energy + motion) / 2, a bin only qualifies at most half as busy as the window mean, and the snap never shortens the hook below max(4s, half the window); --no-snap-quiet keeps the raw window end. Probe-only, writes no file. The director's opening-shot picker. Clip history: --history-file <path> checks every candidate against moments already cut (JSON {version: 1, records: [{source_sha256, start, end, score, recorded_at}]}); a candidate from the same source file overlapping a recorded window by >= --history-overlap (default 0.5) of the shorter window is flagged duplicate with duplicate_of. --record appends the winning window to the history file (only the winner — the alternatives were never cut); a missing history file is an empty history, a corrupt one fails loudly. --words-file <words.json> with --snap-sentences widens every candidate window outward to whole sentence boundaries (final punctuation or a 0.8s+ pause), so a hook opens on a sentence start and closes on a sentence end; each candidate reports the snap in sentence_snap. --energy-peak also reports the loudest mean-energy window (sonic-match peak_window — a sliding min(6, max(3, duration*0.35))s window on the per-step energy curve, earliest wins a tie; on a speech clip a peak before 1s is re-searched from 25% in) as energy_peak_window with energy_peak_offset_seconds from the winning hook — an audio-only second opinion that never re-ranks the hook.",
     args: [{ name: "input", required: true }],
     options: [
       ["--duration", "Hook window length in seconds, 4-20 (default 15)"],
@@ -983,6 +984,7 @@ const COMMANDS = {
       ["--no-snap-quiet", "Keep the raw window end instead of snapping the trim to the nearest quiet moment"],
       ["--words-file", "Transcribe words.json — needed for --snap-sentences"],
       ["--snap-sentences", "Widen every candidate window outward to whole sentence boundaries from --words-file (needs --words-file)"],
+      ["--energy-peak", "Also report the loudest mean-energy window (sonic-match peak_window) as energy_peak_window + energy_peak_offset_seconds — an audio-only second opinion, never a re-rank"],
     ],
   },
   "apply-hook": {
@@ -2450,6 +2452,7 @@ async function main() {
           thumbnailCount: numOpt(opts, "thumbnails") ?? 3,
           wordsFile: opts.words_file ?? null,
           snapSentences: opts.snap_sentences === true,
+          energyPeak: opts.energy_peak === true,
         });
         break;
       case "keyframes":
@@ -2489,6 +2492,7 @@ async function main() {
           snapWindowSeconds: numOpt(opts, "snap_window") ?? 5,
           wordsFile: opts.words_file ?? null,
           snapSentences: opts.snap_sentences === true,
+          energyPeak: opts.energy_peak === true,
         });
         break;
       case "apply-hook": {

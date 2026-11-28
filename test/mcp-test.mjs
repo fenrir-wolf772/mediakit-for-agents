@@ -15,7 +15,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
-import { acquireEditLease, analyzeHookMove, analyzeSeamSamples, applyContentBaseline, applyHook, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, clearProbeCache, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, ffmpegThreads, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookMotionCalibration, hookOverlapSeconds, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, orderHookRanges, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStabTrfMotion, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, pickFarthestThumbnails, planCleanVoice, planSmartCuts, projectSummary, proposeEdit, probe, probeCacheStats, releaseEditLease, renewEditLease, resolveQcPolicy, restoreEditSessionCheckpoint, resumeEditSession, robustZMotionScore, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, sentenceBoundaries, sharpnessVerdict, snapHookToWords, snapKeepSegmentsToPauses, snapRangeToSentences, spectralFluxOnset, stabilizeVerdict, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
+import { acquireEditLease, analyzeHookMove, analyzeSeamSamples, applyContentBaseline, applyHook, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, clearProbeCache, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, ffmpegThreads, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findHighlights, findHook, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookMotionCalibration, hookOverlapSeconds, hookSliceForTrack, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, orderHookRanges, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStabTrfMotion, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, peakEnergyWindow, pickFarthestThumbnails, planCleanVoice, planSmartCuts, projectSummary, proposeEdit, probe, probeCacheStats, releaseEditLease, renewEditLease, resolveQcPolicy, restoreEditSessionCheckpoint, resumeEditSession, robustZMotionScore, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, sentenceBoundaries, sharpnessVerdict, snapHookToWords, snapKeepSegmentsToPauses, snapRangeToSentences, spectralFluxOnset, stabilizeVerdict, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
@@ -4438,6 +4438,28 @@ checkOk(hlSentenceJson.highlights.length === 3 && hlSentenceJson.highlights[0].s
 const hlSentenceNoWords = await callExpectThrow("highlights", { input: path.join(root, "test/highlights-source.mp4"), snap_sentences: true });
 checkOk(/snap-sentences needs.*words-file/.test(hlSentenceNoWords ?? ""), "highlights snap_sentences without words_file is refused", (hlSentenceNoWords ?? "").slice(0, 160));
 
+// highlights energy peak (lượt 193, sonic-match peak_window):
+// hook-source.mp4 has audio, so the peak is [15.5,21.5] — the same
+// window the hook tool reports on the same file — and the single
+// whole-file span contains it; highlights-source.mp4 has no audio
+// stream at all, so the peak is null with a warning and no span is
+// flagged.
+const hlEnergyRes = await client.callTool({
+  name: "highlights",
+  arguments: { input: path.join(root, "test/hook-source.mp4"), energy_peak: true },
+});
+const hlEnergyJson = JSON.parse(hlEnergyRes.content[0].text);
+checkOk(hlEnergyJson.energy_peak_window?.start === 15.5 && hlEnergyJson.energy_peak_window?.end === 21.5 && hlEnergyJson.energy_peak_window?.width_seconds === 6 && hlEnergyJson.energy_peak_window?.mean_energy === 0.999 && hlEnergyJson.highlights.length === 1 && hlEnergyJson.highlights[0].contains_energy_peak === true && hlEnergyJson.warnings?.length === 0, "highlights --energy-peak reports [15.5,21.5] (same as hook on the same file) and flags the span that contains it", JSON.stringify({ peak: hlEnergyJson.energy_peak_window, spans: hlEnergyJson.highlights.map((h) => [h.start, h.end, h.contains_energy_peak]) }));
+const hlEnergyNoAudioRes = await client.callTool({
+  name: "highlights",
+  arguments: { input: path.join(root, "test/highlights-source.mp4"), energy_peak: true },
+});
+const hlEnergyNoAudioJson = JSON.parse(hlEnergyNoAudioRes.content[0].text);
+checkOk(hlEnergyNoAudioJson.energy_peak_window === null && /no audio stream/.test((hlEnergyNoAudioJson.warnings ?? []).join(" ")) && hlEnergyNoAudioJson.highlights.every((h) => h.contains_energy_peak === undefined), "highlights --energy-peak on a video-only file reports no peak window (null + warning, no span flagged)", JSON.stringify({ peak: hlEnergyNoAudioJson.energy_peak_window, warnings: hlEnergyNoAudioJson.warnings }));
+let hlEnergyBad = null;
+try { await findHighlights({ input: path.join(root, "test/highlights-source.mp4"), energyPeak: "yes" }); } catch (e) { hlEnergyBad = e.message; }
+checkOk(/energy_peak must be true or false/.test(hlEnergyBad ?? ""), "findHighlights: a non-boolean energy_peak is refused", (hlEnergyBad ?? "").slice(0, 120));
+
 // align_voice (lượt 138, idea: agent-storyboard timing.mjs): pure
 // estimator + dialogue key first, then the tool on the fixtures —
 // the 9s voice is tone [0,2),[4,6),[7,9) by construction, so the
@@ -4853,6 +4875,47 @@ checkOk(snapFloor.snapped === false && /below 8s/.test(snapFloor.reason ?? ""), 
 const snapOutOfWindow = findQuietSnap({ bins: snapBins({ 0: 0, 0.5: 0, 1: 0, 1.5: 0, 2: 0.5, 2.5: 0.5, 3: 0.5, 3.5: 0.5, 4: 0.5, 4.5: 0.5, 5: 0.5, 5.5: 0.5, 6: 0.5, 6.5: 0.5, 7: 0.5, 7.5: 0.5, 8: 0.5, 8.5: 0.5, 9: 0.5, 9.5: 0.5 }), start: 0, end: 10, snapWindowSeconds: 5, minDurationSeconds: 5 });
 checkOk(snapOutOfWindow.snapped === false && /no quiet moment/.test(snapOutOfWindow.reason ?? ""), "findQuietSnap: a dip outside the search window does not snap", JSON.stringify(snapOutOfWindow));
 
+// peakEnergyWindow + hookSliceForTrack are pure (no ffmpeg):
+// sonic-match's peak_window (sliding mean-energy window) and
+// hook_slice (the 12-20s cut inside one track), unit-tested
+// directly — flat curve, mid-file peak, short file, speech retry,
+// invalid input, and the slice's start fractions.
+const peakBins = (energyByT) => Object.entries(energyByT).map(([t, energy]) => ({ t: +t, energy })).sort((a, b) => a.t - b.t);
+const peakFlat = peakEnergyWindow(peakBins({ 0: 0.5, 1: 0.5, 2: 0.5, 3: 0.5, 4: 0.5, 5: 0.5, 6: 0.5, 7: 0.5, 8: 0.5, 9: 0.5 }), 10);
+checkOk(peakFlat.start === 0 && peakFlat.end === 3.5 && peakFlat.width_seconds === 3.5 && peakFlat.mean_energy === 0.5 && peakFlat.retried === false, "peakEnergyWindow: a flat curve peaks at the earliest window [0,3.5] (width min(6,max(3,10*0.35)))", JSON.stringify(peakFlat));
+const peakMidBins = [];
+for (let t = 0; t < 30; t += 0.5) peakMidBins.push({ t, energy: t >= 10 && t < 16 ? 1 : 0.2 });
+const peakMid = peakEnergyWindow(peakMidBins, 30);
+checkOk(peakMid.start === 10 && peakMid.end === 16 && peakMid.width_seconds === 6 && peakMid.mean_energy === 1 && peakMid.retried === false, "peakEnergyWindow: the loudest 6s window is [10,16] on a curve that is 1.0 there and 0.2 elsewhere", JSON.stringify(peakMid));
+const peakShort = peakEnergyWindow(peakBins({ 0: 0.2, 0.5: 0.4, 1: 0.6, 1.5: 0.8, 2: 1 }), 2.5);
+checkOk(peakShort.start === 0 && peakShort.end === 2.5 && peakShort.mean_energy === 0.6 && peakShort.retried === false, "peakEnergyWindow: a file shorter than the window is one window (the whole file)", JSON.stringify(peakShort));
+const peakSpeechBins = [];
+for (let t = 0; t < 30; t += 0.5) peakSpeechBins.push({ t, energy: t < 6 ? 1 : t >= 8 && t < 14 ? 0.8 : 0.1 });
+const peakSpeech = peakEnergyWindow(peakSpeechBins, 30, { hasSpeech: true });
+checkOk(peakSpeech.start === 8 && peakSpeech.end === 14 && peakSpeech.mean_energy === 0.8 && peakSpeech.retried === true && peakSpeech.first_peak_start === 0, "peakEnergyWindow: a speech clip whose peak opens at 0 is re-searched from 25% in ([8,14], first attempt 0)", JSON.stringify(peakSpeech));
+const peakNoSpeech = peakEnergyWindow(peakSpeechBins, 30, { hasSpeech: false });
+checkOk(peakNoSpeech.start === 0 && peakNoSpeech.end === 6 && peakNoSpeech.mean_energy === 1 && peakNoSpeech.retried === false, "peakEnergyWindow: without speech the same curve keeps its opening peak [0,6]", JSON.stringify(peakNoSpeech));
+checkOk(peakEnergyWindow([], 30) === null, "peakEnergyWindow: no bins (no audio) returns null, not an error", "");
+let peakBad = null;
+try { peakEnergyWindow("nope", 10); } catch (e) { peakBad = e.message; }
+checkOk(/needs an energy bins array/.test(peakBad ?? ""), "peakEnergyWindow: a non-array bins argument is refused", (peakBad ?? "").slice(0, 120));
+let peakBadBin = null;
+try { peakEnergyWindow([{ t: 0, energy: "loud" }], 10); } catch (e) { peakBadBin = e.message; }
+checkOk(/bins need \{t, energy\} numbers/.test(peakBadBin ?? ""), "peakEnergyWindow: a bin without numeric energy is refused", (peakBadBin ?? "").slice(0, 120));
+const sliceShort = hookSliceForTrack({ trackDurationSeconds: 8, trackEnergyMean: 0.7, loopable: false, videoDurationSeconds: 30 });
+checkOk(sliceShort.start === 0 && sliceShort.end === 8 && sliceShort.duration_seconds === 8 && sliceShort.wanted_seconds === 20, "hookSliceForTrack: a track shorter than the wanted 20s slice is used whole", JSON.stringify(sliceShort));
+const sliceHot = hookSliceForTrack({ trackDurationSeconds: 200, trackEnergyMean: 0.8, loopable: false, videoDurationSeconds: 30 });
+checkOk(sliceHot.start === 56 && sliceHot.end === 76 && sliceHot.duration_seconds === 20 && sliceHot.start_fraction === 0.28, "hookSliceForTrack: a hot 200s track starts ~28% in ([56,76])", JSON.stringify(sliceHot));
+const sliceCool = hookSliceForTrack({ trackDurationSeconds: 200, trackEnergyMean: 0.3, loopable: false, videoDurationSeconds: 15 });
+checkOk(sliceCool.start === 24 && sliceCool.end === 39 && sliceCool.duration_seconds === 15 && sliceCool.start_fraction === 0.12, "hookSliceForTrack: a cool 200s track starts ~12% in ([24,39])", JSON.stringify(sliceCool));
+const sliceLoop = hookSliceForTrack({ trackDurationSeconds: 200, trackEnergyMean: 0.3, loopable: true, videoDurationSeconds: 30 });
+checkOk(sliceLoop.start === 0 && sliceLoop.end === 20 && sliceLoop.start_fraction === 0, "hookSliceForTrack: a loopable cool track starts at 0, where its loop point sits", JSON.stringify(sliceLoop));
+const slicePullback = hookSliceForTrack({ trackDurationSeconds: 25, trackEnergyMean: 0.9, loopable: false, videoDurationSeconds: 30 });
+checkOk(slicePullback.start === 5 && slicePullback.end === 25 && slicePullback.duration_seconds === 20, "hookSliceForTrack: the start is pulled back so a 25s track still yields the full 20s slice ([5,25])", JSON.stringify(slicePullback));
+let sliceBad = null;
+try { hookSliceForTrack({ trackDurationSeconds: 200, trackEnergyMean: 1.5, loopable: false, videoDurationSeconds: 30 }); } catch (e) { sliceBad = e.message; }
+checkOk(/track_energy_mean must be <= 1/.test(sliceBad ?? ""), "hookSliceForTrack: an energy mean above 1 is refused", (sliceBad ?? "").slice(0, 120));
+
 // hook motion (shorts-maker-gpu's combined audio/video scoring):
 // fixture test/hook-motion-source.mp4 is 30s, loud + static red
 // [0,15) then quieter + moving testsrc2 [15,30), joined by a 1s
@@ -4966,6 +5029,35 @@ checkOk(/snap-sentences needs.*words-file/.test(hookSentenceNoWords ?? ""), "hoo
 const hookSentenceCli = await runCliJson(["hook", path.join(root, "test/hook-snap-source.mp4"), "--duration", "10", "--step", "0.5", "--top", "1", "--words-file", hookSentenceWordsPath, "--snap-sentences"]);
 checkOk(hookSentenceCli.hook.start === 14 && hookSentenceCli.hook.end === 25.8 && hookSentenceCli.sentences?.count === 4, "CLI hook --words-file --snap-sentences reports the same snapped winner [14,25.8]", JSON.stringify(hookSentenceCli.hook));
 
+// hook energy peak (lượt 193, sonic-match peak_window): the
+// loudest mean-energy window on the same curve, opt-in — it never
+// re-ranks the hook. Measured on the fixtures: snap-source winner
+// [14.5,24.5] with peak [15,21] (+0.5s); visual-source retries a
+// 0s peak to [7.5,13.5] (-4s from its winner).
+const hookEnergyRes = await client.callTool({
+  name: "hook",
+  arguments: { input: path.join(root, "test/hook-snap-source.mp4"), duration: 10, step: 0.5, top: 3, energy_peak: true },
+});
+const hookEnergyJson = JSON.parse(hookEnergyRes.content[0].text);
+checkOk(hookEnergyJson.hook.start === 14.5 && hookEnergyJson.hook.end === 24.5 && hookEnergyJson.energy_peak_window?.start === 15 && hookEnergyJson.energy_peak_window?.end === 21 && hookEnergyJson.energy_peak_window?.width_seconds === 6 && hookEnergyJson.energy_peak_window?.mean_energy === 1 && hookEnergyJson.energy_peak_window?.retried === false && hookEnergyJson.energy_peak_window?.first_peak_start === null && hookEnergyJson.energy_peak_offset_seconds === 0.5, "hook --energy-peak reports the loudest window [15,21] (+0.5s from the winner) without re-ranking [14.5,24.5]", JSON.stringify({ hook: hookEnergyJson.hook, peak: hookEnergyJson.energy_peak_window, offset: hookEnergyJson.energy_peak_offset_seconds }));
+const hookEnergyVisualRes = await client.callTool({
+  name: "hook",
+  arguments: { input: path.join(root, "test/hook-visual-source.mp4"), duration: 10, step: 0.5, top: 3, energy_peak: true },
+});
+const hookEnergyVisualJson = JSON.parse(hookEnergyVisualRes.content[0].text);
+checkOk(hookEnergyVisualJson.hook.start === 11.5 && hookEnergyVisualJson.hook.end === 21.5 && hookEnergyVisualJson.energy_peak_window?.start === 7.5 && hookEnergyVisualJson.energy_peak_window?.end === 13.5 && hookEnergyVisualJson.energy_peak_window?.mean_energy === 0.999 && hookEnergyVisualJson.energy_peak_window?.retried === true && hookEnergyVisualJson.energy_peak_window?.first_peak_start === 0 && hookEnergyVisualJson.energy_peak_offset_seconds === -4, "hook --energy-peak on a speech clip retries a 0s peak to [7.5,13.5] (-4s from the winner [11.5,21.5])", JSON.stringify({ hook: hookEnergyVisualJson.hook, peak: hookEnergyVisualJson.energy_peak_window, offset: hookEnergyVisualJson.energy_peak_offset_seconds }));
+const hookEnergyOffRes = await client.callTool({
+  name: "hook",
+  arguments: { input: path.join(root, "test/hook-source.mp4"), duration: 10, step: 0.5, top: 1 },
+});
+const hookEnergyOffJson = JSON.parse(hookEnergyOffRes.content[0].text);
+checkOk(hookEnergyOffJson.energy_peak_window === null && hookEnergyOffJson.energy_peak_offset_seconds === null, "hook without energy_peak reports no peak window (null, opt-in)", JSON.stringify({ peak: hookEnergyOffJson.energy_peak_window, offset: hookEnergyOffJson.energy_peak_offset_seconds }));
+const hookEnergyCli = await runCliJson(["hook", path.join(root, "test/hook-snap-source.mp4"), "--duration", "10", "--step", "0.5", "--top", "1", "--energy-peak"]);
+checkOk(hookEnergyCli.energy_peak_window?.start === 15 && hookEnergyCli.energy_peak_window?.end === 21 && hookEnergyCli.energy_peak_offset_seconds === 0.5 && hookEnergyCli.hook.start === 14.5, "CLI hook --energy-peak reports the same peak [15,21] as the MCP tool", JSON.stringify({ peak: hookEnergyCli.energy_peak_window, offset: hookEnergyCli.energy_peak_offset_seconds }));
+let hookEnergyBad = null;
+try { await findHook({ input: path.join(root, "test/hook-source.mp4"), energyPeak: "yes" }); } catch (e) { hookEnergyBad = e.message; }
+checkOk(/energy_peak must be true or false/.test(hookEnergyBad ?? ""), "findHook: a non-boolean energy_peak is refused", (hookEnergyBad ?? "").slice(0, 120));
+
 
 // hook in batch + manifest (lượt 69): hook is the first probe-only
 // operation — no file is written, so a batch row's output is null
@@ -5022,6 +5114,22 @@ const hookBatchSnapNoWordsRes = await client.callTool({
 });
 const hookBatchSnapNoWordsJson = JSON.parse(hookBatchSnapNoWordsRes.content[0].text);
 checkOk(hookBatchSnapNoWordsJson.failed === 3 && hookBatchSnapNoWordsJson.results.every((r) => r.status === "error" && /words file not found/i.test(r.error ?? "")), "batch hook snap_sentences with no words file fails each row (no silent un-snapped result)", JSON.stringify(hookBatchSnapNoWordsJson.results.map((r) => r.error)));
+// batch hook + highlights energy peak (lượt 193): probe-only like
+// the snap batch — the peak comes back in the row's result, and
+// the cache key covers the new arg, so the snap run above does not
+// serve this row.
+const hookBatchEnergyRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "hook", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-hook-snap-in"), output_dir: path.join(root, "outputs/mcp-batch-hook-energy-out"), args: { duration: 10, energy_peak: true }, jobs: 1 },
+});
+const hookBatchEnergyJson = JSON.parse(hookBatchEnergyRes.content[0].text);
+checkOk(hookBatchEnergyJson.succeeded === 1 && hookBatchEnergyJson.failed === 0 && hookBatchEnergyJson.results[0].result.energy_peak_window?.start === 15 && hookBatchEnergyJson.results[0].result.energy_peak_window?.end === 21 && hookBatchEnergyJson.results[0].result.hook.start === 14.5, "batch hook energy_peak reports [15,21] in the row result without re-ranking [14.5,24.5]", JSON.stringify(hookBatchEnergyJson.results[0].result?.energy_peak_window));
+const hlBatchEnergyRes = await client.callTool({
+  name: "batch",
+  arguments: { operation: "highlights", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-hook-snap-in"), output_dir: path.join(root, "outputs/mcp-batch-hl-energy-out"), args: { energy_peak: true }, jobs: 1 },
+});
+const hlBatchEnergyJson = JSON.parse(hlBatchEnergyRes.content[0].text);
+checkOk(hlBatchEnergyJson.succeeded === 1 && hlBatchEnergyJson.failed === 0 && hlBatchEnergyJson.results[0].result.energy_peak_window?.start === 15 && hlBatchEnergyJson.results[0].result.energy_peak_window?.end === 21 && hlBatchEnergyJson.results[0].result.highlights[0]?.contains_energy_peak === true, "batch highlights energy_peak reports [15,21] and flags the span that contains it", JSON.stringify(hlBatchEnergyJson.results[0].result?.energy_peak_window));
 await rm(path.join(root, "outputs/mcp-manifest-hook.mp4"), { force: true });
 await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
 const hookManifestRes = await client.callTool({
@@ -5123,6 +5231,24 @@ const hlManifestSentenceRes = await client.callTool({
 });
 const hlManifestSentenceJson = JSON.parse(hlManifestSentenceRes.content[0].text);
 checkOk(hlManifestSentenceJson.steps_run === 1 && hlManifestSentenceJson.steps[0].status === "ok" && hlManifestSentenceJson.steps[0].result.highlights[0].end === 7 && hlManifestSentenceJson.steps[0].result.highlights[1].start === 2.5 && hlManifestSentenceJson.steps[0].result.highlights[1].end === 12.5 && hlManifestSentenceJson.steps[0].result.highlights[2].start === 7.5, "manifest highlights step with words_file + snap_sentences widens the spans to whole sentences", JSON.stringify(hlManifestSentenceJson.steps[0].result?.highlights?.map((h) => [h.start, h.end])));
+// manifest hook + highlights energy peak (lượt 193): the steps
+// pass energy_peak through to findHook / findHighlights.
+const hookManifestEnergyPath = path.join(root, "outputs", "manifest-hook-energy.json");
+await writeFile(hookManifestEnergyPath, JSON.stringify({ version: 1, input: path.join(root, "test/hook-snap-source.mp4"), output: path.join(root, "outputs/mcp-manifest-hook-energy.mp4"), steps: [{ tool: "hook", args: { duration: 10, energy_peak: true } }] }), "utf8");
+const hookManifestEnergyRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: hookManifestEnergyPath },
+});
+const hookManifestEnergyJson = JSON.parse(hookManifestEnergyRes.content[0].text);
+checkOk(hookManifestEnergyJson.steps_run === 1 && hookManifestEnergyJson.steps[0].status === "ok" && hookManifestEnergyJson.steps[0].result.energy_peak_window?.start === 15 && hookManifestEnergyJson.steps[0].result.energy_peak_window?.end === 21 && hookManifestEnergyJson.steps[0].result.hook.start === 14.5, "manifest hook step with energy_peak reports [15,21] in the step result", JSON.stringify(hookManifestEnergyJson.steps[0].result?.energy_peak_window));
+const hlManifestEnergyPath = path.join(root, "outputs", "manifest-hl-energy.json");
+await writeFile(hlManifestEnergyPath, JSON.stringify({ version: 1, input: path.join(root, "test/hook-snap-source.mp4"), output: path.join(root, "outputs/mcp-manifest-hl-energy.mp4"), steps: [{ tool: "highlights", args: { energy_peak: true } }] }), "utf8");
+const hlManifestEnergyRes = await client.callTool({
+  name: "manifest",
+  arguments: { manifest_path: hlManifestEnergyPath },
+});
+const hlManifestEnergyJson = JSON.parse(hlManifestEnergyRes.content[0].text);
+checkOk(hlManifestEnergyJson.steps_run === 1 && hlManifestEnergyJson.steps[0].status === "ok" && hlManifestEnergyJson.steps[0].result.energy_peak_window?.start === 15 && hlManifestEnergyJson.steps[0].result.energy_peak_window?.end === 21 && hlManifestEnergyJson.steps[0].result.highlights[0]?.contains_energy_peak === true, "manifest highlights step with energy_peak reports [15,21] and flags the span that contains it", JSON.stringify(hlManifestEnergyJson.steps[0].result?.energy_peak_window));
 
 // hook clip history in batch + manifest: the same history file is
 // shared across files, the cache key hashes its bytes (so a recorded
