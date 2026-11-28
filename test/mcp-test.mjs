@@ -15,7 +15,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
-import { acquireEditLease, acquireDirLock, analyzeHookMove, analyzeSeamSamples, applyContentBaseline, applyHook, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, clearProbeCache, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, ffmpegThreads, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findHighlights, findHook, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookMotionCalibration, hookOverlapSeconds, hookSliceForTrack, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, isCheckpointLockStale, isPidAlive, listSceneTemplates, localTempoCurve, meanAbsDiffGray, orderHookRanges, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStabTrfMotion, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, peakEnergyWindow, pickFarthestThumbnails, planCleanVoice, planSmartCuts, probeEncoderCached, probeEncoderDetail, probeAudioEncoderDetail, checkOutputDirWritable, checkCaptionFont, probeFailureReason, encoderProbeCacheStats, clearEncoderProbeCache, projectSummary, proposeEdit, probe, probeCacheStats, readCheckpointLockOwner, releaseEditLease, renewEditLease, resolveQcPolicy, resolveSilenceProfile, listSilenceProfiles, restoreEditSessionCheckpoint, resumeEditSession, robustZMotionScore, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, sentenceBoundaries, sharpnessVerdict, snapHookToWords, snapKeepSegmentsToPauses, snapRangeToSentences, smoothKeepSegments, spectralFluxOnset, stabilizeVerdict, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
+import { acquireEditLease, acquireDirLock, analyzeHookMove, analyzeSeamSamples, applyContentBaseline, applyHook, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, clearProbeCache, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, ffmpegThreads, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findHighlights, findHook, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookMotionCalibration, hookOverlapSeconds, hookSliceForTrack, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, isCheckpointLockStale, isPidAlive, listSceneTemplates, localTempoCurve, meanAbsDiffGray, orderHookRanges, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStabTrfMotion, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, peakEnergyWindow, pickFarthestThumbnails, planCleanVoice, planSmartCuts, probeEncoderCached, probeEncoderDetail, probeAudioEncoderDetail, checkOutputDirWritable, checkCaptionFont, probeFailureReason, encoderProbeCacheStats, clearEncoderProbeCache, projectSummary, proposeEdit, probe, probeCacheStats, quietestWindow, windowScoreAt, readCheckpointLockOwner, releaseEditLease, renewEditLease, resolveQcPolicy, resolveSilenceProfile, listSilenceProfiles, restoreEditSessionCheckpoint, resumeEditSession, robustZMotionScore, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, sentenceBoundaries, sharpnessVerdict, snapHookToWords, snapKeepSegmentsToPauses, snapRangeToSentences, smoothKeepSegments, spectralFluxOnset, stabilizeVerdict, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
@@ -9587,13 +9587,16 @@ checkOk(snapPause !== "none" && snapPause !== "ambiguous" && snapPause.start ===
 checkOk(pauseAt(snapLevels, 0.14, -Infinity) === "none", "pauseAt(0.14, no word before) is 'none' — no pause in reach", String(pauseAt(snapLevels, 0.14, -Infinity)));
 const ambLevels = levelsFromSpans([[0, 1, -20], [1, 1.5, -120], [1.5, 2, -20], [2, 2.6, -120], [2.6, 4, -20]], 4);
 checkOk(pauseAt(ambLevels, 2.02, 0.2) === "ambiguous", "pauseAt with two >= 0.12s pauses in reach is 'ambiguous', not a guess", String(pauseAt(ambLevels, 2.02, 0.2)));
-checkOk(endInPause({ start: 2, end: 4 }) === 2.1 && startInPause({ start: 2, end: 4 }) === 3.9 && endInPause({ start: 6, end: 6.1 }) === 6.05 && startInPause({ start: 6, end: 6.1 }) === 6.05, "endInPause/startInPause keep 0.1s room tone, capped at half a short pause", `${endInPause({ start: 2, end: 4 })}/${startInPause({ start: 2, end: 4 })}`);
+checkOk(endInPause({ start: 2, end: 4 }) === 2.975 && startInPause({ start: 2, end: 4 }) === 3.025 && endInPause({ start: 6, end: 6.1 }) === 6.05 && startInPause({ start: 6, end: 6.1 }) === 6.05, "endInPause/startInPause cut a long pause at its middle (0.05s sliver left: 2.975/3.025), a short pause at half (6.05)", `${endInPause({ start: 2, end: 4 })}/${startInPause({ start: 2, end: 4 })}`);
 const snapWords = [{ start: 0.2, end: 1.9, word: "hello" }, { start: 4.1, end: 5.9, word: "um" }, { start: 7.1, end: 8.9, word: "world" }];
 const snapRes = snapKeepSegmentsToPauses(snapWords, [{ start: 0.14, end: 2.02, duration: 1.88 }, { start: 7.04, end: 9, duration: 1.96 }], [[0], [2]], snapLevels, { minKeep: 0.2 });
-checkOk(JSON.stringify(snapRes.keep) === JSON.stringify([{ start: 0.14, end: 2.1, duration: 1.96 }, { start: 6.9, end: 9, duration: 2.1 }]) && snapRes.snap[0].end.mode === "pause" && snapRes.snap[0].end.to === 2.1 && snapRes.snap[1].start.mode === "pause" && snapRes.snap[1].start.to === 6.9 && snapRes.snap[0].start.mode === "kept" && snapRes.snap[1].end.mode === "kept", "snapKeepSegmentsToPauses moves both cut edges into the real pauses: [0.14,2.1]+[6.9,9.0], file-edge ends kept", JSON.stringify(snapRes));
+checkOk(JSON.stringify(snapRes.keep) === JSON.stringify([{ start: 0.14, end: 2.975, duration: 2.835 }, { start: 6.525, end: 9, duration: 2.475 }]) && snapRes.snap[0].end.mode === "pause" && snapRes.snap[0].end.to === 2.975 && snapRes.snap[1].start.mode === "pause" && snapRes.snap[1].start.to === 6.525 && snapRes.snap[0].start.mode === "kept" && snapRes.snap[1].end.mode === "kept", "snapKeepSegmentsToPauses cuts both edges at the pause middles: [0.14,2.975]+[6.525,9.0], file-edge ends kept", JSON.stringify(snapRes));
 const lateLevels = levelsFromSpans([[0, 1.5, -20], [1.5, 4, -120], [4, 9, -20]], 9);
 const lateRes = snapKeepSegmentsToPauses(snapWords, [{ start: 0.14, end: 2.02, duration: 1.88 }], [[0]], lateLevels, { minKeep: 0.2 });
-checkOk(lateRes.keep[0].end === 2.02 && lateRes.snap[0].end.mode === "kept" && /cross/.test(lateRes.snap[0].end.reason ?? ""), "snap refuses an edge whose pause starts before the kept word ends (whisper ran late) — keeps the padded value", JSON.stringify(lateRes.snap[0].end));
+checkOk(lateRes.keep[0].end === 2.725 && lateRes.snap[0].end.mode === "pause" && lateRes.snap[0].end.to === 2.725, "mid-pause rescues an edge the 0.1s rule refused: the [1.5,4) pause starts before the word ends, its middle (2.725) is safely past it", JSON.stringify(lateRes.snap[0].end));
+const shortLateLevels = levelsFromSpans([[0, 1.5, -20], [1.5, 1.7, -120], [1.7, 9, -20]], 9);
+const shortLateRes = snapKeepSegmentsToPauses(snapWords, [{ start: 0.14, end: 2.02, duration: 1.88 }], [[0]], shortLateLevels, { minKeep: 0.2 });
+checkOk(shortLateRes.keep[0].end === 2.02 && shortLateRes.snap[0].end.mode === "kept" && /cross/.test(shortLateRes.snap[0].end.reason ?? ""), "snap still refuses an edge whose pause midpoint falls inside the kept word (short [1.5,1.7) pause, midpoint 1.6 < word end 1.9) — keeps the padded value", JSON.stringify(shortLateRes.snap[0].end));
 const tightWords = [{ start: 0.2, end: 1, word: "a" }, { start: 1.05, end: 1.15, word: "um" }, { start: 1.2, end: 2.2, word: "b" }];
 const tightLevels = levelsFromSpans([[0, 1, -20], [1, 1.2, -120], [1.2, 3, -20]], 3);
 const tightRes = snapKeepSegmentsToPauses(tightWords, [{ start: 0.14, end: 1.05, duration: 0.91 }, { start: 1.15, end: 2.32, duration: 1.17 }], [[0], [2]], tightLevels, { minKeep: 0.2 });
@@ -9607,20 +9610,31 @@ const segIdxWords = [{ start: 0, end: 0.4, word: "hello" }, { start: 1.3, end: 1
 const segIdxKeep = [{ start: 0, end: 0.45, duration: 0.45 }, { start: 1.75, end: 2.65, duration: 0.9 }, { start: 3.7, end: 5.25, duration: 1.55 }];
 checkOk(JSON.stringify(segmentWordIndices(segIdxWords, segIdxKeep)) === JSON.stringify([[0], [2, 3], []]) && JSON.stringify(segmentWordIndices(segIdxWords, [{ start: 0, end: 10, duration: 10 }])) === JSON.stringify([[0, 1, 2, 3]]), "segmentWordIndices: [0]/[world,so]/[] (um ends exactly on an edge, so ends exactly on the next — no overlap, no count)", JSON.stringify(segmentWordIndices(segIdxWords, segIdxKeep)));
 const emptySegRes = snapKeepSegmentsToPauses(snapWords, [{ start: 0, end: 0.5, duration: 0.5 }, { start: 7.05, end: 9, duration: 1.95 }], [[], [2]], snapLevels, { minKeep: 0.2 });
-checkOk(JSON.stringify(emptySegRes.keep) === JSON.stringify([{ start: 0, end: 0.5, duration: 0.5 }, { start: 6.9, end: 9, duration: 2.1 }]) && emptySegRes.snap[0].start.mode === "kept" && emptySegRes.snap[0].start.reason === "no kept words in segment" && emptySegRes.snap[0].end.reason === "no kept words in segment" && emptySegRes.snap[1].start.mode === "pause", "snap with an empty-indices segment keeps it untouched (reason named) and still snaps the worded one", JSON.stringify(emptySegRes.snap[0]));
+checkOk(JSON.stringify(emptySegRes.keep) === JSON.stringify([{ start: 0, end: 0.5, duration: 0.5 }, { start: 6.525, end: 9, duration: 2.475 }]) && emptySegRes.snap[0].start.mode === "kept" && emptySegRes.snap[0].start.reason === "no kept words in segment" && emptySegRes.snap[0].end.reason === "no kept words in segment" && emptySegRes.snap[1].start.mode === "pause", "snap with an empty-indices segment keeps it untouched (reason named) and still snaps the worded one", JSON.stringify(emptySegRes.snap[0]));
+// quietestWindow (auto-editor quietestCut fallback): neighbour-scored,
+// latest wins a tie, null when the range holds no full window.
+const qwDip = levelsFromSpans([[1.55, 1.58, -120], [0, 3, -20], [3, 4, -120], [4, 6, -20]], 6);
+const qwDipRes = quietestWindow(qwDip, 1.0, 4.0);
+checkOk(qwDipRes !== null && qwDipRes.center === 3.85 && qwDipRes.score_db === -120, "quietestWindow: a 30ms dip between loud windows loses to the wide quiet stretch [3,4) (centre 3.85, -120 dB)", JSON.stringify(qwDipRes));
+const qwFlat = levelsFromSpans([[0, 1, -20]], 1);
+checkOk(JSON.stringify(quietestWindow(qwFlat, 0, 1)) === JSON.stringify({ start: 0.9, end: 1, center: 0.95, score_db: -20 }), "quietestWindow: on a tie the latest window wins (centre 0.95)", JSON.stringify(quietestWindow(qwFlat, 0, 1)));
+checkOk(quietestWindow(qwFlat, 0, 0.05) === null, "quietestWindow returns null when the range holds no full 0.1s window", String(quietestWindow(qwFlat, 0, 0.05)));
+const qwEdge = levelsFromSpans([[0, 0.5, -120], [0.5, 1, -20]], 1);
+checkOk(JSON.stringify(quietestWindow(qwEdge, 0, 1)) === JSON.stringify({ start: 0.3, end: 0.4, center: 0.35, score_db: -120 }), "quietestWindow: a window at the array start is scored with its neighbours clamped (latest fully-quiet window 0.35)", JSON.stringify(quietestWindow(qwEdge, 0, 1)));
+checkOk(windowScoreAt(snapLevels, 1.95) === -20 && windowScoreAt(snapLevels, 3) === -120, "windowScoreAt: the window at 1.95 scores -20 (tone next door), at 3.0 scores -120 (deep in the pause)", `${windowScoreAt(snapLevels, 1.95)}/${windowScoreAt(snapLevels, 3)}`);
 // Measured e2e: the same cut through MCP, CLI, batch and manifest.
 const cwSnapWords = path.join(root, "test/cut-words-pause.json");
 const cwSnapDryRes = await client.callTool({ name: "cut_words", arguments: { input: path.join(root, "test/silence-source.mp4"), words_file: cwSnapWords, remove: "um", snap_to_pause: true, dry_run: true } });
 const cwSnapDryJson = JSON.parse(cwSnapDryRes.content[0].text);
-checkOk(cwSnapDryRes.isError !== true && cwSnapDryJson.snap_to_pause === true && JSON.stringify(cwSnapDryJson.keep_segments) === JSON.stringify([{ start: 0.14, end: 2.1, duration: 1.96 }, { start: 6.9, end: 9, duration: 2.1 }]) && cwSnapDryJson.snap[0].end.mode === "pause" && cwSnapDryJson.snap[1].start.mode === "pause" && near(cwSnapDryJson.removed_seconds, 4.94, 0.01), "cut_words --snap-to-pause dry-run plans [0.14,2.1]+[6.9,9.0] (4.94s removed)", JSON.stringify(cwSnapDryJson.keep_segments));
+checkOk(cwSnapDryRes.isError !== true && cwSnapDryJson.snap_to_pause === true && JSON.stringify(cwSnapDryJson.keep_segments) === JSON.stringify([{ start: 0.14, end: 2.975, duration: 2.835 }, { start: 6.525, end: 9, duration: 2.475 }]) && cwSnapDryJson.snap[0].end.mode === "pause" && cwSnapDryJson.snap[1].start.mode === "pause" && near(cwSnapDryJson.removed_seconds, 3.69, 0.01), "cut_words --snap-to-pause dry-run plans [0.14,2.975]+[6.525,9.0] (3.69s removed — mid-pause edges keep more room tone)", JSON.stringify(cwSnapDryJson.keep_segments));
 const cwSnapRes = await client.callTool({ name: "cut_words", arguments: { input: path.join(root, "test/silence-source.mp4"), output: path.join(root, "outputs/mcp-cutwords-snap.mp4"), words_file: cwSnapWords, remove: "um", snap_to_pause: true } });
 const cwSnapJson = JSON.parse(cwSnapRes.content[0].text);
-checkOk(cwSnapRes.isError !== true && near(cwSnapJson.duration_after, 4.06, 0.05), "cut_words --snap-to-pause cuts to 4.06s on disk", JSON.stringify({ after: cwSnapJson.duration_after }));
+checkOk(cwSnapRes.isError !== true && near(cwSnapJson.duration_after, 5.31, 0.05), "cut_words --snap-to-pause cuts to 5.31s on disk", JSON.stringify({ after: cwSnapJson.duration_after }));
 const cwNoSnapRes = await client.callTool({ name: "cut_words", arguments: { input: path.join(root, "test/silence-source.mp4"), output: path.join(root, "outputs/mcp-cutwords-nosnap.mp4"), words_file: cwSnapWords, remove: "um" } });
 const cwNoSnapJson = JSON.parse(cwNoSnapRes.content[0].text);
 checkOk(cwNoSnapRes.isError !== true && near(cwNoSnapJson.duration_after, 3.84, 0.05) && cwNoSnapJson.snap_to_pause === false && cwNoSnapJson.snap === null, "cut_words without snap cuts the same words to 3.84s (fixed pads) and reports snap null", JSON.stringify({ after: cwNoSnapJson.duration_after }));
 const cwSnapCli = await runCli(["cut-words", path.join(root, "test/silence-source.mp4"), "--words-file", cwSnapWords, "--remove", "um", "--snap-to-pause", "--dry-run"]);
-checkOk(cwSnapCli.code === 0 && /"snap_to_pause": true/.test(cwSnapCli.out) && /"end": 2.1/.test(cwSnapCli.out), "CLI cut-words --snap-to-pause --dry-run reports the snapped plan", cwSnapCli.out.slice(0, 200));
+checkOk(cwSnapCli.code === 0 && /"snap_to_pause": true/.test(cwSnapCli.out) && /"end": 2.975/.test(cwSnapCli.out), "CLI cut-words --snap-to-pause --dry-run reports the snapped plan", cwSnapCli.out.slice(0, 200));
 await rm(path.join(root, "outputs/mcp-batch-cw-snap-in"), { recursive: true, force: true });
 await rm(path.join(root, "outputs/mcp-batch-cw-snap-out"), { recursive: true, force: true });
 await mkdir(path.join(root, "outputs/mcp-batch-cw-snap-in"), { recursive: true });
@@ -9628,14 +9642,27 @@ await copyFile(path.join(root, "test/silence-source.mp4"), path.join(root, "outp
 await copyFile(cwSnapWords, path.join(root, "outputs/mcp-batch-cw-snap-in/silence-source.words.json"));
 const cwSnapBatchRes = await client.callTool({ name: "batch", arguments: { operation: "cut_words", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-cw-snap-in"), output_dir: path.join(root, "outputs/mcp-batch-cw-snap-out"), args: { remove: "um", snap_to_pause: true }, jobs: 1 } });
 const cwSnapBatchJson = JSON.parse(cwSnapBatchRes.content[0].text);
-checkOk(cwSnapBatchJson.succeeded === 1 && cwSnapBatchJson.failed === 0 && near(cwSnapBatchJson.results[0].result?.duration_after, 4.06, 0.05), "batch cut_words snap_to_pause cuts to 4.06s", JSON.stringify(cwSnapBatchJson.results.map((r) => r.result?.duration_after)));
+checkOk(cwSnapBatchJson.succeeded === 1 && cwSnapBatchJson.failed === 0 && near(cwSnapBatchJson.results[0].result?.duration_after, 5.31, 0.05), "batch cut_words snap_to_pause cuts to 5.31s", JSON.stringify(cwSnapBatchJson.results.map((r) => r.result?.duration_after)));
 const cwSnapManifestPath = path.join(root, "outputs/mcp-manifest-cw-snap.json");
 await writeFile(cwSnapManifestPath, JSON.stringify({ version: 1, input: path.join(root, "test/silence-source.mp4"), output: path.join(root, "outputs/mcp-manifest-cw-snap.mp4"), steps: [{ tool: "cut_words", args: { words_file: cwSnapWords, remove: "um", snap_to_pause: true } }] }), "utf8");
 await rm(path.join(root, "outputs/mcp-manifest-cw-snap.mp4"), { force: true });
 await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
 const cwSnapManifestRes = await client.callTool({ name: "manifest", arguments: { manifest_path: cwSnapManifestPath } });
 const cwSnapManifestJson = JSON.parse(cwSnapManifestRes.content[0].text);
-checkOk(cwSnapManifestJson.steps_run === 1 && cwSnapManifestJson.steps.every((s) => s.status === "ok") && near(cwSnapManifestJson.final.duration_seconds, 4.06, 0.05), "manifest cut_words step with snap_to_pause runs and final is 4.06s", JSON.stringify(cwSnapManifestJson.final?.duration_seconds));
+checkOk(cwSnapManifestJson.steps_run === 1 && cwSnapManifestJson.steps.every((s) => s.status === "ok") && near(cwSnapManifestJson.final.duration_seconds, 5.31, 0.05), "manifest cut_words step with snap_to_pause runs and final is 5.31s", JSON.stringify(cwSnapManifestJson.final?.duration_seconds));
+// --snap-to-pause fallback (lượt 200, auto-editor quietestCut):
+// test/snap-quiet-fallback.mp4 is 9s of continuous tone with NO true
+// pause — only a 1s stretch [2.5,3.5) 10 dB quieter (-31.4 vs -21.1
+// dB RMS, findPauses finds nothing). The end edge has no pause in
+// reach, so it falls back to the quietest window: 2.02 -> 2.87
+// (window [2.82,2.92], -31.45 dB). The start edge finds no window
+// 3 dB quieter than its padded edge and stays put.
+const cwFbDryRes = await client.callTool({ name: "cut_words", arguments: { input: path.join(root, "test/snap-quiet-fallback.mp4"), words_file: cwSnapWords, remove: "um", snap_to_pause: true, dry_run: true } });
+const cwFbDryJson = JSON.parse(cwFbDryRes.content[0].text);
+checkOk(cwFbDryRes.isError !== true && JSON.stringify(cwFbDryJson.keep_segments) === JSON.stringify([{ start: 0.14, end: 2.87, duration: 2.73 }, { start: 7.04, end: 9, duration: 1.96 }]) && cwFbDryJson.snap[0].end.mode === "quietest" && cwFbDryJson.snap[0].end.to === 2.87 && cwFbDryJson.snap[0].end.window_start === 2.82 && cwFbDryJson.snap[0].end.window_end === 2.92 && near(cwFbDryJson.snap[0].end.score_db, -31.45, 0.5) && cwFbDryJson.snap[1].start.mode === "kept" && /3 dB quieter/.test(cwFbDryJson.snap[1].start.reason ?? "") && near(cwFbDryJson.removed_seconds, 4.31, 0.01), "cut_words --snap-to-pause with no true pause falls back to the quietest window [0.14,2.87]+[7.04,9] (mode quietest, -31.45 dB)", JSON.stringify(cwFbDryJson.keep_segments));
+const cwFbRes = await client.callTool({ name: "cut_words", arguments: { input: path.join(root, "test/snap-quiet-fallback.mp4"), output: path.join(root, "outputs/mcp-cutwords-quietest.mp4"), words_file: cwSnapWords, remove: "um", snap_to_pause: true } });
+const cwFbJson = JSON.parse(cwFbRes.content[0].text);
+checkOk(cwFbRes.isError !== true && near(cwFbJson.duration_after, 4.69, 0.05), "cut_words --snap-to-pause quietest fallback cuts to 4.69s on disk", JSON.stringify({ after: cwFbJson.duration_after }));
 // Batch + manifest pass-through: trim with edge_buffer runs through
 // the batch table and the manifest step table like any other arg.
 await rm(path.join(root, "outputs/mcp-batch-trim-edge-in"), { recursive: true, force: true });
@@ -9697,19 +9724,20 @@ checkOk(rtCliDetect.code === 0 && /"detect_only": true/.test(rtCliDetect.out) &&
 // twice, junk "um") over silence-source.mp4 (tone [0,2),[4,6),
 // [7,9)): keep=last keeps the second take + "done" in ONE run
 // [4.14,7.72] (3.58s); snapping moves the start into the real
-// pause [2,4) → [3.9,7.72] (3.82s), 0.1s of room tone before "we".
+// pause [2,4) → [3.025,7.72] (4.695s), the start edge at the pause
+// middle (3.025) instead of 0.1s before its end.
 const rtSnapWords = path.join(root, "test/retakes-snap-words.json");
 const rtSnapDetectRes = await client.callTool({ name: "remove_retakes", arguments: { input: path.join(root, "test/silence-source.mp4"), words_file: rtSnapWords, snap_to_pause: true, detect_only: true } });
 const rtSnapDetectJson = JSON.parse(rtSnapDetectRes.content[0].text);
-checkOk(rtSnapDetectRes.isError !== true && rtSnapDetectJson.snap_to_pause === true && rtSnapDetectJson.clusters.length === 1 && rtSnapDetectJson.removed_count === 4 && near(rtSnapDetectJson.removed_seconds, 5.18, 0.01) && JSON.stringify(rtSnapDetectJson.keep_segments) === JSON.stringify([{ start: 3.9, end: 7.72, duration: 3.82 }]) && rtSnapDetectJson.snap[0].start.mode === "pause" && rtSnapDetectJson.snap[0].start.to === 3.9 && rtSnapDetectJson.snap[0].end.mode === "kept", "remove_retakes --snap-to-pause detect-only plans [3.9,7.72] (5.18s removed), start snapped into the [2,4) pause", JSON.stringify(rtSnapDetectJson.keep_segments));
+checkOk(rtSnapDetectRes.isError !== true && rtSnapDetectJson.snap_to_pause === true && rtSnapDetectJson.clusters.length === 1 && rtSnapDetectJson.removed_count === 4 && near(rtSnapDetectJson.removed_seconds, 4.31, 0.01) && JSON.stringify(rtSnapDetectJson.keep_segments) === JSON.stringify([{ start: 3.025, end: 7.72, duration: 4.695 }]) && rtSnapDetectJson.snap[0].start.mode === "pause" && rtSnapDetectJson.snap[0].start.to === 3.025 && rtSnapDetectJson.snap[0].end.mode === "kept", "remove_retakes --snap-to-pause detect-only plans [3.025,7.72] (4.31s removed), start snapped to the [2,4) pause middle", JSON.stringify(rtSnapDetectJson.keep_segments));
 const rtSnapNoSnapRes = await client.callTool({ name: "remove_retakes", arguments: { input: path.join(root, "test/silence-source.mp4"), words_file: rtSnapWords, detect_only: true } });
 const rtSnapNoSnapJson = JSON.parse(rtSnapNoSnapRes.content[0].text);
 checkOk(rtSnapNoSnapRes.isError !== true && rtSnapNoSnapJson.snap_to_pause === false && rtSnapNoSnapJson.snap === null && near(rtSnapNoSnapJson.removed_seconds, 5.42, 0.01) && JSON.stringify(rtSnapNoSnapJson.keep_segments) === JSON.stringify([{ start: 4.14, end: 7.72, duration: 3.58 }]), "remove_retakes without snap plans [4.14,7.72] (5.42s removed) and reports snap null", JSON.stringify(rtSnapNoSnapJson.keep_segments));
 const rtSnapRes = await client.callTool({ name: "remove_retakes", arguments: { input: path.join(root, "test/silence-source.mp4"), output: path.join(root, "outputs/mcp-retakes-snap.mp4"), words_file: rtSnapWords, snap_to_pause: true } });
 const rtSnapJson = JSON.parse(rtSnapRes.content[0].text);
-checkOk(rtSnapRes.isError !== true && near(rtSnapJson.duration_after, 3.82, 0.05) && rtSnapJson.snap[0].start.mode === "pause" && JSON.stringify(rtSnapJson.keep_segments) === JSON.stringify([{ start: 3.9, end: 7.72, duration: 3.82 }]), "remove_retakes --snap-to-pause cuts to 3.82s on disk", JSON.stringify({ after: rtSnapJson.duration_after }));
+checkOk(rtSnapRes.isError !== true && near(rtSnapJson.duration_after, 4.7, 0.05) && rtSnapJson.snap[0].start.mode === "pause" && JSON.stringify(rtSnapJson.keep_segments) === JSON.stringify([{ start: 3.025, end: 7.72, duration: 4.695 }]), "remove_retakes --snap-to-pause cuts to 4.7s on disk", JSON.stringify({ after: rtSnapJson.duration_after }));
 const rtSnapCli = await runCli(["remove-retakes", path.join(root, "test/silence-source.mp4"), "--words-file", rtSnapWords, "--snap-to-pause", "--detect-only"]);
-checkOk(rtSnapCli.code === 0 && /"snap_to_pause": true/.test(rtSnapCli.out) && /"start": 3.9/.test(rtSnapCli.out), "CLI remove-retakes --snap-to-pause --detect-only reports the snapped plan", rtSnapCli.out.slice(0, 200));
+checkOk(rtSnapCli.code === 0 && /"snap_to_pause": true/.test(rtSnapCli.out) && /"start": 3.025/.test(rtSnapCli.out), "CLI remove-retakes --snap-to-pause --detect-only reports the snapped plan", rtSnapCli.out.slice(0, 200));
 
 // smart_cut: tighten a take on the transcript — fixture
 // test/smartcut-words.json is 10 words (0-7.5s): a 0.9s gap, a
@@ -9750,34 +9778,40 @@ const scCliNoGate = await runCli(["smart-cut", path.join(root, "test/source.mp4"
 checkOk(scCliNoGate.code === 0 && /"removed_count": 5/.test(scCliNoGate.out), "CLI smart-cut --no-contextual-gate reports 5 removals", scCliNoGate.out.slice(0, 200));
 const scCliSeg = await runCli(["smart-cut", path.join(root, "test/source.mp4"), "--words-file", path.join(root, "test/smartcut-words.json"), "--detect-only", "--min-segment", "2"]);
 checkOk(scCliSeg.code === 0 && /"removed_count": 1/.test(scCliSeg.out) && /"min_segment_merges": 3/.test(scCliSeg.out), "CLI smart-cut --min-segment 2 collapses the fixture to 1 removal (3 merges)", scCliSeg.out.slice(0, 200));
-// smart_cut --snap-to-pause (lượt 167, follow-up lượt 159): the
-// same snap machinery cut_words uses, on the planner's own keep.
+// smart_cut --snap-to-pause (lượt 167, follow-up lượt 159; lượt
+// 200: mid-pause edges + quietest-window fallback): the same snap
+// machinery cut_words uses, on the planner's own keep.
 // Fixture: silence-source.mp4 (tone [0,2),[4,6),[7,9)) with
 // cut-words-pause.json (hello[0.2,1.9] um[4.1,5.9] world[7.1,8.9]):
 // the plan cuts 2 gaps + the long um and keeps [0,1.95]+[7.05,9]
-// (3.9s); snapping moves the second start into the real pause
-// [6,7) → [0,1.95]+[6.9,9] (4.05s), 0.1s of room tone before
-// "world" instead of starting 0.05s before it in the tone.
+// (3.9s); snapping moves the second start to the [6,7) pause middle
+// (6.525) and the first end to the quietest window near it (2.8, in
+// the [2,4) pause pauseAt's narrow window missed) → [0,2.8]+
+// [6.525,9] (5.275s). Longer than the old 4.05s on purpose: snap
+// trades tightness for seams that open AND close in silence.
 const scSnapPlan = planSmartCuts([{ start: 0.2, end: 1.9, word: "hello" }, { start: 4.1, end: 5.9, word: "um" }, { start: 7.1, end: 8.9, word: "world" }], 9);
 const scSnapPure = snapKeepSegmentsToPauses([{ start: 0.2, end: 1.9, word: "hello" }, { start: 4.1, end: 5.9, word: "um" }, { start: 7.1, end: 8.9, word: "world" }], scSnapPlan.keep, segmentWordIndices([{ start: 0.2, end: 1.9, word: "hello" }, { start: 4.1, end: 5.9, word: "um" }, { start: 7.1, end: 8.9, word: "world" }], scSnapPlan.keep), snapLevels, { minKeep: 0.2 });
-checkOk(scSnapPlan.removed_count === 3 && JSON.stringify(scSnapPlan.keep) === JSON.stringify([{ start: 0, end: 1.95, duration: 1.95 }, { start: 7.05, end: 9, duration: 1.95 }]) && JSON.stringify(scSnapPure.keep) === JSON.stringify([{ start: 0, end: 1.95, duration: 1.95 }, { start: 6.9, end: 9, duration: 2.1 }]) && scSnapPure.snap[1].start.mode === "pause" && scSnapPure.snap[1].start.to === 6.9, "smart_cut snap (pure): plan keeps [0,1.95]+[7.05,9], snap moves the second start to 6.9 in the real pause", JSON.stringify(scSnapPure.keep));
+checkOk(scSnapPlan.removed_count === 3 && JSON.stringify(scSnapPlan.keep) === JSON.stringify([{ start: 0, end: 1.95, duration: 1.95 }, { start: 7.05, end: 9, duration: 1.95 }]) && JSON.stringify(scSnapPure.keep) === JSON.stringify([{ start: 0, end: 2.8, duration: 2.8 }, { start: 6.525, end: 9, duration: 2.475 }]) && scSnapPure.snap[0].end.mode === "quietest" && scSnapPure.snap[0].end.to === 2.8 && scSnapPure.snap[1].start.mode === "pause" && scSnapPure.snap[1].start.to === 6.525, "smart_cut snap (pure): plan keeps [0,1.95]+[7.05,9], snap moves the first end to the quietest window (2.8) and the second start to the pause middle (6.525)", JSON.stringify(scSnapPure.keep));
 const scSnapDetectRes = await client.callTool({ name: "smart_cut", arguments: { input: path.join(root, "test/silence-source.mp4"), words_file: cwSnapWords, snap_to_pause: true, detect_only: true } });
 const scSnapDetectJson = JSON.parse(scSnapDetectRes.content[0].text);
-checkOk(scSnapDetectRes.isError !== true && scSnapDetectJson.snap_to_pause === true && scSnapDetectJson.removed_count === 3 && near(scSnapDetectJson.removed_seconds, 4.95, 0.01) && JSON.stringify(scSnapDetectJson.keep_segments) === JSON.stringify([{ start: 0, end: 1.95, duration: 1.95 }, { start: 6.9, end: 9, duration: 2.1 }]) && scSnapDetectJson.snap[1].start.mode === "pause" && scSnapDetectJson.snap[1].start.to === 6.9 && scSnapDetectJson.snap[1].start.pause_start === 6, "smart_cut --snap-to-pause detect-only plans [0,1.95]+[6.9,9] (4.95s removed) with the pause named", JSON.stringify(scSnapDetectJson.keep_segments));
+checkOk(scSnapDetectRes.isError !== true && scSnapDetectJson.snap_to_pause === true && scSnapDetectJson.removed_count === 3 && near(scSnapDetectJson.removed_seconds, 3.73, 0.01) && JSON.stringify(scSnapDetectJson.keep_segments) === JSON.stringify([{ start: 0, end: 2.8, duration: 2.8 }, { start: 6.525, end: 9, duration: 2.475 }]) && scSnapDetectJson.snap[1].start.mode === "pause" && scSnapDetectJson.snap[1].start.to === 6.525 && scSnapDetectJson.snap[1].start.pause_start === 6, "smart_cut --snap-to-pause detect-only plans [0,2.8]+[6.525,9] (3.73s removed) with the pause named", JSON.stringify(scSnapDetectJson.keep_segments));
 const scSnapRes = await client.callTool({ name: "smart_cut", arguments: { input: path.join(root, "test/silence-source.mp4"), output: path.join(root, "outputs/mcp-smartcut-snap.mp4"), words_file: cwSnapWords, snap_to_pause: true } });
 const scSnapJson = JSON.parse(scSnapRes.content[0].text);
-checkOk(scSnapRes.isError !== true && near(scSnapJson.duration_after, 4.05, 0.05) && JSON.stringify(scSnapJson.keep_segments) === JSON.stringify([{ start: 0, end: 1.95, duration: 1.95 }, { start: 6.9, end: 9, duration: 2.1 }]), "smart_cut --snap-to-pause cuts to 4.05s on disk", JSON.stringify({ after: scSnapJson.duration_after }));
+checkOk(scSnapRes.isError !== true && near(scSnapJson.duration_after, 5.28, 0.05) && JSON.stringify(scSnapJson.keep_segments) === JSON.stringify([{ start: 0, end: 2.8, duration: 2.8 }, { start: 6.525, end: 9, duration: 2.475 }]), "smart_cut --snap-to-pause cuts to 5.28s on disk", JSON.stringify({ after: scSnapJson.duration_after }));
 const scNoSnapRes = await client.callTool({ name: "smart_cut", arguments: { input: path.join(root, "test/silence-source.mp4"), output: path.join(root, "outputs/mcp-smartcut-nosnap.mp4"), words_file: cwSnapWords } });
 const scNoSnapJson = JSON.parse(scNoSnapRes.content[0].text);
 checkOk(scNoSnapRes.isError !== true && near(scNoSnapJson.duration_after, 3.9, 0.05) && scNoSnapJson.snap_to_pause === false && scNoSnapJson.snap === null, "smart_cut without snap cuts the same take to 3.9s (fixed pads) and reports snap null", JSON.stringify({ after: scNoSnapJson.duration_after }));
-// The seam tells the story: at the join (output 1.95s) the snapped
-// cut opens on 0.1s of room tone (measured -62.2 dB), the unsnapped
-// one opens mid-tone 0.05s before "world" (measured -3.9 dB).
-const scSnapSeam = await meanVolume(path.join(root, "outputs/mcp-smartcut-snap.mp4"), 1.95, 0.1);
+// The seam tells the story: at the join (output 2.8s) the snapped
+// cut opens on room tone (measured -91 dB, digital silence) and
+// closes on room tone too (2.7s, -91 dB) — the old 0.1s rule only
+// opened quietly (-62.2 dB) and closed mid-tone. The unsnapped one
+// opens mid-tone 0.05s before "world" (measured -3.9 dB).
+const scSnapSeam = await meanVolume(path.join(root, "outputs/mcp-smartcut-snap.mp4"), 2.8, 0.1);
+const scSnapClose = await meanVolume(path.join(root, "outputs/mcp-smartcut-snap.mp4"), 2.7, 0.1);
 const scNoSnapSeam = await meanVolume(path.join(root, "outputs/mcp-smartcut-nosnap.mp4"), 1.95, 0.1);
-checkOk(scSnapSeam !== null && scSnapSeam < -50 && scNoSnapSeam !== null && scNoSnapSeam > -10, "smart_cut snap seam is room tone (-62.2 dB) where the unsnapped seam is mid-tone (-3.9 dB)", `snapped=${scSnapSeam} unsnapped=${scNoSnapSeam}`);
+checkOk(scSnapSeam !== null && scSnapSeam < -50 && scSnapClose !== null && scSnapClose < -50 && scNoSnapSeam !== null && scNoSnapSeam > -10, "smart_cut snap seam opens AND closes in silence (-91 dB both sides) where the unsnapped seam is mid-tone (-3.9 dB)", `snapped-open=${scSnapSeam} snapped-close=${scSnapClose} unsnapped=${scNoSnapSeam}`);
 const scSnapCli = await runCli(["smart-cut", path.join(root, "test/silence-source.mp4"), "--words-file", cwSnapWords, "--snap-to-pause", "--detect-only"]);
-checkOk(scSnapCli.code === 0 && /"snap_to_pause": true/.test(scSnapCli.out) && /"start": 6.9/.test(scSnapCli.out), "CLI smart-cut --snap-to-pause --detect-only reports the snapped plan", scSnapCli.out.slice(0, 200));
+checkOk(scSnapCli.code === 0 && /"snap_to_pause": true/.test(scSnapCli.out) && /"start": 6.525/.test(scSnapCli.out), "CLI smart-cut --snap-to-pause --detect-only reports the snapped plan", scSnapCli.out.slice(0, 200));
 // smart_cut --snap-to-pause with nothing to cut: the no-op path
 // stream-copies and reports snap null (no edges to snap).
 const scSnapNoneRes = await client.callTool({ name: "smart_cut", arguments: { input: path.join(root, "test/source.mp4"), output: path.join(root, "outputs/mcp-smartcut-snap-none.mp4"), words_file: path.join(root, "test/smartcut-clean-words.json"), snap_to_pause: true } });
@@ -9790,14 +9824,14 @@ await copyFile(path.join(root, "test/silence-source.mp4"), path.join(root, "outp
 await copyFile(cwSnapWords, path.join(root, "outputs/mcp-batch-sc-snap-in/silence-source.words.json"));
 const scSnapBatchRes = await client.callTool({ name: "batch", arguments: { operation: "smart_cut", pattern: "*.mp4", input_dir: path.join(root, "outputs/mcp-batch-sc-snap-in"), output_dir: path.join(root, "outputs/mcp-batch-sc-snap-out"), args: { snap_to_pause: true }, jobs: 1 } });
 const scSnapBatchJson = JSON.parse(scSnapBatchRes.content[0].text);
-checkOk(scSnapBatchJson.succeeded === 1 && scSnapBatchJson.failed === 0 && near(scSnapBatchJson.results[0].result?.duration_after, 4.05, 0.05), "batch smart_cut snap_to_pause cuts to 4.05s", JSON.stringify(scSnapBatchJson.results.map((r) => r.result?.duration_after)));
+checkOk(scSnapBatchJson.succeeded === 1 && scSnapBatchJson.failed === 0 && near(scSnapBatchJson.results[0].result?.duration_after, 5.28, 0.05), "batch smart_cut snap_to_pause cuts to 5.28s", JSON.stringify(scSnapBatchJson.results.map((r) => r.result?.duration_after)));
 const scSnapManifestPath = path.join(root, "outputs/mcp-manifest-sc-snap.json");
 await writeFile(scSnapManifestPath, JSON.stringify({ version: 1, input: path.join(root, "test/silence-source.mp4"), output: path.join(root, "outputs/mcp-manifest-sc-snap.mp4"), steps: [{ tool: "smart_cut", args: { words_file: cwSnapWords, snap_to_pause: true } }] }), "utf8");
 await rm(path.join(root, "outputs/mcp-manifest-sc-snap.mp4"), { force: true });
 await rm(path.join(root, "outputs/.mediakit-manifest-cache"), { recursive: true, force: true });
 const scSnapManifestRes = await client.callTool({ name: "manifest", arguments: { manifest_path: scSnapManifestPath } });
 const scSnapManifestJson = JSON.parse(scSnapManifestRes.content[0].text);
-checkOk(scSnapManifestJson.steps_run === 1 && scSnapManifestJson.steps.every((s) => s.status === "ok") && near(scSnapManifestJson.final.duration_seconds, 4.05, 0.05), "manifest smart_cut step with snap_to_pause runs and final is 4.05s", JSON.stringify(scSnapManifestJson.final?.duration_seconds));
+checkOk(scSnapManifestJson.steps_run === 1 && scSnapManifestJson.steps.every((s) => s.status === "ok") && near(scSnapManifestJson.final.duration_seconds, 5.28, 0.05), "manifest smart_cut step with snap_to_pause runs and final is 5.28s", JSON.stringify(scSnapManifestJson.final?.duration_seconds));
 
 // search_words: search-first editing on the transcript — fixture
 // test/search-words.json is 14 words: "the quick brown fox jumps

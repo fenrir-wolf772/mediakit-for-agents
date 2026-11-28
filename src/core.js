@@ -12478,6 +12478,9 @@ const PAUSE_MIN_SEC = 0.08;
 const PAUSE_MAX_BLIP_SEC = 0.04;
 const PAUSE_COMPETING_SEC = 0.12;
 const PAUSE_KEEP_SEC = 0.1;
+const PAUSE_SEAM_SLIVER_SEC = 0.05; // removed sliver left at a long pause's midpoint
+const PAUSE_QUIET_WINDOW_SEC = 0.1; // quietest-window width (auto-editor quietestCut win)
+const PAUSE_QUIET_IMPROVEMENT_DB = 3; // fallback only when this much quieter than the padded edge
 const PAUSE_SILENT_DB = -120;
 const PAUSE_DIGITAL_SILENCE_DB = -100;
 const PAUSE_MAX_DURATION_SEC = 1200;
@@ -12545,15 +12548,70 @@ export function pauseAt(levels, boundarySec, wordBeforeStartSec = -Infinity) {
   return inReach.reduce((a, b) => (b.end - b.start > a.end - a.start ? b : a));
 }
 
+// Max dB over frames [a, b) of a SpeechLevels array (an empty
+// range scores -Infinity, so it never wins a max).
+function levelsWindowMax(levels, a, b) {
+  let m = -Infinity;
+  for (let k = Math.max(0, a); k < Math.min(levels.db.length, b); k++) m = Math.max(m, levels.db[k]);
+  return m;
+}
+
+// A window's loudness, ranked by the window AND its two neighbours
+// — auto-editor's quietestCut: "Rank a window by its neighbors too,
+// so a lone dip between two loud windows (a zero crossing, not a
+// lull) loses to a wider one." Neighbour windows are clamped at the
+// array edges, the same way their max(i-1, 0) / min(i+1, n-1) does.
+function quietWindowScore(levels, i, win) {
+  return Math.max(
+    levelsWindowMax(levels, i, i + win),
+    levelsWindowMax(levels, i - win, i),
+    levelsWindowMax(levels, i + win, i + 2 * win),
+  );
+}
+
+// The neighbour-scored loudness of the window containing tSec.
+export function windowScoreAt(levels, tSec, { windowSec = PAUSE_QUIET_WINDOW_SEC } = {}) {
+  const win = Math.max(1, Math.round(windowSec / levels.frameSec));
+  const i = Math.min(Math.max(0, Math.floor((tSec - levels.fromSec) / levels.frameSec)), Math.max(0, levels.db.length - win));
+  return +quietWindowScore(levels, i, win).toFixed(2);
+}
+
+// The quietest window in [fromSec, toSec]: lowest neighbour-scored
+// loudness, latest wins a tie (auto-editor: "The latest candidate
+// wins a tie"). Returns null when the range holds no full window.
+export function quietestWindow(levels, fromSec, toSec, { windowSec = PAUSE_QUIET_WINDOW_SEC } = {}) {
+  const win = Math.max(1, Math.round(windowSec / levels.frameSec));
+  const iMin = Math.max(0, Math.ceil((fromSec - levels.fromSec) / levels.frameSec - 1e-9));
+  const iMax = Math.min(levels.db.length - win, Math.floor((toSec - levels.fromSec) / levels.frameSec - win + 1e-9));
+  if (iMax < iMin) return null;
+  let best = iMin;
+  let bestScore = Infinity;
+  for (let i = iMin; i <= iMax; i++) {
+    const score = quietWindowScore(levels, i, win);
+    if (score <= bestScore) { bestScore = score; best = i; }
+  }
+  const start = +(levels.fromSec + best * levels.frameSec).toFixed(3);
+  const end = +(levels.fromSec + (best + win) * levels.frameSec).toFixed(3);
+  return { start, end, center: +((start + end) / 2).toFixed(3), score_db: +bestScore.toFixed(2) };
+}
+
 // Where a keep segment ends in a pause: a little room tone after
 // the voice stops. Where it starts: a little room tone before the
-// voice. Never more than half the pause, so a short pause still
-// leaves silence on both sides of the cut.
+// voice. A pause of <= 2 x PAUSE_KEEP_SEC splits at its midpoint
+// (the old rule). A longer pause splits at its midpoint too, minus
+// half the seam sliver — auto-editor's quietestCut: "Mid-pause
+// leaves each side some silence around its speech." The two edges
+// of one pause then leave exactly the sliver removed, centred on
+// the pause, instead of 0.1s of room tone each side.
 export function endInPause(pause) {
-  return +(pause.start + Math.min(PAUSE_KEEP_SEC, (pause.end - pause.start) / 2)).toFixed(3);
+  const d = pause.end - pause.start;
+  const off = d <= 2 * PAUSE_KEEP_SEC ? d / 2 : Math.max(PAUSE_KEEP_SEC, d / 2 - PAUSE_SEAM_SLIVER_SEC / 2);
+  return +(pause.start + off).toFixed(3);
 }
 export function startInPause(pause) {
-  return +(pause.end - Math.min(PAUSE_KEEP_SEC, (pause.end - pause.start) / 2)).toFixed(3);
+  const d = pause.end - pause.start;
+  const off = d <= 2 * PAUSE_KEEP_SEC ? d / 2 : Math.max(PAUSE_KEEP_SEC, d / 2 - PAUSE_SEAM_SLIVER_SEC / 2);
+  return +(pause.end - off).toFixed(3);
 }
 
 // Measure a source's per-frame RMS levels (one ffmpeg decode).
@@ -12585,11 +12643,34 @@ export function segmentWordIndices(words, keep) {
 // points at (pure: levels are passed in, unit-tested directly).
 // The start edge snaps into the pause BEFORE the first kept word
 // (startInPause), the end edge into the pause AFTER the last kept
-// word (endInPause). An edge that finds no pause, an ambiguous one,
+// word (endInPause). When no pause is in reach, an INTERIOR edge
+// falls back to the quietest window near it (auto-editor's
+// quietestCut), but only when that window is clearly quieter than
+// the padded edge. An edge that finds no pause, an ambiguous one,
 // or a snap that would cross a kept word, a neighbour segment or
 // the minKeep floor keeps its padded value, with the reason in the
 // returned snap record — a snap never eats speech, never overlaps
 // the next segment, and never invents a timestamp.
+// Try the quietest-window fallback for one edge. `edge` is "end"
+// or "start"; `from`/`to` bound the search (already intersected
+// with the gap to the neighbouring word and segment); `wordBound`
+// is the kept word the edge must not cross, `neighbourBound` the
+// neighbouring segment's padded edge, `segStart`/`segEnd` the
+// segment's current (possibly already snapped) bounds. Returns a
+// snap record plus the new edge, or a kept record with the reason.
+function quietestEdgeFallback(levels, { edge, from, to, padded, wordBound, neighbourBound, segStart, segEnd, minKeep }) {
+  const q = quietestWindow(levels, from, to);
+  if (!q) return { snap: { mode: "kept", reason: "no quiet window near the edge" }, to: null };
+  const paddedScore = windowScoreAt(levels, padded);
+  if (q.score_db > paddedScore - PAUSE_QUIET_IMPROVEMENT_DB) {
+    return { snap: { mode: "kept", reason: "no window 3 dB quieter than the padded edge" }, to: null };
+  }
+  const crosses = edge === "end"
+    ? !(q.center > wordBound + 0.005 && q.center < neighbourBound - 0.005 && q.center - segStart >= minKeep)
+    : !(q.center < wordBound - 0.005 && q.center > neighbourBound + 0.005 && segEnd - q.center >= minKeep);
+  if (crosses) return { snap: { mode: "kept", reason: "quietest window would cross a kept word or the next segment" }, to: null };
+  return { snap: { mode: "quietest", from: padded, to: q.center, window_start: q.start, window_end: q.end, score_db: q.score_db }, to: q.center };
+}
 export function snapKeepSegmentsToPauses(words, keep, segmentIndices, levels, { minKeep = 0.2 } = {}) {
   const snapped = keep.map((s) => ({ ...s }));
   const snap = keep.map(() => ({ start: { mode: "kept", reason: "no pause found" }, end: { mode: "kept", reason: "no pause found" } }));
@@ -12618,6 +12699,26 @@ export function snapKeepSegmentsToPauses(words, keep, segmentIndices, levels, { 
       }
     } else if (endPause === "ambiguous") {
       snap[i].end = { mode: "kept", reason: "ambiguous — two pauses >= 0.12s in reach" };
+    } else if (i + 1 < keep.length) {
+      // No pause in reach and this is an interior edge (a file
+      // boundary is an output boundary, not a seam): fall back to
+      // the quietest window near the padded edge, searched within
+      // +/-PAUSE_SEARCH_BEFORE_SEC and inside the gap to the next
+      // word — never into removed or kept speech.
+      const nextWordStart = lastIdx + 1 < words.length ? words[lastIdx + 1].start : Infinity;
+      const nextStart = snapped[i + 1].start;
+      const fb = quietestEdgeFallback(levels, {
+        edge: "end",
+        from: Math.max(words[lastIdx].end, seg.end - PAUSE_SEARCH_BEFORE_SEC),
+        to: Math.min(nextWordStart, nextStart, seg.end + PAUSE_SEARCH_BEFORE_SEC),
+        padded: seg.end, wordBound: words[lastIdx].end, neighbourBound: nextStart,
+        segStart: snapped[i].start, segEnd: snapped[i].end, minKeep,
+      });
+      snap[i].end = fb.snap;
+      if (fb.to !== null) {
+        snapped[i].end = fb.to;
+        snapped[i].duration = +(fb.to - snapped[i].start).toFixed(3);
+      }
     }
     // Start edge: the pause before the first kept word.
     const wordBeforeStart = firstIdx === 0 ? -Infinity : words[firstIdx - 1].start;
@@ -12634,6 +12735,24 @@ export function snapKeepSegmentsToPauses(words, keep, segmentIndices, levels, { 
       }
     } else if (startPause === "ambiguous") {
       snap[i].start = { mode: "kept", reason: "ambiguous — two pauses >= 0.12s in reach" };
+    } else if (i > 0) {
+      // No pause in reach and this is an interior edge: the
+      // quietest-window fallback, mirrored (gap to the previous
+      // word, searched within +/-PAUSE_SEARCH_BEFORE_SEC).
+      const prevWordEnd = firstIdx === 0 ? -Infinity : words[firstIdx - 1].end;
+      const prevEnd = snapped[i - 1].end;
+      const fb = quietestEdgeFallback(levels, {
+        edge: "start",
+        from: Math.max(prevWordEnd, prevEnd, seg.start - PAUSE_SEARCH_BEFORE_SEC),
+        to: Math.min(words[firstIdx].start, seg.start + PAUSE_SEARCH_BEFORE_SEC),
+        padded: seg.start, wordBound: words[firstIdx].start, neighbourBound: prevEnd,
+        segStart: snapped[i].start, segEnd: snapped[i].end, minKeep,
+      });
+      snap[i].start = fb.snap;
+      if (fb.to !== null) {
+        snapped[i].start = fb.to;
+        snapped[i].duration = +(snapped[i].end - fb.to).toFixed(3);
+      }
     }
   });
   // A start snap moves an edge EARLIER than its padded value, so a
@@ -12644,15 +12763,17 @@ export function snapKeepSegmentsToPauses(words, keep, segmentIndices, levels, { 
   // also snapped past it, revert that too.
   for (let i = 1; i < snapped.length; i++) {
     if (snapped[i].start < snapped[i - 1].end + 0.005) {
-      if (snap[i].start.mode === "pause") {
+      if (snap[i].start.mode === "pause" || snap[i].start.mode === "quietest") {
+        const mode = snap[i].start.mode;
         snapped[i].start = keep[i].start;
         snapped[i].duration = +(snapped[i].end - snapped[i].start).toFixed(3);
-        snap[i].start = { mode: "kept", reason: "pause snap would overlap the previous segment" };
+        snap[i].start = { mode: "kept", reason: `${mode} snap would overlap the previous segment` };
       }
-      if (snapped[i].start < snapped[i - 1].end + 0.005 && snap[i - 1].end.mode === "pause") {
+      if (snapped[i].start < snapped[i - 1].end + 0.005 && (snap[i - 1].end.mode === "pause" || snap[i - 1].end.mode === "quietest")) {
+        const mode = snap[i - 1].end.mode;
         snapped[i - 1].end = keep[i - 1].end;
         snapped[i - 1].duration = +(snapped[i - 1].end - snapped[i - 1].start).toFixed(3);
-        snap[i - 1].end = { mode: "kept", reason: "pause snap would overlap the next segment" };
+        snap[i - 1].end = { mode: "kept", reason: `${mode} snap would overlap the next segment` };
       }
     }
   }

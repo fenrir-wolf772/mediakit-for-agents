@@ -1537,7 +1537,13 @@ between two kept runs merges them (the cut between them disappears).
 transcript points at instead of the fixed pads: the audio is measured
 at 10 ms frames, the quiet threshold is set from the take's own
 levels (5th percentile + 10 dB, 95th percentile − 20 dB), and the cut
-lands 0.1s into the pause (room tone on both sides). Whisper's word
+lands at the pause's middle — a 0.05s sliver left removed, room tone
+balanced on both sides (a pause ≤ 0.2s splits at its exact middle).
+When no pause is in reach, an interior edge falls back to the
+quietest 0.1s window nearby, scored by the window and its neighbours
+so a lone dip cannot win — but only when it is ≥ 3 dB quieter than
+the padded edge (`snap` mode `quietest`); file-boundary edges never
+fall back. Whisper's word
 edges run late at sentence ends, so a transcript-only cut keeps the
 start of the next sentence — snap fixes that. An edge with no pause,
 an ambiguous one (two pauses ≥ 0.12s in reach), or a snap that would
@@ -2156,7 +2162,8 @@ making a choppy clip (2.0 is OpenEdit's default — but it can
 swallow real words on a dense take, so it stays off unless
 asked). `--snap-to-pause` moves each keep edge into the real pause
 the transcript points at (rule 43: measured from the take's own
-audio at 10 ms frames, 0.1s of room tone kept each side) instead
+audio at 10 ms frames, edges cut at the pause middle, quietest-window
+fallback when no pause is in reach) instead
 of the fixed pads — Whisper's word edges run late at sentence
 ends, so a transcript-only cut keeps the start of the next
 sentence; an edge with no pause, an ambiguous one, or a snap that
