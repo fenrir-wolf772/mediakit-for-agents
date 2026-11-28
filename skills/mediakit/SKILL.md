@@ -805,7 +805,18 @@ reports a `gpu` section: hardware encoders present in the ffmpeg build
 a tiny probe encode. A build that merely *lists* `h264_nvenc` without a
 working device reports `gpu.available: false` — listed is not usable, so
 never pick a hardware encoder from the list alone; pick it from
-`working_encoder`, or stay on libx264.
+`working_encoder`, or stay on libx264. Since turn 194 the section also
+carries `working_by_family` (first working encoder per codec family —
+h264/hevc/av1/vp9, null when none works) and `probes` (one entry per
+listed encoder: `working` plus a one-line `reason` when it failed, e.g.
+"Cannot load libcuda.so.1" — never a silent fallback). Probes are
+cached once per process and `doctor` reports the counters in
+`encoder_cache` (env `MEDIAKIT_ENCODER_CACHE=0` disables the cache);
+`convert --encoder auto` reuses the same cached probes. Note the
+probe's vaapi limit: it feeds system-memory frames, so vaapi fails it
+even with a working device — a vaapi reason of "Error reinitializing
+filters!" means the probe input is unsuitable, not that VAAPI is
+absent (convert adds the hwupload filter on its real path).
 
 ### 33b. A loop is a crossfade, not a copy — and the seam gets a number
 `make-loopable in.mp4 -o loop.mp4 --overlap 1` makes a clip repeat

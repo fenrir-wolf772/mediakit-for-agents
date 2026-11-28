@@ -13777,20 +13777,110 @@ const FAMILY_CODEC_NAME = { h264: "h264", hevc: "hevc", av1: "av1", vp9: "vp9" }
 // frames), with a hard 10s cap so a hanging driver init cannot stall
 // the caller. On a GPU-less machine every attempt fails in well under
 // a second (measured 2026-11-12: nvenc/qsv/vaapi all fail in <1s
-// total). Pure true/false — the caller decides what a failure means.
-export async function probeEncoder(encoder) {
+// total). Returns { working, reason }: the reason is the most
+// informative stderr line, cleaned of log prefixes and pointer
+// addresses — a failed probe must say WHY it failed, not silently
+// fall back (mcp-video-studio swallows its probe errors with
+// `except Exception: pass`, lượt 192 anti-pattern #5). reason is
+// null when the encode worked. Known limit (pre-existing, not this
+// turn): vaapi fails this probe on input format even with a working
+// device — testsrc is system-memory rgb24 and vaapi needs hwupload,
+// which convert adds only on its real path — so a vaapi reason of
+// "Error reinitializing filters!" means "probe input unsuitable",
+// not "no VAAPI device".
+export async function probeEncoderDetail(encoder) {
+  const args = ["-hide_banner", "-nostats", "-f", "lavfi", "-i", "testsrc=duration=0.2:size=64x64:rate=10", "-c:v", encoder, "-frames:v", "2", "-f", "null", "-"];
   try {
-    await run(FFMPEG, ["-hide_banner", "-nostats", "-f", "lavfi", "-i", "testsrc=duration=0.2:size=64x64:rate=10", "-c:v", encoder, "-frames:v", "2", "-f", "null", "-"], { timeoutMs: 10_000 });
-    return true;
-  } catch { /* not usable on this machine — the caller tries the next one, or reports it */ }
-  return false;
+    await new Promise((resolve, reject) => {
+      execFile(FFMPEG, withFfmpegThreads(args), { timeout: 10_000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+        if (err) reject(Object.assign(err, { stderr }));
+        else resolve({ stdout, stderr });
+      });
+    });
+    return { working: true, reason: null };
+  } catch (err) {
+    return { working: false, reason: probeFailureReason(err?.stderr ?? "") };
+  }
+}
+
+// Most informative line of a probe failure, cleaned for display.
+// Pure — unit-tested directly on captured stderr text. Rules: strip
+// "[tag @ 0x...] " prefixes (nested too) and pointer addresses;
+// drop ffmpeg's boilerplate (input listing, stream mapping, frame
+// progress, "Conversion failed!", thread-termination noise, the
+// vaapi pixel-format dump); prefer a line that names the cause
+// (cannot load / unknown encoder / error creating / error
+// reinitializing / could not open / no device / not supported);
+// otherwise the first surviving line; "Could not open encoder
+// before EOF" is generic, so it is only the last resort.
+const PROBE_REASON_NOISE = /^(press \[q\]|input #|duration:|stream #|stream mapping:|frame=|conversion failed!|nothing was written|terminating thread|task finished|error sending frames|link '|pixel formats:|src:|dst:)/i;
+const PROBE_REASON_CAUSE = /(cannot load|unknown encoder|error creating|error reinitializing|could not open|failed to|no .*device|not supported|operation not permitted|incorrect parameters)/i;
+export function probeFailureReason(stderr) {
+  const lines = String(stderr ?? "").split("\n").map((line) => line
+    .replace(/^\s*(?:\[[^\]]*? @ 0x[0-9a-f]+\]\s*)+/, "")
+    .replace(/ @ 0x[0-9a-f]+/g, "")
+    .trim()).filter(Boolean);
+  const informative = lines.filter((line) => !PROBE_REASON_NOISE.test(line));
+  const cause = informative.find((line) => PROBE_REASON_CAUSE.test(line));
+  const picked = cause ?? informative[0] ?? lines.find((line) => /could not open encoder before eof/i.test(line)) ?? "probe encode failed";
+  return picked.length > 160 ? picked.slice(0, 157) + "..." : picked;
+}
+
+export async function probeEncoder(encoder) {
+  return (await probeEncoderDetail(encoder)).working;
+}
+
+// Hardware-encoder probe cache (mcp-video-studio's
+// _CACHED_ENCODER_ARGS/_CACHED_ENCODER_NAME, lượt 192 — probe once
+// per process, not once per doctor/convert call). Unlike the file
+// probe cache there is no mtime to validate against: the machine's
+// GPUs do not change mid-process, so the entry lives for the process
+// lifetime. Env MEDIAKIT_ENCODER_CACHE=0 disables it (every probe
+// runs live). Counters mirror probeCacheStats so doctor reports both
+// caches the same way.
+const ENCODER_PROBE_CACHE_ENV = "MEDIAKIT_ENCODER_CACHE";
+const encoderProbeCache = new Map();
+const encoderProbeCacheCounters = { hits: 0, misses: 0 };
+
+export function encoderProbeCacheEnabled() {
+  const raw = (process.env[ENCODER_PROBE_CACHE_ENV] ?? "").trim().toLowerCase();
+  return raw !== "0" && raw !== "false";
+}
+
+export function encoderProbeCacheStats() {
+  return { enabled: encoderProbeCacheEnabled(), hits: encoderProbeCacheCounters.hits, misses: encoderProbeCacheCounters.misses, entries: encoderProbeCache.size };
+}
+
+export function clearEncoderProbeCache() {
+  encoderProbeCache.clear();
+  encoderProbeCacheCounters.hits = 0;
+  encoderProbeCacheCounters.misses = 0;
+}
+
+// Cached probe: a repeat call in the same process returns the stored
+// { working, reason } without spawning ffmpeg again — doctor and
+// convert --encoder auto both probe the same encoders, and on a
+// GPU-less machine that is a dozen failed spawns per call without
+// the cache. The cached object is a copy, so a caller cannot mutate
+// the stored entry.
+export async function probeEncoderCached(encoder) {
+  if (encoderProbeCacheEnabled() && encoderProbeCache.has(encoder)) {
+    encoderProbeCacheCounters.hits++;
+    return { ...encoderProbeCache.get(encoder) };
+  }
+  const detail = await probeEncoderDetail(encoder);
+  if (encoderProbeCacheEnabled()) {
+    encoderProbeCacheCounters.misses++;
+    encoderProbeCache.set(encoder, { ...detail });
+  }
+  return detail;
 }
 
 // First WORKING encoder of one family, in GPU_ENCODERS order (best
 // first). A present-but-broken encoder is skipped, never returned.
 export async function probeWorkingEncoder(family) {
   for (const enc of GPU_ENCODERS.filter((e) => hwEncoderFamily(e) === family)) {
-    if (await probeEncoder(enc)) return enc;
+    if ((await probeEncoderCached(enc)).working) return enc;
   }
   return null;
 }
@@ -13798,11 +13888,19 @@ export async function probeWorkingEncoder(family) {
 async function detectGpu(encodersOut) {
   const has = (name) => new RegExp(`\\b${name}\\b`).test(encodersOut);
   const present = GPU_ENCODERS.filter(has);
-  let working = null;
+  // No early break: the per-family map needs every family probed,
+  // not just the first working encoder. Each probe is cached, so a
+  // second doctor call in the same process costs no ffmpeg spawn.
+  const probes = {};
   for (const enc of present) {
-    if (await probeEncoder(enc)) { working = enc; break; }
+    probes[enc] = await probeEncoderCached(enc);
   }
-  return { available: working !== null, encoders: present, working_encoder: working };
+  const working = present.filter((enc) => probes[enc].working);
+  const workingByFamily = {};
+  for (const family of Object.keys(SOFTWARE_CODEC_FAMILY).map((c) => SOFTWARE_CODEC_FAMILY[c])) {
+    workingByFamily[family] = working.find((enc) => hwEncoderFamily(enc) === family) ?? null;
+  }
+  return { available: working.length > 0, encoders: present, working_encoder: working[0] ?? null, working_by_family: workingByFamily, probes };
 }
 
 // Resolve which encoder a convert actually uses (turn 104, podcli's
@@ -13825,7 +13923,8 @@ export async function resolveVideoEncoder({ videoCodec, encoder }) {
   }
   if (!GPU_ENCODERS.includes(encoder)) throw new MediaKitError(`unsupported hardware encoder: ${encoder} (supported: ${GPU_ENCODERS.join(", ")} or "auto")`, "INVALID_ARG");
   if (hwEncoderFamily(encoder) !== family) throw new MediaKitError(`hardware encoder ${encoder} encodes ${hwEncoderFamily(encoder)}, not ${family} (requested codec ${videoCodec})`, "INVALID_ARG");
-  if (!(await probeEncoder(encoder))) throw new MediaKitError(`hardware encoder ${encoder} is not usable on this machine (probe encode failed; an explicitly requested encoder never falls back silently — use --encoder auto to allow a software fallback)`, "HW_ENCODER_UNAVAILABLE");
+  const probe = await probeEncoderCached(encoder);
+  if (!probe.working) throw new MediaKitError(`hardware encoder ${encoder} is not usable on this machine (probe encode failed${probe.reason ? `: ${probe.reason}` : ""}; an explicitly requested encoder never falls back silently — use --encoder auto to allow a software fallback)`, "HW_ENCODER_UNAVAILABLE");
   return { requested: encoder, used: encoder, fallback: false, fallbackReason: null };
 }
 
@@ -14168,6 +14267,10 @@ export async function doctor({ smoke = false } = {}) {
     // A long-lived MCP server that never probes the same file twice
     // will show hits 0 — that is normal, not a broken cache.
     probe_cache: probeCacheStats(),
+    // Encoder probe cache counters (lượt 194): same shape as
+    // probe_cache — hits/misses since this process started, plus
+    // entries. Env MEDIAKIT_ENCODER_CACHE=0 disables it.
+    encoder_cache: encoderProbeCacheStats(),
     audit,
     jobs_dir: jobsDir,
     voice_venv: voiceVenv,

@@ -15,7 +15,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TOOL_DEFS, TOOL_FAMILY_OF, HOT_TOOLS, describeOperation, listOperations, toolProfile, visibleTools } from "../src/tools.js";
-import { acquireEditLease, analyzeHookMove, analyzeSeamSamples, applyContentBaseline, applyHook, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, clearProbeCache, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, ffmpegThreads, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findHighlights, findHook, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookMotionCalibration, hookOverlapSeconds, hookSliceForTrack, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, orderHookRanges, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStabTrfMotion, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, peakEnergyWindow, pickFarthestThumbnails, planCleanVoice, planSmartCuts, projectSummary, proposeEdit, probe, probeCacheStats, releaseEditLease, renewEditLease, resolveQcPolicy, restoreEditSessionCheckpoint, resumeEditSession, robustZMotionScore, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, sentenceBoundaries, sharpnessVerdict, snapHookToWords, snapKeepSegmentsToPauses, snapRangeToSentences, spectralFluxOnset, stabilizeVerdict, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
+import { acquireEditLease, analyzeHookMove, analyzeSeamSamples, applyContentBaseline, applyHook, assembleShotTimeoutMs, assembleTimeoutBlock, averageHash, buildZoomChains, chunkCaptions, clearProbeCache, commitEditSession, compactManifestOps, compareDeterminismRuns, computeAssembleJobFingerprint, countClippedRuns, cutSheetRows, detectVoiceVenv, demoFrames, diagnoseVoice, dialogueKeyForShots, diffManifestDocs, editLeaseStatus, editSessionStatus, endInPause, estimateDecodedWork, estimateFfmpegTimeoutMs, estimateJobRemaining, estimateTempo, estimateVoiceAlignment, expandSlideshowGlob, explainError, ffmpegThreads, findAttachableJob, findDensestSpeechWindow, findHighlightSpans, findHighlights, findHook, findPauses, findPhraseMatches, findQuietSnap, fixForMissing, getSceneTemplates, getShortsStyles, groupWords, hammingDistanceHex, hookDuplicateOf, hookMotionCalibration, hookOverlapSeconds, hookSliceForTrack, hookVisualScore, inlineSheetImage, inspectPacing, inspectionPointTimestamps, listSceneTemplates, localTempoCurve, meanAbsDiffGray, orderHookRanges, paceNumbers, parseCleanVoiceSteps, parseContentBaseline, parseFfmpegProgress, parsePreviewCompareTimestamps, parseSmartCutFillers, parseSpeechLevels, parseStabTrfMotion, parseStyleFile, parseTemplateCatalogMeta, parseTemplateReadiness, parseTemplateSlotMeta, parseZoomChainEvents, patchManifest, pauseAt, peakEnergyWindow, pickFarthestThumbnails, planCleanVoice, planSmartCuts, probeEncoderCached, probeEncoderDetail, probeFailureReason, encoderProbeCacheStats, clearEncoderProbeCache, projectSummary, proposeEdit, probe, probeCacheStats, releaseEditLease, renewEditLease, resolveQcPolicy, restoreEditSessionCheckpoint, resumeEditSession, robustZMotionScore, runFfmpegWithProgress, scoreStylePace, secondsToFrames, segmentWordIndices, sentenceBoundaries, sharpnessVerdict, snapHookToWords, snapKeepSegmentsToPauses, snapRangeToSentences, spectralFluxOnset, stabilizeVerdict, startEditSession, startInPause, stepFallbackConfirmed, suggestSeamFix, summarizeProject, trackBeatsDP, validateOtioTimeline, validateSceneTemplateEntry, validateShotSpec, validateTemplatePackage, voiceEnvelopeDb, voiceSyncMs, abortEditSession, SHORTS_STYLE_IDS } from "../src/core.js";
 import { createHttpServer } from "../src/http.js";
 import { buildBaseline, evaluateRatchet, formatRatchetReport } from "../scripts/mutation-ratchet.mjs";
 import { buildSpec, specDiff, specHash, specText, SPEC_VERSION } from "../scripts/generate-spec.mjs";
@@ -2838,6 +2838,17 @@ const hasLibvmaf = doctorJson.filters?.libvmaf === true;
 checkOk(typeof doctorJson.gpu?.available === "boolean" && Array.isArray(doctorJson.gpu?.encoders) && "working_encoder" in (doctorJson.gpu ?? {}), "doctor: gpu section reports available + listed encoders + working encoder", JSON.stringify(doctorJson.gpu));
 checkOk(doctorJson.gpu.available === (doctorJson.gpu.working_encoder !== null), "doctor: gpu available is true exactly when a probe encode worked", JSON.stringify(doctorJson.gpu));
 console.log("doctor gpu:", JSON.stringify(doctorJson.gpu));
+// Encoder probe cache + per-family map (lượt 194, mcp-video-studio
+// _CACHED_ENCODER_ARGS): doctor probes every listed encoder once
+// per process (cached), reports the first working encoder per
+// family, one probe result per listed encoder with a failure reason,
+// and cache counters next to probe_cache. Machine-agnostic: a
+// machine WITH a working GPU reports non-null families, this VM
+// reports all null — either way the shape holds.
+const gpuFamilies = Object.keys(doctorJson.gpu?.working_by_family ?? {});
+checkOk(gpuFamilies.length === 4 && ["h264", "hevc", "av1", "vp9"].every((f) => gpuFamilies.includes(f)) && gpuFamilies.every((f) => doctorJson.gpu.working_by_family[f] === null || doctorJson.gpu.encoders.includes(doctorJson.gpu.working_by_family[f])), "doctor: gpu.working_by_family has exactly h264/hevc/av1/vp9, each null or a listed encoder", JSON.stringify(doctorJson.gpu.working_by_family));
+checkOk(Object.keys(doctorJson.gpu?.probes ?? {}).length === doctorJson.gpu.encoders.length && doctorJson.gpu.encoders.every((e) => typeof doctorJson.gpu.probes[e]?.working === "boolean" && (doctorJson.gpu.probes[e].working ? doctorJson.gpu.probes[e].reason === null : typeof doctorJson.gpu.probes[e].reason === "string" && doctorJson.gpu.probes[e].reason.length > 0 && !/0x[0-9a-f]+/.test(doctorJson.gpu.probes[e].reason))), "doctor: gpu.probes has one entry per listed encoder — working with null reason, or failed with a non-empty reason free of pointer addresses", JSON.stringify(doctorJson.gpu.probes));
+checkOk(typeof doctorJson.encoder_cache?.enabled === "boolean" && typeof doctorJson.encoder_cache?.hits === "number" && typeof doctorJson.encoder_cache?.misses === "number" && typeof doctorJson.encoder_cache?.entries === "number" && doctorJson.encoder_cache.entries >= doctorJson.gpu.encoders.length, "doctor: encoder_cache reports enabled + hits/misses/entries, at least one entry per listed encoder after this doctor run", JSON.stringify(doctorJson.encoder_cache));
 // jobs_dir + voice_venv (lượt 144, kinocut doctor idea): the async
 // job store is auto-created on the first job, so a missing dir is
 // reported, not an error; the voice venv is optional like ASR.
@@ -4916,6 +4927,66 @@ let sliceBad = null;
 try { hookSliceForTrack({ trackDurationSeconds: 200, trackEnergyMean: 1.5, loopable: false, videoDurationSeconds: 30 }); } catch (e) { sliceBad = e.message; }
 checkOk(/track_energy_mean must be <= 1/.test(sliceBad ?? ""), "hookSliceForTrack: an energy mean above 1 is refused", (sliceBad ?? "").slice(0, 120));
 
+// Encoder probe failure reasons + cache (lượt 194, mcp-video-studio
+// probe cache): probeFailureReason is pure — tested on captured
+// stderr text from this VM (ffmpeg 8.1.2); the cache tests run one
+// real probe encode each (nvenc fails in ~70ms here, the replay is
+// a 0ms cache hit).
+const nvencStderr = `Input #0, lavfi, from 'testsrc=duration=0.2:size=64x64:rate=10':
+  Duration: N/A, start: 0.000000, bitrate: N/A
+  Stream #0:0: Video: wrapped_avframe, rgb24, 64x64 [SAR 1:1 DAR 1:1], 10 fps, 10 tbr, 10 tbn
+Stream mapping:
+  Stream #0:0 -> #0:0 (wrapped_avframe (native) -> h264 (h264_nvenc))
+Press [q] to stop, [?] for help
+[h264_nvenc @ 0x60340a804b00] Cannot load libcuda.so.1
+[vost#0:0/h264_nvenc @ 0x60340a804700] [enc:h264_nvenc @ 0x60340a7fd700] Error while opening encoder - maybe incorrect parameters such as bit_rate, rate, width or height.
+[vf#0:0 @ 0x60340a81fe40] Error sending frames to consumers: Operation not permitted
+[vf#0:0 @ 0x60340a81fe40] Task finished with error code: -1 (Operation not permitted)
+[vf#0:0 @ 0x60340a81fe40] Terminating thread with return code -1 (Operation not permitted)
+[vost#0:0/h264_nvenc @ 0x60340a804700] [enc:h264_nvenc @ 0x60340a7fd700] Could not open encoder before EOF
+[vost#0:0/h264_nvenc @ 0x60340a804700] Task finished with error code: -22 (Invalid argument)
+[vost#0:0/h264_nvenc @ 0x60340a804700] Terminating thread with return code -22 (Invalid argument)
+[out#0/null @ 0x60340a804380] Nothing was written into output file, because at least one of its streams received no packets.
+Conversion failed!`;
+checkOk(probeFailureReason(nvencStderr) === "Cannot load libcuda.so.1", "probeFailureReason: nvenc stderr yields the cause line, not the thread-termination tail", probeFailureReason(nvencStderr));
+const qsvStderr = `[h264_qsv @ 0x593266a26b00] Error creating a MFX session: -9.
+[vost#0:0/h264_qsv @ 0x593266a26700] [enc:h264_qsv @ 0x593266a1f700] Error while opening encoder - maybe incorrect parameters such as bit_rate, rate, width or height.
+[vf#0:0 @ 0x593266a27900] Task finished with error code: -1313558101 (Unknown error occurred)
+[vost#0:0/h264_qsv @ 0x593266a26700] [enc:h264_qsv @ 0x593266a1f700] Could not open encoder before EOF
+Conversion failed!`;
+checkOk(probeFailureReason(qsvStderr) === "Error creating a MFX session: -9.", "probeFailureReason: qsv stderr yields the MFX session error", probeFailureReason(qsvStderr));
+const vaapiStderr = `Impossible to convert between the formats supported by the filter 'Parsed_null_0' and the filter 'auto_scale_0'
+Link 'Parsed_null_0.default' -> 'auto_scale_0.default':
+  Pixel formats:
+    src: rgb24
+    dst: vaapi
+[vf#0:0 @ 0x63b864da13c0] Error reinitializing filters!
+[vf#0:0 @ 0x63b864da13c0] Task finished with error code: -38 (Function not implemented)
+[vost#0:0/h264_vaapi @ 0x63b864d9e700] [enc:h264_vaapi @ 0x63b864d97700] Could not open encoder before EOF
+Conversion failed!`;
+checkOk(probeFailureReason(vaapiStderr) === "Error reinitializing filters!", "probeFailureReason: vaapi stderr skips the pixel-format dump and picks the reinitializing error", probeFailureReason(vaapiStderr));
+checkOk(probeFailureReason(`[vost#0:0 @ 0x575490320700] Unknown encoder 'h264_nope'\n[vost#0:0 @ 0x575490320700] Error selecting an encoder\n`) === "Unknown encoder 'h264_nope'", "probeFailureReason: an unknown encoder name is reported, pointer address stripped", probeFailureReason(`[vost#0:0 @ 0x575490320700] Unknown encoder 'h264_nope'`));
+checkOk(probeFailureReason("") === "probe encode failed", "probeFailureReason: empty stderr falls back to a plain sentence, never an empty reason", probeFailureReason(""));
+checkOk(probeFailureReason("x".repeat(200)).length === 160 && probeFailureReason("x".repeat(200)).endsWith("..."), "probeFailureReason: a 200-char line is truncated to 160 chars with an ellipsis", probeFailureReason("x".repeat(200)).length.toString());
+clearEncoderProbeCache();
+const encCacheBefore = encoderProbeCacheStats();
+checkOk(encCacheBefore.enabled === true && encCacheBefore.entries === 0 && encCacheBefore.hits === 0 && encCacheBefore.misses === 0, "encoderProbeCacheStats starts empty after clearEncoderProbeCache", JSON.stringify(encCacheBefore));
+const encProbeFirst = await probeEncoderCached("h264_nvenc");
+const encCacheAfterFirst = encoderProbeCacheStats();
+checkOk(encProbeFirst.working === false && /Cannot load libcuda\.so\.1|Unknown encoder 'h264_nvenc'/.test(encProbeFirst.reason ?? "") && encCacheAfterFirst.misses === 1 && encCacheAfterFirst.hits === 0 && encCacheAfterFirst.entries === 1, "probeEncoderCached: first probe runs ffmpeg live (miss 1) and reports the real reason (libcuda missing on a build with nvenc, unknown encoder on a build without it)", JSON.stringify({ probe: encProbeFirst, stats: encCacheAfterFirst }));
+const encProbeSecond = await probeEncoderCached("h264_nvenc");
+const encCacheAfterSecond = encoderProbeCacheStats();
+checkOk(encProbeSecond.working === false && encProbeSecond.reason === encProbeFirst.reason && encCacheAfterSecond.hits === 1 && encCacheAfterSecond.misses === 1 && encCacheAfterSecond.entries === 1, "probeEncoderCached: second probe is a cache hit (no ffmpeg spawn) with the same result", JSON.stringify(encCacheAfterSecond));
+const encProbeDetail = await probeEncoderDetail("h264_nope");
+checkOk(encProbeDetail.working === false && encProbeDetail.reason === "Unknown encoder 'h264_nope'", "probeEncoderDetail: a bogus encoder fails with its name in the reason", JSON.stringify(encProbeDetail));
+process.env.MEDIAKIT_ENCODER_CACHE = "0";
+clearEncoderProbeCache();
+const encProbeNoCache = await probeEncoderCached("h264_nvenc");
+const encCacheOffStats = encoderProbeCacheStats();
+delete process.env.MEDIAKIT_ENCODER_CACHE;
+clearEncoderProbeCache();
+checkOk(encCacheOffStats.enabled === false && encCacheOffStats.entries === 0 && encProbeNoCache.working === false && /Cannot load libcuda\.so\.1|Unknown encoder 'h264_nvenc'/.test(encProbeNoCache.reason ?? ""), "probeEncoderCached: MEDIAKIT_ENCODER_CACHE=0 disables the cache (probe still runs, nothing stored)", JSON.stringify({ stats: encCacheOffStats, probe: encProbeNoCache }));
+
 // hook motion (shorts-maker-gpu's combined audio/video scoring):
 // fixture test/hook-motion-source.mp4 is 30s, loud + static red
 // [0,15) then quieter + moving testsrc2 [15,30), joined by a 1s
@@ -5099,6 +5170,13 @@ checkOk(hookBatchDryJson.dry_run === true && hookBatchDryJson.results.every((r) 
 // edges. A clip with no words file fails its own row only.
 await rm(path.join(root, "outputs/mcp-batch-hook-snap-in"), { recursive: true, force: true });
 await rm(path.join(root, "outputs/mcp-batch-hook-snap-out"), { recursive: true, force: true });
+// Energy batch output dirs too (lượt 194): the batch cache lives
+// in <outputDir>/.mediakit-batch-cache.json, so a second suite run
+// serves the first run's rows (succeeded 0, cached 1) and the
+// succeeded===1 asserts below fail — the snap-out dir above is
+// cleaned for exactly this reason, these two were missed.
+await rm(path.join(root, "outputs/mcp-batch-hook-energy-out"), { recursive: true, force: true });
+await rm(path.join(root, "outputs/mcp-batch-hl-energy-out"), { recursive: true, force: true });
 await mkdir(path.join(root, "outputs/mcp-batch-hook-snap-in"), { recursive: true });
 await copyFile(path.join(root, "test/hook-snap-source.mp4"), path.join(root, "outputs/mcp-batch-hook-snap-in/hook-snap-source.mp4"));
 await writeFile(path.join(root, "outputs/mcp-batch-hook-snap-in/hook-snap-source.words.json"), JSON.stringify({ words: sbWords }), "utf8");
