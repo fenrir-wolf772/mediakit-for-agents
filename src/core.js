@@ -897,8 +897,8 @@ function displayDims(meta) {
   const v = meta?.video;
   if (!v) return null;
   return {
-    width: v.width,
-    height: v.height,
+    width: v.display_width ?? v.width,
+    height: v.display_height ?? v.height,
     rotation: v.rotation ?? null,
     stored_width: v.width,
     stored_height: v.height,
